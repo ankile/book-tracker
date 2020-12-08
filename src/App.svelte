@@ -19,7 +19,7 @@
   };
   const closemodal = () => (currentBook = null);
 
-  let books = Database.getBooks();
+  let books = Database.getBooks(false);
 
   function hasEstimate(book) {
     return book.pagesRead !== 0 && book.timeRead !== 0;

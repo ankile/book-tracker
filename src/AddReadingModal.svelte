@@ -6,10 +6,12 @@
     ModalFooter,
     ModalHeader,
     Label,
-    Input
+    Input,
   } from "sveltestrap";
 
   import { createEventDispatcher } from "svelte";
+
+  import { validateReading } from "./utils/validation";
 
   export let book;
 
@@ -19,11 +21,24 @@
   const dispatch = createEventDispatcher();
 
   function addReading() {
+    const { valid, message } = validateReading({
+      inputTime,
+      inputPages,
+      previousPage: book.currentPage,
+      pageCount: book.pageCount,
+    });
+
+    console.log("Trying to add reading");
+    if (!valid) {
+      console.log("invalid input");
+      alert(message);
+      return;
+    }
     dispatch("addReading", {
       id: book.id,
       timeRead: Number.parseInt(inputTime),
       currentPage: Number.parseInt(inputPages),
-      previousPage: book.currentPage
+      previousPage: book.currentPage,
     });
     dispatch("closeModal");
   }
@@ -31,30 +46,39 @@
   function closeModal() {
     dispatch("closeModal");
   }
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter") {
+      addReading();
+    }
+  }
 </script>
 
-<div>
-  <Modal isOpen={!!book} {closeModal}>
+<div on:keydown={handleKeyDown}>
+  <Modal isOpen={!!book} {closeModal} toggle={closeModal}>
     <ModalHeader {closeModal}>{book.title}</ModalHeader>
     <ModalBody>
-      <Label for="time">Time in minutes</Label>
+      <Label for="time">Time read this session (in minutes)</Label>
       <Input
         type="number"
         name="time"
         id="time"
         bind:value={inputTime}
+        readonly={false}
         placeholder="Minutes of reading" />
-      <Label for="exampleEmail">Pages read</Label>
+
+      <Label for="pages">Current page</Label>
       <Input
-        type="numbers"
+        type="number"
         name="pages"
         id="pages"
         bind:value={inputPages}
-        placeholder="Number of pages read" />
+        readonly={false}
+        placeholder="What page are you on" />
     </ModalBody>
     <ModalFooter>
-      <Button color="primary" on:click={addReading}>Add reading</Button>
       <Button color="secondary" on:click={closeModal}>Cancel</Button>
+      <Button color="primary" on:click={addReading}>Add reading</Button>
     </ModalFooter>
   </Modal>
 </div>

@@ -5,17 +5,18 @@ import { collectionData } from "rxfire/firestore";
 import { startWith } from "rxjs/operators";
 
 class Database {
-  static getBooks() {
-    const query = db.collection("books").orderBy("updatedAt", "desc");
+  static getBooks(finished) {
+    const query = db
+      .collection("books")
+      .where("finished", "==", finished)
+      .orderBy("updatedAt", "desc");
     return collectionData(query, "id").pipe(startWith([]));
   }
 
   static addReading(event) {
     const { id, previousPage, currentPage, timeRead } = event.detail;
     if (timeRead < 0) {
-      db.collection(collections.BOOKS)
-      .doc(id)
-      .update({
+      db.collection(collections.BOOKS).doc(id).update({
         currentPage: currentPage,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
