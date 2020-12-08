@@ -13,25 +13,25 @@ class Database {
     return collectionData(query, "id").pipe(startWith([]));
   }
 
-  static addReading(event) {
-    const { id, previousPage, currentPage, timeRead } = event.detail;
-    if (timeRead < 0) {
-      db.collection(collections.BOOKS).doc(id).update({
+  static updateCurrentPage({ detail: { id, currentPage } }) {
+    console.log("id", id, currentPage);
+    db.collection(collections.BOOKS).doc(id).update({
+      currentPage,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+
+  static addReading({ detail: { id, previousPage, currentPage, timeRead } }) {
+    db.collection(collections.BOOKS)
+      .doc(id)
+      .update({
         currentPage: currentPage,
+        timeRead: firebase.firestore.FieldValue.increment(timeRead),
+        pagesRead: firebase.firestore.FieldValue.increment(
+          currentPage - previousPage
+        ),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
-    } else {
-      db.collection(collections.BOOKS)
-        .doc(id)
-        .update({
-          currentPage: currentPage,
-          timeRead: firebase.firestore.FieldValue.increment(timeRead),
-          pagesRead: firebase.firestore.FieldValue.increment(
-            currentPage - previousPage
-          ),
-          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        });
-    }
   }
 }
 

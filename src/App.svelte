@@ -10,12 +10,15 @@
     Row,
   } from "sveltestrap";
   import AddReadingModal from "./AddReadingModal.svelte";
+  import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
   import { Database } from "./firebase/db";
   import { formatTime } from "./utils/format";
 
   let currentBook = null;
-  const setModalBook = (book) => {
+  let modal = null;
+  const setModalBook = (book, modalType) => {
     currentBook = book;
+    modal = modalType;
   };
   const closemodal = () => (currentBook = null);
 
@@ -73,10 +76,15 @@
 </style>
 
 <main>
-  {#if currentBook}
+  {#if currentBook && modal === 'addReading'}
     <AddReadingModal
       book={currentBook}
       on:addReading={Database.addReading}
+      on:closeModal={closemodal} />
+  {:else if currentBook && modal === 'updatePage'}
+    <UpdateCurrentModal
+      book={currentBook}
+      on:updateCurrentPage={Database.updateCurrentPage}
       on:closeModal={closemodal} />
   {/if}
 
@@ -99,7 +107,10 @@
           <Col md="6">
             <Row>
               <Col>
-                <div class="text-right">
+                <div
+                  class="text-right"
+                  style="cursor: pointer;"
+                  on:click={() => setModalBook(book, 'updatePage')}>
                   <span class="label">Page</span>
                   <br />
                   <span class="page-number">
@@ -145,7 +156,7 @@
           <Col md="1">
             <div
               style="height: 100%; text-align: center;"
-              on:click={() => setModalBook(book)}>
+              on:click={() => setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.7"
