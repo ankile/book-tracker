@@ -11,17 +11,20 @@
 
   import { createEventDispatcher } from "svelte";
 
-  import { validateCurrentPage } from "./utils/validation";
+  import { validateReading } from "../utils/validation";
 
   export let book;
 
+  let inputTime;
   let inputPages;
 
   const dispatch = createEventDispatcher();
 
-  function updateCurrentPage() {
-    const { valid, message } = validateCurrentPage({
+  function addReading() {
+    const { valid, message } = validateReading({
+      inputTime,
       inputPages,
+      previousPage: book.currentPage,
       pageCount: book.pageCount,
     });
 
@@ -29,9 +32,11 @@
       alert(message);
       return;
     }
-    dispatch("updateCurrentPage", {
+    dispatch("addReading", {
       id: book.id,
+      timeRead: Number.parseInt(inputTime),
       currentPage: Number.parseInt(inputPages),
+      previousPage: book.currentPage,
     });
     dispatch("closeModal");
   }
@@ -42,7 +47,7 @@
 
   function handleKeyDown(event) {
     if (event.key === "Enter") {
-      updateCurrentPage();
+      addReading();
     }
   }
 </script>
@@ -51,7 +56,16 @@
   <Modal isOpen={!!book} {closeModal} toggle={closeModal}>
     <ModalHeader {closeModal}>{book.title}</ModalHeader>
     <ModalBody>
-      <Label for="pages">Set current page</Label>
+      <Label for="time">Time read this session (in minutes)</Label>
+      <Input
+        type="number"
+        name="time"
+        id="time"
+        bind:value={inputTime}
+        readonly={false}
+        placeholder="Minutes of reading" />
+
+      <Label for="pages">Current page</Label>
       <Input
         type="number"
         name="pages"
@@ -62,7 +76,7 @@
     </ModalBody>
     <ModalFooter>
       <Button color="secondary" on:click={closeModal}>Cancel</Button>
-      <Button color="primary" on:click={updateCurrentPage}>Update page</Button>
+      <Button color="primary" on:click={addReading}>Add reading</Button>
     </ModalFooter>
   </Modal>
 </div>

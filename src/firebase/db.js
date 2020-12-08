@@ -14,7 +14,6 @@ class Database {
   }
 
   static updateCurrentPage({ detail: { id, currentPage } }) {
-    console.log("id", id, currentPage);
     db.collection(collections.BOOKS).doc(id).update({
       currentPage,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -25,7 +24,7 @@ class Database {
     db.collection(collections.BOOKS)
       .doc(id)
       .update({
-        currentPage: currentPage,
+        currentPage,
         timeRead: firebase.firestore.FieldValue.increment(timeRead),
         pagesRead: firebase.firestore.FieldValue.increment(
           currentPage - previousPage
