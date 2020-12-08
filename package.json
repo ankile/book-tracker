@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "firebase": "^8.1.2",
-    "page": "^1.11.6",
     "rxfire": "^3.12.5",
     "rxjs": "^6.5.5",
     "sirv-cli": "^0.4.4",
