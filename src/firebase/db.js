@@ -23,13 +23,15 @@ class Database {
   static addReading({ detail: { id, previousPage, currentPage, timeRead } }) {
     db.collection(collections.BOOKS)
       .doc(id)
-      .update({
-        currentPage,
-        timeRead: firebase.firestore.FieldValue.increment(timeRead),
-        pagesRead: firebase.firestore.FieldValue.increment(
-          currentPage - previousPage
-        ),
+      .collection("readings")
+      .add({
+        book: id,
+        timeRead,
+        fromPage: previousPage,
+        toPage: currentPage,
+        pagesRead: currentPage - previousPage,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        readingDate: firebase.firestore.FieldValue.serverTimestamp(),
       });
   }
 }
