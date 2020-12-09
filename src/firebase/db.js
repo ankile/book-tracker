@@ -15,25 +15,37 @@ class Database {
     return collectionData(query, "id").pipe(startWith([]));
   }
 
-  static updateCurrentPage({ userId, id, currentPage }) {
-    db.collection(`users/${userId}/books`).doc(id).update({
-      currentPage,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-    });
+  static addPageUpdate({ userId, id, currentPage, previousPage }) {
+    db.collection("users")
+      .doc(userId)
+      .collection(books)
+      .doc(id)
+      .add({
+        book: db.collection("users").doc(userId).collection("books").doc(id),
+        type: "update",
+        fromPage: previousPage,
+        toPage: currentPage,
+        pagesRead: currentPage - previousPage,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
   }
 
   static addReading({ userId, id, previousPage, currentPage, timeRead }) {
-    db.collection(collections.BOOKS)
+    db.collection("users")
+      .doc(userId)
+      .collection("books")
       .doc(id)
       .collection("readings")
       .add({
-        book: id,
+        book: db.collection("users").doc(userId).collection("books").doc(id),
+        type: "reading",
         timeRead,
         fromPage: previousPage,
         toPage: currentPage,
         pagesRead: currentPage - previousPage,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        readingDate: firebase.firestore.FieldValue.serverTimestamp(),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
   }
 }

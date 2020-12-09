@@ -32,6 +32,7 @@
     dispatch("updateCurrentPage", {
       id: book.id,
       currentPage: Number.parseInt(inputPages),
+      previousPage: book.currentPage,
     });
     dispatch("closeModal");
   }

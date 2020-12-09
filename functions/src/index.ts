@@ -18,15 +18,19 @@ exports.bookIsFinished = functions.firestore
     return null;
   });
 
-exports.newReading = functions.firestore
-  .document("/books/{bookId}/readings/{readingId}")
+exports.newBookUpdate = functions.firestore
+  .document("/users/{userId}/books/{bookId}/updates/{updateId}")
   .onCreate(async (snap, context) => {
-    const bookId = context.params.bookId;
+    const { bookId, userId } = context.params;
     // Grab the current value of what was written to Cloud Firestore.
-    const { fromPage, toPage, timeRead } = snap.data();
+    const { type, fromPage, toPage } = snap.data();
+
+    const timeRead = type === "reading" ? snap.data().timeRead : 0;
 
     await admin
       .firestore()
+      .collection("users")
+      .doc(userId)
       .collection("books")
       .doc(bookId)
       .update({
@@ -44,5 +48,10 @@ exports.createUserDocument = functions.auth.user().onCreate(async (user) => {
     email: user.email,
     uid: user.uid,
   });
+  return null;
+});
+
+exports.deleteUserDocument = functions.auth.user().onDelete(async (user) => {
+  await admin.firestore().collection("users").doc(user.uid).delete();
   return null;
 });
