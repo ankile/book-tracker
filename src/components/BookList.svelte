@@ -8,6 +8,7 @@
   import { formatTime } from "../utils/format";
 
   export let finished;
+  export let userId;
 
   let currentBook = null;
   let modal = null;
@@ -17,10 +18,18 @@
   };
   const closemodal = () => (currentBook = null);
 
-  let books = Database.getBooks(finished);
+  let books = Database.getBooks(userId, finished);
 
   function hasEstimate(book) {
     return book.pagesRead !== 0 && book.timeRead !== 0;
+  }
+
+  function addReading({ detail }) {
+    Database.addReading({ userId, ...detail });
+  }
+
+  function updateCurrentPage({ detail }) {
+    Database.updateCurrentPage({ userId, ...detail });
   }
 </script>
 
@@ -67,12 +76,12 @@
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
     book={currentBook}
-    on:addReading={Database.addReading}
+    on:addReading={addReading}
     on:closeModal={closemodal} />
 {:else if currentBook && modal === 'updatePage'}
   <UpdateCurrentModal
     book={currentBook}
-    on:updateCurrentPage={Database.updateCurrentPage}
+    on:updateCurrentPage={updateCurrentPage}
     on:closeModal={closemodal} />
 {/if}
 

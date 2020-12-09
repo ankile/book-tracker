@@ -1,6 +1,7 @@
 <script>
   import { Router, Route } from "svelte-routing";
   import { FirebaseApp, User } from "sveltefire";
+  import firebase from "firebase/app";
   import Reading from "./pages/Reading.svelte";
   import Finished from "./pages/Finished.svelte";
   import MySite from "./pages/MySite.svelte";
@@ -17,9 +18,9 @@
 </style>
 
 <Router>
-  <FirebaseApp>
+  <FirebaseApp {firebase}>
     <User persist={sessionStorage} let:user let:auth on:user>
-      <Navbar {auth} />
+      <Navbar />
 
       <div slot="signed-out">
         <Login {auth} />
@@ -27,11 +28,15 @@
 
       <div slot="default">
         <main>
-          <Route path="/finished" component={Finished} />
+          <Route path="/finished">
+            <Finished userId={user.uid} />
+          </Route>
           <Route path="/me">
             <MySite {auth} />
           </Route>
-          <Route path="/" component={Reading} />
+          <Route path="/">
+            <Reading userId={user.uid} />
+          </Route>
         </main>
       </div>
     </User>

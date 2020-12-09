@@ -38,3 +38,11 @@ exports.newReading = functions.firestore
 
     return null;
   });
+
+exports.createUserDocument = functions.auth.user().onCreate(async (user) => {
+  await admin.firestore().collection("users").doc(user.uid).set({
+    email: user.email,
+    uid: user.uid,
+  });
+  return null;
+});
