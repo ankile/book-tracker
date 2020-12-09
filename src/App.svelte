@@ -32,7 +32,7 @@
             <Finished userId={user.uid} />
           </Route>
           <Route path="/me">
-            <MySite {auth} />
+            <MySite {auth} {user} />
           </Route>
           <Route path="/">
             <Reading userId={user.uid} />

@@ -1,8 +1,7 @@
 import firebase from "firebase/app"; // rollup bundle issue with ESM import
-import { db, auth } from "../firebase";
-import { collections } from "../firebase/collections";
 import { collectionData } from "rxfire/firestore";
 import { startWith } from "rxjs/operators";
+import { db } from "../firebase";
 
 class Database {
   static getBooks(userId, finished) {
@@ -16,37 +15,58 @@ class Database {
   }
 
   static addPageUpdate({ userId, id, currentPage, previousPage }) {
-    db.collection("users")
+    const bookRef = db
+      .collection("users")
       .doc(userId)
-      .collection(books)
-      .doc(id)
-      .add({
-        book: db.collection("users").doc(userId).collection("books").doc(id),
-        type: "update",
-        fromPage: previousPage,
-        toPage: currentPage,
-        pagesRead: currentPage - previousPage,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      });
+      .collection("books")
+      .doc(id);
+
+    bookRef.collection("updates").add({
+      book: bookRef,
+      type: "update",
+      fromPage: previousPage,
+      toPage: currentPage,
+      pagesRead: currentPage - previousPage,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
   }
 
   static addReading({ userId, id, previousPage, currentPage, timeRead }) {
-    db.collection("users")
+    const bookRef = db
+      .collection("users")
       .doc(userId)
       .collection("books")
-      .doc(id)
-      .collection("readings")
-      .add({
-        book: db.collection("users").doc(userId).collection("books").doc(id),
-        type: "reading",
-        timeRead,
-        fromPage: previousPage,
-        toPage: currentPage,
-        pagesRead: currentPage - previousPage,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      });
+      .doc(id);
+
+    bookRef.collection("updates").add({
+      book: bookRef,
+      type: "reading",
+      timeRead,
+      fromPage: previousPage,
+      toPage: currentPage,
+      pagesRead: currentPage - previousPage,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+
+  static addBook({ userId, author, title, pageCount, currentPage, isbn }) {
+    const owner = db.collection("users").doc(userId);
+
+    owner.collection("books").add({
+      author,
+      currentPage,
+      finished: false,
+      owner,
+      pageCount,
+      pagesRead: 0,
+      timeRead: 0,
+      title,
+      isbn,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
   }
 }
 
