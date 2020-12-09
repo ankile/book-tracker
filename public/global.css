@@ -10,14 +10,17 @@ body {
 nav a {
   color: white;
   font-size: 1.2em;
+  margin-bottom: 1px;
 }
 
 nav a:hover {
   color: white;
   text-decoration: none;
   border-bottom: solid 1px white;
+  margin-bottom: 0px;
 }
 
 a.active {
   border-bottom: solid 3px white !important;
+  margin-bottom: 0px;
 }

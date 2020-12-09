@@ -17,11 +17,14 @@
   },
   "dependencies": {
     "firebase": "^8.1.2",
+    "node-sass": "^5.0.0",
     "rxfire": "^3.12.5",
     "rxjs": "^6.5.5",
     "sirv-cli": "^0.4.4",
     "svelte-awesome": "^2.3.0",
+    "svelte-preprocess": "^4.6.1",
     "svelte-routing": "^1.4.2",
+    "sveltefire": "^0.1.5",
     "sveltestrap": "^3.3.3"
   }
 }
