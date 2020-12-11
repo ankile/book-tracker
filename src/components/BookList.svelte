@@ -176,7 +176,7 @@
             </Col>
           </Row>
         </Col>
-        {#if screenWidth > 770}
+        {#if !finished && screenWidth > 770}
           <Col md="1">
             <div
               style="height: 100%; text-align: center;"
@@ -206,7 +206,7 @@
           </div>
         </Col>
       </Row>
-      {#if screenWidth <= 770}
+      {#if !finished && screenWidth <= 770}
         <Row>
           <Col>
             <div
