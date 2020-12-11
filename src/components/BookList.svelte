@@ -117,7 +117,7 @@
 {/if}
 
 <Container>
-  {#each $books as book}
+  {#each $books as book (book.id)}
     <div class="book-row">
       <Row>
         <Col>

@@ -1,16 +1,8 @@
 <script>
-  import {
-    Button,
-    Modal,
-    ModalBody,
-    ModalFooter,
-    ModalHeader,
-    Label,
-    Input,
-  } from "sveltestrap";
+  import { Label, Input } from "sveltestrap";
 
   import { createEventDispatcher } from "svelte";
-
+  import ModalCard from "../components/ModalCard.svelte";
   import { validateReading } from "../utils/validation";
 
   export let book;
@@ -44,39 +36,29 @@
   function closeModal() {
     dispatch("closeModal");
   }
-
-  function handleKeyDown(event) {
-    if (event.key === "Enter") {
-      addReading();
-    }
-  }
 </script>
 
-<div on:keydown={handleKeyDown}>
-  <Modal isOpen={!!book} {closeModal} toggle={closeModal}>
-    <ModalHeader {closeModal}>{book.title}</ModalHeader>
-    <ModalBody>
-      <Label for="time">Time read this session (in minutes)</Label>
-      <Input
-        type="number"
-        name="time"
-        id="time"
-        bind:value={inputTime}
-        readonly={false}
-        placeholder="Minutes of reading" />
+<ModalCard
+  open={!!book}
+  on:close={closeModal}
+  primaryText="Add"
+  primaryAction={addReading}
+  header={book.title}>
+  <Label for="time">Time read this session (in minutes)</Label>
+  <Input
+    type="number"
+    name="time"
+    id="time"
+    bind:value={inputTime}
+    readonly={false}
+    placeholder="Minutes of reading" />
 
-      <Label for="pages">Current page</Label>
-      <Input
-        type="number"
-        name="pages"
-        id="pages"
-        bind:value={inputPages}
-        readonly={false}
-        placeholder="What page are you on" />
-    </ModalBody>
-    <ModalFooter>
-      <Button color="secondary" on:click={closeModal}>Cancel</Button>
-      <Button color="primary" on:click={addReading}>Add reading</Button>
-    </ModalFooter>
-  </Modal>
-</div>
+  <Label for="pages">Current page</Label>
+  <Input
+    type="number"
+    name="pages"
+    id="pages"
+    bind:value={inputPages}
+    readonly={false}
+    placeholder="What page are you on" />
+</ModalCard>

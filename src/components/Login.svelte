@@ -1,4 +1,6 @@
 <script>
+  import Button from "../components/Button.svelte";
+
   export let auth;
 
   let login = true;
@@ -90,26 +92,6 @@
     transition: box-shadow 0.2s;
   }
 
-  button.hover {
-    width: 50%;
-    margin-top: 0;
-
-    &:hover {
-      box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2),
-        0 3px 10px 0 rgba(0, 0, 0, 0.19);
-    }
-
-    &:focus {
-      outline: none;
-    }
-  }
-
-  .btn-container {
-    display: flex;
-    flex-direction: row;
-    justify-content: center;
-  }
-
   .bottom-text {
     margin-top: 1em;
     font-size: smaller;
@@ -139,11 +121,7 @@
         type="password"
         bind:value={password} />
     </div>
-    <div class="btn-container">
-      <button
-        class="hover"
-        on:click={signInOrUp}>{login ? 'Log in' : 'Register'}</button>
-    </div>
+    <Button on:click={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
   </div>
 
   <div class="left">
