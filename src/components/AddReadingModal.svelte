@@ -1,5 +1,5 @@
 <script>
-  import { Label, Input } from "sveltestrap";
+  import Input from "../components/Input.svelte";
 
   import { createEventDispatcher } from "svelte";
   import ModalCard from "../components/ModalCard.svelte";
@@ -44,21 +44,17 @@
   primaryText="Add"
   primaryAction={addReading}
   header={book.title}>
-  <Label for="time">Time read this session (in minutes)</Label>
-  <Input
-    type="number"
-    name="time"
-    id="time"
-    bind:value={inputTime}
-    readonly={false}
-    placeholder="Minutes of reading" />
-
-  <Label for="pages">Current page</Label>
-  <Input
-    type="number"
-    name="pages"
-    id="pages"
-    bind:value={inputPages}
-    readonly={false}
-    placeholder="What page are you on" />
+  <Input label="Minutes read">
+    <input
+      placeholder="Minutes of reading"
+      bind:value={inputTime}
+      type="number" />
+  </Input>
+  <div style="height: 8px;" />
+  <Input label="Current page">
+    <input
+      type="number"
+      placeholder="What page are you on"
+      bind:value={inputPages} />
+  </Input>
 </ModalCard>

@@ -24,3 +24,16 @@ a.active {
   border-bottom: solid 3px white !important;
   margin-bottom: 0px;
 }
+
+input {
+  border: none;
+  border-bottom: 1px solid darkgray;
+  margin-bottom: 1.5em;
+  padding-bottom: 2px;
+}
+
+input:focus {
+  outline: none;
+  border-bottom: 3px solid cadetblue;
+  padding-bottom: 0;
+}
