@@ -6,7 +6,7 @@
 <nav>
   <Navbar color="dark" dark class="mb-2">
     <NavLink to="/finished">Finished</NavLink>
-    <NavLink to="/">Currently Reading</NavLink>
+    <NavLink to="/">Right Now</NavLink>
     <NavLink to="/me">My site</NavLink>
   </Navbar>
 </nav>

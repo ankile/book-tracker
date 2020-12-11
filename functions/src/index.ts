@@ -18,7 +18,7 @@ exports.bookIsFinished = functions.firestore
     return null;
   });
 
-exports.newBookUpdate = functions.firestore
+exports.createBookUpdate = functions.firestore
   .document("/users/{userId}/books/{bookId}/updates/{updateId}")
   .onCreate(async (snap, context) => {
     const { bookId, userId } = context.params;
@@ -38,6 +38,31 @@ exports.newBookUpdate = functions.firestore
         currentPage: toPage,
         pagesRead: admin.firestore.FieldValue.increment(toPage - fromPage),
         timeRead: admin.firestore.FieldValue.increment(timeRead),
+      });
+
+    return null;
+  });
+
+exports.deleteBookUpdate = functions.firestore
+  .document("/users/{userId}/books/{bookId}/updates/{updateId}")
+  .onDelete(async (snap, context) => {
+    const { bookId, userId } = context.params;
+    // Grab the current value of what was written to Cloud Firestore.
+    const { type, fromPage, toPage } = snap.data();
+
+    const timeRead = type === "reading" ? snap.data().timeRead : 0;
+
+    await admin
+      .firestore()
+      .collection("users")
+      .doc(userId)
+      .collection("books")
+      .doc(bookId)
+      .update({
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        currentPage: fromPage,
+        pagesRead: admin.firestore.FieldValue.increment(-(toPage - fromPage)),
+        timeRead: admin.firestore.FieldValue.increment(-timeRead),
       });
 
     return null;

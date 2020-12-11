@@ -10,6 +10,8 @@
   export let finished;
   export let userId;
 
+  let screenWidth;
+
   let currentBook = null;
   let modal = null;
   const setModalBook = (book, modalType) => {
@@ -29,11 +31,11 @@
   }
 
   function updateCurrentPage({ detail }) {
-    Database.updateCurrentPage({ userId, ...detail });
+    Database.addPageUpdate({ userId, ...detail });
   }
 </script>
 
-<style>
+<style lang="scss">
   .book-row {
     margin: 3em;
     padding: 2em;
@@ -52,13 +54,17 @@
     text-transform: uppercase;
   }
 
-  .author {
+  .author,
+  .title,
+  .page-number {
     font-size: 1.5em;
+  }
+
+  .author {
     color: #333;
   }
 
   .title {
-    font-size: 1.5em;
     color: #555;
     font-style: italic;
   }
@@ -68,10 +74,35 @@
   }
 
   .page-number {
-    font-size: 1.5em;
     color: #555;
   }
+
+  @media only screen and (max-width: 770px) {
+    .author,
+    .title,
+    .page-number {
+      font-size: 1em;
+    }
+
+    .label {
+      font-size: 0.4em;
+    }
+
+    .book-row {
+      margin: 2em 1em;
+      padding: 1em;
+    }
+
+    .text-right {
+      margin: -0.2em;
+    }
+
+    @media only screen and (max-width: 370px) {
+    }
+  }
 </style>
+
+<svelte:window bind:innerWidth={screenWidth} />
 
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
@@ -120,6 +151,7 @@
                 </span>
               </div>
             </Col>
+
             <Col>
               <div class="text-right">
                 <span class="label">Est left</span>
@@ -144,28 +176,50 @@
             </Col>
           </Row>
         </Col>
-        <Col md="1">
-          <div
-            style="height: 100%; text-align: center;"
-            on:click={() => setModalBook(book, 'addReading')}>
-            <Icon
-              data={plus}
-              scale="1.7"
-              style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
-          </div>
-        </Col>
+        {#if screenWidth > 770}
+          <Col md="1">
+            <div
+              style="height: 100%; text-align: center;"
+              on:click={() => setModalBook(book, 'addReading')}>
+              <Icon
+                data={plus}
+                scale="1.7"
+                style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
+            </div>
+          </Col>
+        {/if}
       </Row>
       <div class="v-spacer" />
       <Row>
         <Col>
-          <Progress
-            color="danger"
-            value={(book.currentPage / book.pageCount) * 100} />
+          <div
+            style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
+            <Progress
+              color="danger"
+              value={(book.currentPage / book.pageCount) * 100} />
+          </div>
         </Col>
-        <Col md="1">
-          {Math.round((book.currentPage / book.pageCount) * 100)}%
+        <Col xs="3">
+          <div
+            style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
+            {Math.round((book.currentPage / book.pageCount) * 100)}%
+          </div>
         </Col>
       </Row>
+      {#if screenWidth <= 770}
+        <Row>
+          <Col>
+            <div
+              style="height: 100%; text-align: center;"
+              on:click={() => setModalBook(book, 'addReading')}>
+              <Icon
+                data={plus}
+                scale="1.3"
+                style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
+            </div>
+          </Col>
+        </Row>
+      {/if}
     </div>
   {/each}
 </Container>
