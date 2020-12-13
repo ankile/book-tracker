@@ -4,7 +4,7 @@ import * as admin from "firebase-admin";
 admin.initializeApp();
 
 exports.bookIsFinished = functions.firestore
-  .document("/books/{bookId}")
+  .document("/users/{userId}/books/{bookId}")
   .onUpdate(async (snap, _) => {
     // Grab the current value of what was written to Cloud Firestore.
     const { currentPage, pageCount, finished } = snap.after.data();
