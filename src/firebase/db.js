@@ -30,6 +30,9 @@ class Database {
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
+    bookRef.update({
+      currentPage,
+    });
   }
 
   static addReading({ userId, id, previousPage, currentPage, timeRead }) {
@@ -49,6 +52,9 @@ class Database {
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
+    bookRef.update({
+      currentPage,
+    });
   }
 
   static addBook({ userId, author, title, pageCount, currentPage, isbn }) {
@@ -67,6 +73,11 @@ class Database {
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
+  }
+
+  static deleteBook(userId, bookId) {
+    const owner = db.collection("users").doc(userId);
+    owner.collection("books").doc(bookId).delete();
   }
 }
 

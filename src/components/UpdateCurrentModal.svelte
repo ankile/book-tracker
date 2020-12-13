@@ -1,19 +1,13 @@
 <script>
-  import {
-    Button,
-    Modal,
-    ModalBody,
-    ModalFooter,
-    ModalHeader,
-    Label,
-    Input,
-  } from "sveltestrap";
-
   import { createEventDispatcher } from "svelte";
 
+  import ModalCard from "../components/ModalCard.svelte";
+  import Input from "../components/Input.svelte";
   import { validateCurrentPage } from "../utils/validation";
 
   export let book;
+
+  $: open = !!book;
 
   let inputPages;
 
@@ -36,34 +30,18 @@
     });
     dispatch("closeModal");
   }
-
-  function closeModal() {
-    dispatch("closeModal");
-  }
-
-  function handleKeyDown(event) {
-    if (event.key === "Enter") {
-      updateCurrentPage();
-    }
-  }
 </script>
 
-<div on:keydown={handleKeyDown}>
-  <Modal isOpen={!!book} {closeModal} toggle={closeModal}>
-    <ModalHeader {closeModal}>{book.title}</ModalHeader>
-    <ModalBody>
-      <Label for="pages">Set current page</Label>
-      <Input
-        type="number"
-        name="pages"
-        id="pages"
-        bind:value={inputPages}
-        readonly={false}
-        placeholder="What page are you on" />
-    </ModalBody>
-    <ModalFooter>
-      <Button color="secondary" on:click={closeModal}>Cancel</Button>
-      <Button color="primary" on:click={updateCurrentPage}>Update page</Button>
-    </ModalFooter>
-  </Modal>
-</div>
+<ModalCard
+  {open}
+  on:close={() => dispatch('closeModal')}
+  header={book.title}
+  primaryAction={updateCurrentPage}
+  primaryText="Update page">
+  <Input label="Set current page">
+    <input
+      type="number"
+      bind:value={inputPages}
+      placeholder="What page are you on" />
+  </Input>
+</ModalCard>

@@ -1,15 +1,8 @@
 <script>
-  import {
-    Button,
-    Modal,
-    ModalBody,
-    ModalFooter,
-    ModalHeader,
-    Label,
-    Input,
-  } from "sveltestrap";
-
   import { createEventDispatcher } from "svelte";
+
+  import ModalCard from "../components/ModalCard.svelte";
+  import Input from "../components/Input.svelte";
 
   import { Database } from "../firebase/db";
 
@@ -18,11 +11,11 @@
   export let open;
   export let userId;
 
-  let author;
-  let title;
+  let author = "";
+  let title = "";
   let pageCount;
   let currentPage = 1;
-  let isbn;
+  let isbn = "";
 
   function addBook() {
     Database.addBook({
@@ -33,17 +26,7 @@
       currentPage,
       isbn,
     });
-    dispatch("closeModal");
-  }
-
-  function closeModal() {
-    dispatch("closeModal");
-  }
-
-  function handleKeyDown(event) {
-    if (event.key === "Enter") {
-      addBook();
-    }
+    dispatch("close");
   }
 </script>
 
@@ -53,56 +36,43 @@
   }
 </style>
 
-<div on:keydown={handleKeyDown}>
-  <Modal isOpen={open} {closeModal} toggle={closeModal}>
-    <ModalHeader {closeModal}>Add new book</ModalHeader>
-    <ModalBody style="text-align: left;">
-      <Label class="label" for="author">Author</Label>
-      <Input
-        type="text"
-        id="author"
-        bind:value={author}
-        readonly={false}
-        placeholder="Name of author(s)" />
-      <div class="space" />
-      <Label class="label" for="title">Book title</Label>
-      <Input
-        type="text"
-        id="title"
-        bind:value={title}
-        readonly={false}
-        placeholder="Book title" />
+<ModalCard
+  {open}
+  on:close={() => dispatch('close')}
+  header="Add new book"
+  primaryText="Add book"
+  primaryAction={addBook}>
+  <Input label="Author">
+    <input type="text" bind:value={author} placeholder="Name of author(s)" />
+  </Input>
 
-      <div class="space" />
-      <Label class="label" for="pageCount">Number of pages</Label>
-      <Input
-        type="number"
-        id="pageCount"
-        bind:value={pageCount}
-        readonly={false}
-        placeholder="How many pages are there?" />
+  <div class="space" />
 
-      <div class="space" />
-      <Label class="label" for="currentPage">Current page</Label>
-      <Input
-        type="number"
-        id="currentPage"
-        bind:value={currentPage}
-        readonly={false}
-        placeholder="Have you already started reading?" />
+  <Input label="Book title">
+    <input type="text" bind:value={title} placeholder="Book title" />
+  </Input>
 
-      <div class="space" />
-      <Label class="label" for="isbn">ISBN number (optional)</Label>
-      <Input
-        type="text"
-        id="isbn"
-        bind:value={isbn}
-        readonly={false}
-        placeholder="ISBN" />
-    </ModalBody>
-    <ModalFooter>
-      <Button color="secondary" on:click={closeModal}>Cancel</Button>
-      <Button color="primary" on:click={addBook}>Add book</Button>
-    </ModalFooter>
-  </Modal>
-</div>
+  <div class="space" />
+
+  <Input label="Number of pages">
+    <input
+      type="number"
+      bind:value={pageCount}
+      placeholder="How many pages are there?" />
+  </Input>
+
+  <div class="space" />
+
+  <Input label="Current page">
+    <input
+      type="number"
+      bind:value={currentPage}
+      placeholder="Have you already started reading?" />
+  </Input>
+
+  <div class="space" />
+
+  <Input label="ISBN number (optional)">
+    <input type="text" bind:value={isbn} placeholder="ISBN" />
+  </Input>
+</ModalCard>

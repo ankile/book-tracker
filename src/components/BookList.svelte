@@ -33,6 +33,13 @@
   function updateCurrentPage({ detail }) {
     Database.addPageUpdate({ userId, ...detail });
   }
+
+  function deleteBook(bookId) {
+    let del = confirm("Are you sure you want to delete this book?");
+    if (del) {
+      Database.deleteBook(userId, bookId);
+    }
+  }
 </script>
 
 <style lang="scss">
@@ -121,7 +128,7 @@
     <div class="book-row">
       <Row>
         <Col>
-          <span class="label">Book Title</span>
+          <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
           <br />
           <span class="author">{book.author}:</span>
           <span class="title">{book.title}</span>
@@ -199,7 +206,7 @@
               value={(book.currentPage / book.pageCount) * 100} />
           </div>
         </Col>
-        <Col xs="3">
+        <Col xs={screenWidth > 470 ? '2' : '3'}>
           <div
             style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
             {Math.round((book.currentPage / book.pageCount) * 100)}%

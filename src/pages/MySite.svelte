@@ -42,10 +42,7 @@
   }
 </style>
 
-<NewBookModal
-  open={newBookModal}
-  on:closeModal={toggleModal}
-  userId={user.uid} />
+<NewBookModal open={newBookModal} on:close={toggleModal} userId={user.uid} />
 
 <h1>Hi {user.email}</h1>
 <div class="container">
