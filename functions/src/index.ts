@@ -26,6 +26,7 @@ exports.createBookUpdate = functions.firestore
     const { type, fromPage, toPage } = snap.data();
 
     const timeRead = type === "reading" ? snap.data().timeRead : 0;
+    const pagesRead = type === "reading" ? toPage - fromPage : 0;
 
     await admin
       .firestore()
@@ -36,7 +37,7 @@ exports.createBookUpdate = functions.firestore
       .update({
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         currentPage: toPage,
-        pagesRead: admin.firestore.FieldValue.increment(toPage - fromPage),
+        pagesRead: admin.firestore.FieldValue.increment(pagesRead),
         timeRead: admin.firestore.FieldValue.increment(timeRead),
       });
 
