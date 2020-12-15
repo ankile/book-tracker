@@ -1,10 +1,8 @@
-<script>
+<script lang="ts">
   import Login from "./Login.svelte";
 
-  export let x;
-  export let y;
-
-  console.log(x, y);
+  export let x: number;
+  export let y: number;
 </script>
 
 <style>

@@ -4,16 +4,16 @@
   import { Col, Container, Progress, Row } from "sveltestrap";
   import AddReadingModal from "./AddReadingModal.svelte";
   import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
-  import RightClickMenu from "./RightClickMenu.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
+  import RightClickMenu from "./RightMenu.svelte";
 
   export let finished;
   export let userId;
 
   let screenWidth;
 
-  let rightClickMenu = null;
+  let menuPosition = null;
 
   let currentBook = null;
   let modal = null;
@@ -49,7 +49,7 @@
     event.preventDefault();
     const { x, y } = event;
 
-    rightClickMenu = { x, y };
+    menuPosition = { x, y };
   }
 </script>
 
@@ -122,8 +122,8 @@
 
 <svelte:window bind:innerWidth={screenWidth} />
 
-{#if rightClickMenu}
-  <RightClickMenu {...rightClickMenu} />
+{#if menuPosition}
+  <RightClickMenu {...menuPosition} />
 {/if}
 
 {#if currentBook && modal === 'addReading'}

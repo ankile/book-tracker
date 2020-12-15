@@ -1,10 +1,10 @@
-<script>
+<script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
   import Button from "../components/Button.svelte";
 
-  export let header;
-  export let open;
-  export let primaryAction = undefined;
+  export let header: string | undefined;
+  export let open: boolean;
+  export let primaryAction: () => void | undefined;
   export let primaryText = "Do it!";
   export let secondaryText = "Close";
 

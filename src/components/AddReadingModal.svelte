@@ -1,18 +1,20 @@
-<script>
+<script lang="ts">
   import Input from "../components/Input.svelte";
 
   import { createEventDispatcher } from "svelte";
   import ModalCard from "../components/ModalCard.svelte";
   import { validateReading } from "../utils/validation";
+  import type { Book } from "../interfaces/book";
 
-  export let book;
+  export let book: Book;
 
-  let inputTime;
-  let inputPages;
+  let inputTime: number;
+  let inputPages: number;
 
   const dispatch = createEventDispatcher();
 
   function addReading() {
+    console.log(inputTime + inputPages);
     const { valid, message } = validateReading({
       inputTime,
       inputPages,
@@ -26,8 +28,8 @@
     }
     dispatch("addReading", {
       id: book.id,
-      timeRead: Number.parseInt(inputTime),
-      currentPage: Number.parseInt(inputPages),
+      timeRead: inputTime,
+      currentPage: inputPages,
       previousPage: book.currentPage,
     });
     dispatch("closeModal");

@@ -1,9 +1,9 @@
-<script>
+<script lang="ts">
   import { createEventDispatcher } from "svelte";
 
   const dispatch = createEventDispatcher();
 
-  export let label;
+  export let label: string;
 </script>
 
 <style lang="scss">

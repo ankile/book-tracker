@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import { Router, Route } from "svelte-routing";
   import { FirebaseApp, User } from "sveltefire";
   import firebase from "firebase/app";
