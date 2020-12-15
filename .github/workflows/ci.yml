@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@master
+      - name: Install dependencies
+        run: npm i
       - name: Build Svelte
         run: npm run build
       - name: Deploy to Firebase
