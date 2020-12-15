@@ -4,7 +4,7 @@
   import { Col, Container, Progress, Row } from "sveltestrap";
   import AddReadingModal from "./AddReadingModal.svelte";
   import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
-  import RightClickMenu from "./rightClickMenu.svelte";
+  import RightClickMenu from "./RightClickMenu.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
 
