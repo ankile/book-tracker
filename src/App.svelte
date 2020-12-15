@@ -8,13 +8,6 @@
   import Navbar from "./components/Navbar.svelte";
   import ModalCard from "./components/ModalCard.svelte";
   import Login from "./components/Login.svelte";
-
-  let modalOpen = true;
-
-  const primaryAction = () => {
-    console.log("Clicked primary!");
-    modalOpen = false;
-  };
 </script>
 
 <style>

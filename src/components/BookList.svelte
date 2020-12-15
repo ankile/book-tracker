@@ -4,6 +4,7 @@
   import { Col, Container, Progress, Row } from "sveltestrap";
   import AddReadingModal from "./AddReadingModal.svelte";
   import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
+  import RightClickMenu from "./rightClickMenu.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
 
@@ -11,6 +12,8 @@
   export let userId;
 
   let screenWidth;
+
+  let rightClickMenu = null;
 
   let currentBook = null;
   let modal = null;
@@ -39,6 +42,14 @@
     if (del) {
       Database.deleteBook(userId, bookId);
     }
+  }
+
+  function showMenu(event) {
+    console.log(event);
+    event.preventDefault();
+    const { x, y } = event;
+
+    rightClickMenu = { x, y };
   }
 </script>
 
@@ -111,6 +122,10 @@
 
 <svelte:window bind:innerWidth={screenWidth} />
 
+{#if rightClickMenu}
+  <RightClickMenu {...rightClickMenu} />
+{/if}
+
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
     book={currentBook}
@@ -125,7 +140,7 @@
 
 <Container>
   {#each $books as book (book.id)}
-    <div class="book-row">
+    <div class="book-row" on:contextmenu={showMenu}>
       <Row>
         <Col>
           <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
