@@ -2,7 +2,7 @@ name: Build and Deploy
 on:
   push:
     branches:
-      - main
+      - master
 jobs:
   main:
     name: Build and Deploy
@@ -17,4 +17,4 @@ jobs:
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
           FIREBASE_PROJECT: book-tracker-d8f24
-          TARGET_BRANCH: main
+          TARGET_BRANCH: master
