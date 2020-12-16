@@ -24,6 +24,7 @@
     "svelte-awesome": "^2.3.0",
     "svelte-routing": "^1.4.2",
     "sveltefire": "^0.1.5",
+    "sveltestrap": "^3.3.3",
     "svelte-check": "^1.0.0",
     "@rollup/plugin-typescript": "^6.0.0",
     "typescript": "^3.9.3",
