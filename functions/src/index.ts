@@ -3,10 +3,6 @@ import * as admin from "firebase-admin";
 
 admin.initializeApp();
 
-exports.helloWorld = functions.https.onRequest((req, resp) => {
-  resp.send("Herro functions from ci-system!");
-});
-
 exports.bookIsFinished = functions.firestore
   .document("/users/{userId}/books/{bookId}")
   .onUpdate(async (snap, _) => {
