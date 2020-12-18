@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@master
+      - name: Install dependencies
+        run: cd functions && npm i
       - name: Deploy to Firebase
         uses: BIGG-Kaymo/deploy-firebase-functions@v1.0.1
         env:
