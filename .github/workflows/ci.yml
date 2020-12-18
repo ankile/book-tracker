@@ -1,11 +1,11 @@
-name: Build and Deploy Hosting
+name: Build and Deploy
 on:
   push:
     branches:
       - master
 jobs:
-  main:
-    name: Build and Deploy
+  hosting:
+    name: Hosting
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -16,6 +16,18 @@ jobs:
         run: npm run build
       - name: Deploy to Firebase
         uses: lowply/deploy-firebase@v0.0.4
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_PROJECT: book-tracker-d8f24
+          TARGET_BRANCH: master
+  functions:
+    name: Functions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@master
+      - name: Deploy to Firebase
+        uses: BIGG-Kaymo/deploy-firebase-functions@v1.0.1
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
           FIREBASE_PROJECT: book-tracker-d8f24
