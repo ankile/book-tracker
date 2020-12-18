@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@master
+      - name: Install dependencies
+        run: npm install
       - name: Deploy functions to Firebase
         uses: w9jds/firebase-action@master
         with:
