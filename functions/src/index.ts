@@ -4,7 +4,7 @@ import * as admin from "firebase-admin";
 admin.initializeApp();
 
 exports.helloWorld = functions.https.onRequest((req, resp) => {
-  resp.send("Herro!");
+  resp.send("Herro functions from ci-system!");
 });
 
 exports.bookIsFinished = functions.firestore
