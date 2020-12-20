@@ -9,8 +9,10 @@ exports.bookIsFinished = functions.firestore
     // Grab the current value of what was written to Cloud Firestore.
     const { currentPage, pageCount, finished } = snap.after.data();
 
-    if (!finished && currentPage === pageCount) {
-      return snap.after.ref.set({ finished: true }, { merge: true });
+    if (currentPage === pageCount) {
+      if (!finished) {
+        return snap.after.ref.set({ finished: true }, { merge: true });
+      }
     } else if (finished) {
       return snap.after.ref.set({ finished: false }, { merge: true });
     }
