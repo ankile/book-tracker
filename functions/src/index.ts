@@ -3,8 +3,9 @@ import * as admin from "firebase-admin";
 
 admin.initializeApp();
 
-exports.bookIsFinished = functions.firestore
-  .document("/users/{userId}/books/{bookId}")
+exports.bookIsFinished = functions
+  .region("europe-west1")
+  .firestore.document("/users/{userId}/books/{bookId}")
   .onUpdate(async (snap, _) => {
     // Grab the current value of what was written to Cloud Firestore.
     const { currentPage, pageCount, finished } = snap.after.data();
@@ -20,8 +21,9 @@ exports.bookIsFinished = functions.firestore
     return null;
   });
 
-exports.createBookUpdate = functions.firestore
-  .document("/users/{userId}/books/{bookId}/updates/{updateId}")
+exports.createBookUpdate = functions
+  .region("europe-west1")
+  .firestore.document("/users/{userId}/books/{bookId}/updates/{updateId}")
   .onCreate(async (snap, context) => {
     const { bookId, userId } = context.params;
     // Grab the current value of what was written to Cloud Firestore.
@@ -46,8 +48,9 @@ exports.createBookUpdate = functions.firestore
     return null;
   });
 
-exports.deleteBookUpdate = functions.firestore
-  .document("/users/{userId}/books/{bookId}/updates/{updateId}")
+exports.deleteBookUpdate = functions
+  .region("europe-west1")
+  .firestore.document("/users/{userId}/books/{bookId}/updates/{updateId}")
   .onDelete(async (snap, context) => {
     const { bookId, userId } = context.params;
     // Grab the current value of what was written to Cloud Firestore.
@@ -71,15 +74,21 @@ exports.deleteBookUpdate = functions.firestore
     return null;
   });
 
-exports.createUserDocument = functions.auth.user().onCreate(async (user) => {
-  await admin.firestore().collection("users").doc(user.uid).set({
-    email: user.email,
-    uid: user.uid,
+exports.createUserDocument = functions
+  .region("europe-west1")
+  .auth.user()
+  .onCreate(async (user) => {
+    await admin.firestore().collection("users").doc(user.uid).set({
+      email: user.email,
+      uid: user.uid,
+    });
+    return null;
   });
-  return null;
-});
 
-exports.deleteUserDocument = functions.auth.user().onDelete(async (user) => {
-  await admin.firestore().collection("users").doc(user.uid).delete();
-  return null;
-});
+exports.deleteUserDocument = functions
+  .region("europe-west1")
+  .auth.user()
+  .onDelete(async (user) => {
+    await admin.firestore().collection("users").doc(user.uid).delete();
+    return null;
+  });
