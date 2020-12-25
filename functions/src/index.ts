@@ -92,3 +92,5 @@ exports.deleteUserDocument = functions
     await admin.firestore().collection("users").doc(user.uid).delete();
     return null;
   });
+
+exports.booksapi = require("./booksapi");
