@@ -1,4 +1,4 @@
-# The Stupid-Simple book tracker
+# The Stupid-Simple Book Tracker
 
 > The solution is located at [book.ankile.com](https://book.ankile.com).
 
