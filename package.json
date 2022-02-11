@@ -17,7 +17,7 @@
     "svelte": "^3.21.0",
     "svelte-preprocess": "^4.0.0",
     "firebase": "^8.1.2",
-    "node-sass": "^5.0.0",
+    "node-sass": "^7.0.0",
     "rxfire": "^3.12.5",
     "rxjs": "^6.5.5",
     "sirv-cli": "^0.4.4",
