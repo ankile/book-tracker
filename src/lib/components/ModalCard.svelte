@@ -7,6 +7,7 @@
     primaryAction = undefined,
     primaryText = "Do it!",
     secondaryText = "Close",
+    hideSecondary = false,
     onclose
   }: {
     header?: string;
@@ -14,6 +15,7 @@
     primaryAction?: () => void;
     primaryText?: string;
     secondaryText?: string;
+    hideSecondary?: boolean;
     onclose: () => void;
   } = $props();
 
@@ -101,7 +103,9 @@
       </div>
       <div class="divider" />
       <div class="buttons">
-        <Button onclick={close}>{secondaryText}</Button>
+        {#if !hideSecondary}
+          <Button onclick={close}>{secondaryText}</Button>
+        {/if}
         {#if primaryAction}
           <Button primary onclick={primaryAction}>{primaryText}</Button>
         {/if}

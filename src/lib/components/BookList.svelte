@@ -5,6 +5,7 @@
   import AddReadingModal from "$lib/components/AddReadingModal.svelte";
   import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
   import NewBookModal from "$lib/components/NewBookModal.svelte";
+  import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
   import RightClickMenu from "$lib/components/RightMenu.svelte";
@@ -22,6 +23,10 @@
     modal = modalType;
   };
   const closemodal = () => (currentBook = null);
+
+  let sessionsBook = $state(null);
+  const showSessions = (book) => (sessionsBook = book);
+  const closeSessions = () => (sessionsBook = null);
 
   let books = Database.getBooks(userId, finished);
 
@@ -177,6 +182,13 @@
     onclose={closemodal} />
 {/if}
 
+{#if sessionsBook}
+  <ReadingSessionsModal
+    book={sessionsBook}
+    {userId}
+    onclose={closeSessions} />
+{/if}
+
 <Container>
   {#each $books as book (book.id)}
     <div class="book-row" oncontextmenu={showMenu}>
@@ -214,7 +226,13 @@
               </div>
             </Col>
             <Col>
-              <div class="text-right">
+              <div
+                role="button"
+                tabindex="0"
+                class="text-right clickable"
+                style="cursor: pointer;"
+                onclick={() => showSessions(book)}
+                onkeypress={(e) => e.key === 'Enter' && showSessions(book)}>
                 <span class="label">Time read</span>
                 <br />
                 <span class="page-number">

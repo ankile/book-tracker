@@ -133,6 +133,36 @@ class Database {
     const bookRef = doc(db, 'users', userId, 'books', bookId);
     await deleteDoc(bookRef);
   }
+
+  static getReadingSessions(userId, bookId) {
+    const store = writable([]);
+
+    const q = query(
+      collection(db, 'users', userId, 'books', bookId, 'updates')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessions = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        if (data.type === 'reading') {
+          sessions.push({ id: doc.id, ...data });
+        }
+      });
+      // Sort by createdAt descending on the client side
+      sessions.sort((a, b) => {
+        const aTime = a.createdAt?.toMillis?.() || 0;
+        const bTime = b.createdAt?.toMillis?.() || 0;
+        return bTime - aTime;
+      });
+      store.set(sessions);
+    });
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
 }
 
 export { Database };
