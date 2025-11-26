@@ -40,12 +40,6 @@
       return;
     }
 
-    // Verify this is the most recent session by checking if its toPage matches the book's currentPage
-    if (book && session.toPage !== book.currentPage) {
-      alert("Only the most recent reading session can be edited");
-      return;
-    }
-
     onupdateSession({
       sessionId: session.id,
       timeRead: inputTime,

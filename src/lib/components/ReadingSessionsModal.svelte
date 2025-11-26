@@ -20,7 +20,12 @@
     }
   });
 
-  let editingSession = $state(null);
+  let editingSessionId = $state(null);
+
+  // Derive the actual session object from the ID to always use fresh data
+  let editingSession = $derived(
+    editingSessionId ? sessions.find(s => s.id === editingSessionId) : null
+  );
 
   function formatDate(timestamp) {
     if (!timestamp?.toDate) return 'N/A';
@@ -35,7 +40,7 @@
   }
 
   function editSession(session) {
-    editingSession = session;
+    editingSessionId = session.id;
   }
 
   function updateSession(data) {
@@ -47,7 +52,7 @@
   }
 
   function closeEditModal() {
-    editingSession = null;
+    editingSessionId = null;
   }
 
   function deleteSession(session) {
