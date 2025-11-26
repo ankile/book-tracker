@@ -10,7 +10,7 @@
   import { formatTime } from "../utils/format";
   import RightClickMenu from "$lib/components/RightMenu.svelte";
 
-  let { finished, userId } = $props();
+  let { finished, userId, books: booksProp = null } = $props();
 
   let screenWidth = $state();
 
@@ -28,7 +28,8 @@
   const showSessions = (book) => (sessionsBook = book);
   const closeSessions = () => (sessionsBook = null);
 
-  let books = Database.getBooks(userId, finished);
+  // Use provided books prop if available, otherwise fetch from database
+  let books = $derived(booksProp !== null ? { subscribe: (fn) => { fn(booksProp); return () => {}; } } : Database.getBooks(userId, finished));
 
   function hasEstimate(book) {
     return book.pagesRead !== 0 && book.timeRead !== 0;
