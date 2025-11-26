@@ -1,10 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from "svelte";
-
-  const dispatch = createEventDispatcher();
-
-  export let label: string;
-  export let inputId: string | undefined = undefined;
+  let { label, inputId = undefined }: { label: string; inputId?: string } = $props();
 </script>
 
 <style lang="scss">

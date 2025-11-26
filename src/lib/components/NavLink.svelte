@@ -1,19 +1,13 @@
 <script>
-  import { Link } from "svelte-routing";
+  import { page } from '$app/stores';
 
-  export let to = "";
+  let { to = "", children } = $props();
 
-  function getProps({ href, isPartiallyCurrent, isCurrent }) {
-    const isActive = href === "/" ? isCurrent : isPartiallyCurrent || isCurrent;
-
-    // The object returned here is spread on the anchor element's attributes
-    if (isActive) {
-      return { class: "active" };
-    }
-    return {};
-  }
+  const isActive = $derived(
+    to === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(to)
+  );
 </script>
 
-<Link {to} {getProps}>
-  <slot />
-</Link>
+<a href={to} class:active={isActive}>
+  {@render children?.()}
+</a>

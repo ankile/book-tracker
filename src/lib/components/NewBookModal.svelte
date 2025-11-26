@@ -1,24 +1,18 @@
 <script>
-  import { createEventDispatcher } from "svelte";
-
-  import ModalCard from "../components/ModalCard.svelte";
-  import Input from "../components/Input.svelte";
+  import ModalCard from "$lib/components/ModalCard.svelte";
+  import Input from "$lib/components/Input.svelte";
 
   import { Database } from "../firebase/db";
 
-  const dispatch = createEventDispatcher();
+  let { open, userId, book = null, onclose } = $props();
 
-  export let open;
-  export let userId;
-  export let book = null;
+  let author = $state(book ? book.author : "");
+  let title = $state(book ? book.title : "");
+  let pageCount = $state(book ? book.pageCount : undefined);
+  let currentPage = $state(book ? book.currentPage : 1);
+  let isbn = $state(book ? book.isbn : "");
 
-  let author = book ? book.author : "";
-  let title = book ? book.title : "";
-  let pageCount = book ? book.pageCount : undefined;
-  let currentPage = book ? book.currentPage : 1;
-  let isbn = book ? book.isbn : "";
-
-  $: isEditMode = !!book;
+  let isEditMode = $derived(!!book);
 
   function addBook() {
     Database.addBook({
@@ -29,7 +23,7 @@
       currentPage,
       isbn,
     });
-    dispatch("close");
+    onclose();
   }
 
   function updateBook() {
@@ -41,7 +35,7 @@
       pageCount,
       isbn,
     });
-    dispatch("close");
+    onclose();
   }
 
   function handleSubmit() {
@@ -61,7 +55,7 @@
 
 <ModalCard
   {open}
-  on:close={() => dispatch('close')}
+  onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
   primaryAction={handleSubmit}>

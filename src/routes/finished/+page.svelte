@@ -4,5 +4,5 @@
 </script>
 
 {#if $user}
-  <BookList finished={false} userId={$user.uid} />
+  <BookList finished={true} userId={$user.uid} />
 {/if}

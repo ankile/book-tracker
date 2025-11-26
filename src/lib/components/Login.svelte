@@ -1,26 +1,20 @@
 <script>
-  import Button from "../components/Button.svelte";
+  import Button from "./Button.svelte";
+  import { signIn, signUp } from "$lib/firebase/auth.js";
 
-  export let auth;
-
-  let login = true;
-
-  let email = "";
-  let password = "";
-
-  function handleAuthError(error) {
-    alert(error.message);
-  }
+  let login = $state(true);
+  let email = $state("");
+  let password = $state("");
 
   async function signInOrUp() {
-    if (login) {
-      await auth
-        .signInWithEmailAndPassword(email, password)
-        .catch(handleAuthError);
-    } else {
-      await auth
-        .createUserWithEmailAndPassword(email, password)
-        .catch(handleAuthError);
+    try {
+      if (login) {
+        await signIn(email, password);
+      } else {
+        await signUp(email, password);
+      }
+    } catch (error) {
+      alert(error.message);
     }
   }
 </script>
@@ -121,7 +115,7 @@
         type="password"
         bind:value={password} />
     </div>
-    <Button on:click={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
+    <Button onclick={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
   </div>
 
   <div class="left">

@@ -1,17 +1,21 @@
 <script lang="ts">
-  import Input from "../components/Input.svelte";
-
-  import { createEventDispatcher } from "svelte";
-  import ModalCard from "../components/ModalCard.svelte";
+  import Input from "$lib/components/Input.svelte";
+  import ModalCard from "$lib/components/ModalCard.svelte";
   import { validateReading } from "../utils/validation";
   import type { Book } from "../interfaces/book";
 
-  export let book: Book;
+  let {
+    book,
+    onaddReading,
+    oncloseModal
+  }: {
+    book: Book;
+    onaddReading: (data: { id: string; timeRead: number; currentPage: number; previousPage: number }) => void;
+    oncloseModal: () => void;
+  } = $props();
 
-  let inputTime: number;
-  let inputPages: number;
-
-  const dispatch = createEventDispatcher();
+  let inputTime = $state<number>(undefined);
+  let inputPages = $state<number>(undefined);
 
   function addReading() {
     console.log(inputTime + inputPages);
@@ -26,23 +30,23 @@
       alert(message);
       return;
     }
-    dispatch("addReading", {
+    onaddReading({
       id: book.id,
       timeRead: inputTime,
       currentPage: inputPages,
       previousPage: book.currentPage,
     });
-    dispatch("closeModal");
+    oncloseModal();
   }
 
   function closeModal() {
-    dispatch("closeModal");
+    oncloseModal();
   }
 </script>
 
 <ModalCard
   open={!!book}
-  on:close={closeModal}
+  onclose={closeModal}
   primaryText="Add"
   primaryAction={addReading}
   header={book.title}>
