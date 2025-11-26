@@ -60,13 +60,13 @@
   primaryText={isEditMode ? 'Update book' : 'Add book'}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <input id="author" type="text" bind:value={author} placeholder="Name of author(s)" />
+    <input id="author" class="form-control" type="text" bind:value={author} placeholder="Name of author(s)" />
   </Input>
 
   <div class="space" />
 
   <Input label="Book title" inputId="title">
-    <input id="title" type="text" bind:value={title} placeholder="Book title" />
+    <input id="title" class="form-control" type="text" bind:value={title} placeholder="Book title" />
   </Input>
 
   <div class="space" />
@@ -74,6 +74,7 @@
   <Input label="Number of pages" inputId="pageCount">
     <input
       id="pageCount"
+      class="form-control"
       type="number"
       bind:value={pageCount}
       placeholder="How many pages are there?" />
@@ -84,6 +85,7 @@
   <Input label="Current page" inputId="currentPage">
     <input
       id="currentPage"
+      class="form-control"
       type="number"
       bind:value={currentPage}
       placeholder="Have you already started reading?" />
@@ -92,6 +94,6 @@
   <div class="space" />
 
   <Input label="ISBN number (optional)" inputId="isbn">
-    <input id="isbn" type="text" bind:value={isbn} placeholder="ISBN" />
+    <input id="isbn" class="form-control" type="text" bind:value={isbn} placeholder="ISBN" />
   </Input>
 </ModalCard>

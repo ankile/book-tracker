@@ -104,7 +104,7 @@
   </div>
   <div
     class="column form"
-    on:keypress={(event) => event.key === 'Enter' && signInOrUp()}>
+    onkeypress={(event) => event.key === 'Enter' && signInOrUp()}>
     <div class="column hover">
       <label for="email">Email address</label>
       <input id="email" placeholder="Email" type="email" bind:value={email} />
@@ -125,8 +125,8 @@
         <span
           role="button"
           tabindex="0"
-          on:click={() => (login = !login)}
-          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          onclick={() => (login = !login)}
+          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
           class="link">here</span>
         to register instead.
       {:else}
@@ -134,8 +134,8 @@
         <span
           role="button"
           tabindex="0"
-          on:click={() => (login = !login)}
-          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          onclick={() => (login = !login)}
+          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
           class="link">here</span>
         to log in instead.
       {/if}

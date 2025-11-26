@@ -37,6 +37,7 @@
   <Input label="Set current page" inputId="inputPages">
     <input
       id="inputPages"
+      class="form-control"
       type="number"
       bind:value={inputPages}
       placeholder="What page are you on" />

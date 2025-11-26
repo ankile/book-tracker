@@ -179,10 +179,10 @@
 
 <Container>
   {#each $books as book (book.id)}
-    <div class="book-row" on:contextmenu={showMenu}>
+    <div class="book-row" oncontextmenu={showMenu}>
       <Row>
         <Col>
-          <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
+          <span ondblclick={() => deleteBook(book.id)} class="label">Book Title</span>
           <span
             role="button"
             tabindex="0"
