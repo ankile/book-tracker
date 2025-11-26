@@ -119,6 +119,44 @@ exports.deleteBookUpdate = functions
     return null;
   });
 
+// IMPORTANT: This function assumes only the most recent reading session is being edited.
+// Editing older sessions could break data consistency (page progression, currentPage).
+// The UI enforces this by only showing edit buttons for the latest session.
+exports.updateBookUpdate = functions
+  .region("europe-west1")
+  .firestore.document("/users/{userId}/books/{bookId}/updates/{updateId}")
+  .onUpdate(async (change, context) => {
+    const { bookId, userId } = context.params;
+
+    const oldData = change.before.data();
+    const newData = change.after.data();
+
+    // Calculate delta for timeRead
+    const oldTimeRead = oldData.type === "reading" ? oldData.timeRead : 0;
+    const newTimeRead = newData.type === "reading" ? newData.timeRead : 0;
+    const deltaTime = newTimeRead - oldTimeRead;
+
+    // Calculate delta for pagesRead
+    const oldPagesRead = oldData.type === "reading" ? (oldData.toPage - oldData.fromPage) : 0;
+    const newPagesRead = newData.type === "reading" ? (newData.toPage - newData.fromPage) : 0;
+    const deltaPages = newPagesRead - oldPagesRead;
+
+    await admin
+      .firestore()
+      .collection("users")
+      .doc(userId)
+      .collection("books")
+      .doc(bookId)
+      .update({
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        currentPage: newData.toPage,
+        pagesRead: admin.firestore.FieldValue.increment(deltaPages),
+        timeRead: admin.firestore.FieldValue.increment(deltaTime),
+      });
+
+    return null;
+  });
+
 exports.updateHabitify = functions
   .region("europe-west1")
   .pubsub.topic("habitify-log")

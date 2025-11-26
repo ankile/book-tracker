@@ -1,5 +1,8 @@
 <script>
+  import Icon from "svelte-awesome";
+  import { edit } from "svelte-awesome/icons";
   import ModalCard from "$lib/components/ModalCard.svelte";
+  import EditSessionModal from "$lib/components/EditSessionModal.svelte";
   import { Database } from "$lib/firebase/db.js";
   import { formatTime } from "$lib/utils/format.js";
 
@@ -17,6 +20,8 @@
     }
   });
 
+  let editingSession = $state(null);
+
   function formatDate(timestamp) {
     if (!timestamp?.toDate) return 'N/A';
     const date = timestamp.toDate();
@@ -27,6 +32,22 @@
       hour: '2-digit',
       minute: '2-digit'
     });
+  }
+
+  function editSession(session) {
+    editingSession = session;
+  }
+
+  function updateSession(data) {
+    Database.updateReadingSession({
+      userId,
+      bookId: book.id,
+      ...data
+    });
+  }
+
+  function closeEditModal() {
+    editingSession = null;
   }
 </script>
 
@@ -62,10 +83,26 @@
     font-weight: 600;
   }
 
+  .session-time-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .session-time {
     font-size: 1.1rem;
     color: #333;
     font-weight: 700;
+  }
+
+  .edit-button {
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .session:hover .edit-button {
+    opacity: 1;
   }
 
   .session-details {
@@ -103,11 +140,23 @@
     {#if sessions.length === 0}
       <div class="empty-state">No reading sessions recorded yet.</div>
     {:else}
-      {#each sessions as session (session.id)}
+      {#each sessions as session, index (session.id)}
         <div class="session">
           <div class="session-header">
             <span class="session-date">{formatDate(session.createdAt)}</span>
-            <span class="session-time">{formatTime(session.timeRead)}</span>
+            <div class="session-time-container">
+              <span class="session-time">{formatTime(session.timeRead)}</span>
+              {#if index === 0}
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="edit-button"
+                  onclick={() => editSession(session)}
+                  onkeypress={(e) => e.key === 'Enter' && editSession(session)}>
+                  <Icon data={edit} scale="0.8" style="color: #666;" />
+                </span>
+              {/if}
+            </div>
           </div>
           <div class="session-details">
             <div class="detail">
@@ -124,3 +173,11 @@
     {/if}
   </div>
 </ModalCard>
+
+{#if editingSession}
+  <EditSessionModal
+    session={editingSession}
+    {book}
+    onupdateSession={updateSession}
+    oncloseModal={closeEditModal} />
+{/if}

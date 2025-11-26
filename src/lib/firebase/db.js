@@ -134,6 +134,18 @@ class Database {
     await deleteDoc(bookRef);
   }
 
+  static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage }) {
+    const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
+
+    await updateDoc(sessionRef, {
+      timeRead,
+      fromPage,
+      toPage,
+      pagesRead: toPage - fromPage,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
   static getReadingSessions(userId, bookId) {
     const store = writable([]);
 
