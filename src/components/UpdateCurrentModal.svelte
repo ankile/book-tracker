@@ -38,8 +38,9 @@
   header={book.title}
   primaryAction={updateCurrentPage}
   primaryText="Update page">
-  <Input label="Set current page">
+  <Input label="Set current page" inputId="inputPages">
     <input
+      id="inputPages"
       type="number"
       bind:value={inputPages}
       placeholder="What page are you on" />

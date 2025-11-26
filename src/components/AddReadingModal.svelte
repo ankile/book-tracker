@@ -46,15 +46,17 @@
   primaryText="Add"
   primaryAction={addReading}
   header={book.title}>
-  <Input label="Minutes read">
+  <Input label="Minutes read" inputId="inputTime">
     <input
+      id="inputTime"
       placeholder="Minutes of reading"
       bind:value={inputTime}
       type="number" />
   </Input>
   <div style="height: 8px;" />
-  <Input label="Current page">
+  <Input label="Current page" inputId="inputPagesReading">
     <input
+      id="inputPagesReading"
       type="number"
       placeholder="What page are you on"
       bind:value={inputPages} />

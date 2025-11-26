@@ -21,13 +21,12 @@
 <Router>
   <FirebaseApp {firebase}>
     <User persist={sessionStorage} let:user let:auth on:user>
-      <Navbar />
-
       <div slot="signed-out">
         <Login {auth} />
       </div>
 
       <div slot="default">
+        <Navbar />
         <main>
           <Route path="/finished">
             <Finished userId={user.uid} />

@@ -76,8 +76,15 @@
 </style>
 
 {#if open}
-  <div on:click={close} class="background">
-    <div on:click={(e) => e.stopPropagation()} class="card hover">
+  <div
+    role="presentation"
+    on:click={close}
+    on:keydown={(e) => e.key === 'Escape' && close()}
+    class="background">
+    <div
+      on:click={(e) => e.stopPropagation()}
+      on:keydown={(e) => e.stopPropagation()}
+      class="card hover">
       {#if header}
         <h4 class="header">{header}</h4>
         <div class="divider" />

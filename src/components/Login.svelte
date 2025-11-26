@@ -112,9 +112,9 @@
     class="column form"
     on:keypress={(event) => event.key === 'Enter' && signInOrUp()}>
     <div class="column hover">
-      <label>Email address</label>
+      <label for="email">Email address</label>
       <input id="email" placeholder="Email" type="email" bind:value={email} />
-      <label>Password</label>
+      <label for="password">Password</label>
       <input
         id="password"
         placeholder="Password"
@@ -128,11 +128,21 @@
     <p class="bottom-text">
       {#if login}
         If you're not already registered, press
-        <span on:click={() => (login = !login)} class="link">here</span>
+        <span
+          role="button"
+          tabindex="0"
+          on:click={() => (login = !login)}
+          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          class="link">here</span>
         to register instead.
       {:else}
         If you're already registered, press
-        <span on:click={() => (login = !login)} class="link">here</span>
+        <span
+          role="button"
+          tabindex="0"
+          on:click={() => (login = !login)}
+          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          class="link">here</span>
         to log in instead.
       {/if}
     </p>

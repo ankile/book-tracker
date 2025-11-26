@@ -185,7 +185,10 @@
         <Col>
           <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
           <span
+            role="button"
+            tabindex="0"
             on:click={() => setModalBook(book, 'editBook')}
+            on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'editBook')}
             style="cursor: pointer; margin-left: 0.5em;">
             <Icon data={edit} scale="0.8" style="color: #666;" />
           </span>
@@ -198,9 +201,12 @@
           <Row>
             <Col>
               <div
+                role="button"
+                tabindex="0"
                 class="text-right"
                 style="cursor: pointer;"
-                on:click={() => setModalBook(book, 'updatePage')}>
+                on:click={() => setModalBook(book, 'updatePage')}
+                on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'updatePage')}>
                 <span class="label">Page</span>
                 <br />
                 <span class="page-number">
@@ -247,8 +253,11 @@
         {#if !finished && screenWidth > 770}
           <Col md="1">
             <div
+              role="button"
+              tabindex="0"
               style="height: 100%; text-align: center;"
-              on:click={() => setModalBook(book, 'addReading')}>
+              on:click={() => setModalBook(book, 'addReading')}
+              on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.7"
@@ -277,8 +286,11 @@
         <Row>
           <Col>
             <div
+              role="button"
+              tabindex="0"
               style="height: 100%; text-align: center;"
-              on:click={() => setModalBook(book, 'addReading')}>
+              on:click={() => setModalBook(book, 'addReading')}
+              on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.3"

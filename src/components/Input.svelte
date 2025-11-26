@@ -4,6 +4,7 @@
   const dispatch = createEventDispatcher();
 
   export let label: string;
+  export let inputId: string | undefined = undefined;
 </script>
 
 <style lang="scss">
@@ -16,6 +17,6 @@
 </style>
 
 <div class="column">
-  {#if label}<label>{label}</label>{/if}
+  {#if label}<label for={inputId}>{label}</label>{/if}
   <slot>Yeet</slot>
 </div>
