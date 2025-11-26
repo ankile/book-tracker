@@ -68,7 +68,7 @@
   }
 
   .v-spacer {
-    height: 4px;
+    height: 10px;
   }
 
   .label {
@@ -105,6 +105,7 @@
     width: 100%;
     min-height: 2.5em;
     margin-top: 15px;
+    margin-bottom: -1em;
   }
 
   .progress-container :global(.progress) {
