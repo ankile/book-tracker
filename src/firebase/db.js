@@ -75,6 +75,22 @@ class Database {
     });
   }
 
+  static updateBook({ userId, bookId, author, title, pageCount, isbn }) {
+    const bookRef = db
+      .collection("users")
+      .doc(userId)
+      .collection("books")
+      .doc(bookId);
+
+    bookRef.update({
+      author,
+      title,
+      pageCount,
+      isbn,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+
   static deleteBook(userId, bookId) {
     const owner = db.collection("users").doc(userId);
     owner.collection("books").doc(bookId).delete();

@@ -10,12 +10,15 @@
 
   export let open;
   export let userId;
+  export let book = null;
 
-  let author = "";
-  let title = "";
-  let pageCount;
-  let currentPage = 1;
-  let isbn = "";
+  let author = book ? book.author : "";
+  let title = book ? book.title : "";
+  let pageCount = book ? book.pageCount : undefined;
+  let currentPage = book ? book.currentPage : 1;
+  let isbn = book ? book.isbn : "";
+
+  $: isEditMode = !!book;
 
   function addBook() {
     Database.addBook({
@@ -28,6 +31,26 @@
     });
     dispatch("close");
   }
+
+  function updateBook() {
+    Database.updateBook({
+      userId,
+      bookId: book.id,
+      author,
+      title,
+      pageCount,
+      isbn,
+    });
+    dispatch("close");
+  }
+
+  function handleSubmit() {
+    if (isEditMode) {
+      updateBook();
+    } else {
+      addBook();
+    }
+  }
 </script>
 
 <style>
@@ -39,9 +62,9 @@
 <ModalCard
   {open}
   on:close={() => dispatch('close')}
-  header="Add new book"
-  primaryText="Add book"
-  primaryAction={addBook}>
+  header={isEditMode ? 'Edit book' : 'Add new book'}
+  primaryText={isEditMode ? 'Update book' : 'Add book'}
+  primaryAction={handleSubmit}>
   <Input label="Author">
     <input type="text" bind:value={author} placeholder="Name of author(s)" />
   </Input>

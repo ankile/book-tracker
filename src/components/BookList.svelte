@@ -1,9 +1,10 @@
 <script>
   import Icon from "svelte-awesome";
-  import { plus } from "svelte-awesome/icons";
+  import { plus, edit } from "svelte-awesome/icons";
   import { Col, Container, Progress, Row } from "sveltestrap";
   import AddReadingModal from "./AddReadingModal.svelte";
   import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
+  import NewBookModal from "./NewBookModal.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
   import RightClickMenu from "./RightMenu.svelte";
@@ -136,6 +137,12 @@
     book={currentBook}
     on:updateCurrentPage={updateCurrentPage}
     on:closeModal={closemodal} />
+{:else if currentBook && modal === 'editBook'}
+  <NewBookModal
+    open={true}
+    {userId}
+    book={currentBook}
+    on:close={closemodal} />
 {/if}
 
 <Container>
@@ -144,6 +151,11 @@
       <Row>
         <Col>
           <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
+          <span
+            on:click={() => setModalBook(book, 'editBook')}
+            style="cursor: pointer; margin-left: 0.5em;">
+            <Icon data={edit} scale="0.8" style="color: #666;" />
+          </span>
           <br />
           <span class="author">{book.author}:</span>
           <span class="title">{book.title}</span>
