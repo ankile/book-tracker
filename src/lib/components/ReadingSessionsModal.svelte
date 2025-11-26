@@ -1,6 +1,6 @@
 <script>
   import Icon from "svelte-awesome";
-  import { edit } from "svelte-awesome/icons";
+  import { edit, trash } from "svelte-awesome/icons";
   import ModalCard from "$lib/components/ModalCard.svelte";
   import EditSessionModal from "$lib/components/EditSessionModal.svelte";
   import { Database } from "$lib/firebase/db.js";
@@ -48,6 +48,13 @@
 
   function closeEditModal() {
     editingSession = null;
+  }
+
+  function deleteSession(session) {
+    const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
+    if (confirmed) {
+      Database.deleteReadingSession(userId, book.id, session.id);
+    }
   }
 </script>
 
@@ -99,10 +106,17 @@
     cursor: pointer;
     opacity: 0;
     transition: opacity 0.2s;
+    display: inline-block;
+    width: 20px;
   }
 
   .session:hover .edit-button {
     opacity: 1;
+  }
+
+  .button-spacer {
+    display: inline-block;
+    width: 20px;
   }
 
   .session-details {
@@ -145,7 +159,6 @@
           <div class="session-header">
             <span class="session-date">{formatDate(session.createdAt)}</span>
             <div class="session-time-container">
-              <span class="session-time">{formatTime(session.timeRead)}</span>
               {#if index === 0}
                 <span
                   role="button"
@@ -155,7 +168,19 @@
                   onkeypress={(e) => e.key === 'Enter' && editSession(session)}>
                   <Icon data={edit} scale="0.8" style="color: #666;" />
                 </span>
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="edit-button"
+                  onclick={() => deleteSession(session)}
+                  onkeypress={(e) => e.key === 'Enter' && deleteSession(session)}>
+                  <Icon data={trash} scale="0.8" style="color: #d9534f;" />
+                </span>
+              {:else}
+                <span class="button-spacer"></span>
+                <span class="button-spacer"></span>
               {/if}
+              <span class="session-time">{formatTime(session.timeRead)}</span>
             </div>
           </div>
           <div class="session-details">

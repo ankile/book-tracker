@@ -10,13 +10,11 @@
   } = $props();
 
   let inputTime = $state(session?.timeRead || 0);
-  let inputFromPage = $state(session?.fromPage || 0);
   let inputToPage = $state(session?.toPage || 0);
 
   $effect(() => {
     if (session) {
       inputTime = session.timeRead;
-      inputFromPage = session.fromPage;
       inputToPage = session.toPage;
     }
   });
@@ -27,18 +25,18 @@
       return;
     }
 
-    if (inputFromPage < 0 || inputToPage < 0) {
+    if (inputToPage < 0) {
       alert("Page numbers must be positive");
       return;
     }
 
-    if (inputToPage <= inputFromPage) {
-      alert("End page must be greater than start page");
+    if (inputToPage <= session.fromPage) {
+      alert(`End page must be greater than start page (${session.fromPage})`);
       return;
     }
 
-    if (book && (inputFromPage > book.pageCount || inputToPage > book.pageCount)) {
-      alert(`Page numbers cannot exceed book's total pages (${book.pageCount})`);
+    if (book && inputToPage > book.pageCount) {
+      alert(`Page number cannot exceed book's total pages (${book.pageCount})`);
       return;
     }
 
@@ -51,7 +49,7 @@
     onupdateSession({
       sessionId: session.id,
       timeRead: inputTime,
-      fromPage: inputFromPage,
+      fromPage: session.fromPage, // Keep the original fromPage
       toPage: inputToPage,
     });
     oncloseModal();
@@ -77,15 +75,12 @@
       type="number" />
   </Input>
   <div style="height: 8px;" />
-  <Input label="From page" inputId="inputFromPage">
-    <input
-      id="inputFromPage"
-      class="form-control"
-      type="number"
-      placeholder="Starting page"
-      bind:value={inputFromPage} />
-  </Input>
-  <div style="height: 8px;" />
+  <div style="margin-bottom: 1rem;">
+    <label style="font-size: 0.9rem; color: #666; display: block; margin-bottom: 0.25rem;">From page (cannot be changed)</label>
+    <div style="padding: 0.5rem; background-color: #f5f5f5; border-radius: 4px; color: #666;">
+      {session?.fromPage || 0}
+    </div>
+  </div>
   <Input label="To page" inputId="inputToPage">
     <input
       id="inputToPage"

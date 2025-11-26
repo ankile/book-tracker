@@ -237,7 +237,7 @@
                 <br />
                 <span class="page-number">
                   {#if hasEstimate(book)}
-                    {formatTime(Math.round(book.currentPage * (book.timeRead / book.pagesRead)))}
+                    {formatTime(book.timeRead)}
                   {:else}NA{/if}
                 </span>
               </div>

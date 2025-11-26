@@ -146,6 +146,11 @@ class Database {
     });
   }
 
+  static async deleteReadingSession(userId, bookId, sessionId) {
+    const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
+    await deleteDoc(sessionRef);
+  }
+
   static getReadingSessions(userId, bookId) {
     const store = writable([]);
 
