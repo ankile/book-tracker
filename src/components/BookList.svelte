@@ -96,6 +96,39 @@
     color: #555;
   }
 
+  .progress-container {
+    position: relative;
+    width: 100%;
+    min-height: 2.5em;
+  }
+
+  .progress-container :global(.progress) {
+    height: 2.5em !important;
+    margin: 0;
+    border-radius: 0.25rem;
+  }
+
+  .progress-text-black,
+  .progress-text-white {
+    position: absolute;
+    top: 0.45em;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-weight: bold;
+    font-size: 1em;
+    pointer-events: none;
+    line-height: 1;
+  }
+
+  .progress-text-black {
+    color: #333;
+  }
+
+  .progress-text-white {
+    color: white;
+  }
+
   @media only screen and (max-width: 770px) {
     .author,
     .title,
@@ -226,17 +259,16 @@
       <div class="v-spacer" />
       <Row>
         <Col>
-          <div
-            style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
+          <div class="progress-container">
             <Progress
               color="danger"
               value={(book.currentPage / book.pageCount) * 100} />
-          </div>
-        </Col>
-        <Col xs={screenWidth > 470 ? '2' : '3'}>
-          <div
-            style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
-            {Math.round((book.currentPage / book.pageCount) * 100)}%
+            <div class="progress-text-black">
+              {Math.round((book.currentPage / book.pageCount) * 100)}%
+            </div>
+            <div class="progress-text-white" style="clip-path: inset(0 {100 - (book.currentPage / book.pageCount) * 100}% 0 0);">
+              {Math.round((book.currentPage / book.pageCount) * 100)}%
+            </div>
           </div>
         </Col>
       </Row>
