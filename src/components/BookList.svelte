@@ -191,6 +191,7 @@
           </span>
           <br />
           <span class="author">{book.author}:</span>
+          <br />
           <span class="title">{book.title}</span>
         </Col>
         <Col md="6">
