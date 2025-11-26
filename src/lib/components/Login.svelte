@@ -1,26 +1,20 @@
 <script>
-  import Button from "../components/Button.svelte";
+  import Button from "./Button.svelte";
+  import { signIn, signUp } from "$lib/firebase/auth.js";
 
-  export let auth;
-
-  let login = true;
-
-  let email = "";
-  let password = "";
-
-  function handleAuthError(error) {
-    alert(error.message);
-  }
+  let login = $state(true);
+  let email = $state("");
+  let password = $state("");
 
   async function signInOrUp() {
-    if (login) {
-      await auth
-        .signInWithEmailAndPassword(email, password)
-        .catch(handleAuthError);
-    } else {
-      await auth
-        .createUserWithEmailAndPassword(email, password)
-        .catch(handleAuthError);
+    try {
+      if (login) {
+        await signIn(email, password);
+      } else {
+        await signUp(email, password);
+      }
+    } catch (error) {
+      alert(error.message);
     }
   }
 </script>
@@ -110,7 +104,7 @@
   </div>
   <div
     class="column form"
-    on:keypress={(event) => event.key === 'Enter' && signInOrUp()}>
+    onkeypress={(event) => event.key === 'Enter' && signInOrUp()}>
     <div class="column hover">
       <label for="email">Email address</label>
       <input id="email" placeholder="Email" type="email" bind:value={email} />
@@ -121,7 +115,7 @@
         type="password"
         bind:value={password} />
     </div>
-    <Button on:click={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
+    <Button onclick={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
   </div>
 
   <div class="left">
@@ -131,8 +125,8 @@
         <span
           role="button"
           tabindex="0"
-          on:click={() => (login = !login)}
-          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          onclick={() => (login = !login)}
+          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
           class="link">here</span>
         to register instead.
       {:else}
@@ -140,8 +134,8 @@
         <span
           role="button"
           tabindex="0"
-          on:click={() => (login = !login)}
-          on:keypress={(e) => e.key === 'Enter' && (login = !login)}
+          onclick={() => (login = !login)}
+          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
           class="link">here</span>
         to log in instead.
       {/if}

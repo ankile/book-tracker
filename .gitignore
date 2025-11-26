@@ -1,5 +1,6 @@
 /node_modules/
 /public/build/
+/.svelte-kit/
 
 .DS_Store
 
@@ -19,7 +20,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/

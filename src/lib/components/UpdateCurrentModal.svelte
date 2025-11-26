@@ -1,17 +1,13 @@
 <script>
-  import { createEventDispatcher } from "svelte";
-
-  import ModalCard from "../components/ModalCard.svelte";
-  import Input from "../components/Input.svelte";
+  import ModalCard from "$lib/components/ModalCard.svelte";
+  import Input from "$lib/components/Input.svelte";
   import { validateCurrentPage } from "../utils/validation";
 
-  export let book;
+  let { book, onupdateCurrentPage, oncloseModal } = $props();
 
-  $: open = !!book;
+  let open = $derived(!!book);
 
-  let inputPages;
-
-  const dispatch = createEventDispatcher();
+  let inputPages = $state(undefined);
 
   function updateCurrentPage() {
     const { valid, message } = validateCurrentPage({
@@ -23,24 +19,25 @@
       alert(message);
       return;
     }
-    dispatch("updateCurrentPage", {
+    onupdateCurrentPage({
       id: book.id,
       currentPage: Number.parseInt(inputPages),
       previousPage: book.currentPage,
     });
-    dispatch("closeModal");
+    oncloseModal();
   }
 </script>
 
 <ModalCard
   {open}
-  on:close={() => dispatch('closeModal')}
+  onclose={() => oncloseModal()}
   header={book.title}
   primaryAction={updateCurrentPage}
   primaryText="Update page">
   <Input label="Set current page" inputId="inputPages">
     <input
       id="inputPages"
+      class="form-control"
       type="number"
       bind:value={inputPages}
       placeholder="What page are you on" />

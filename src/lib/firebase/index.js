@@ -1,8 +1,8 @@
-import firebase from "firebase/app"; // rollup bundle issue with ESM import
-import "firebase/auth";
-import "firebase/firestore";
+import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 
-var firebaseConfig = {
+const firebaseConfig = {
   apiKey: "AIzaSyCf5oh1h3ySg7M31dSpo1YDwVxQDhGR4Es",
   authDomain: "book-tracker-d8f24.firebaseapp.com",
   databaseURL: "https://book-tracker-d8f24.firebaseio.com",
@@ -13,8 +13,9 @@ var firebaseConfig = {
   measurementId: "G-R4HGQYGQJH",
 };
 
-firebase.initializeApp(firebaseConfig);
+// Initialize Firebase
+export const app = initializeApp(firebaseConfig);
 
-export const auth = firebase.auth();
-
-export const db = firebase.firestore();
+// Initialize services
+export const auth = getAuth(app);
+export const db = getFirestore(app);

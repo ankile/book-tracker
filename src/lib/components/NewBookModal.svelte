@@ -1,24 +1,18 @@
 <script>
-  import { createEventDispatcher } from "svelte";
-
-  import ModalCard from "../components/ModalCard.svelte";
-  import Input from "../components/Input.svelte";
+  import ModalCard from "$lib/components/ModalCard.svelte";
+  import Input from "$lib/components/Input.svelte";
 
   import { Database } from "../firebase/db";
 
-  const dispatch = createEventDispatcher();
+  let { open, userId, book = null, onclose } = $props();
 
-  export let open;
-  export let userId;
-  export let book = null;
+  let author = $state(book ? book.author : "");
+  let title = $state(book ? book.title : "");
+  let pageCount = $state(book ? book.pageCount : undefined);
+  let currentPage = $state(book ? book.currentPage : 1);
+  let isbn = $state(book ? book.isbn : "");
 
-  let author = book ? book.author : "";
-  let title = book ? book.title : "";
-  let pageCount = book ? book.pageCount : undefined;
-  let currentPage = book ? book.currentPage : 1;
-  let isbn = book ? book.isbn : "";
-
-  $: isEditMode = !!book;
+  let isEditMode = $derived(!!book);
 
   function addBook() {
     Database.addBook({
@@ -29,7 +23,7 @@
       currentPage,
       isbn,
     });
-    dispatch("close");
+    onclose();
   }
 
   function updateBook() {
@@ -41,7 +35,7 @@
       pageCount,
       isbn,
     });
-    dispatch("close");
+    onclose();
   }
 
   function handleSubmit() {
@@ -61,18 +55,18 @@
 
 <ModalCard
   {open}
-  on:close={() => dispatch('close')}
+  onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <input id="author" type="text" bind:value={author} placeholder="Name of author(s)" />
+    <input id="author" class="form-control" type="text" bind:value={author} placeholder="Name of author(s)" />
   </Input>
 
   <div class="space" />
 
   <Input label="Book title" inputId="title">
-    <input id="title" type="text" bind:value={title} placeholder="Book title" />
+    <input id="title" class="form-control" type="text" bind:value={title} placeholder="Book title" />
   </Input>
 
   <div class="space" />
@@ -80,6 +74,7 @@
   <Input label="Number of pages" inputId="pageCount">
     <input
       id="pageCount"
+      class="form-control"
       type="number"
       bind:value={pageCount}
       placeholder="How many pages are there?" />
@@ -90,6 +85,7 @@
   <Input label="Current page" inputId="currentPage">
     <input
       id="currentPage"
+      class="form-control"
       type="number"
       bind:value={currentPage}
       placeholder="Have you already started reading?" />
@@ -98,6 +94,6 @@
   <div class="space" />
 
   <Input label="ISBN number (optional)" inputId="isbn">
-    <input id="isbn" type="text" bind:value={isbn} placeholder="ISBN" />
+    <input id="isbn" class="form-control" type="text" bind:value={isbn} placeholder="ISBN" />
   </Input>
 </ModalCard>

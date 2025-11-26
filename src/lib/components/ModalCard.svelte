@@ -1,23 +1,30 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from "svelte";
-  import Button from "../components/Button.svelte";
+  import Button from "$lib/components/Button.svelte";
 
-  export let header: string | undefined;
-  export let open: boolean;
-  export let primaryAction: () => void | undefined;
-  export let primaryText = "Do it!";
-  export let secondaryText = "Close";
+  let {
+    header = undefined,
+    open,
+    primaryAction = undefined,
+    primaryText = "Do it!",
+    secondaryText = "Close",
+    onclose
+  }: {
+    header?: string;
+    open: boolean;
+    primaryAction?: () => void;
+    primaryText?: string;
+    secondaryText?: string;
+    onclose: () => void;
+  } = $props();
 
-  onMount(() => {
+  $effect(() => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
-  const dispatch = createEventDispatcher();
+  const close = () => onclose();
 
-  const close = () => dispatch("close");
-
-  function handleKeyDown(event) {
+  function handleKeyDown(event: KeyboardEvent) {
     if (primaryAction && event.key === "Enter") {
       primaryAction();
     } else if (event.key === "Escape") {
@@ -78,12 +85,12 @@
 {#if open}
   <div
     role="presentation"
-    on:click={close}
-    on:keydown={(e) => e.key === 'Escape' && close()}
+    onclick={close}
+    onkeydown={(e) => e.key === 'Escape' && close()}
     class="background">
     <div
-      on:click={(e) => e.stopPropagation()}
-      on:keydown={(e) => e.stopPropagation()}
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
       class="card hover">
       {#if header}
         <h4 class="header">{header}</h4>
@@ -94,9 +101,9 @@
       </div>
       <div class="divider" />
       <div class="buttons">
-        <Button on:click={close}>{secondaryText}</Button>
+        <Button onclick={close}>{secondaryText}</Button>
         {#if primaryAction}
-          <Button primary on:click={primaryAction}>{primaryText}</Button>
+          <Button primary onclick={primaryAction}>{primaryText}</Button>
         {/if}
       </div>
     </div>

@@ -2,22 +2,21 @@
   import Icon from "svelte-awesome";
   import { plus, edit } from "svelte-awesome/icons";
   import { Col, Container, Progress, Row } from "sveltestrap";
-  import AddReadingModal from "./AddReadingModal.svelte";
-  import UpdateCurrentModal from "./UpdateCurrentModal.svelte";
-  import NewBookModal from "./NewBookModal.svelte";
+  import AddReadingModal from "$lib/components/AddReadingModal.svelte";
+  import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
+  import NewBookModal from "$lib/components/NewBookModal.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
-  import RightClickMenu from "./RightMenu.svelte";
+  import RightClickMenu from "$lib/components/RightMenu.svelte";
 
-  export let finished;
-  export let userId;
+  let { finished, userId } = $props();
 
-  let screenWidth;
+  let screenWidth = $state();
 
-  let menuPosition = null;
+  let menuPosition = $state(null);
 
-  let currentBook = null;
-  let modal = null;
+  let currentBook = $state(null);
+  let modal = $state(null);
   const setModalBook = (book, modalType) => {
     currentBook = book;
     modal = modalType;
@@ -30,11 +29,11 @@
     return book.pagesRead !== 0 && book.timeRead !== 0;
   }
 
-  function addReading({ detail }) {
+  function addReading(detail) {
     Database.addReading({ userId, ...detail });
   }
 
-  function updateCurrentPage({ detail }) {
+  function updateCurrentPage(detail) {
     Database.addPageUpdate({ userId, ...detail });
   }
 
@@ -163,32 +162,32 @@
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
     book={currentBook}
-    on:addReading={addReading}
-    on:closeModal={closemodal} />
+    onaddReading={addReading}
+    oncloseModal={closemodal} />
 {:else if currentBook && modal === 'updatePage'}
   <UpdateCurrentModal
     book={currentBook}
-    on:updateCurrentPage={updateCurrentPage}
-    on:closeModal={closemodal} />
+    onupdateCurrentPage={updateCurrentPage}
+    oncloseModal={closemodal} />
 {:else if currentBook && modal === 'editBook'}
   <NewBookModal
     open={true}
     {userId}
     book={currentBook}
-    on:close={closemodal} />
+    onclose={closemodal} />
 {/if}
 
 <Container>
   {#each $books as book (book.id)}
-    <div class="book-row" on:contextmenu={showMenu}>
+    <div class="book-row" oncontextmenu={showMenu}>
       <Row>
         <Col>
-          <span on:dblclick={() => deleteBook(book.id)} class="label">Book Title</span>
+          <span ondblclick={() => deleteBook(book.id)} class="label">Book Title</span>
           <span
             role="button"
             tabindex="0"
-            on:click={() => setModalBook(book, 'editBook')}
-            on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'editBook')}
+            onclick={() => setModalBook(book, 'editBook')}
+            onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'editBook')}
             style="cursor: pointer; margin-left: 0.5em;">
             <Icon data={edit} scale="0.8" style="color: #666;" />
           </span>
@@ -205,8 +204,8 @@
                 tabindex="0"
                 class="text-right"
                 style="cursor: pointer;"
-                on:click={() => setModalBook(book, 'updatePage')}
-                on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'updatePage')}>
+                onclick={() => setModalBook(book, 'updatePage')}
+                onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'updatePage')}>
                 <span class="label">Page</span>
                 <br />
                 <span class="page-number">
@@ -256,8 +255,8 @@
               role="button"
               tabindex="0"
               style="height: 100%; text-align: center;"
-              on:click={() => setModalBook(book, 'addReading')}
-              on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
+              onclick={() => setModalBook(book, 'addReading')}
+              onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.7"
@@ -289,8 +288,8 @@
               role="button"
               tabindex="0"
               style="height: 100%; text-align: center;"
-              on:click={() => setModalBook(book, 'addReading')}
-              on:keypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
+              onclick={() => setModalBook(book, 'addReading')}
+              onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.3"

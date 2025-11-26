@@ -1,9 +1,5 @@
 <script>
-  import { createEventDispatcher } from "svelte";
-
-  export let primary = false;
-
-  const dispatch = createEventDispatcher();
+  let { primary = false, onclick } = $props();
 </script>
 
 <style lang="scss">
@@ -40,7 +36,7 @@
 </style>
 
 <div class="btn-container">
-  <button class="hover" class:primary on:click={(e) => dispatch('click', e)}>
+  <button class="hover" class:primary {onclick}>
     <slot>Click</slot>
   </button>
 </div>

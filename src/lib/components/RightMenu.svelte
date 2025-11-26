@@ -1,8 +1,7 @@
 <script lang="ts">
-  import Login from "./Login.svelte";
+  import Login from "$lib/components/Login.svelte";
 
-  export let x: number;
-  export let y: number;
+  let { x, y } = $props();
 </script>
 
 <style>
