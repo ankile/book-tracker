@@ -45,11 +45,34 @@
       addBook();
     }
   }
+
+  function handleDelete() {
+    const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
+    if (confirmed) {
+      Database.deleteBook(userId, book.id);
+      onclose();
+    }
+  }
 </script>
 
 <style>
   .space {
     height: 1em;
+  }
+
+  .delete-button {
+    background: none;
+    border: none;
+    color: #d9534f;
+    cursor: pointer;
+    font-size: 0.9rem;
+    text-decoration: underline;
+    padding: 0;
+    margin-top: 1rem;
+  }
+
+  .delete-button:hover {
+    color: #c9302c;
   }
 </style>
 
@@ -96,4 +119,10 @@
   <Input label="ISBN number (optional)" inputId="isbn">
     <input id="isbn" class="form-control" type="text" bind:value={isbn} placeholder="ISBN" />
   </Input>
+
+  {#if isEditMode}
+    <button class="delete-button" onclick={handleDelete}>
+      Delete this book
+    </button>
+  {/if}
 </ModalCard>
