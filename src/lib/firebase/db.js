@@ -39,6 +39,29 @@ class Database {
     };
   }
 
+  // Returns a Svelte store with all books (for statistics)
+  static getAllBooks(userId) {
+    const store = writable([]);
+
+    const q = query(
+      collection(db, 'users', userId, 'books'),
+      orderBy('createdAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const books = [];
+      snapshot.forEach((doc) => {
+        books.push({ id: doc.id, ...doc.data() });
+      });
+      store.set(books);
+    });
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
+
   static async addPageUpdate({ userId, id, currentPage, previousPage }) {
     const bookRef = doc(db, 'users', userId, 'books', id);
 
