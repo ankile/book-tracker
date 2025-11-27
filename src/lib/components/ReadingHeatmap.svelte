@@ -160,20 +160,18 @@
 
       // Only add label if month changed
       if (month !== lastMonth) {
-        // Skip the first label if it's not at week 0 (partial month at start)
-        if (weekIndex > 0 && labels.length === 0) {
-          lastMonth = month;
-          return;
+        // Only add label if there are at least 2 weeks remaining after this week
+        // This prevents labels from appearing with no or few weeks below them
+        if (weekIndex < weeks.length - 2) {
+          // Ensure at least 2 weeks between labels to prevent overlap
+          if (labels.length === 0 || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
+            labels.push({
+              weekIndex,
+              month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
+            });
+          }
         }
-
-        // Ensure at least 2 weeks between labels to prevent overlap
-        if (labels.length === 0 || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
-          labels.push({
-            weekIndex,
-            month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
-          });
-          lastMonth = month;
-        }
+        lastMonth = month;
       }
     });
 
@@ -312,13 +310,15 @@
     position: fixed;
     background: rgba(0, 0, 0, 0.9);
     color: white;
-    padding: 0.5rem;
+    padding: 0.5rem 0.75rem;
     border-radius: 4px;
     font-size: 0.75rem;
     white-space: pre-line;
     pointer-events: none;
-    z-index: 1000;
+    z-index: 9999;
     transform: translate(10px, 10px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    min-width: 150px;
   }
 
   .month-labels {
@@ -441,12 +441,6 @@
     </div>
   </div>
 
-  {#if tooltipVisible}
-    <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
-      {tooltipContent}
-    </div>
-  {/if}
-
   <div class="legend">
     <span>Less</span>
     <div class="legend-colors">
@@ -459,3 +453,9 @@
     <span>More</span>
   </div>
 </div>
+
+{#if tooltipVisible}
+  <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
+    {tooltipContent}
+  </div>
+{/if}
