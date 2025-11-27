@@ -1,5 +1,6 @@
 /node_modules/
 /public/build/
+/public/_app/
 /.svelte-kit/
 
 .DS_Store
