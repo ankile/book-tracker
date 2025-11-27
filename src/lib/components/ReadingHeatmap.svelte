@@ -9,6 +9,12 @@
   let tooltipX = $state(0);
   let tooltipY = $state(0);
 
+  // Day boundary offset: sessions before 3 AM count as previous day
+  const DAY_BOUNDARY_OFFSET_HOURS = 3;
+
+  // Year selection for heatmap view
+  let selectedYear = $state('last12months');
+
   // Get all reading sessions across all books using a single query
   let allSessions = $state([]);
 
@@ -33,8 +39,12 @@
     const dayMap = new Map();
 
     allSessions.forEach(session => {
-      const date = session.createdAt?.toDate?.();
-      if (!date) return;
+      const timestamp = session.createdAt?.toDate?.();
+      if (!timestamp) return;
+
+      // Subtract offset hours so sessions before 3 AM count as previous day
+      const date = new Date(timestamp);
+      date.setHours(date.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
 
       const dayKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
@@ -56,25 +66,56 @@
     return dayMap;
   });
 
-  // Generate grid for last 52 weeks
+  // Get available years from session data
+  let availableYears = $derived.by(() => {
+    const years = new Set();
+    allSessions.forEach(session => {
+      const timestamp = session.createdAt?.toDate?.();
+      if (!timestamp) return;
+
+      const date = new Date(timestamp);
+      date.setHours(date.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
+      years.add(date.getFullYear());
+    });
+    return Array.from(years).sort((a, b) => b - a); // Descending order
+  });
+
+  // Generate grid for selected year or last 52 weeks
   let weeks = $derived.by(() => {
-    const today = new Date();
-    const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const startDate = new Date(endDate);
-    startDate.setDate(startDate.getDate() - (52 * 7)); // Go back 52 weeks
+    let startDate, endDate;
 
-    // Start from the most recent Sunday (so Monday is first in our grid)
-    const dayOfWeek = endDate.getDay();
-    // Adjust to get to next Sunday (day 0)
-    const daysToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
-    endDate.setDate(endDate.getDate() + daysToSunday);
+    if (selectedYear === 'last12months') {
+      // Last 52 weeks (current behavior)
+      const today = new Date();
+      endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      startDate = new Date(endDate);
+      startDate.setDate(startDate.getDate() - (52 * 7)); // Go back 52 weeks
 
-    // Go back to the first Monday (by going to Sunday then forward 1 day)
-    const startDayOfWeek = startDate.getDay();
-    // Go back to previous Sunday
-    startDate.setDate(startDate.getDate() - startDayOfWeek);
-    // Then forward to Monday
-    startDate.setDate(startDate.getDate() + 1);
+      // Start from the most recent Sunday (so Monday is first in our grid)
+      const dayOfWeek = endDate.getDay();
+      const daysToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+      endDate.setDate(endDate.getDate() + daysToSunday);
+
+      // Go back to the first Monday
+      const startDayOfWeek = startDate.getDay();
+      startDate.setDate(startDate.getDate() - startDayOfWeek);
+      startDate.setDate(startDate.getDate() + 1);
+    } else {
+      // Specific calendar year
+      const year = parseInt(selectedYear);
+      startDate = new Date(year, 0, 1); // Jan 1
+      endDate = new Date(year, 11, 31); // Dec 31
+
+      // Start from Monday of the week containing Jan 1
+      const startDayOfWeek = startDate.getDay();
+      const daysToMonday = startDayOfWeek === 0 ? 6 : startDayOfWeek - 1;
+      startDate.setDate(startDate.getDate() - daysToMonday);
+
+      // End on Sunday of the week containing Dec 31
+      const endDayOfWeek = endDate.getDay();
+      const daysToSunday = endDayOfWeek === 0 ? 0 : 7 - endDayOfWeek;
+      endDate.setDate(endDate.getDate() + daysToSunday);
+    }
 
     const weeks = [];
     let currentDate = new Date(startDate);
@@ -190,9 +231,10 @@
       if (day.pagesRead > 0) activeDays++;
     });
 
-    // Calculate streaks
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Calculate streaks (using same offset as activity aggregation)
+    const now = new Date();
+    now.setHours(now.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let checkDate = new Date(today);
     let streakActive = true;
 
@@ -249,10 +291,36 @@
     gap: 1rem;
   }
 
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
   h2 {
     font-size: 1.5rem;
     color: #333;
     margin: 0;
+  }
+
+  .year-selector {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    background: white;
+    cursor: pointer;
+    color: #333;
+  }
+
+  .year-selector:hover {
+    border-color: #999;
+  }
+
+  .year-selector:focus {
+    outline: none;
+    border-color: #007bff;
+    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.1);
   }
 
   .heatmap-stats {
@@ -358,6 +426,20 @@
   }
 
   @media (max-width: 768px) {
+    .heatmap-header {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .header-left {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .year-selector {
+      width: 100%;
+    }
+
     .heatmap-stats {
       width: 100%;
       justify-content: space-around;
@@ -371,7 +453,15 @@
 
 <div class="heatmap-container">
   <div class="heatmap-header">
-    <h2>Reading Activity</h2>
+    <div class="header-left">
+      <h2>Reading Activity</h2>
+      <select bind:value={selectedYear} class="year-selector">
+        <option value="last12months">Last 12 months</option>
+        {#each availableYears as year}
+          <option value={year.toString()}>{year}</option>
+        {/each}
+      </select>
+    </div>
     <div class="heatmap-stats">
       <div class="stat">
         <span class="stat-value">{stats.activeDays}</span>
