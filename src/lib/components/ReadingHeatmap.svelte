@@ -136,9 +136,13 @@
 
   function showTooltip(event, day) {
     tooltipContent = formatTooltip(day);
-    tooltipX = event.pageX;
-    tooltipY = event.pageY;
+    updateTooltipPosition(event);
     tooltipVisible = true;
+  }
+
+  function updateTooltipPosition(event) {
+    tooltipX = event.clientX;
+    tooltipY = event.clientY;
   }
 
   function hideTooltip() {
@@ -154,9 +158,16 @@
       const firstDay = week[0];
       const month = firstDay.date.getMonth();
 
-      // Only add label if month changed and there's enough space (at least 2 weeks since last label)
+      // Only add label if month changed
       if (month !== lastMonth) {
-        if (weekIndex === 0 || (labels.length === 0) || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
+        // Skip the first label if it's not at week 0 (partial month at start)
+        if (weekIndex > 0 && labels.length === 0) {
+          lastMonth = month;
+          return;
+        }
+
+        // Ensure at least 2 weeks between labels to prevent overlap
+        if (labels.length === 0 || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
           labels.push({
             weekIndex,
             month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
@@ -298,7 +309,7 @@
   }
 
   .tooltip {
-    position: absolute;
+    position: fixed;
     background: rgba(0, 0, 0, 0.9);
     color: white;
     padding: 0.5rem;
@@ -307,8 +318,7 @@
     white-space: pre-line;
     pointer-events: none;
     z-index: 1000;
-    transform: translate(-50%, -100%);
-    margin-top: -8px;
+    transform: translate(10px, 10px);
   }
 
   .month-labels {
@@ -421,6 +431,7 @@
                 class="day-cell"
                 style="background-color: {getColor(day.pagesRead)}"
                 onmouseenter={(e) => showTooltip(e, day)}
+                onmousemove={updateTooltipPosition}
                 onmouseleave={hideTooltip}>
               </div>
             {/each}
@@ -428,12 +439,13 @@
         {/each}
       </div>
     </div>
+  </div>
 
-    {#if tooltipVisible}
-      <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
-        {tooltipContent}
-      </div>
-    {/if}
+  {#if tooltipVisible}
+    <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
+      {tooltipContent}
+    </div>
+  {/if}
 
     <div class="legend">
       <span>Less</span>
