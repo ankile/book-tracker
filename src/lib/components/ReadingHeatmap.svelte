@@ -160,9 +160,14 @@
 
       // Only add label if month changed
       if (month !== lastMonth) {
-        // Only add label if there are at least 2 weeks remaining after this week
-        // This prevents labels from appearing with no or few weeks below them
-        if (weekIndex < weeks.length - 2) {
+        // Count how many weeks remain for this month
+        let weeksInMonth = 0;
+        for (let i = weekIndex; i < weeks.length && weeks[i][0].date.getMonth() === month; i++) {
+          weeksInMonth++;
+        }
+
+        // Only add label if there are at least 2 weeks of this month visible
+        if (weeksInMonth >= 2) {
           // Ensure at least 2 weeks between labels to prevent overlap
           if (labels.length === 0 || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
             labels.push({
@@ -171,6 +176,7 @@
             });
           }
         }
+
         lastMonth = month;
       }
     });
@@ -306,21 +312,6 @@
     outline-offset: 1px;
   }
 
-  .tooltip {
-    position: fixed;
-    background: rgba(0, 0, 0, 0.9);
-    color: white;
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    white-space: pre-line;
-    pointer-events: none;
-    z-index: 9999;
-    transform: translate(10px, 10px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-    min-width: 150px;
-  }
-
   .month-labels {
     display: flex;
     margin-bottom: 0.5rem;
@@ -408,7 +399,7 @@
   <div class="heatmap-wrapper">
     <div class="month-labels" style="position: relative; height: 15px;">
       {#each monthLabels as label}
-        <span class="month-label" style="left: {label.weekIndex * 14}px;">{label.month}</span>
+        <span class="month-label" style="left: {(label.weekIndex + 1) * 14}px;">{label.month}</span>
       {/each}
     </div>
 
@@ -455,7 +446,7 @@
 </div>
 
 {#if tooltipVisible}
-  <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
+  <div style="position: fixed; left: {tooltipX}px; top: {tooltipY}px; background: rgba(0, 0, 0, 0.9); color: white; padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.75rem; white-space: pre-line; pointer-events: none; z-index: 9999; transform: translate(10px, 10px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">
     {tooltipContent}
   </div>
 {/if}
