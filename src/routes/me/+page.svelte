@@ -2,6 +2,7 @@
   import { user, signOut } from '$lib/firebase/auth.js';
   import { goto } from '$app/navigation';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
+  import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { formatTime } from '$lib/utils/format.js';
 
@@ -392,5 +393,7 @@
         </table>
       </div>
     {/if}
+
+    <ReadingHeatmap userId={$user.uid} {allBooks} />
   </div>
 {/if}
