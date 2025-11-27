@@ -394,6 +394,6 @@
       </div>
     {/if}
 
-    <ReadingHeatmap userId={$user.uid} {allBooks} />
+    <ReadingHeatmap userId={$user.uid} />
   </div>
 {/if}

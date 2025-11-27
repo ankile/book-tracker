@@ -139,3 +139,6 @@ dmypy.json
 
 # VS Code
 .vscode
+
+serviceAccountKey.json
+migrate-add-owner.js

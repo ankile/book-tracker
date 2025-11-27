@@ -2,37 +2,29 @@
   import { Database } from '../firebase/db.js';
   import { formatTime } from '../utils/format.js';
 
-  let { userId, allBooks } = $props();
+  let { userId } = $props();
 
   let tooltipVisible = $state(false);
   let tooltipContent = $state('');
   let tooltipX = $state(0);
   let tooltipY = $state(0);
 
-  // Get all reading sessions across all books
+  // Get all reading sessions across all books using a single query
   let allSessions = $state([]);
 
   $effect(() => {
-    if (!userId || !allBooks || allBooks.length === 0) {
+    if (!userId) {
       allSessions = [];
       return;
     }
 
-    const unsubscribers = [];
-    const sessionsByBook = new Map();
-
-    allBooks.forEach(book => {
-      const sessionsStore = Database.getReadingSessions(userId, book.id);
-      const unsub = sessionsStore.subscribe((sessions) => {
-        sessionsByBook.set(book.id, sessions);
-        // Flatten all sessions into one array
-        allSessions = Array.from(sessionsByBook.values()).flat();
-      });
-      unsubscribers.push(unsub);
+    const sessionsStore = Database.getAllReadingSessions(userId);
+    const unsubscribe = sessionsStore.subscribe((sessions) => {
+      allSessions = sessions;
     });
 
     return () => {
-      unsubscribers.forEach(unsub => unsub());
+      unsubscribe();
     };
   });
 

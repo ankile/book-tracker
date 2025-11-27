@@ -1,5 +1,6 @@
 import {
   collection,
+  collectionGroup,
   doc,
   query,
   where,
@@ -93,12 +94,14 @@ class Database {
   static async addReading({ userId, id, previousPage, currentPage, timeRead }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', id);
+    const ownerRef = doc(db, 'users', userId);
     const sessionRef = doc(collection(db, 'users', userId, 'books', id, 'updates'));
 
     const pagesRead = currentPage - previousPage;
 
     // Add the reading session document
     batch.set(sessionRef, {
+      owner: ownerRef,
       book: bookRef,
       type: 'reading',
       timeRead,
@@ -243,6 +246,31 @@ class Database {
         const aTime = a.createdAt?.toMillis?.() || 0;
         const bTime = b.createdAt?.toMillis?.() || 0;
         return bTime - aTime;
+      });
+      store.set(sessions);
+    });
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
+
+  // Get all reading sessions across all books for a user using collectionGroup
+  static getAllReadingSessions(userId) {
+    const store = writable([]);
+
+    const ownerRef = doc(db, 'users', userId);
+    const q = query(
+      collectionGroup(db, 'updates'),
+      where('owner', '==', ownerRef),
+      where('type', '==', 'reading')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessions = [];
+      snapshot.forEach((doc) => {
+        sessions.push({ id: doc.id, ...doc.data() });
       });
       store.set(sessions);
     });
