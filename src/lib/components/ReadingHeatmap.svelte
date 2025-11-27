@@ -4,6 +4,11 @@
 
   let { userId, allBooks } = $props();
 
+  let tooltipVisible = $state(false);
+  let tooltipContent = $state('');
+  let tooltipX = $state(0);
+  let tooltipY = $state(0);
+
   // Get all reading sessions across all books
   let allSessions = $state([]);
 
@@ -66,13 +71,18 @@
     const startDate = new Date(endDate);
     startDate.setDate(startDate.getDate() - (52 * 7)); // Go back 52 weeks
 
-    // Start from the most recent Sunday
+    // Start from the most recent Sunday (so Monday is first in our grid)
     const dayOfWeek = endDate.getDay();
-    endDate.setDate(endDate.getDate() + (6 - dayOfWeek));
+    // Adjust to get to next Sunday (day 0)
+    const daysToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+    endDate.setDate(endDate.getDate() + daysToSunday);
 
-    // Go back to the first Sunday
+    // Go back to the first Monday (by going to Sunday then forward 1 day)
     const startDayOfWeek = startDate.getDay();
+    // Go back to previous Sunday
     startDate.setDate(startDate.getDate() - startDayOfWeek);
+    // Then forward to Monday
+    startDate.setDate(startDate.getDate() + 1);
 
     const weeks = [];
     let currentDate = new Date(startDate);
@@ -124,6 +134,17 @@
     return `${dateStr}\n${day.pagesRead} pages\n${formatTime(day.timeRead)}\n${day.sessions} session${day.sessions !== 1 ? 's' : ''}`;
   }
 
+  function showTooltip(event, day) {
+    tooltipContent = formatTooltip(day);
+    tooltipX = event.pageX;
+    tooltipY = event.pageY;
+    tooltipVisible = true;
+  }
+
+  function hideTooltip() {
+    tooltipVisible = false;
+  }
+
   // Get month labels
   let monthLabels = $derived.by(() => {
     const labels = [];
@@ -133,18 +154,15 @@
       const firstDay = week[0];
       const month = firstDay.date.getMonth();
 
-      if (month !== lastMonth && weekIndex > 0) {
-        labels.push({
-          weekIndex,
-          month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
-        });
-        lastMonth = month;
-      } else if (weekIndex === 0) {
-        labels.push({
-          weekIndex: 0,
-          month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
-        });
-        lastMonth = month;
+      // Only add label if month changed and there's enough space (at least 2 weeks since last label)
+      if (month !== lastMonth) {
+        if (weekIndex === 0 || (labels.length === 0) || (weekIndex - labels[labels.length - 1].weekIndex >= 2)) {
+          labels.push({
+            weekIndex,
+            month: firstDay.date.toLocaleDateString('en-US', { month: 'short' })
+          });
+          lastMonth = month;
+        }
       }
     });
 
@@ -279,8 +297,18 @@
     outline-offset: 1px;
   }
 
-  .day-cell[title] {
+  .tooltip {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
     white-space: pre-line;
+    pointer-events: none;
+    z-index: 1000;
+    transform: translate(-50%, -100%);
+    margin-top: -8px;
   }
 
   .month-labels {
@@ -376,12 +404,12 @@
 
     <div class="heatmap-grid">
       <div class="day-labels">
-        <div class="day-label"></div>
         <div class="day-label">Mon</div>
         <div class="day-label"></div>
         <div class="day-label">Wed</div>
         <div class="day-label"></div>
         <div class="day-label">Fri</div>
+        <div class="day-label"></div>
         <div class="day-label"></div>
       </div>
 
@@ -392,13 +420,20 @@
               <div
                 class="day-cell"
                 style="background-color: {getColor(day.pagesRead)}"
-                title={formatTooltip(day)}>
+                onmouseenter={(e) => showTooltip(e, day)}
+                onmouseleave={hideTooltip}>
               </div>
             {/each}
           </div>
         {/each}
       </div>
     </div>
+
+    {#if tooltipVisible}
+      <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
+        {tooltipContent}
+      </div>
+    {/if}
 
     <div class="legend">
       <span>Less</span>
