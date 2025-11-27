@@ -447,16 +447,15 @@
     </div>
   {/if}
 
-    <div class="legend">
-      <span>Less</span>
-      <div class="legend-colors">
-        <div class="legend-cell" style="background-color: #ebedf0"></div>
-        <div class="legend-cell" style="background-color: #9be9a8"></div>
-        <div class="legend-cell" style="background-color: #40c463"></div>
-        <div class="legend-cell" style="background-color: #30a14e"></div>
-        <div class="legend-cell" style="background-color: #216e39"></div>
-      </div>
-      <span>More</span>
+  <div class="legend">
+    <span>Less</span>
+    <div class="legend-colors">
+      <div class="legend-cell" style="background-color: #ebedf0"></div>
+      <div class="legend-cell" style="background-color: #9be9a8"></div>
+      <div class="legend-cell" style="background-color: #40c463"></div>
+      <div class="legend-cell" style="background-color: #30a14e"></div>
+      <div class="legend-cell" style="background-color: #216e39"></div>
     </div>
+    <span>More</span>
   </div>
 </div>
