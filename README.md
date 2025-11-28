@@ -4,6 +4,37 @@
 
 This responsive single-page app allows one to keep track of what one's reading, as well as give some indication as to how long books will take to complete.
 
+## Features
+
+### Core Functionality
+- **Book Management**: Add, edit, and delete books from your library
+- **Reading Progress**: Track current page and mark books as finished
+- **Reading Sessions**: Log reading sessions with time spent and pages read
+- **Session Management**: View, edit, and delete individual reading sessions
+
+### Statistics & Analytics
+- **Profile Dashboard**: Comprehensive reading statistics including:
+  - Total books read and currently reading
+  - Total time spent reading and pages read
+  - Books per year average
+  - Average time per finished book
+  - Year-by-year breakdown with longest books
+
+- **Reading Heatmap**: GitHub-style activity visualization showing:
+  - Daily reading activity (pages read per day)
+  - Customizable 3 AM day boundary (late-night sessions count as previous day)
+  - Year selector (view specific years or last 12 months)
+  - Current reading streak and longest streak tracking
+  - Detailed tooltips with session information
+
+### Organization & Filtering
+- **Finished Books Page**: Browse completed books with:
+  - Sort options: recently finished, title (A-Z), length, or time spent
+  - Filter by year
+  - Summary statistics for filtered view
+
+- **Currently Reading**: View all books in progress
+
 ## Version 2.0 - Major Upgrade 🎉
 
 Version 2.0 brings a complete modernization of the tech stack:
