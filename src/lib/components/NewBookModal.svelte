@@ -127,7 +127,7 @@
   .isbn-container {
     display: flex;
     gap: 0.5rem;
-    align-items: flex-end;
+    align-items: flex-start;
   }
 
   .isbn-input-wrapper {
@@ -144,6 +144,7 @@
     font-size: 0.9rem;
     white-space: nowrap;
     height: fit-content;
+    margin-top: 1.6rem;
   }
 
   .lookup-button:hover:not(:disabled) {
