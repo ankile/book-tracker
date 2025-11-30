@@ -236,24 +236,34 @@
     now.setHours(now.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let checkDate = new Date(today);
+    let tempStreak = 0;
+    let foundCurrentStreak = false;
 
     for (let i = 0; i < 365; i++) {
       const dayKey = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
       const activity = activityByDay.get(dayKey);
 
       if (activity && activity.pagesRead > 0) {
-        currentStreak++;
-        if (currentStreak > longestStreak) {
-          longestStreak = currentStreak;
+        tempStreak++;
+        if (tempStreak > longestStreak) {
+          longestStreak = tempStreak;
+        }
+        // If we haven't found the current streak yet, this counts toward it
+        if (!foundCurrentStreak) {
+          currentStreak++;
         }
       } else {
         // No activity on this day
         const isToday = checkDate.getTime() === today.getTime();
         if (!isToday) {
-          // A past day has no reading - streak is broken, stop counting
-          break;
+          // Past day with no reading - current streak ends (if not already ended)
+          if (!foundCurrentStreak) {
+            foundCurrentStreak = true;
+          }
+          // Reset temp streak for finding longest historical streak
+          tempStreak = 0;
         }
-        // If it's today with no reading, continue checking yesterday (might read later today)
+        // If it's today with no reading, continue (might read later today)
       }
 
       checkDate.setDate(checkDate.getDate() - 1);
