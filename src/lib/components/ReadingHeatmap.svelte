@@ -236,7 +236,6 @@
     now.setHours(now.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let checkDate = new Date(today);
-    let streakActive = true;
 
     for (let i = 0; i < 365; i++) {
       const dayKey = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
@@ -248,16 +247,13 @@
           longestStreak = currentStreak;
         }
       } else {
-        if (streakActive) {
-          // Only count as broken streak if it's not today (you might read later today)
-          const isToday = checkDate.getTime() === today.getTime();
-          if (!isToday) {
-            streakActive = false;
-          }
+        // No activity on this day
+        const isToday = checkDate.getTime() === today.getTime();
+        if (!isToday) {
+          // A past day has no reading - streak is broken, stop counting
+          break;
         }
-        if (!streakActive) {
-          currentStreak = 0;
-        }
+        // If it's today with no reading, continue checking yesterday (might read later today)
       }
 
       checkDate.setDate(checkDate.getDate() - 1);
@@ -267,7 +263,7 @@
       totalPages,
       totalTime,
       activeDays,
-      currentStreak: streakActive ? currentStreak : 0,
+      currentStreak,
       longestStreak
     };
   });
