@@ -13,6 +13,8 @@
   let isbn = $state(book ? book.isbn : "");
 
   let isEditMode = $derived(!!book);
+  let isLookingUp = $state(false);
+  let lookupError = $state("");
 
   function addBook() {
     Database.addBook({
@@ -53,6 +55,53 @@
       onclose();
     }
   }
+
+  async function lookupISBN() {
+    if (!isbn.trim()) {
+      lookupError = "Please enter an ISBN first";
+      return;
+    }
+
+    isLookingUp = true;
+    lookupError = "";
+
+    try {
+      const response = await fetch(
+        `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn.trim()}&format=json&jscmd=data`
+      );
+
+      if (!response.ok) {
+        throw new Error("Network error");
+      }
+
+      const data = await response.json();
+      const bookData = data[`ISBN:${isbn.trim()}`];
+
+      if (!bookData) {
+        lookupError = "No book found for this ISBN";
+        return;
+      }
+
+      // Auto-fill fields (always overwrite when looking up)
+      if (bookData.title) {
+        title = bookData.title;
+      }
+
+      if (bookData.authors && bookData.authors.length > 0) {
+        author = bookData.authors.map(a => a.name).join(", ");
+      }
+
+      if (bookData.number_of_pages) {
+        pageCount = bookData.number_of_pages;
+      }
+
+    } catch (error) {
+      lookupError = "Failed to look up ISBN. Please try again.";
+      console.error("ISBN lookup error:", error);
+    } finally {
+      isLookingUp = false;
+    }
+  }
 </script>
 
 <style>
@@ -73,6 +122,49 @@
 
   .delete-button:hover {
     color: #c9302c;
+  }
+
+  .isbn-container {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+  }
+
+  .isbn-input-wrapper {
+    flex: 1;
+  }
+
+  .lookup-button {
+    padding: 0.375rem 0.75rem;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    height: fit-content;
+  }
+
+  .lookup-button:hover:not(:disabled) {
+    background-color: #0056b3;
+  }
+
+  .lookup-button:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+  }
+
+  .lookup-error {
+    color: #d9534f;
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+  }
+
+  .lookup-success {
+    color: #5cb85c;
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
   }
 </style>
 
@@ -116,9 +208,23 @@
 
   <div class="space" />
 
-  <Input label="ISBN number (optional)" inputId="isbn">
-    <input id="isbn" class="form-control" type="text" bind:value={isbn} placeholder="ISBN" />
-  </Input>
+  <div class="isbn-container">
+    <div class="isbn-input-wrapper">
+      <Input label="ISBN number (optional)" inputId="isbn">
+        <input id="isbn" class="form-control" type="text" bind:value={isbn} placeholder="ISBN" />
+      </Input>
+    </div>
+    <button
+      class="lookup-button"
+      onclick={lookupISBN}
+      disabled={isLookingUp || !isbn.trim()}>
+      {isLookingUp ? 'Looking up...' : 'Look up'}
+    </button>
+  </div>
+
+  {#if lookupError}
+    <div class="lookup-error">{lookupError}</div>
+  {/if}
 
   {#if isEditMode}
     <button class="delete-button" onclick={handleDelete}>
