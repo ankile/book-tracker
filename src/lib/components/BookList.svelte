@@ -248,10 +248,12 @@
 
             <Col>
               <div class="text-right">
-                <span class="label">Est left</span>
+                <span class="label">{finished ? 'Finished' : 'Est left'}</span>
                 <br />
                 <span class="page-number">
-                  {#if hasEstimate(book)}
+                  {#if finished && book.updatedAt}
+                    {book.updatedAt.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {:else if hasEstimate(book)}
                     {formatTime(Math.round((book.pageCount - book.currentPage) * (book.timeRead / book.pagesRead)))}
                   {:else}NA{/if}
                 </span>
