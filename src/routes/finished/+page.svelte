@@ -6,6 +6,7 @@
 
   let sortBy = $state('updatedAt'); // 'updatedAt', 'pageCount', 'timeRead', 'title'
   let filterYear = $state('all'); // 'all', '2020', '2021', etc.
+  let searchTerm = $state(''); // Search filter
 
   let allBooks = $state([]);
 
@@ -29,10 +30,21 @@
     return Array.from(years).sort((a, b) => b - a); // Descending
   });
 
+  // Filter books by search term (title or author)
+  let searchedBooks = $derived.by(() => {
+    if (!searchTerm.trim()) return allBooks;
+    const term = searchTerm.toLowerCase();
+    return allBooks.filter(book => {
+      const title = (book.title || '').toLowerCase();
+      const author = (book.author || '').toLowerCase();
+      return title.includes(term) || author.includes(term);
+    });
+  });
+
   // Filter books by year
   let filteredBooks = $derived.by(() => {
-    if (filterYear === 'all') return allBooks;
-    return allBooks.filter(book => {
+    if (filterYear === 'all') return searchedBooks;
+    return searchedBooks.filter(book => {
       if (!book.updatedAt?.toDate) return false;
       return book.updatedAt.toDate().getFullYear() === parseInt(filterYear);
     });
@@ -122,20 +134,27 @@
     font-weight: 600;
   }
 
-  select {
+  select, input[type="text"] {
     padding: 0.5rem 0.75rem;
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 0.95rem;
     background: white;
+  }
+
+  select {
     cursor: pointer;
   }
 
-  select:hover {
+  input[type="text"] {
+    min-width: 200px;
+  }
+
+  select:hover, input[type="text"]:hover {
     border-color: #999;
   }
 
-  select:focus {
+  select:focus, input[type="text"]:focus {
     outline: none;
     border-color: #007bff;
     box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.1);
@@ -160,6 +179,16 @@
     </div>
 
     <div class="filters">
+      <div class="filter-group">
+        <label class="filter-label" for="search-input">Search</label>
+        <input
+          id="search-input"
+          type="text"
+          placeholder="Title or author..."
+          bind:value={searchTerm}
+        />
+      </div>
+
       <div class="filter-group">
         <label class="filter-label" for="sort-select">Sort by</label>
         <select id="sort-select" bind:value={sortBy}>
