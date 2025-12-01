@@ -4,6 +4,14 @@
 
 This responsive single-page app allows one to keep track of what one's reading, as well as give some indication as to how long books will take to complete.
 
+## Screenshots
+
+### Currently Reading
+![Currently Reading Page](static/screenshots/currently_reading.png)
+
+### Profile & Reading Activity
+![Profile Page with Statistics and Reading Heatmap](static/screenshots/my_page.png)
+
 ## Features
 
 ### Core Functionality
