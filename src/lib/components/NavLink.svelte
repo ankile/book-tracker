@@ -28,6 +28,10 @@
   }
 </style>
 
-<a href={to} class="nav-link" class:active={isActive}>
+<a
+  href={to}
+  class="nav-link"
+  class:active={isActive}
+  aria-current={isActive ? 'page' : undefined}>
   {@render children?.()}
 </a>

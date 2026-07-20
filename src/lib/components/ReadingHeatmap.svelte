@@ -8,6 +8,7 @@
   let tooltipContent = $state('');
   let tooltipX = $state(0);
   let tooltipY = $state(0);
+  let focusedDayKey = $state(null);
 
   // Day boundary offset: sessions before 3 AM count as previous day
   const DAY_BOUNDARY_OFFSET_HOURS = 3;
@@ -142,6 +143,16 @@
     return weeks;
   });
 
+  $effect(() => {
+    const focusedDayIsVisible = weeks.some((week) =>
+      week.some((day) => day.dayKey === focusedDayKey)
+    );
+
+    if (!focusedDayIsVisible) {
+      focusedDayKey = weeks[0]?.[0]?.dayKey ?? null;
+    }
+  });
+
   // Get color based on activity level
   function getColor(pagesRead) {
     if (pagesRead === 0) return '#ebedf0';
@@ -173,6 +184,14 @@
     tooltipVisible = true;
   }
 
+  function showKeyboardTooltip(event, day) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    tooltipContent = formatTooltip(day);
+    tooltipX = bounds.right;
+    tooltipY = bounds.top;
+    tooltipVisible = true;
+  }
+
   function updateTooltipPosition(event) {
     tooltipX = event.clientX;
     tooltipY = event.clientY;
@@ -180,6 +199,31 @@
 
   function hideTooltip() {
     tooltipVisible = false;
+  }
+
+  function handleDayKeydown(event, day) {
+    const dayOffsets = {
+      ArrowUp: -1,
+      ArrowDown: 1,
+      ArrowLeft: -7,
+      ArrowRight: 7
+    };
+    const offset = dayOffsets[event.key];
+
+    if (offset === undefined) {
+      return;
+    }
+
+    event.preventDefault();
+    const targetDate = new Date(day.date);
+    targetDate.setDate(targetDate.getDate() + offset);
+    const targetDayKey = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
+    const target = document.querySelector(`[data-day-key="${targetDayKey}"]`);
+
+    if (target instanceof HTMLButtonElement) {
+      focusedDayKey = targetDayKey;
+      target.focus();
+    }
   }
 
   // Get month labels
@@ -366,8 +410,10 @@
   }
 
   .day-cell {
+    border: 0;
     width: 11px;
     height: 11px;
+    padding: 0;
     border-radius: 2px;
     cursor: pointer;
     position: relative;
@@ -502,17 +548,24 @@
         <div class="day-label"></div>
       </div>
 
-      <div class="heatmap">
+      <div class="heatmap" role="group" aria-label="Daily reading activity">
         {#each weeks as week}
           <div class="week-column">
             {#each week as day}
-              <div
+              <button
+                type="button"
+                data-day-key={day.dayKey}
+                tabindex={day.dayKey === focusedDayKey ? 0 : -1}
+                aria-label={formatTooltip(day).replaceAll('\n', ', ')}
                 class="day-cell"
                 style="background-color: {getColor(day.pagesRead)}"
                 onmouseenter={(e) => showTooltip(e, day)}
                 onmousemove={updateTooltipPosition}
-                onmouseleave={hideTooltip}>
-              </div>
+                onmouseleave={hideTooltip}
+                onfocus={(e) => showKeyboardTooltip(e, day)}
+                onblur={hideTooltip}
+                onkeydown={(e) => handleDayKeydown(e, day)}>
+              </button>
             {/each}
           </div>
         {/each}

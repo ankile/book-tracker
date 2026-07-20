@@ -1,4 +1,5 @@
-import * as functions from "firebase-functions";
+import * as functions from "firebase-functions/v1";
+import {defineJsonSecret} from "firebase-functions/params";
 import * as https from "https";
 
 interface FunctionConfig {
@@ -37,8 +38,11 @@ interface BookApiResponse {
   items: BookApiResponseItem[];
 }
 
+const runtimeConfig =
+  defineJsonSecret<FunctionConfig>("FUNCTIONS_CONFIG_EXPORT");
+
 async function getBooks(isbn: string): Promise<BookApiResponse> {
-  const { url, key } = (functions.config() as FunctionConfig).booksapi;
+  const {url, key} = runtimeConfig.value().booksapi;
 
   return new Promise((resolve) => {
     let data = "";
@@ -56,6 +60,7 @@ async function getBooks(isbn: string): Promise<BookApiResponse> {
 }
 
 exports.searchisbn = functions
+  .runWith({secrets: [runtimeConfig]})
   .region("europe-west1")
   .https.onRequest(async (req, resp) => {
     const { isbn } = req.query;
@@ -75,7 +80,7 @@ exports.searchisbn = functions
     if (result.totalItems < 1) {
       resp.statusCode = 400;
       resp.send(
-        JSON.stringify({ message: "Book not found for that ISBN number" })
+        JSON.stringify({message: "Book not found for that ISBN number"}),
       );
 
       return;

@@ -58,7 +58,7 @@
       bind:value={inputTime}
       type="number" />
   </Input>
-  <div style="height: 8px;" />
+  <div style="height: 8px;"></div>
   <Input label="Current page" inputId="inputPagesReading">
     <input
       id="inputPagesReading"

@@ -44,8 +44,14 @@
   }
 
   .link {
+    appearance: none;
+    background: none;
+    border: 0;
     color: $color;
     cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-decoration: none;
 
     &:hover {
       filter: brightness(0.8);
@@ -73,7 +79,7 @@
   }
 
   .form {
-    width: $width;
+    width: min($width, calc(100vw - 2rem));
   }
 
   .hover {
@@ -102,9 +108,12 @@
       {:else}Register to start using the service{/if}
     </h3>
   </div>
-  <div
+  <form
     class="column form"
-    onkeypress={(event) => event.key === 'Enter' && signInOrUp()}>
+    onsubmit={(event) => {
+      event.preventDefault();
+      signInOrUp();
+    }}>
     <div class="column hover">
       <label for="email">Email address</label>
       <input id="email" placeholder="Email" type="email" bind:value={email} />
@@ -115,28 +124,24 @@
         type="password"
         bind:value={password} />
     </div>
-    <Button onclick={signInOrUp}>{login ? 'Log in' : 'Register'}</Button>
-  </div>
+    <Button type="submit">{login ? 'Log in' : 'Register'}</Button>
+  </form>
 
   <div class="left">
     <p class="bottom-text">
       {#if login}
         If you're not already registered, press
-        <span
-          role="button"
-          tabindex="0"
+        <button
+          type="button"
           onclick={() => (login = !login)}
-          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
-          class="link">here</span>
+          class="link">here</button>
         to register instead.
       {:else}
         If you're already registered, press
-        <span
-          role="button"
-          tabindex="0"
+        <button
+          type="button"
           onclick={() => (login = !login)}
-          onkeypress={(e) => e.key === 'Enter' && (login = !login)}
-          class="link">here</span>
+          class="link">here</button>
         to log in instead.
       {/if}
     </p>

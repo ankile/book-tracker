@@ -3,10 +3,13 @@
 **/*.js.map
 
 # Except the ESLint config file
-!.eslintrc.js
+!eslint.config.cjs
 
 # TypeScript v1 declaration files
 typings/
 
 # Node.js dependency directory
 node_modules/
+
+# Local Secret Manager emulator overrides
+.secret.local

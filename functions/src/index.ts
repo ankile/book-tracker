@@ -1,13 +1,15 @@
-import * as functions from "firebase-functions";
-import * as admin from "firebase-admin";
+import * as functions from "firebase-functions/v1";
+import {initializeApp} from "firebase-admin/app";
+import {getFirestore} from "firebase-admin/firestore";
 
-admin.initializeApp();
+initializeApp();
+const db = getFirestore();
 
 // Automatically mark book as finished when currentPage reaches pageCount
 exports.bookIsFinished = functions
   .region("europe-west1")
   .firestore.document("/users/{userId}/books/{bookId}")
-  .onUpdate(async (snap, _) => {
+  .onUpdate(async (snap) => {
     // Grab the current value of what was written to Cloud Firestore.
     const { currentPage, pageCount, finished } = snap.after.data();
 
@@ -27,7 +29,7 @@ exports.createUserDocument = functions
   .region("europe-west1")
   .auth.user()
   .onCreate(async (user) => {
-    await admin.firestore().collection("users").doc(user.uid).set({
+    await db.collection("users").doc(user.uid).set({
       email: user.email,
       uid: user.uid,
     });
@@ -38,7 +40,7 @@ exports.deleteUserDocument = functions
   .region("europe-west1")
   .auth.user()
   .onDelete(async (user) => {
-    await admin.firestore().collection("users").doc(user.uid).delete();
+    await db.collection("users").doc(user.uid).delete();
     return null;
   });
 

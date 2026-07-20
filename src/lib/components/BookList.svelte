@@ -1,20 +1,16 @@
 <script>
   import Icon from "svelte-awesome";
   import { plus, edit } from "svelte-awesome/icons";
-  import { Col, Container, Progress, Row } from "sveltestrap";
   import AddReadingModal from "$lib/components/AddReadingModal.svelte";
   import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
   import NewBookModal from "$lib/components/NewBookModal.svelte";
   import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
   import { Database } from "../firebase/db";
   import { formatTime } from "../utils/format";
-  import RightClickMenu from "$lib/components/RightMenu.svelte";
 
   let { finished, userId, books: booksProp = null } = $props();
 
   let screenWidth = $state();
-
-  let menuPosition = $state(null);
 
   let currentBook = $state(null);
   let modal = $state(null);
@@ -43,20 +39,6 @@
     Database.addPageUpdate({ userId, ...detail });
   }
 
-  function deleteBook(bookId) {
-    let del = confirm("Are you sure you want to delete this book?");
-    if (del) {
-      Database.deleteBook(userId, bookId);
-    }
-  }
-
-  function showMenu(event) {
-    console.log(event);
-    event.preventDefault();
-    const { x, y } = event;
-
-    menuPosition = { x, y };
-  }
 </script>
 
 <style lang="scss">
@@ -97,6 +79,27 @@
     text-align: end;
   }
 
+  .action-button {
+    appearance: none;
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    width: 100%;
+  }
+
+  .edit-book-button {
+    margin-left: 0.5em;
+    width: auto;
+  }
+
+  .add-reading-button {
+    height: 100%;
+    text-align: center;
+  }
+
   .page-number {
     color: #555;
   }
@@ -109,7 +112,7 @@
     margin-bottom: -1em;
   }
 
-  .progress-container :global(.progress) {
+  .progress-container .progress {
     height: 2.5em !important;
     margin: 0;
     border-radius: 0.25rem;
@@ -163,10 +166,6 @@
 
 <svelte:window bind:innerWidth={screenWidth} />
 
-{#if menuPosition}
-  <RightClickMenu {...menuPosition} />
-{/if}
-
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
     book={currentBook}
@@ -192,50 +191,46 @@
     onclose={closeSessions} />
 {/if}
 
-<Container>
+<div class="container">
   {#each $books as book (book.id)}
-    <div class="book-row" oncontextmenu={showMenu}>
-      <Row>
-        <Col>
-          <span ondblclick={() => deleteBook(book.id)} class="label">Book Title</span>
-          <span
-            role="button"
-            tabindex="0"
-            onclick={() => setModalBook(book, 'editBook')}
-            onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'editBook')}
-            style="cursor: pointer; margin-left: 0.5em;">
+    {@const progress = (book.currentPage / book.pageCount) * 100}
+    <div class="book-row">
+      <div class="row">
+        <div class="col">
+          <span class="label">Book Title</span>
+          <button
+            type="button"
+            class="action-button edit-book-button"
+            aria-label={`Edit ${book.title}`}
+            onclick={() => setModalBook(book, 'editBook')}>
             <Icon data={edit} scale="0.8" style="color: #666;" />
-          </span>
+          </button>
           <br />
           <span class="author">{book.author}:</span>
           <br />
           <span class="title">{book.title}</span>
-        </Col>
-        <Col md="6">
-          <Row>
-            <Col>
-              <div
-                role="button"
-                tabindex="0"
-                class="text-right"
-                style="cursor: pointer;"
-                onclick={() => setModalBook(book, 'updatePage')}
-                onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'updatePage')}>
+        </div>
+        <div class="col-md-6">
+          <div class="row">
+            <div class="col">
+              <button
+                type="button"
+                class="action-button text-right"
+                aria-label={`Update current page for ${book.title}`}
+                onclick={() => setModalBook(book, 'updatePage')}>
                 <span class="label">Page</span>
                 <br />
                 <span class="page-number">
                   {book.currentPage}/{book.pageCount}
                 </span>
-              </div>
-            </Col>
-            <Col>
-              <div
-                role="button"
-                tabindex="0"
-                class="text-right clickable"
-                style="cursor: pointer;"
-                onclick={() => showSessions(book)}
-                onkeypress={(e) => e.key === 'Enter' && showSessions(book)}>
+              </button>
+            </div>
+            <div class="col">
+              <button
+                type="button"
+                class="action-button text-right clickable"
+                aria-label={`View reading sessions for ${book.title}`}
+                onclick={() => showSessions(book)}>
                 <span class="label">Time read</span>
                 <br />
                 <span class="page-number">
@@ -243,10 +238,10 @@
                     {formatTime(book.timeRead)}
                   {:else}NA{/if}
                 </span>
-              </div>
-            </Col>
+              </button>
+            </div>
 
-            <Col>
+            <div class="col">
               <div class="text-right">
                 <span class="label">{finished ? 'Finished' : 'Est left'}</span>
                 <br />
@@ -258,8 +253,8 @@
                   {:else}NA{/if}
                 </span>
               </div>
-            </Col>
-            <Col>
+            </div>
+            <div class="col">
               <div class="text-right">
                 <span class="label">Min/Page</span>
                 <br />
@@ -269,58 +264,68 @@
                   {:else}NA{/if}
                 </span>
               </div>
-            </Col>
-          </Row>
-        </Col>
+            </div>
+          </div>
+        </div>
         {#if !finished && screenWidth > 770}
-          <Col md="1">
-            <div
-              role="button"
-              tabindex="0"
-              style="height: 100%; text-align: center;"
-              onclick={() => setModalBook(book, 'addReading')}
-              onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
+          <div class="col-md-1">
+            <button
+              type="button"
+              class="action-button add-reading-button"
+              aria-label={`Add a reading session for ${book.title}`}
+              onclick={() => setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.7"
                 style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
-            </div>
-          </Col>
+            </button>
+          </div>
         {/if}
-      </Row>
-      <div class="v-spacer" />
-      <Row>
-        <Col>
+      </div>
+      <div class="v-spacer"></div>
+      <div class="row">
+        <div class="col">
           <div class="progress-container">
-            <Progress
-              color="danger"
-              value={(book.currentPage / book.pageCount) * 100} />
-            <div class="progress-text-black">
-              {Math.round((book.currentPage / book.pageCount) * 100)}%
+            <div
+              class="progress"
+              role="progressbar"
+              aria-label={`Reading progress for ${book.title}`}
+              aria-valuenow={Math.round(progress)}
+              aria-valuemin="0"
+              aria-valuemax="100">
+              <div
+                class="progress-bar text-bg-danger"
+                style={`width: ${progress}%`}>
+              </div>
             </div>
-            <div class="progress-text-white" style="clip-path: inset(0 {100 - (book.currentPage / book.pageCount) * 100}% 0 0);">
-              {Math.round((book.currentPage / book.pageCount) * 100)}%
+            <div class="progress-text-black" aria-hidden="true">
+              {Math.round(progress)}%
+            </div>
+            <div
+              class="progress-text-white"
+              aria-hidden="true"
+              style={`clip-path: inset(0 ${100 - progress}% 0 0)`}>
+              {Math.round(progress)}%
             </div>
           </div>
-        </Col>
-      </Row>
+        </div>
+      </div>
       {#if !finished && screenWidth <= 770}
-        <Row>
-          <Col>
-            <div
-              role="button"
-              tabindex="0"
-              style="height: 100%; text-align: center;"
-              onclick={() => setModalBook(book, 'addReading')}
-              onkeypress={(e) => e.key === 'Enter' && setModalBook(book, 'addReading')}>
+        <div class="row">
+          <div class="col">
+            <button
+              type="button"
+              class="action-button add-reading-button"
+              aria-label={`Add a reading session for ${book.title}`}
+              onclick={() => setModalBook(book, 'addReading')}>
               <Icon
                 data={plus}
                 scale="1.3"
                 style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
-            </div>
-          </Col>
-        </Row>
+            </button>
+          </div>
+        </div>
       {/if}
     </div>
   {/each}
-</Container>
+</div>

@@ -8,14 +8,17 @@ import {
   onSnapshot,
   addDoc,
   updateDoc,
-  deleteDoc,
   getDoc,
+  getDocs,
   writeBatch,
   increment,
-  serverTimestamp
+  serverTimestamp,
+  getFirestore
 } from 'firebase/firestore';
 import { writable } from 'svelte/store';
-import { db } from './index.js';
+import { app } from './index.js';
+
+const db = getFirestore(app);
 
 class Database {
   // Returns a Svelte store that listens to book updates
@@ -155,7 +158,25 @@ class Database {
 
   static async deleteBook(userId, bookId) {
     const bookRef = doc(db, 'users', userId, 'books', bookId);
-    await deleteDoc(bookRef);
+    const updates = await getDocs(
+      collection(db, 'users', userId, 'books', bookId, 'updates')
+    );
+    const finalBatchStart = Math.max(0, updates.docs.length - 499);
+
+    for (let offset = 0; offset < finalBatchStart; offset += 500) {
+      const batch = writeBatch(db);
+      updates.docs
+        .slice(offset, Math.min(offset + 500, finalBatchStart))
+        .forEach((update) => batch.delete(update.ref));
+      await batch.commit();
+    }
+
+    const finalBatch = writeBatch(db);
+    updates.docs
+      .slice(finalBatchStart)
+      .forEach((update) => finalBatch.delete(update.ref));
+    finalBatch.delete(bookRef);
+    await finalBatch.commit();
   }
 
   static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage }) {

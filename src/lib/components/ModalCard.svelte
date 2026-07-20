@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from "$lib/components/Button.svelte";
+  import type { Snippet } from "svelte";
 
   let {
     header = undefined,
@@ -8,7 +9,8 @@
     primaryText = "Do it!",
     secondaryText = "Close",
     hideSecondary = false,
-    onclose
+    onclose,
+    children
   }: {
     header?: string;
     open: boolean;
@@ -17,50 +19,80 @@
     secondaryText?: string;
     hideSecondary?: boolean;
     onclose: () => void;
+    children: Snippet;
   } = $props();
 
+  let dialogElement = $state<HTMLDialogElement>();
+
   $effect(() => {
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    if (!open || !dialogElement) {
+      return;
+    }
+
+    dialogElement.showModal();
+
+    return () => {
+      if (dialogElement.open) {
+        dialogElement.close();
+      }
+    };
   });
 
   const close = () => onclose();
 
-  function handleKeyDown(event: KeyboardEvent) {
-    if (primaryAction && event.key === "Enter") {
+  function handleSubmit(event: SubmitEvent) {
+    event.preventDefault();
+    if (primaryAction) {
       primaryAction();
-    } else if (event.key === "Escape") {
+    }
+  }
+
+  function handleBackdropClick(event: MouseEvent) {
+    if (event.currentTarget === event.target) {
       close();
     }
+  }
+
+  function handleCancel(event: Event) {
+    event.preventDefault();
+    close();
   }
 </script>
 
 <style lang="scss">
   .background {
-    background-color: rgba(0, 0, 0, 0.4);
-    height: 100vh;
-    width: 100vw;
-    position: fixed;
-    top: 0;
-    left: 0;
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
     align-items: center;
+    background-color: rgba(0, 0, 0, 0.4);
+    border: 0;
+    box-sizing: border-box;
+    display: flex;
+    height: 100vh;
+    height: 100dvh;
+    justify-content: center;
+    max-height: none;
+    max-width: none;
+    margin: 0;
+    padding:
+      max(1rem, env(safe-area-inset-top))
+      max(1rem, env(safe-area-inset-right))
+      max(1rem, env(safe-area-inset-bottom))
+      max(1rem, env(safe-area-inset-left));
+    width: 100vw;
+    width: 100dvw;
   }
 
   .card {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    padding: 1em 3em;
-    margin: 1em 2em;
+    box-sizing: border-box;
+    max-height: 100%;
     max-width: 400px;
+    overflow-y: auto;
     width: 100%;
     border: none;
     background-color: white;
-    margin: 1em;
+    margin: 0;
     padding: 1em;
     box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
     border-radius: 5px;
@@ -85,31 +117,29 @@
 </style>
 
 {#if open}
-  <div
-    role="presentation"
-    onclick={close}
-    onkeydown={(e) => e.key === 'Escape' && close()}
+  <dialog
+    bind:this={dialogElement}
+    aria-label={header ?? "Dialog"}
+    onclick={handleBackdropClick}
+    oncancel={handleCancel}
     class="background">
-    <div
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
-      class="card hover">
+    <form class="card hover" onsubmit={handleSubmit}>
       {#if header}
         <h4 class="header">{header}</h4>
-        <div class="divider" />
+        <div class="divider"></div>
       {/if}
       <div class="content">
-        <slot>No content</slot>
+        {@render children()}
       </div>
-      <div class="divider" />
+      <div class="divider"></div>
       <div class="buttons">
         {#if !hideSecondary}
-          <Button onclick={close}>{secondaryText}</Button>
+          <Button type="button" onclick={close}>{secondaryText}</Button>
         {/if}
         {#if primaryAction}
-          <Button primary onclick={primaryAction}>{primaryText}</Button>
+          <Button primary type="submit">{primaryText}</Button>
         {/if}
       </div>
-    </div>
-  </div>
+    </form>
+  </dialog>
 {/if}

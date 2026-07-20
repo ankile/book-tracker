@@ -4,6 +4,8 @@
   import Navbar from '$lib/components/Navbar.svelte';
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
+
+  let { children } = $props();
 </script>
 
 <style>
@@ -36,7 +38,7 @@
     {#if $user}
       <Navbar />
       <main>
-        <slot />
+        {@render children()}
       </main>
     {:else}
       <Login />

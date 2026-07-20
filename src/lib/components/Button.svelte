@@ -1,5 +1,10 @@
 <script>
-  let { primary = false, onclick } = $props();
+  let {
+    primary = false,
+    type = "button",
+    onclick = undefined,
+    children
+  } = $props();
 </script>
 
 <style lang="scss">
@@ -18,8 +23,9 @@
         0 3px 10px 0 rgba(0, 0, 0, 0.19);
     }
 
-    &:focus {
-      outline: none;
+    &:focus-visible {
+      outline: 3px solid #1f6f78;
+      outline-offset: 2px;
     }
   }
 
@@ -36,7 +42,7 @@
 </style>
 
 <div class="btn-container">
-  <button class="hover" class:primary {onclick}>
-    <slot>Click</slot>
+  <button class="hover" class:primary {type} {onclick}>
+    {@render children()}
   </button>
 </div>

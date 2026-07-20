@@ -1,5 +1,15 @@
 <script lang="ts">
-  let { label, inputId = undefined }: { label: string; inputId?: string } = $props();
+  import type { Snippet } from "svelte";
+
+  let {
+    label,
+    inputId = undefined,
+    children
+  }: {
+    label: string;
+    inputId?: string;
+    children: Snippet;
+  } = $props();
 </script>
 
 <style lang="scss">
@@ -13,5 +23,5 @@
 
 <div class="column">
   {#if label}<label for={inputId}>{label}</label>{/if}
-  <slot>Yeet</slot>
+  {@render children()}
 </div>

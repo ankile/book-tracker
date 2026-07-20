@@ -9,8 +9,8 @@
     oncloseModal
   } = $props();
 
-  let inputTime = $state(session?.timeRead || 0);
-  let inputToPage = $state(session?.toPage || 0);
+  let inputTime = $state(0);
+  let inputToPage = $state(0);
 
   $effect(() => {
     if (session) {
@@ -68,9 +68,9 @@
       bind:value={inputTime}
       type="number" />
   </Input>
-  <div style="height: 8px;" />
+  <div style="height: 8px;"></div>
   <div style="margin-bottom: 1rem;">
-    <label style="font-size: 0.9rem; color: #666; display: block; margin-bottom: 0.25rem;">From page (cannot be changed)</label>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 0.25rem;">From page (cannot be changed)</p>
     <div style="padding: 0.5rem; background-color: #f5f5f5; border-radius: 4px; color: #666;">
       {session?.fromPage || 0}
     </div>

@@ -6,15 +6,23 @@
 
   let { open, userId, book = null, onclose } = $props();
 
-  let author = $state(book ? book.author : "");
-  let title = $state(book ? book.title : "");
-  let pageCount = $state(book ? book.pageCount : undefined);
-  let currentPage = $state(book ? book.currentPage : 1);
-  let isbn = $state(book ? book.isbn : "");
+  let author = $state("");
+  let title = $state("");
+  let pageCount = $state();
+  let currentPage = $state(1);
+  let isbn = $state("");
 
   let isEditMode = $derived(!!book);
   let isLookingUp = $state(false);
   let lookupError = $state("");
+
+  $effect(() => {
+    author = book?.author ?? "";
+    title = book?.title ?? "";
+    pageCount = book?.pageCount;
+    currentPage = book?.currentPage ?? 1;
+    isbn = book?.isbn ?? "";
+  });
 
   function addBook() {
     Database.addBook({
@@ -48,10 +56,10 @@
     }
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
     if (confirmed) {
-      Database.deleteBook(userId, book.id);
+      await Database.deleteBook(userId, book.id);
       onclose();
     }
   }
@@ -162,11 +170,6 @@
     margin-top: 0.25rem;
   }
 
-  .lookup-success {
-    color: #5cb85c;
-    font-size: 0.85rem;
-    margin-top: 0.25rem;
-  }
 </style>
 
 <ModalCard
@@ -179,13 +182,13 @@
     <input id="author" class="form-control" type="text" bind:value={author} placeholder="Name of author(s)" />
   </Input>
 
-  <div class="space" />
+  <div class="space"></div>
 
   <Input label="Book title" inputId="title">
     <input id="title" class="form-control" type="text" bind:value={title} placeholder="Book title" />
   </Input>
 
-  <div class="space" />
+  <div class="space"></div>
 
   <Input label="Number of pages" inputId="pageCount">
     <input
@@ -196,7 +199,7 @@
       placeholder="How many pages are there?" />
   </Input>
 
-  <div class="space" />
+  <div class="space"></div>
 
   <Input label="Current page" inputId="currentPage">
     <input
@@ -207,7 +210,7 @@
       placeholder="Have you already started reading?" />
   </Input>
 
-  <div class="space" />
+  <div class="space"></div>
 
   <div class="isbn-container">
     <div class="isbn-input-wrapper">
@@ -216,6 +219,7 @@
       </Input>
     </div>
     <button
+      type="button"
       class="lookup-button"
       onclick={lookupISBN}
       disabled={isLookingUp || !isbn.trim()}>
@@ -228,7 +232,7 @@
   {/if}
 
   {#if isEditMode}
-    <button class="delete-button" onclick={handleDelete}>
+    <button type="button" class="delete-button" onclick={handleDelete}>
       Delete this book
     </button>
   {/if}

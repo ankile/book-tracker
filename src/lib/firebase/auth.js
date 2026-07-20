@@ -1,14 +1,17 @@
 import { writable } from 'svelte/store';
 import {
   browserLocalPersistence,
+  getAuth,
   onAuthStateChanged,
   setPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut
 } from 'firebase/auth';
-import { auth } from './index.js';
+import { app } from './index.js';
 import { browser } from '$app/environment';
+
+const auth = getAuth(app);
 
 const authPersistenceReady = browser
   ? setPersistence(auth, browserLocalPersistence)

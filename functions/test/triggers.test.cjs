@@ -1,0 +1,60 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
+
+const functions = require("../lib");
+
+test("preserves the deployed function export names", () => {
+  assert.deepEqual(Object.keys(functions).sort(), [
+    "bookIsFinished",
+    "booksapi",
+    "createUserDocument",
+    "deleteUserDocument",
+  ]);
+  assert.deepEqual(Object.keys(functions.booksapi), ["searchisbn"]);
+});
+
+test("keeps every function on first generation in europe-west1", () => {
+  const deployedFunctions = [
+    functions.bookIsFinished,
+    functions.createUserDocument,
+    functions.deleteUserDocument,
+    functions.booksapi.searchisbn,
+  ];
+
+  for (const deployedFunction of deployedFunctions) {
+    assert.equal(deployedFunction.__endpoint.platform, "gcfv1");
+    assert.deepEqual(deployedFunction.__endpoint.region, ["europe-west1"]);
+  }
+});
+
+test("preserves the Firestore and Authentication event contracts", () => {
+  assert.equal(
+    functions.bookIsFinished.__trigger.eventTrigger.eventType,
+    "providers/cloud.firestore/eventTypes/document.update",
+  );
+  assert.match(
+    functions.bookIsFinished.__trigger.eventTrigger.resource,
+    /documents\/users\/\{userId\}\/books\/\{bookId\}$/,
+  );
+  assert.equal(
+    functions.createUserDocument.__trigger.eventTrigger.eventType,
+    "providers/firebase.auth/eventTypes/user.create",
+  );
+  assert.equal(
+    functions.deleteUserDocument.__trigger.eventTrigger.eventType,
+    "providers/firebase.auth/eventTypes/user.delete",
+  );
+});
+
+test("binds the migrated Runtime Config secret only to booksapi", () => {
+  assert.deepEqual(
+    functions.booksapi.searchisbn.__endpoint.secretEnvironmentVariables,
+    [{key: "FUNCTIONS_CONFIG_EXPORT"}],
+  );
+  assert.equal(
+    functions.bookIsFinished.__endpoint.secretEnvironmentVariables,
+    undefined,
+  );
+});

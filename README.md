@@ -56,9 +56,9 @@ Version 2.0 brings a complete modernization of the tech stack:
 
 ## Prerequisites
 
-- Node.js 20.19+ or 22.12+ (tested with Node.js 22+)
+- Node.js 22.12+ (pinned to Node.js 22.23.1 in `.nvmrc`)
 - npm (comes with Node.js)
-- Firebase CLI: `npm install -g firebase-tools`
+- Firebase CLI when deploying (the commands below use a pinned temporary copy)
 
 ## Installation & Setup
 
@@ -71,19 +71,13 @@ cd book-tracker
 
 ### 2. Install dependencies
 
-Due to compatibility with Svelte 5, you may need to use specific flags:
-
 ```bash
 # Install root dependencies (for the web app)
-npm install --legacy-peer-deps
+npm install
 
 # Install Firebase Functions dependencies
-cd functions
-npm install --legacy-peer-deps
-cd ..
+npm --prefix functions install
 ```
-
-**Note:** The `--legacy-peer-deps` flag may be needed for some packages that haven't updated their peer dependencies for Svelte 5 yet.
 
 ### 3. Firebase Configuration
 
@@ -91,10 +85,10 @@ If this is your first time setting up the project:
 
 ```bash
 # Login to Firebase
-firebase login
+npm exec --yes --package firebase-tools@15.24.0 -- firebase login
 
 # Initialize Firebase (if not already done)
-firebase init
+npm exec --yes --package firebase-tools@15.24.0 -- firebase init
 ```
 
 The project is already configured to use the Firebase project `book-tracker-d8f24` (see `.firebaserc`).
@@ -135,9 +129,18 @@ This serves the built app locally to test the production build before deploying.
 To test Firebase Functions locally using emulators:
 
 ```bash
-cd functions
-npm run serve
+npm --prefix functions run serve
 ```
+
+### Run the complete validation suite
+
+```bash
+npm run validate
+```
+
+This runs Svelte diagnostics, PWA tests, Functions linting and compilation,
+the production web build, a bundle-size budget, and production-dependency
+security audits for both workspaces.
 
 ## Deployment
 
@@ -145,14 +148,28 @@ npm run serve
 
 1. Make sure you're logged into Firebase:
    ```bash
-   firebase login
+   npm exec --yes --package firebase-tools@15.24.0 -- firebase login
    ```
 
 2. Verify you're deploying to the correct project:
    ```bash
-   firebase use default
+   npm exec --yes --package firebase-tools@15.24.0 -- firebase use default
    # Should show: book-tracker-d8f24
    ```
+
+3. Before the first Functions deployment from this version, migrate the
+   existing Runtime Config to Secret Manager:
+
+   ```bash
+   npm exec --yes --package firebase-tools@15.24.0 -- \
+     firebase functions:config:export \
+     --project book-tracker-d8f24 \
+     --secret FUNCTIONS_CONFIG_EXPORT \
+     --force
+   ```
+
+   This preserves the existing `booksapi` URL and API key without printing or
+   copying the secret into the repository.
 
 ### Deploy Everything
 
@@ -163,7 +180,7 @@ To deploy both hosting and functions:
 npm run build
 
 # Deploy everything
-firebase deploy
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
 ```
 
 ### Deploy Hosting Only
@@ -175,7 +192,7 @@ To deploy just the web app (faster for frontend-only changes):
 npm run build
 
 # Deploy hosting
-firebase deploy --only hosting
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
 ```
 
 ### Deploy to Preview Channel
@@ -187,7 +204,8 @@ Test your changes on a temporary URL before deploying to production:
 npm run build
 
 # Deploy to a preview channel (expires in 30 days)
-npx firebase-tools hosting:channel:deploy preview --expires 30d
+npm exec --yes --package firebase-tools@15.24.0 -- \
+  firebase hosting:channel:deploy preview --expires 30d
 ```
 
 ### Deploy Functions Only
@@ -196,25 +214,23 @@ To deploy just the Firebase Functions (faster for backend-only changes):
 
 ```bash
 # The predeploy hooks will automatically lint and build
-firebase deploy --only functions
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
 ```
 
 Or use the npm script:
 
 ```bash
-cd functions
-npm run deploy
+npm --prefix functions run deploy
 ```
 
 ### View Deployment Logs
 
 ```bash
 # View function logs
-firebase functions:log
+npm exec --yes --package firebase-tools@15.24.0 -- firebase functions:log
 
 # Or use the npm script
-cd functions
-npm run logs
+npm --prefix functions run logs
 ```
 
 ## Project Structure
@@ -246,16 +262,15 @@ book-tracker/
 ## Technology Stack
 
 ### Frontend
-- **Svelte 5.45.1** - Reactive UI framework with runes
-- **SvelteKit 2.49** - Application framework with routing
-- **Vite 7.2.4** - Fast build tool with HMR
+- **Svelte 5.56.6** - Reactive UI framework with runes
+- **SvelteKit 2.70.1** - Application framework with routing
+- **Vite 7.3.6** - Fast build tool with HMR
 - **TypeScript 5.9.3** - Type-safe JavaScript
-- **Bootstrap 5.3.3** - CSS framework
-- **Sveltestrap 5.11.3** - Bootstrap components for Svelte
+- **Bootstrap 5.3.8** - CSS framework
 
 ### Backend
-- **Firebase 12.6.0** - Authentication and Firestore database
-- **Firebase Functions** - Serverless cloud functions
+- **Firebase 12.16.0** - Authentication and Firestore database
+- **Firebase Functions 7.3.0** on Node.js 22 - Serverless cloud functions
 
 ## Development Guide
 
@@ -300,7 +315,7 @@ import { getFirestore, collection, query, where } from 'firebase/firestore';
 
 ### Node.js Version Issues
 
-This project requires Node.js 20.19+ or 22.12+. If you're running a different version, consider using a Node version manager like `nvm`:
+This project requires Node.js 22.12+. If you're running a different version, consider using a Node version manager like `nvm`:
 
 ```bash
 nvm install 22
@@ -309,23 +324,12 @@ nvm use 22
 
 ### Dependency Installation Fails
 
-If you encounter errors during `npm install`:
+Confirm `node --version` satisfies `package.json`; with `nvm`, run:
 
-1. Make sure you're using the `--legacy-peer-deps` flag
-2. Delete `node_modules` and `package-lock.json` and try again:
-   ```bash
-   rm -rf node_modules package-lock.json
-   npm install --legacy-peer-deps
-   ```
-
-### Build Warnings
-
-You may see warnings during build about:
-- **Sveltestrap exports**: Non-breaking, package works correctly
-- **ARIA roles**: Accessibility warnings for elements with event handlers
-- **Self-closing div tags**: Style preference, works correctly
-
-These warnings don't affect functionality but can be addressed in future updates.
+```bash
+nvm install
+nvm use
+```
 
 ## Available Scripts
 
@@ -334,6 +338,8 @@ These warnings don't affect functionality but can be addressed in future updates
 - `npm run dev` - Start Vite development server (http://localhost:5173)
 - `npm run build` - Build for production using SvelteKit
 - `npm run preview` - Preview production build locally
+- `npm test` - Run web checks, PWA tests, and Functions tests
+- `npm run validate` - Run the complete build, test, and audit suite
 - `npm run check` - Run Svelte type checking
 - `npm run check:watch` - Run type checking in watch mode
 

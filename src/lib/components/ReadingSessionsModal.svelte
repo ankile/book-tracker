@@ -108,14 +108,19 @@
   }
 
   .edit-button {
+    appearance: none;
+    background: none;
+    border: 0;
     cursor: pointer;
     opacity: 0;
+    padding: 0;
     transition: opacity 0.2s;
     display: inline-block;
     width: 20px;
   }
 
-  .session:hover .edit-button {
+  .session:hover .edit-button,
+  .edit-button:focus-visible {
     opacity: 1;
   }
 
@@ -149,7 +154,7 @@
 </style>
 
 <ModalCard
-  {open}
+  open={open && !editingSession}
   onclose={() => onclose()}
   header={book ? `Reading Sessions - ${book.title}` : 'Reading Sessions'}
   primaryAction={() => onclose()}
@@ -165,22 +170,20 @@
             <span class="session-date">{formatDate(session.createdAt)}</span>
             <div class="session-time-container">
               {#if index === 0}
-                <span
-                  role="button"
-                  tabindex="0"
+                <button
+                  type="button"
                   class="edit-button"
-                  onclick={() => editSession(session)}
-                  onkeypress={(e) => e.key === 'Enter' && editSession(session)}>
+                  aria-label={`Edit latest reading session for ${book.title}`}
+                  onclick={() => editSession(session)}>
                   <Icon data={edit} scale="0.8" style="color: #666;" />
-                </span>
-                <span
-                  role="button"
-                  tabindex="0"
+                </button>
+                <button
+                  type="button"
                   class="edit-button"
-                  onclick={() => deleteSession(session)}
-                  onkeypress={(e) => e.key === 'Enter' && deleteSession(session)}>
+                  aria-label={`Delete latest reading session for ${book.title}`}
+                  onclick={() => deleteSession(session)}>
                   <Icon data={trash} scale="0.8" style="color: #d9534f;" />
-                </span>
+                </button>
               {:else}
                 <span class="button-spacer"></span>
                 <span class="button-spacer"></span>
