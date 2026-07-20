@@ -1,6 +1,5 @@
 import * as functions from "firebase-functions/v1";
 import {defineJsonSecret} from "firebase-functions/params";
-import * as https from "https";
 
 interface FunctionConfig {
   booksapi: {
@@ -43,20 +42,14 @@ const runtimeConfig =
 
 async function getBooks(isbn: string): Promise<BookApiResponse> {
   const {url, key} = runtimeConfig.value().booksapi;
+  const fullUrl = `${url}?key=${key}&q=isbn:${isbn}&country=NO`;
+  const response = await fetch(fullUrl);
 
-  return new Promise((resolve) => {
-    let data = "";
-    const fullUrl = `${url}?key=${key}&q=isbn:${isbn}&country=NO`;
-    https.get(fullUrl, (res) => {
-      res.on("data", (chunk) => {
-        data += chunk;
-      });
+  if (!response.ok) {
+    throw new Error(`Books API request failed with status ${response.status}`);
+  }
 
-      res.on("end", () => {
-        resolve(JSON.parse(data));
-      });
-    });
-  });
+  return await response.json() as BookApiResponse;
 }
 
 exports.searchisbn = functions

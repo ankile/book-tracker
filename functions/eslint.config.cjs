@@ -15,6 +15,7 @@ module.exports = [
       globals: {
         console: "readonly",
         exports: "writable",
+        fetch: "readonly",
         require: "readonly",
       },
     },
