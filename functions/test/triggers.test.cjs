@@ -53,6 +53,10 @@ test("binds the migrated Runtime Config secret only to booksapi", () => {
     functions.booksapi.searchisbn.__endpoint.secretEnvironmentVariables,
     [{key: "FUNCTIONS_CONFIG_EXPORT"}],
   );
+  assert.deepEqual(
+    functions.booksapi.searchisbn.__endpoint.httpsTrigger.invoker,
+    ["public"],
+  );
   assert.equal(
     functions.bookIsFinished.__endpoint.secretEnvironmentVariables,
     undefined,

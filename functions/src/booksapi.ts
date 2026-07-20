@@ -60,7 +60,10 @@ async function getBooks(isbn: string): Promise<BookApiResponse> {
 }
 
 exports.searchisbn = functions
-  .runWith({secrets: [runtimeConfig]})
+  .runWith({
+    invoker: "public",
+    secrets: [runtimeConfig],
+  })
   .region("europe-west1")
   .https.onRequest(async (req, resp) => {
     const { isbn } = req.query;
