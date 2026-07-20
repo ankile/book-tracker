@@ -1,6 +1,8 @@
 import { writable } from 'svelte/store';
-import { 
+import {
+  browserLocalPersistence,
   onAuthStateChanged,
+  setPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut
@@ -8,15 +10,17 @@ import {
 import { auth } from './index.js';
 import { browser } from '$app/environment';
 
-// Create a store for the current user
-function createUserStore() {
-  const { subscribe, set } = writable(null);
+const authPersistenceReady = browser
+  ? setPersistence(auth, browserLocalPersistence)
+  : null;
 
-  // Only set up auth listener in browser
+function createUserStore() {
+  // `undefined` means Firebase is still restoring the persisted session.
+  // Once resolved, the value is either `null` (signed out) or a Firebase user.
+  const { subscribe, set } = writable(undefined);
+
   if (browser) {
-    onAuthStateChanged(auth, (user) => {
-      set(user);
-    });
+    onAuthStateChanged(auth, set);
   }
 
   return {
@@ -26,30 +30,16 @@ function createUserStore() {
 
 export const user = createUserStore();
 
-// Auth helper functions
 export async function signIn(email, password) {
-  try {
-    await signInWithEmailAndPassword(auth, email, password);
-  } catch (error) {
-    console.error('Sign in error:', error);
-    throw error;
-  }
+  await authPersistenceReady;
+  await signInWithEmailAndPassword(auth, email, password);
 }
 
 export async function signUp(email, password) {
-  try {
-    await createUserWithEmailAndPassword(auth, email, password);
-  } catch (error) {
-    console.error('Sign up error:', error);
-    throw error;
-  }
+  await authPersistenceReady;
+  await createUserWithEmailAndPassword(auth, email, password);
 }
 
 export async function signOut() {
-  try {
-    await firebaseSignOut(auth);
-  } catch (error) {
-    console.error('Sign out error:', error);
-    throw error;
-  }
+  await firebaseSignOut(auth);
 }

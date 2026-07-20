@@ -1,7 +1,9 @@
 <script>
+  import 'bootstrap/dist/css/bootstrap.min.css';
   import { user } from '$lib/firebase/auth.js';
   import Navbar from '$lib/components/Navbar.svelte';
   import Login from '$lib/components/Login.svelte';
+  import LaunchScreen from '$lib/components/LaunchScreen.svelte';
 </script>
 
 <style>
@@ -15,13 +17,29 @@
     padding: 0;
     margin: 0 auto;
   }
+
+  .app-view {
+    min-height: calc(
+      100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+    );
+    min-height: calc(
+      100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+    );
+    background: white;
+  }
 </style>
 
-{#if $user}
-  <Navbar />
-  <main>
-    <slot />
-  </main>
+{#if $user === undefined}
+  <LaunchScreen />
 {:else}
-  <Login />
+  <div class="app-view">
+    {#if $user}
+      <Navbar />
+      <main>
+        <slot />
+      </main>
+    {:else}
+      <Login />
+    {/if}
+  </div>
 {/if}

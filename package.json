@@ -6,6 +6,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
+    "test:pwa": "node --test tests/pwa.test.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
@@ -15,7 +16,6 @@
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@tsconfig/svelte": "^5.0.6",
     "firebase-admin": "^13.6.0",
-    "node-sass": "^9.0.0",
     "sass": "^1.94.2",
     "svelte": "^5.45.1",
     "svelte-awesome": "^3.3.5",
@@ -26,6 +26,7 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
+    "bootstrap": "5.3.3",
     "firebase": "^12.6.0"
   }
 }
