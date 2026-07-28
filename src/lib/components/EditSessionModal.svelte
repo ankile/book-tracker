@@ -9,15 +9,13 @@
     oncloseModal
   } = $props();
 
-  let inputTime = $state(0);
-  let inputToPage = $state(0);
-
-  $effect(() => {
-    if (session) {
-      inputTime = session.timeRead;
-      inputToPage = session.toPage;
-    }
-  });
+  // The modal is created fresh each time it opens, so capturing the
+  // initial values here is intentional; syncing via $effect instead would
+  // clobber in-progress input whenever a Firestore snapshot re-emits.
+  // svelte-ignore state_referenced_locally
+  let inputTime = $state(session.timeRead);
+  // svelte-ignore state_referenced_locally
+  let inputToPage = $state(session.toPage);
 
   function updateSession() {
     if (inputTime <= 0) {

@@ -14,9 +14,13 @@
   $effect(() => {
     if (book && userId) {
       const sessionsStore = Database.getReadingSessions(userId, book.id);
-      return sessionsStore.subscribe((data) => {
+      const unsubscribeStore = sessionsStore.subscribe((data) => {
         sessions = data;
       });
+      return () => {
+        unsubscribeStore();
+        sessionsStore.unsubscribe();
+      };
     }
   });
 

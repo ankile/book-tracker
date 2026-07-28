@@ -29,11 +29,14 @@
       return;
     }
 
-    dialogElement.showModal();
+    // Capture the element: by teardown time bind:this has already reset
+    // dialogElement to null when the {#if open} branch is destroyed.
+    const dialog = dialogElement;
+    dialog.showModal();
 
     return () => {
-      if (dialogElement.open) {
-        dialogElement.close();
+      if (dialog.open) {
+        dialog.close();
       }
     };
   });
@@ -65,7 +68,6 @@
     background-color: rgba(0, 0, 0, 0.4);
     border: 0;
     box-sizing: border-box;
-    display: flex;
     height: 100vh;
     height: 100dvh;
     justify-content: center;
@@ -79,6 +81,12 @@
       max(1rem, env(safe-area-inset-left));
     width: 100vw;
     width: 100dvw;
+  }
+
+  // Only show the dialog once showModal() has flipped the open attribute;
+  // an unconditional display would render it in-flow, outside the top layer.
+  .background[open] {
+    display: flex;
   }
 
   .card {
