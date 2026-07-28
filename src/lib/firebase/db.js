@@ -21,6 +21,20 @@ import { app } from './index.js';
 const db = getFirestore(app);
 
 class Database {
+  // Returns a Svelte store that listens to the user document
+  static getUser(userId) {
+    const store = writable(null);
+
+    const unsubscribe = onSnapshot(doc(db, 'users', userId), (snapshot) => {
+      store.set(snapshot.data() ?? null);
+    });
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
+
   // Returns a Svelte store that listens to book updates
   static getBooks(userId, finished) {
     const store = writable([]);

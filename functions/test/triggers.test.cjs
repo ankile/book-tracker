@@ -11,8 +11,14 @@ test("preserves the deployed function export names", () => {
     "booksapi",
     "createUserDocument",
     "deleteUserDocument",
+    "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["searchisbn"]);
+  assert.deepEqual(Object.keys(functions.toggl).sort(), [
+    "savetoken",
+    "start",
+    "stop",
+  ]);
 });
 
 test("keeps every function on first generation in europe-west1", () => {
@@ -21,6 +27,9 @@ test("keeps every function on first generation in europe-west1", () => {
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.searchisbn,
+    functions.toggl.savetoken,
+    functions.toggl.start,
+    functions.toggl.stop,
   ];
 
   for (const deployedFunction of deployedFunctions) {
@@ -61,4 +70,11 @@ test("binds the migrated Runtime Config secret only to booksapi", () => {
     functions.bookIsFinished.__endpoint.secretEnvironmentVariables,
     undefined,
   );
+  for (const togglFunction of Object.values(functions.toggl)) {
+    assert.equal(
+      togglFunction.__endpoint.secretEnvironmentVariables,
+      undefined,
+    );
+    assert.notEqual(togglFunction.__endpoint.callableTrigger, undefined);
+  }
 });

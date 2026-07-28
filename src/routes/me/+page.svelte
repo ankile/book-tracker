@@ -4,6 +4,7 @@
   import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import { Database } from '$lib/firebase/db.js';
+  import { togglSaveToken } from '$lib/firebase/functions.js';
   import { formatTime } from '$lib/utils/format.js';
 
   let newBookModal = $state(false);
@@ -26,6 +27,36 @@
       });
     }
   });
+
+  // User document (for the Toggl connection status)
+  let userDoc = $state(null);
+  $effect(() => {
+    if ($user) {
+      const userStore = Database.getUser($user.uid);
+      const unsubscribe = userStore.subscribe((data) => {
+        userDoc = data;
+      });
+      return () => {
+        unsubscribe();
+        userStore.unsubscribe();
+      };
+    }
+  });
+
+  let togglToken = $state('');
+  let savingToken = $state(false);
+
+  async function saveTogglToken() {
+    savingToken = true;
+    try {
+      await togglSaveToken({ token: togglToken });
+      togglToken = '';
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      savingToken = false;
+    }
+  }
 
   // Calculate statistics
   const stats = $derived(() => {
@@ -213,6 +244,56 @@
     }
   }
 
+  .toggl-card {
+    background: white;
+    padding: 2rem;
+    border-radius: 5px;
+    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
+    margin-bottom: 2rem;
+
+    h2 {
+      font-size: 1.5rem;
+      color: #333;
+      margin: 0 0 1rem 0;
+    }
+
+    .toggl-status {
+      color: #666;
+      margin-bottom: 1rem;
+
+      &.connected {
+        color: #198754;
+      }
+    }
+
+    form {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+
+      input {
+        flex: 1;
+        min-width: 200px;
+      }
+
+      button {
+        border: none;
+        background: white;
+        padding: 0.5rem 1.5rem;
+        font-weight: 600;
+        color: #333;
+        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+        border-radius: 5px;
+        cursor: pointer;
+
+        &:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
+      }
+    }
+  }
+
   .books-by-year {
     background: white;
     padding: 2rem;
@@ -355,6 +436,35 @@
         <div class="stat-value">{stats().totalBooks}</div>
         <div class="stat-subtext">In your library</div>
       </div>
+    </div>
+
+    <div class="toggl-card">
+      <h2>Toggl Track</h2>
+      {#if userDoc?.toggl}
+        <p class="toggl-status connected">
+          Connected — timers log to your "Reading" project in Toggl.
+        </p>
+      {:else}
+        <p class="toggl-status">
+          Paste your Toggl API token (found under Profile settings in Toggl) to
+          start reading timers from your book list. Requires a Toggl project
+          named "Reading".
+        </p>
+      {/if}
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          saveTogglToken();
+        }}>
+        <input
+          type="password"
+          class="form-control"
+          placeholder="Toggl API token"
+          bind:value={togglToken} />
+        <button type="submit" disabled={savingToken || !togglToken}>
+          {userDoc?.toggl ? 'Replace Token' : 'Connect'}
+        </button>
+      </form>
     </div>
 
     {#if booksByYear().length > 0}

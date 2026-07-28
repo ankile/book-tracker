@@ -4,4 +4,5 @@ export interface Book {
   pageCount: number;
   title: string;
   author: string;
+  activeTimer?: { entryId: number; start: string } | null;
 }

@@ -6,19 +6,23 @@
 
   let {
     book,
+    initialTime = undefined,
     onaddReading,
     oncloseModal
   }: {
     book: Book;
+    initialTime?: number;
     onaddReading: (data: { id: string; timeRead: number; currentPage: number; previousPage: number }) => void;
     oncloseModal: () => void;
   } = $props();
 
-  let inputTime = $state<number>(undefined);
+  // The modal is created fresh each time it opens, so capturing the
+  // initial value here is intentional.
+  // svelte-ignore state_referenced_locally
+  let inputTime = $state<number>(initialTime);
   let inputPages = $state<number>(undefined);
 
   function addReading() {
-    console.log(inputTime + inputPages);
     const { valid, message } = validateReading({
       inputTime,
       inputPages,

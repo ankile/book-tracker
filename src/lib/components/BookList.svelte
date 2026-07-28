@@ -1,11 +1,12 @@
 <script>
   import Icon from "svelte-awesome";
-  import { plus, edit } from "svelte-awesome/icons";
+  import { plus, edit, play, stop } from "svelte-awesome/icons";
   import AddReadingModal from "$lib/components/AddReadingModal.svelte";
   import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
   import NewBookModal from "$lib/components/NewBookModal.svelte";
   import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
   import { Database } from "../firebase/db";
+  import { togglStart, togglStop } from "../firebase/functions.js";
   import { formatTime } from "../utils/format";
 
   let { finished, userId, books: booksProp = null } = $props();
@@ -18,7 +19,10 @@
     currentBook = book;
     modal = modalType;
   };
-  const closemodal = () => (currentBook = null);
+  const closemodal = () => {
+    currentBook = null;
+    prefillMinutes = null;
+  };
 
   let sessionsBook = $state(null);
   const showSessions = (book) => (sessionsBook = book);
@@ -33,6 +37,49 @@
 
   function addReading(detail) {
     Database.addReading({ userId, ...detail });
+  }
+
+  // Toggl timer state; the running timer itself lives on the book doc
+  // (activeTimer) so it syncs across devices via the books snapshot stream.
+  let prefillMinutes = $state(null);
+  let busy = $state(false);
+  let now = $state(Date.now());
+
+  let anyTimerRunning = $derived($books.some((b) => b.activeTimer));
+
+  $effect(() => {
+    if (!anyTimerRunning) return;
+    const interval = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(interval);
+  });
+
+  function formatElapsed(startIso) {
+    const totalSeconds = Math.max(0, Math.floor((now - Date.parse(startIso)) / 1000));
+    return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+  }
+
+  async function startTimer(book) {
+    busy = true;
+    try {
+      await togglStart({ bookId: book.id });
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function stopTimer(book) {
+    busy = true;
+    try {
+      const { data } = await togglStop({ bookId: book.id });
+      prefillMinutes = data.minutes;
+      setModalBook(book, 'addReading');
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      busy = false;
+    }
   }
 
   function updateCurrentPage(detail) {
@@ -98,6 +145,37 @@
   .add-reading-button {
     height: 100%;
     text-align: center;
+  }
+
+  .action-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75em;
+  }
+
+  .action-col .add-reading-button {
+    height: auto;
+  }
+
+  .timer-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15em;
+    text-align: center;
+  }
+
+  .timer-button:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+
+  .elapsed {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.9em;
+    color: #555;
   }
 
   .page-number {
@@ -169,6 +247,7 @@
 {#if currentBook && modal === 'addReading'}
   <AddReadingModal
     book={currentBook}
+    initialTime={prefillMinutes ?? undefined}
     onaddReading={addReading}
     oncloseModal={closemodal} />
 {:else if currentBook && modal === 'updatePage'}
@@ -190,6 +269,29 @@
     {userId}
     onclose={closeSessions} />
 {/if}
+
+{#snippet timerControl(book, scale)}
+  {#if book.activeTimer}
+    <button
+      type="button"
+      class="action-button timer-button"
+      disabled={busy}
+      aria-label={`Stop the reading timer for ${book.title}`}
+      onclick={() => stopTimer(book)}>
+      <Icon data={stop} {scale} style="color: #dc3545;" />
+      <span class="elapsed">{formatElapsed(book.activeTimer.start)}</span>
+    </button>
+  {:else}
+    <button
+      type="button"
+      class="action-button timer-button"
+      disabled={busy || anyTimerRunning}
+      aria-label={`Start a reading timer for ${book.title}`}
+      onclick={() => startTimer(book)}>
+      <Icon data={play} {scale} style="color: #198754;" />
+    </button>
+  {/if}
+{/snippet}
 
 <div class="container">
   {#each $books as book (book.id)}
@@ -268,7 +370,7 @@
           </div>
         </div>
         {#if !finished && screenWidth > 770}
-          <div class="col-md-1">
+          <div class="col-md-1 action-col">
             <button
               type="button"
               class="action-button add-reading-button"
@@ -277,8 +379,9 @@
               <Icon
                 data={plus}
                 scale="1.7"
-                style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
+                style="margin: auto; position: relative; cursor: pointer;" />
             </button>
+            {@render timerControl(book, '1.4')}
           </div>
         {/if}
       </div>
@@ -312,7 +415,7 @@
       </div>
       {#if !finished && screenWidth <= 770}
         <div class="row">
-          <div class="col">
+          <div class="col action-col">
             <button
               type="button"
               class="action-button add-reading-button"
@@ -321,8 +424,11 @@
               <Icon
                 data={plus}
                 scale="1.3"
-                style="margin: auto; top: 25%; position: relative; cursor: pointer;" />
+                style="margin: auto; position: relative; cursor: pointer;" />
             </button>
+          </div>
+          <div class="col action-col">
+            {@render timerControl(book, '1.1')}
           </div>
         </div>
       {/if}
