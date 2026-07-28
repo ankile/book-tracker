@@ -4,5 +4,6 @@ export interface Book {
   pageCount: number;
   title: string;
   author: string;
-  activeTimer?: { entryId: number; start: string } | null;
+  // entryId is only present for Toggl-backed timers; local timers store just the start time
+  activeTimer?: { entryId?: number; start: string } | null;
 }

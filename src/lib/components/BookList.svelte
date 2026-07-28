@@ -39,11 +39,26 @@
     Database.addReading({ userId, ...detail });
   }
 
-  // Toggl timer state; the running timer itself lives on the book doc
+  // Timer state; the running timer itself lives on the book doc
   // (activeTimer) so it syncs across devices via the books snapshot stream.
+  // With a Toggl token connected the timer runs through Toggl; otherwise a
+  // local timer is written directly to Firestore (no entryId).
   let prefillMinutes = $state(null);
   let busy = $state(false);
   let now = $state(Date.now());
+
+  let userDoc = $state(undefined);
+  $effect(() => {
+    if (finished) return; // timer UI never renders on the finished list
+    const userStore = Database.getUser(userId);
+    const unsubscribe = userStore.subscribe((data) => (userDoc = data));
+    return () => {
+      unsubscribe();
+      userStore.unsubscribe();
+    };
+  });
+  let userLoaded = $derived(userDoc !== undefined);
+  let hasToggl = $derived(!!userDoc?.toggl);
 
   let anyTimerRunning = $derived($books.some((b) => b.activeTimer));
 
@@ -59,6 +74,15 @@
   }
 
   async function startTimer(book) {
+    if (!hasToggl) {
+      busy = true;
+      try {
+        await Database.startLocalTimer(userId, book.id);
+      } finally {
+        busy = false;
+      }
+      return;
+    }
     busy = true;
     try {
       await togglStart({ bookId: book.id });
@@ -70,6 +94,19 @@
   }
 
   async function stopTimer(book) {
+    // No entryId means the timer is local, even if Toggl was connected later
+    if (!book.activeTimer.entryId) {
+      const seconds = (Date.now() - Date.parse(book.activeTimer.start)) / 1000;
+      prefillMinutes = Math.max(1, Math.round(seconds / 60));
+      busy = true;
+      try {
+        await Database.stopLocalTimer(userId, book.id);
+      } finally {
+        busy = false;
+      }
+      setModalBook(book, 'addReading');
+      return;
+    }
     busy = true;
     try {
       const { data } = await togglStop({ bookId: book.id });
@@ -343,7 +380,7 @@
     <button
       type="button"
       class="action-button timer-button"
-      disabled={busy || anyTimerRunning}
+      disabled={busy || anyTimerRunning || !userLoaded}
       aria-label={`Start a reading timer for ${book.title}`}
       onclick={() => startTimer(book)}>
       <Icon data={play} {scale} style="color: #198754;" />
@@ -496,7 +533,7 @@
             <button
               type="button"
               class="mobile-action-button start-button"
-              disabled={busy || anyTimerRunning}
+              disabled={busy || anyTimerRunning || !userLoaded}
               aria-label={`Start a reading timer for ${book.title}`}
               onclick={() => startTimer(book)}>
               <Icon data={play} scale="0.9" />

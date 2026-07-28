@@ -21,9 +21,12 @@ import { app } from './index.js';
 const db = getFirestore(app);
 
 class Database {
-  // Returns a Svelte store that listens to the user document
+  // Returns a Svelte store that listens to the user document.
+  // Starts as undefined (loading) so consumers can distinguish "not yet
+  // loaded" from the first snapshot; user docs always exist (created by
+  // the createUserDocument auth trigger).
   static getUser(userId) {
-    const store = writable(null);
+    const store = writable(undefined);
 
     const unsubscribe = onSnapshot(doc(db, 'users', userId), (snapshot) => {
       store.set(snapshot.data() ?? null);
@@ -167,6 +170,21 @@ class Database {
       pageCount,
       isbn,
       updatedAt: serverTimestamp(),
+    });
+  }
+
+  // Local (non-Toggl) timers reuse the activeTimer field the Toggl flow
+  // writes server-side; no entryId marks the timer as local. updatedAt is
+  // deliberately untouched so the book list doesn't reorder mid-session.
+  static async startLocalTimer(userId, bookId) {
+    await updateDoc(doc(db, 'users', userId, 'books', bookId), {
+      activeTimer: { start: new Date().toISOString() },
+    });
+  }
+
+  static async stopLocalTimer(userId, bookId) {
+    await updateDoc(doc(db, 'users', userId, 'books', bookId), {
+      activeTimer: null,
     });
   }
 
