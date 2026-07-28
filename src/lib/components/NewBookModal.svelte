@@ -195,6 +195,7 @@
       id="pageCount"
       class="form-control"
       type="number"
+      inputmode="numeric"
       bind:value={pageCount}
       placeholder="How many pages are there?" />
   </Input>
@@ -206,6 +207,7 @@
       id="currentPage"
       class="form-control"
       type="number"
+      inputmode="numeric"
       bind:value={currentPage}
       placeholder="Have you already started reading?" />
   </Input>

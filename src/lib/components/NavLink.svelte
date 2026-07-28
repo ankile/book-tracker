@@ -26,6 +26,14 @@
     color: white;
     font-weight: 700;
   }
+
+  /* Keep all three links on one row on phone screens. */
+  @media only screen and (max-width: 500px) {
+    a {
+      font-size: 0.95rem;
+      padding: 0.5rem 0.4rem;
+    }
+  }
 </style>
 
 <a

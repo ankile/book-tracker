@@ -60,7 +60,8 @@
       class="form-control"
       placeholder="Minutes of reading"
       bind:value={inputTime}
-      type="number" />
+      type="number"
+      inputmode="numeric" />
   </Input>
   <div style="height: 8px;"></div>
   <Input label="Current page" inputId="inputPagesReading">
@@ -68,6 +69,7 @@
       id="inputPagesReading"
       class="form-control"
       type="number"
+      inputmode="numeric"
       placeholder="What page are you on"
       bind:value={inputPages} />
   </Input>

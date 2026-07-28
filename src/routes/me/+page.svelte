@@ -306,8 +306,13 @@
       margin: 0 0 1.5rem 0;
     }
 
+    .table-scroll {
+      overflow-x: auto;
+    }
+
     table {
       width: 100%;
+      min-width: 480px;
       border-collapse: collapse;
 
       th, td {
@@ -382,6 +387,21 @@
 
     .actions button {
       width: 100%;
+    }
+
+    .toggl-card,
+    .books-by-year {
+      padding: 1.25rem;
+    }
+
+    .books-by-year table {
+      th, td {
+        padding: 0.5rem;
+      }
+
+      td {
+        font-size: 1rem;
+      }
     }
   }
 </style>
@@ -470,6 +490,7 @@
     {#if booksByYear().length > 0}
       <div class="books-by-year">
         <h2>Books by Year</h2>
+        <div class="table-scroll">
         <table>
           <thead>
             <tr>
@@ -501,6 +522,7 @@
             {/each}
           </tbody>
         </table>
+        </div>
       </div>
     {/if}
 

@@ -182,6 +182,63 @@
     color: #555;
   }
 
+  .mobile-actions {
+    display: flex;
+    gap: 0.75em;
+    margin-top: 1.75em;
+  }
+
+  .mobile-action-button {
+    appearance: none;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5em;
+    min-height: 44px;
+    padding: 0.5em 1em;
+    border: 1px solid;
+    border-radius: 999px;
+    background: none;
+    font: inherit;
+    font-size: 0.95em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s ease;
+  }
+
+  .mobile-action-button:active {
+    transform: scale(0.97);
+  }
+
+  .mobile-action-button:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .mobile-action-button .mobile-elapsed {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+  }
+
+  .log-button {
+    color: #35686a;
+    border-color: rgba(53, 104, 106, 0.35);
+    background: rgba(53, 104, 106, 0.07);
+  }
+
+  .start-button {
+    color: #198754;
+    border-color: rgba(25, 135, 84, 0.35);
+    background: rgba(25, 135, 84, 0.07);
+  }
+
+  .stop-button {
+    color: #dc3545;
+    border-color: rgba(220, 53, 69, 0.35);
+    background: rgba(220, 53, 69, 0.08);
+  }
+
   .progress-container {
     position: relative;
     width: 100%;
@@ -225,11 +282,12 @@
     }
 
     .label {
-      font-size: 0.4em;
+      font-size: 0.62em;
+      letter-spacing: 0.02em;
     }
 
     .book-row {
-      margin: 2em 1em;
+      margin: 1.5em 0.75em;
       padding: 1em;
     }
 
@@ -414,22 +472,37 @@
         </div>
       </div>
       {#if !finished && screenWidth <= 770}
-        <div class="row">
-          <div class="col action-col">
+        <div class="mobile-actions">
+          <button
+            type="button"
+            class="mobile-action-button log-button"
+            aria-label={`Add a reading session for ${book.title}`}
+            onclick={() => setModalBook(book, 'addReading')}>
+            <Icon data={plus} scale="0.9" />
+            <span>Log reading</span>
+          </button>
+          {#if book.activeTimer}
             <button
               type="button"
-              class="action-button add-reading-button"
-              aria-label={`Add a reading session for ${book.title}`}
-              onclick={() => setModalBook(book, 'addReading')}>
-              <Icon
-                data={plus}
-                scale="1.3"
-                style="margin: auto; position: relative; cursor: pointer;" />
+              class="mobile-action-button stop-button"
+              disabled={busy}
+              aria-label={`Stop the reading timer for ${book.title}`}
+              onclick={() => stopTimer(book)}>
+              <Icon data={stop} scale="0.9" />
+              <span>Stop</span>
+              <span class="mobile-elapsed">{formatElapsed(book.activeTimer.start)}</span>
             </button>
-          </div>
-          <div class="col action-col">
-            {@render timerControl(book, '1.1')}
-          </div>
+          {:else}
+            <button
+              type="button"
+              class="mobile-action-button start-button"
+              disabled={busy || anyTimerRunning}
+              aria-label={`Start a reading timer for ${book.title}`}
+              onclick={() => startTimer(book)}>
+              <Icon data={play} scale="0.9" />
+              <span>Start timer</span>
+            </button>
+          {/if}
         </div>
       {/if}
     </div>

@@ -39,6 +39,7 @@
       id="inputPages"
       class="form-control"
       type="number"
+      inputmode="numeric"
       bind:value={inputPages}
       placeholder="What page are you on" />
   </Input>

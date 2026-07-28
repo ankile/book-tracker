@@ -128,6 +128,19 @@
     opacity: 1;
   }
 
+  // Touch devices have no hover, so the buttons must always be visible there.
+  @media (hover: none) {
+    .edit-button {
+      opacity: 1;
+      padding: 0.35em;
+      width: 28px;
+    }
+
+    .button-spacer {
+      width: 28px;
+    }
+  }
+
   .button-spacer {
     display: inline-block;
     width: 20px;

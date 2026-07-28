@@ -13,7 +13,9 @@
     color: black;
     background-color: white;
     margin: 0.5em;
-    padding: 0.5em 1em;
+    padding: 0.5em 1.25em;
+    min-height: 44px;
+    min-width: 5.5em;
     box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
     border-radius: 5px;
     transition: box-shadow 0.2s;
