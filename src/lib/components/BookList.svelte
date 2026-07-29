@@ -60,16 +60,22 @@
   let userLoaded = $derived(userDoc !== undefined);
   let hasToggl = $derived(!!userDoc?.toggl);
 
+  $effect(() => {
+    if (hasToggl) Database.retryStalledTogglSync(userId);
+  });
+
   let anyTimerRunning = $derived($books.some((b) => b.activeTimer));
 
-  // Set synchronously when a fire-and-forget timer write is issued and
-  // cleared when the snapshot reflects it; without this, a double-tap in
-  // the IndexedDB round-trip window starts two timers or enqueues twice.
+  // Set synchronously when a fire-and-forget timer write is issued so a
+  // double-tap in the IndexedDB round-trip window cannot start two timers
+  // or enqueue twice. Cleared by timeout rather than by watching the books
+  // snapshot: a snapshot-based clear misses writes that do not change the
+  // aggregate timer state and would latch the buttons shut permanently.
   let timerPending = $state(false);
-  $effect(() => {
-    anyTimerRunning;
-    timerPending = false;
-  });
+  function markTimerPending() {
+    timerPending = true;
+    setTimeout(() => (timerPending = false), 3000);
+  }
 
   $effect(() => {
     if (!anyTimerRunning) return;
@@ -89,7 +95,7 @@
     if (!hasToggl || !navigator.onLine) {
       // Not awaited: offline, the promise only resolves after reconnect, but
       // the local cache applies the write instantly via the books snapshot.
-      timerPending = true;
+      markTimerPending();
       Database.startLocalTimer(userId, book.id);
       return;
     }
@@ -112,16 +118,21 @@
     const stop = new Date().toISOString();
     const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
     prefillMinutes = Math.max(1, Math.round(seconds / 60));
-    timerPending = true;
+    markTimerPending();
     // Not awaited, same as startTimer: must not hang offline.
     Database.stopLocalTimer(userId, book.id);
     if (book.activeTimer.entryId) {
+      // start and bookTitle ride along so the sync function can build the
+      // full PUT body without a Toggl read (the GET /me endpoints have a
+      // strict 30/hour quota that a reconnect burst would blow through).
       Database.enqueueTogglEntry(userId, {
         type: 'stop',
         entryId: book.activeTimer.entryId,
+        bookTitle: book.title,
+        start: book.activeTimer.start,
         stop,
       });
-    } else if (hasToggl) {
+    } else if (hasToggl && seconds >= 1) {
       Database.enqueueTogglEntry(userId, {
         type: 'create',
         bookTitle: book.title,

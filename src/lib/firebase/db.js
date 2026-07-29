@@ -10,6 +10,7 @@ import {
   updateDoc,
   deleteDoc,
   getDoc,
+  getDocs,
   writeBatch,
   increment,
   Timestamp,
@@ -206,6 +207,25 @@ class Database {
       status: 'pending',
       createdAt: Timestamp.now(),
     });
+  }
+
+  // Requeue Toggl sync items that failed or got stuck, once per app load.
+  // Flipping status back to 'pending' re-fires the syncqueue onWrite
+  // trigger. 'error' items retry immediately; 'processing' (function died
+  // between claim and Toggl call) and 'pending' (trigger event lost) only
+  // after 10 minutes, since a live invocation may still own them.
+  static async retryStalledTogglSync(userId) {
+    const items = await getDocs(query(
+      collection(db, 'users', userId, 'togglQueue'),
+      where('status', 'in', ['pending', 'processing', 'error'])
+    ));
+    const staleBefore = Date.now() - 10 * 60 * 1000;
+    for (const item of items.docs) {
+      const { status, createdAt } = item.data();
+      if (status === 'error' || createdAt.toMillis() < staleBefore) {
+        updateDoc(item.ref, { status: 'pending' });
+      }
+    }
   }
 
   // Only deletes the book document; the deleteBookUpdates trigger cascades

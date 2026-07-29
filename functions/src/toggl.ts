@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions/v1";
 import {getFirestore} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
+import {setTimeout as delay} from "node:timers/promises";
 
 const db = getFirestore();
 
@@ -39,7 +40,7 @@ async function togglFetch(
   path: string,
   body?: object,
 ): Promise<Response> {
-  return await fetch(TOGGL_BASE + path, {
+  const doFetch = () => fetch(TOGGL_BASE + path, {
     method,
     headers: {
       "Authorization":
@@ -48,6 +49,25 @@ async function togglFetch(
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+  let resp = await doFetch();
+  if (resp.status === 429) {
+    // Toggl rate-limits at ~1 request/second per token; a reconnect burst
+    // of queue items can trip it. One spaced retry absorbs that case.
+    await delay(2000);
+    resp = await doFetch();
+  }
+  return resp;
+}
+
+// Toggl stores timestamps at second precision and requires
+// start + duration == stop, so both the duration arithmetic and the
+// timestamps sent must be truncated to whole seconds the same way.
+function secs(iso: string): number {
+  return Math.floor(Date.parse(iso) / 1000);
+}
+
+function isoAtSecond(iso: string): string {
+  return new Date(secs(iso) * 1000).toISOString();
 }
 
 function requireUid(context: functions.https.CallableContext): string {
@@ -230,83 +250,61 @@ async function syncQueueItem(
 ): Promise<number> {
   const toggl = await getTogglConfig(uid);
 
-  if (item.type === "create") {
-    // Timer ran fully offline: create a completed entry covering the
-    // historical interval. Toggl requires duration on create.
-    if (typeof item.start !== "string" || typeof item.stop !== "string") {
-      throw new Error(`malformed create item: ${JSON.stringify(item)}`);
-    }
-    const duration =
-      Math.round((Date.parse(item.stop) - Date.parse(item.start)) / 1000);
-    if (!(duration > 0)) {
-      throw new Error(`invalid interval ${item.start}..${item.stop}`);
-    }
-    const resp = await togglFetch(
-      toggl.apiToken,
-      "POST",
-      `/workspaces/${toggl.workspaceId}/time_entries`,
-      {
-        created_with: "book-tracker",
-        description: item.bookTitle,
-        project_id: toggl.projectId,
-        workspace_id: toggl.workspaceId,
-        start: item.start,
-        stop: item.stop,
-        duration,
-      },
-    );
-    if (!resp.ok) {
-      throw new Error(
-        `Toggl create failed with status ${resp.status}: ` +
-          `${await resp.text()}`,
-      );
-    }
-    return ((await resp.json()) as TogglTimeEntry).id;
-  }
-
-  if (item.type !== "stop" || typeof item.entryId !== "number" ||
+  if (typeof item.bookTitle !== "string" || typeof item.start !== "string" ||
       typeof item.stop !== "string") {
     throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
   }
-  // Entry started online but was stopped offline. PUT the recorded stop
-  // time rather than PATCH /stop, which would stamp reconnect time — and
-  // since the PUT body shares the create schema (start/duration required),
-  // read the entry first and reuse Toggl's own start.
-  const entryResp = await togglFetch(
-    toggl.apiToken,
-    "GET",
-    `/me/time_entries/${item.entryId}`,
-  );
-  if (!entryResp.ok) {
-    throw new Error(
-      `Toggl entry fetch failed with status ${entryResp.status}`,
+  const duration = secs(item.stop) - secs(item.start);
+  if (!(duration > 0)) {
+    throw new Error(`invalid interval ${item.start}..${item.stop}`);
+  }
+  const body = {
+    created_with: "book-tracker",
+    description: item.bookTitle,
+    project_id: toggl.projectId,
+    workspace_id: toggl.workspaceId,
+    start: isoAtSecond(item.start),
+    stop: isoAtSecond(item.stop),
+    duration,
+  };
+
+  if (item.type === "create") {
+    // Timer ran fully offline: create a completed entry covering the
+    // historical interval. Toggl requires duration on create.
+    const postResp = await togglFetch(
+      toggl.apiToken,
+      "POST",
+      `/workspaces/${toggl.workspaceId}/time_entries`,
+      body,
     );
+    if (!postResp.ok) {
+      throw new Error(
+        `Toggl create failed with status ${postResp.status}: ` +
+          `${await postResp.text()}`,
+      );
+    }
+    return ((await postResp.json()) as TogglTimeEntry).id;
   }
-  const entry =
-    await entryResp.json() as TogglTimeEntry & {description: string};
-  const stopDuration =
-    Math.round((Date.parse(item.stop) - Date.parse(entry.start)) / 1000);
-  if (!(stopDuration > 0)) {
-    throw new Error(`invalid interval ${entry.start}..${item.stop}`);
+
+  if (item.type !== "stop" || typeof item.entryId !== "number") {
+    throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
   }
-  const putResp = await togglFetch(
+  // Entry started online but was stopped offline. PUT the recorded stop
+  // time rather than PATCH /stop, which would stamp reconnect time. The PUT
+  // body shares the create schema (start/duration required), so the client
+  // queues start (Toggl's own timestamp, saved at entry creation) and the
+  // title alongside stop — rebuilding the entry from the queue doc avoids a
+  // GET on the /me endpoints, which have a strict 30/hour quota.
+  const resp = await togglFetch(
     toggl.apiToken,
     "PUT",
     `/workspaces/${toggl.workspaceId}/time_entries/${item.entryId}`,
-    {
-      created_with: "book-tracker",
-      description: entry.description,
-      project_id: toggl.projectId,
-      workspace_id: toggl.workspaceId,
-      start: entry.start,
-      stop: item.stop,
-      duration: stopDuration,
-    },
+    body,
   );
-  if (!putResp.ok) {
+  if (!resp.ok) {
     throw new Error(
-      `Toggl stop-update failed with status ${putResp.status}: ` +
-        `${await putResp.text()}`,
+      `Toggl stop-update failed with status ${resp.status}: ` +
+        `${await resp.text()}`,
     );
   }
   return item.entryId;
@@ -316,8 +314,10 @@ async function syncQueueItem(
 // persistence flushes the queue doc when connectivity returns, which fires
 // this trigger — the write itself is the reconnect signal. onWrite (not
 // onCreate) so a failed item can be re-run by setting status back to
-// 'pending'; the transactional claim below makes at-least-once event
-// delivery safe against duplicate Toggl entries.
+// 'pending', which the client's retryStalledTogglSync sweep does on app
+// load (the rules only permit the owner that exact status flip); the
+// transactional claim below makes at-least-once event delivery safe
+// against duplicate Toggl entries.
 exports.syncqueue = functions
   .region("europe-west1")
   .firestore.document("users/{uid}/togglQueue/{queueId}")
