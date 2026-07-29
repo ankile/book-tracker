@@ -1,4 +1,5 @@
 import * as functions from "firebase-functions/v1";
+import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {getFirestore, Timestamp} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {setTimeout as delay} from "node:timers/promises";
@@ -331,42 +332,41 @@ async function syncQueueItem(
 // load (the rules only permit the owner that exact status flip); the
 // transactional claim below makes at-least-once event delivery safe
 // against duplicate Toggl entries.
-exports.syncqueue = functions
-  .region("europe-west1")
-  .firestore.document("users/{uid}/togglQueue/{queueId}")
-  .onWrite(async (change, context) => {
-    if (!change.after.exists || change.after.data()?.status !== "pending") {
-      return null;
+exports.syncqueue = onDocumentWritten(
+  {document: "users/{uid}/togglQueue/{queueId}", region: "europe-west1"},
+  async (event) => {
+    const after = event.data?.after;
+    if (!after?.exists || after.data()?.status !== "pending") {
+      return;
     }
 
     const claimed = await db.runTransaction(async (tx) => {
-      const snap = await tx.get(change.after.ref);
+      const snap = await tx.get(after.ref);
       if (snap.data()?.status !== "pending") return false;
       // claimedAt lets the client sweep distinguish a live invocation from
       // a dead one; attempts caps how often a poison item is retried.
-      tx.update(change.after.ref, {
+      tx.update(after.ref, {
         status: "processing",
         claimedAt: Timestamp.now(),
         attempts: (snap.data()?.attempts ?? 0) + 1,
       });
       return true;
     });
-    if (!claimed) return null;
+    if (!claimed) return;
 
-    const item = change.after.data() as TogglQueueItem;
+    const item = after.data() as TogglQueueItem;
     let entryId: number;
     try {
-      entryId = await syncQueueItem(context.params.uid, item);
+      entryId = await syncQueueItem(event.params.uid, item);
     } catch (error) {
       // Persist the failure so it is visible in the queue doc (and can be
       // retried by flipping status back to 'pending') instead of leaving
       // the item claimed forever, then rethrow so the error is logged.
-      await change.after.ref.update({
+      await after.ref.update({
         status: "error",
         error: (error as Error).message,
       });
       throw error;
     }
-    await change.after.ref.update({status: "synced", entryId});
-    return null;
+    await after.ref.update({status: "synced", entryId});
   });

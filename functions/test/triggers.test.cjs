@@ -10,8 +10,8 @@ test("preserves the deployed function export names", () => {
     "bookIsFinished",
     "booksapi",
     "createUserDocument",
-    "deleteBookUpdates",
     "deleteUserDocument",
+    "deletebookupdates",
     "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["searchisbn"]);
@@ -23,21 +23,30 @@ test("preserves the deployed function export names", () => {
   ]);
 });
 
-test("keeps every function on first generation in europe-west1", () => {
-  const deployedFunctions = [
+test("keeps every function in europe-west1 on its required generation", () => {
+  // The eur3 multi-region database rejects newly created gen1 Firestore
+  // triggers, so the two triggers added for offline support must be gen2;
+  // everything that predates that constraint stays gen1.
+  const gen1Functions = [
     functions.bookIsFinished,
     functions.createUserDocument,
-    functions.deleteBookUpdates,
     functions.deleteUserDocument,
     functions.booksapi.searchisbn,
     functions.toggl.savetoken,
     functions.toggl.start,
     functions.toggl.stop,
+  ];
+  for (const deployedFunction of gen1Functions) {
+    assert.equal(deployedFunction.__endpoint.platform, "gcfv1");
+    assert.deepEqual(deployedFunction.__endpoint.region, ["europe-west1"]);
+  }
+
+  const gen2Functions = [
+    functions.deletebookupdates,
     functions.toggl.syncqueue,
   ];
-
-  for (const deployedFunction of deployedFunctions) {
-    assert.equal(deployedFunction.__endpoint.platform, "gcfv1");
+  for (const deployedFunction of gen2Functions) {
+    assert.equal(deployedFunction.__endpoint.platform, "gcfv2");
     assert.deepEqual(deployedFunction.__endpoint.region, ["europe-west1"]);
   }
 });
@@ -60,20 +69,22 @@ test("preserves the Firestore and Authentication event contracts", () => {
     "providers/firebase.auth/eventTypes/user.delete",
   );
   assert.equal(
-    functions.toggl.syncqueue.__trigger.eventTrigger.eventType,
-    "providers/cloud.firestore/eventTypes/document.write",
-  );
-  assert.match(
-    functions.toggl.syncqueue.__trigger.eventTrigger.resource,
-    /documents\/users\/\{uid\}\/togglQueue\/\{queueId\}$/,
+    functions.toggl.syncqueue.__endpoint.eventTrigger.eventType,
+    "google.cloud.firestore.document.v1.written",
   );
   assert.equal(
-    functions.deleteBookUpdates.__trigger.eventTrigger.eventType,
-    "providers/cloud.firestore/eventTypes/document.delete",
+    functions.toggl.syncqueue.__endpoint.eventTrigger
+      .eventFilterPathPatterns.document,
+    "users/{uid}/togglQueue/{queueId}",
   );
-  assert.match(
-    functions.deleteBookUpdates.__trigger.eventTrigger.resource,
-    /documents\/users\/\{userId\}\/books\/\{bookId\}$/,
+  assert.equal(
+    functions.deletebookupdates.__endpoint.eventTrigger.eventType,
+    "google.cloud.firestore.document.v1.deleted",
+  );
+  assert.equal(
+    functions.deletebookupdates.__endpoint.eventTrigger
+      .eventFilterPathPatterns.document,
+    "users/{userId}/books/{bookId}",
   );
 });
 

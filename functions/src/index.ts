@@ -1,4 +1,5 @@
 import * as functions from "firebase-functions/v1";
+import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
 
@@ -27,12 +28,14 @@ exports.bookIsFinished = functions
 // Cascade-delete a book's updates subcollection. Runs server-side because
 // the client may delete a book while offline, where it cannot reliably
 // enumerate the subcollection (a cache-only getDocs would silently orphan
-// whatever was not cached).
-exports.deleteBookUpdates = functions
-  .region("europe-west1")
-  .firestore.document("/users/{userId}/books/{bookId}")
-  .onDelete(async (snap) => {
-    await db.recursiveDelete(snap.ref);
+// whatever was not cached). v2 trigger: the eur3 multi-region database
+// rejects newly created gen1 Firestore triggers, and gen2 requires
+// lowercase function names.
+exports.deletebookupdates = onDocumentDeleted(
+  {document: "users/{userId}/books/{bookId}", region: "europe-west1"},
+  async (event) => {
+    if (!event.data) return;
+    await db.recursiveDelete(event.data.ref);
   });
 
 // Create a user document when a new user signs up
