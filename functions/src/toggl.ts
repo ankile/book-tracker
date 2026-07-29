@@ -1,5 +1,5 @@
 import * as functions from "firebase-functions/v1";
-import {getFirestore} from "firebase-admin/firestore";
+import {getFirestore, Timestamp} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {setTimeout as delay} from "node:timers/promises";
 
@@ -51,9 +51,14 @@ async function togglFetch(
   });
   let resp = await doFetch();
   if (resp.status === 429) {
-    // Toggl rate-limits at ~1 request/second per token; a reconnect burst
-    // of queue items can trip it. One spaced retry absorbs that case.
-    await delay(2000);
+    // Toggl rate-limits with a leaky bucket per token; a reconnect burst
+    // of queue items (one function instance each) can trip it, and they
+    // all see the 429 at the same moment. Back off long enough for the
+    // bucket to drain and jitter so the retries don't collide again. A 429
+    // rejects before processing, so replaying even a POST cannot
+    // duplicate. Items that still fail go to 'error' and are requeued by
+    // the client's next-session sweep.
+    await delay(15000 + Math.random() * 15000);
     resp = await doFetch();
   }
   return resp;
@@ -254,8 +259,14 @@ async function syncQueueItem(
       typeof item.stop !== "string") {
     throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
   }
-  const duration = secs(item.stop) - secs(item.start);
-  if (!(duration > 0)) {
+  let duration = secs(item.stop) - secs(item.start);
+  if (item.type === "stop") {
+    // A 'stop' item mixes clocks: start is Toggl's server timestamp,
+    // stop is the device clock. A device clock a few seconds slow would
+    // make the interval non-positive, and throwing here would strand the
+    // Toggl entry running forever — clamp to one second instead.
+    duration = Math.max(1, duration);
+  } else if (!(duration > 0)) {
     throw new Error(`invalid interval ${item.start}..${item.stop}`);
   }
   const body = {
@@ -264,7 +275,9 @@ async function syncQueueItem(
     project_id: toggl.projectId,
     workspace_id: toggl.workspaceId,
     start: isoAtSecond(item.start),
-    stop: isoAtSecond(item.stop),
+    // Derived from start + duration (not item.stop) so the clamp above
+    // cannot break Toggl's start + duration == stop invariant.
+    stop: new Date((secs(item.start) + duration) * 1000).toISOString(),
     duration,
   };
 
@@ -329,7 +342,13 @@ exports.syncqueue = functions
     const claimed = await db.runTransaction(async (tx) => {
       const snap = await tx.get(change.after.ref);
       if (snap.data()?.status !== "pending") return false;
-      tx.update(change.after.ref, {status: "processing"});
+      // claimedAt lets the client sweep distinguish a live invocation from
+      // a dead one; attempts caps how often a poison item is retried.
+      tx.update(change.after.ref, {
+        status: "processing",
+        claimedAt: Timestamp.now(),
+        attempts: (snap.data()?.attempts ?? 0) + 1,
+      });
       return true;
     });
     if (!claimed) return null;

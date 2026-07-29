@@ -68,14 +68,21 @@
 
   // Set synchronously when a fire-and-forget timer write is issued so a
   // double-tap in the IndexedDB round-trip window cannot start two timers
-  // or enqueue twice. Cleared by timeout rather than by watching the books
-  // snapshot: a snapshot-based clear misses writes that do not change the
-  // aggregate timer state and would latch the buttons shut permanently.
+  // or enqueue twice. Cleared by the next books snapshot (normally the
+  // local apply of that same write, within milliseconds); the timeout is a
+  // backstop for writes that produce no snapshot (e.g. a no-op stop when
+  // another device already cleared the timer) so it can never latch shut.
   let timerPending = $state(false);
+  let timerPendingTimeout;
   function markTimerPending() {
     timerPending = true;
-    setTimeout(() => (timerPending = false), 3000);
+    clearTimeout(timerPendingTimeout);
+    timerPendingTimeout = setTimeout(() => (timerPending = false), 3000);
   }
+  $effect(() => {
+    $books;
+    timerPending = false;
+  });
 
   $effect(() => {
     if (!anyTimerRunning) return;

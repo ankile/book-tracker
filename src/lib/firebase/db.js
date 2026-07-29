@@ -10,7 +10,7 @@ import {
   updateDoc,
   deleteDoc,
   getDoc,
-  getDocs,
+  getDocsFromServer,
   writeBatch,
   increment,
   Timestamp,
@@ -26,6 +26,10 @@ import { app } from './index.js';
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
+
+// The stalled-Toggl-sync sweep runs at most once per session, not on every
+// remount of the book list.
+let togglSweepDone = false;
 
 class Database {
   // Returns a Svelte store that listens to the user document.
@@ -209,23 +213,37 @@ class Database {
     });
   }
 
-  // Requeue Toggl sync items that failed or got stuck, once per app load.
+  // Requeue Toggl sync items that failed or got stuck, once per session.
   // Flipping status back to 'pending' re-fires the syncqueue onWrite
-  // trigger. 'error' items retry immediately; 'processing' (function died
-  // between claim and Toggl call) and 'pending' (trigger event lost) only
-  // after 10 minutes, since a live invocation may still own them.
+  // trigger. Must read from the server, never the cache: the client has no
+  // togglQueue listener, so cached docs are frozen at the locally-written
+  // 'pending' and requeuing from them would replay already-synced items.
+  // 'error' items retry up to the attempt cap; 'processing' only when the
+  // claim is older than 10 minutes (far beyond the 60s function timeout,
+  // so no live invocation can still own the item); 'pending' only when
+  // stale, meaning the original trigger event was lost.
   static async retryStalledTogglSync(userId) {
-    const items = await getDocs(query(
-      collection(db, 'users', userId, 'togglQueue'),
-      where('status', 'in', ['pending', 'processing', 'error'])
-    ));
-    const staleBefore = Date.now() - 10 * 60 * 1000;
-    for (const item of items.docs) {
-      const { status, createdAt } = item.data();
-      if (status === 'error' || createdAt.toMillis() < staleBefore) {
-        updateDoc(item.ref, { status: 'pending' });
-      }
+    if (togglSweepDone || !navigator.onLine) return;
+    togglSweepDone = true;
+    let items;
+    try {
+      items = await getDocsFromServer(query(
+        collection(db, 'users', userId, 'togglQueue'),
+        where('status', 'in', ['pending', 'processing', 'error'])
+      ));
+    } catch {
+      // navigator.onLine lied; the reconnect flush will handle pending
+      // items and the next real online session will sweep the rest.
+      togglSweepDone = false;
+      return;
     }
+    const staleBefore = Date.now() - 10 * 60 * 1000;
+    await Promise.all(items.docs.map((item) => {
+      const { status, attempts = 0, claimedAt, createdAt } = item.data();
+      const stale = (claimedAt ?? createdAt).toMillis() < staleBefore;
+      const retry = status === 'error' ? attempts < 5 : stale;
+      return retry ? updateDoc(item.ref, { status: 'pending' }) : null;
+    }));
   }
 
   // Only deletes the book document; the deleteBookUpdates trigger cascades
