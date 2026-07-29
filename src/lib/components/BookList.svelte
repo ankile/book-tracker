@@ -75,12 +75,9 @@
 
   async function startTimer(book) {
     if (!hasToggl) {
-      busy = true;
-      try {
-        await Database.startLocalTimer(userId, book.id);
-      } finally {
-        busy = false;
-      }
+      // Not awaited: offline, the promise only resolves after reconnect, but
+      // the local cache applies the write instantly via the books snapshot.
+      Database.startLocalTimer(userId, book.id);
       return;
     }
     busy = true;
@@ -98,12 +95,8 @@
     if (!book.activeTimer.entryId) {
       const seconds = (Date.now() - Date.parse(book.activeTimer.start)) / 1000;
       prefillMinutes = Math.max(1, Math.round(seconds / 60));
-      busy = true;
-      try {
-        await Database.stopLocalTimer(userId, book.id);
-      } finally {
-        busy = false;
-      }
+      // Not awaited, same as startTimer: must not hang offline.
+      Database.stopLocalTimer(userId, book.id);
       setModalBook(book, 'addReading');
       return;
     }

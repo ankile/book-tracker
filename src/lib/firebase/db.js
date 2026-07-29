@@ -13,12 +13,19 @@ import {
   writeBatch,
   increment,
   serverTimestamp,
-  getFirestore
+  Timestamp,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager
 } from 'firebase/firestore';
 import { writable } from 'svelte/store';
 import { app } from './index.js';
 
-const db = getFirestore(app);
+// Persistent local cache makes the app work offline: snapshots serve from
+// IndexedDB and writes queue locally, syncing when connectivity returns.
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
 
 class Database {
   // Returns a Svelte store that listens to the user document.
@@ -91,15 +98,17 @@ class Database {
     const bookRef = doc(db, 'users', userId, 'books', id);
     const updateRef = doc(collection(db, 'users', userId, 'books', id, 'updates'));
 
-    // Add the update document
+    // Add the update document. Client timestamps, not serverTimestamp():
+    // offline writes sync hours later and would otherwise be stamped with
+    // the reconnect time, landing on the wrong day in the heatmap.
     batch.set(updateRef, {
       book: bookRef,
       type: 'update',
       fromPage: previousPage,
       toPage: currentPage,
       pagesRead: currentPage - previousPage,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
+      createdAt: Timestamp.now(),
     });
 
     // Update book with new currentPage and updatedAt
@@ -119,7 +128,8 @@ class Database {
 
     const pagesRead = currentPage - previousPage;
 
-    // Add the reading session document
+    // Add the reading session document. Client timestamps so sessions
+    // logged offline keep the day they actually happened (see addPageUpdate).
     batch.set(sessionRef, {
       owner: ownerRef,
       book: bookRef,
@@ -128,8 +138,8 @@ class Database {
       fromPage: previousPage,
       toPage: currentPage,
       pagesRead,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
+      createdAt: Timestamp.now(),
     });
 
     // Update book with incremented aggregates
