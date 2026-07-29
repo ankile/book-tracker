@@ -8,11 +8,10 @@ import {
   onSnapshot,
   addDoc,
   updateDoc,
+  deleteDoc,
   getDoc,
-  getDocs,
   writeBatch,
   increment,
-  serverTimestamp,
   Timestamp,
   initializeFirestore,
   persistentLocalCache,
@@ -114,7 +113,7 @@ class Database {
     // Update book with new currentPage and updatedAt
     batch.update(bookRef, {
       currentPage,
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
 
     await batch.commit();
@@ -147,7 +146,7 @@ class Database {
       currentPage,
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
 
     await batch.commit();
@@ -166,8 +165,8 @@ class Database {
       timeRead: 0,
       title,
       isbn,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
+      createdAt: Timestamp.now(),
     });
   }
 
@@ -179,7 +178,7 @@ class Database {
       title,
       pageCount,
       isbn,
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
   }
 
@@ -209,27 +208,12 @@ class Database {
     });
   }
 
+  // Only deletes the book document; the deleteBookUpdates trigger cascades
+  // to the updates subcollection server-side. Deleting the subcollection
+  // here would be wrong offline: an offline getDocs silently returns only
+  // whatever happens to be cached, orphaning the rest forever.
   static async deleteBook(userId, bookId) {
-    const bookRef = doc(db, 'users', userId, 'books', bookId);
-    const updates = await getDocs(
-      collection(db, 'users', userId, 'books', bookId, 'updates')
-    );
-    const finalBatchStart = Math.max(0, updates.docs.length - 499);
-
-    for (let offset = 0; offset < finalBatchStart; offset += 500) {
-      const batch = writeBatch(db);
-      updates.docs
-        .slice(offset, Math.min(offset + 500, finalBatchStart))
-        .forEach((update) => batch.delete(update.ref));
-      await batch.commit();
-    }
-
-    const finalBatch = writeBatch(db);
-    updates.docs
-      .slice(finalBatchStart)
-      .forEach((update) => finalBatch.delete(update.ref));
-    finalBatch.delete(bookRef);
-    await finalBatch.commit();
+    await deleteDoc(doc(db, 'users', userId, 'books', bookId));
   }
 
   static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage }) {
@@ -257,7 +241,7 @@ class Database {
       fromPage,
       toPage,
       pagesRead: newPagesRead,
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
 
     // Update book aggregates with deltas and new currentPage
@@ -265,7 +249,7 @@ class Database {
       currentPage: toPage,
       pagesRead: increment(deltaPages),
       timeRead: increment(deltaTime),
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
 
     await batch.commit();
@@ -294,7 +278,7 @@ class Database {
       currentPage: sessionData.fromPage,
       pagesRead: increment(-pagesRead),
       timeRead: increment(-timeRead),
-      updatedAt: serverTimestamp(),
+      updatedAt: Timestamp.now(),
     });
 
     await batch.commit();

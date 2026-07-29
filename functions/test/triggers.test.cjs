@@ -10,6 +10,7 @@ test("preserves the deployed function export names", () => {
     "bookIsFinished",
     "booksapi",
     "createUserDocument",
+    "deleteBookUpdates",
     "deleteUserDocument",
     "toggl",
   ]);
@@ -26,6 +27,7 @@ test("keeps every function on first generation in europe-west1", () => {
   const deployedFunctions = [
     functions.bookIsFinished,
     functions.createUserDocument,
+    functions.deleteBookUpdates,
     functions.deleteUserDocument,
     functions.booksapi.searchisbn,
     functions.toggl.savetoken,
@@ -59,11 +61,19 @@ test("preserves the Firestore and Authentication event contracts", () => {
   );
   assert.equal(
     functions.toggl.syncqueue.__trigger.eventTrigger.eventType,
-    "providers/cloud.firestore/eventTypes/document.create",
+    "providers/cloud.firestore/eventTypes/document.write",
   );
   assert.match(
     functions.toggl.syncqueue.__trigger.eventTrigger.resource,
     /documents\/users\/\{uid\}\/togglQueue\/\{queueId\}$/,
+  );
+  assert.equal(
+    functions.deleteBookUpdates.__trigger.eventTrigger.eventType,
+    "providers/cloud.firestore/eventTypes/document.delete",
+  );
+  assert.match(
+    functions.deleteBookUpdates.__trigger.eventTrigger.resource,
+    /documents\/users\/\{userId\}\/books\/\{bookId\}$/,
   );
 });
 

@@ -56,10 +56,12 @@
     }
   }
 
-  async function handleDelete() {
+  function handleDelete() {
     const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
     if (confirmed) {
-      await Database.deleteBook(userId, book.id);
+      // Not awaited: offline, the promise only resolves after reconnect,
+      // but the local cache removes the book from the list instantly.
+      Database.deleteBook(userId, book.id);
       onclose();
     }
   }

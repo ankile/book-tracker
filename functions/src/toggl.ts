@@ -220,57 +220,134 @@ exports.stop = functions
     return {seconds, minutes: Math.max(1, Math.round(seconds / 60))};
   });
 
+// Performs one queued Toggl operation and returns the entry id it touched.
+// Queue docs are client-writable, so every field is validated before it
+// reaches the Toggl API (entryId in particular is interpolated into the
+// request path and must be a number).
+async function syncQueueItem(
+  uid: string,
+  item: TogglQueueItem,
+): Promise<number> {
+  const toggl = await getTogglConfig(uid);
+
+  if (item.type === "create") {
+    // Timer ran fully offline: create a completed entry covering the
+    // historical interval. Toggl requires duration on create.
+    if (typeof item.start !== "string" || typeof item.stop !== "string") {
+      throw new Error(`malformed create item: ${JSON.stringify(item)}`);
+    }
+    const duration =
+      Math.round((Date.parse(item.stop) - Date.parse(item.start)) / 1000);
+    if (!(duration > 0)) {
+      throw new Error(`invalid interval ${item.start}..${item.stop}`);
+    }
+    const resp = await togglFetch(
+      toggl.apiToken,
+      "POST",
+      `/workspaces/${toggl.workspaceId}/time_entries`,
+      {
+        created_with: "book-tracker",
+        description: item.bookTitle,
+        project_id: toggl.projectId,
+        workspace_id: toggl.workspaceId,
+        start: item.start,
+        stop: item.stop,
+        duration,
+      },
+    );
+    if (!resp.ok) {
+      throw new Error(
+        `Toggl create failed with status ${resp.status}: ` +
+          `${await resp.text()}`,
+      );
+    }
+    return ((await resp.json()) as TogglTimeEntry).id;
+  }
+
+  if (item.type !== "stop" || typeof item.entryId !== "number" ||
+      typeof item.stop !== "string") {
+    throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
+  }
+  // Entry started online but was stopped offline. PUT the recorded stop
+  // time rather than PATCH /stop, which would stamp reconnect time — and
+  // since the PUT body shares the create schema (start/duration required),
+  // read the entry first and reuse Toggl's own start.
+  const entryResp = await togglFetch(
+    toggl.apiToken,
+    "GET",
+    `/me/time_entries/${item.entryId}`,
+  );
+  if (!entryResp.ok) {
+    throw new Error(
+      `Toggl entry fetch failed with status ${entryResp.status}`,
+    );
+  }
+  const entry =
+    await entryResp.json() as TogglTimeEntry & {description: string};
+  const stopDuration =
+    Math.round((Date.parse(item.stop) - Date.parse(entry.start)) / 1000);
+  if (!(stopDuration > 0)) {
+    throw new Error(`invalid interval ${entry.start}..${item.stop}`);
+  }
+  const putResp = await togglFetch(
+    toggl.apiToken,
+    "PUT",
+    `/workspaces/${toggl.workspaceId}/time_entries/${item.entryId}`,
+    {
+      created_with: "book-tracker",
+      description: entry.description,
+      project_id: toggl.projectId,
+      workspace_id: toggl.workspaceId,
+      start: entry.start,
+      stop: item.stop,
+      duration: stopDuration,
+    },
+  );
+  if (!putResp.ok) {
+    throw new Error(
+      `Toggl stop-update failed with status ${putResp.status}: ` +
+        `${await putResp.text()}`,
+    );
+  }
+  return item.entryId;
+}
+
 // Syncs Toggl work queued while the client was offline. Firestore's offline
 // persistence flushes the queue doc when connectivity returns, which fires
-// this trigger — the write itself is the reconnect signal.
+// this trigger — the write itself is the reconnect signal. onWrite (not
+// onCreate) so a failed item can be re-run by setting status back to
+// 'pending'; the transactional claim below makes at-least-once event
+// delivery safe against duplicate Toggl entries.
 exports.syncqueue = functions
   .region("europe-west1")
   .firestore.document("users/{uid}/togglQueue/{queueId}")
-  .onCreate(async (snap, context) => {
-    const item = snap.data() as TogglQueueItem;
-    const toggl = await getTogglConfig(context.params.uid);
-
-    let entryId: number;
-    if (item.type === "create") {
-      // Timer ran fully offline: create a completed entry with the
-      // historical interval.
-      const resp = await togglFetch(
-        toggl.apiToken,
-        "POST",
-        `/workspaces/${toggl.workspaceId}/time_entries`,
-        {
-          created_with: "book-tracker",
-          description: item.bookTitle,
-          project_id: toggl.projectId,
-          workspace_id: toggl.workspaceId,
-          start: item.start,
-          stop: item.stop,
-        },
-      );
-      if (!resp.ok) {
-        throw new Error(
-          `Toggl create failed with status ${resp.status}: ` +
-            `${await resp.text()}`,
-        );
-      }
-      entryId = ((await resp.json()) as TogglTimeEntry).id;
-    } else {
-      // Entry started online but was stopped offline: PUT the recorded stop
-      // time rather than PATCH /stop, which would stamp reconnect time.
-      const resp = await togglFetch(
-        toggl.apiToken,
-        "PUT",
-        `/workspaces/${toggl.workspaceId}/time_entries/${item.entryId}`,
-        {stop: item.stop},
-      );
-      if (!resp.ok) {
-        throw new Error(
-          `Toggl stop-update failed with status ${resp.status}: ` +
-            `${await resp.text()}`,
-        );
-      }
-      entryId = item.entryId as number;
+  .onWrite(async (change, context) => {
+    if (!change.after.exists || change.after.data()?.status !== "pending") {
+      return null;
     }
 
-    await snap.ref.update({status: "synced", entryId});
+    const claimed = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(change.after.ref);
+      if (snap.data()?.status !== "pending") return false;
+      tx.update(change.after.ref, {status: "processing"});
+      return true;
+    });
+    if (!claimed) return null;
+
+    const item = change.after.data() as TogglQueueItem;
+    let entryId: number;
+    try {
+      entryId = await syncQueueItem(context.params.uid, item);
+    } catch (error) {
+      // Persist the failure so it is visible in the queue doc (and can be
+      // retried by flipping status back to 'pending') instead of leaving
+      // the item claimed forever, then rethrow so the error is logged.
+      await change.after.ref.update({
+        status: "error",
+        error: (error as Error).message,
+      });
+      throw error;
+    }
+    await change.after.ref.update({status: "synced", entryId});
+    return null;
   });

@@ -62,6 +62,15 @@
 
   let anyTimerRunning = $derived($books.some((b) => b.activeTimer));
 
+  // Set synchronously when a fire-and-forget timer write is issued and
+  // cleared when the snapshot reflects it; without this, a double-tap in
+  // the IndexedDB round-trip window starts two timers or enqueues twice.
+  let timerPending = $state(false);
+  $effect(() => {
+    anyTimerRunning;
+    timerPending = false;
+  });
+
   $effect(() => {
     if (!anyTimerRunning) return;
     const interval = setInterval(() => (now = Date.now()), 1000);
@@ -74,11 +83,13 @@
   }
 
   async function startTimer(book) {
+    if (timerPending) return;
     // Offline with Toggl connected: run a local timer; the stop path
     // enqueues the finished interval for server-side Toggl sync.
     if (!hasToggl || !navigator.onLine) {
       // Not awaited: offline, the promise only resolves after reconnect, but
       // the local cache applies the write instantly via the books snapshot.
+      timerPending = true;
       Database.startLocalTimer(userId, book.id);
       return;
     }
@@ -92,41 +103,40 @@
     }
   }
 
-  async function stopTimer(book) {
-    // No entryId means the timer is local, even if Toggl was connected later
-    if (!book.activeTimer.entryId) {
-      const stop = new Date().toISOString();
-      const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
-      prefillMinutes = Math.max(1, Math.round(seconds / 60));
-      // Not awaited, same as startTimer: must not hang offline.
-      Database.stopLocalTimer(userId, book.id);
-      if (hasToggl) {
-        // Timer ran locally but Toggl is connected: queue a completed entry
-        // covering the real interval, created server-side on reconnect.
-        Database.enqueueTogglEntry(userId, {
-          type: 'create',
-          bookTitle: book.title,
-          start: book.activeTimer.start,
-          stop,
-        });
-      }
-      setModalBook(book, 'addReading');
-      return;
-    }
-    if (!navigator.onLine) {
-      // Entry was started online in Toggl but is being stopped offline:
-      // record the real stop time now and let the sync queue apply it,
-      // instead of stopping at reconnect time with an inflated duration.
-      const stop = new Date().toISOString();
-      const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
-      prefillMinutes = Math.max(1, Math.round(seconds / 60));
-      Database.stopLocalTimer(userId, book.id);
+  // Stop without the network: clear the timer locally and, when Toggl is
+  // involved, queue the real interval for the toggl-syncqueue trigger.
+  // 'stop' items patch an entry started online in Toggl with the recorded
+  // stop time (instead of stopping it at reconnect time with an inflated
+  // duration); 'create' items cover timers that ran entirely locally.
+  function stopTimerViaQueue(book) {
+    const stop = new Date().toISOString();
+    const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
+    prefillMinutes = Math.max(1, Math.round(seconds / 60));
+    timerPending = true;
+    // Not awaited, same as startTimer: must not hang offline.
+    Database.stopLocalTimer(userId, book.id);
+    if (book.activeTimer.entryId) {
       Database.enqueueTogglEntry(userId, {
         type: 'stop',
         entryId: book.activeTimer.entryId,
         stop,
       });
-      setModalBook(book, 'addReading');
+    } else if (hasToggl) {
+      Database.enqueueTogglEntry(userId, {
+        type: 'create',
+        bookTitle: book.title,
+        start: book.activeTimer.start,
+        stop,
+      });
+    }
+    setModalBook(book, 'addReading');
+  }
+
+  async function stopTimer(book) {
+    if (timerPending) return;
+    // No entryId means the timer is local, even if Toggl was connected later
+    if (!book.activeTimer.entryId || !navigator.onLine) {
+      stopTimerViaQueue(book);
       return;
     }
     busy = true;
@@ -135,7 +145,14 @@
       prefillMinutes = data.minutes;
       setModalBook(book, 'addReading');
     } catch (error) {
-      alert(error.message);
+      if (['functions/unavailable', 'functions/internal', 'functions/deadline-exceeded'].includes(error.code)) {
+        // navigator.onLine lied (wifi with no route, captive portal): the
+        // callable never reached the server. Fall back to the queue so the
+        // timer cannot get stuck running and block every start button.
+        stopTimerViaQueue(book);
+      } else {
+        alert(error.message);
+      }
     } finally {
       busy = false;
     }
@@ -392,7 +409,7 @@
     <button
       type="button"
       class="action-button timer-button"
-      disabled={busy}
+      disabled={busy || timerPending || !userLoaded}
       aria-label={`Stop the reading timer for ${book.title}`}
       onclick={() => stopTimer(book)}>
       <Icon data={stop} {scale} style="color: #dc3545;" />
@@ -402,7 +419,7 @@
     <button
       type="button"
       class="action-button timer-button"
-      disabled={busy || anyTimerRunning || !userLoaded}
+      disabled={busy || timerPending || anyTimerRunning || !userLoaded}
       aria-label={`Start a reading timer for ${book.title}`}
       onclick={() => startTimer(book)}>
       <Icon data={play} {scale} style="color: #198754;" />
@@ -544,7 +561,7 @@
             <button
               type="button"
               class="mobile-action-button stop-button"
-              disabled={busy}
+              disabled={busy || timerPending || !userLoaded}
               aria-label={`Stop the reading timer for ${book.title}`}
               onclick={() => stopTimer(book)}>
               <Icon data={stop} scale="0.9" />
@@ -555,7 +572,7 @@
             <button
               type="button"
               class="mobile-action-button start-button"
-              disabled={busy || anyTimerRunning || !userLoaded}
+              disabled={busy || timerPending || anyTimerRunning || !userLoaded}
               aria-label={`Start a reading timer for ${book.title}`}
               onclick={() => startTimer(book)}>
               <Icon data={play} scale="0.9" />

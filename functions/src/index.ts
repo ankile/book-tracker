@@ -24,6 +24,17 @@ exports.bookIsFinished = functions
     return null;
   });
 
+// Cascade-delete a book's updates subcollection. Runs server-side because
+// the client may delete a book while offline, where it cannot reliably
+// enumerate the subcollection (a cache-only getDocs would silently orphan
+// whatever was not cached).
+exports.deleteBookUpdates = functions
+  .region("europe-west1")
+  .firestore.document("/users/{userId}/books/{bookId}")
+  .onDelete(async (snap) => {
+    await db.recursiveDelete(snap.ref);
+  });
+
 // Create a user document when a new user signs up
 exports.createUserDocument = functions
   .region("europe-west1")
