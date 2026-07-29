@@ -74,7 +74,9 @@
   }
 
   async function startTimer(book) {
-    if (!hasToggl) {
+    // Offline with Toggl connected: run a local timer; the stop path
+    // enqueues the finished interval for server-side Toggl sync.
+    if (!hasToggl || !navigator.onLine) {
       // Not awaited: offline, the promise only resolves after reconnect, but
       // the local cache applies the write instantly via the books snapshot.
       Database.startLocalTimer(userId, book.id);
@@ -93,10 +95,37 @@
   async function stopTimer(book) {
     // No entryId means the timer is local, even if Toggl was connected later
     if (!book.activeTimer.entryId) {
-      const seconds = (Date.now() - Date.parse(book.activeTimer.start)) / 1000;
+      const stop = new Date().toISOString();
+      const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
       prefillMinutes = Math.max(1, Math.round(seconds / 60));
       // Not awaited, same as startTimer: must not hang offline.
       Database.stopLocalTimer(userId, book.id);
+      if (hasToggl) {
+        // Timer ran locally but Toggl is connected: queue a completed entry
+        // covering the real interval, created server-side on reconnect.
+        Database.enqueueTogglEntry(userId, {
+          type: 'create',
+          bookTitle: book.title,
+          start: book.activeTimer.start,
+          stop,
+        });
+      }
+      setModalBook(book, 'addReading');
+      return;
+    }
+    if (!navigator.onLine) {
+      // Entry was started online in Toggl but is being stopped offline:
+      // record the real stop time now and let the sync queue apply it,
+      // instead of stopping at reconnect time with an inflated duration.
+      const stop = new Date().toISOString();
+      const seconds = (Date.parse(stop) - Date.parse(book.activeTimer.start)) / 1000;
+      prefillMinutes = Math.max(1, Math.round(seconds / 60));
+      Database.stopLocalTimer(userId, book.id);
+      Database.enqueueTogglEntry(userId, {
+        type: 'stop',
+        entryId: book.activeTimer.entryId,
+        stop,
+      });
       setModalBook(book, 'addReading');
       return;
     }

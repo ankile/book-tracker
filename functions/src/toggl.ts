@@ -25,6 +25,14 @@ interface TogglTimeEntry {
   duration: number;
 }
 
+interface TogglQueueItem {
+  type: "create" | "stop";
+  stop: string;
+  bookTitle?: string;
+  start?: string;
+  entryId?: number;
+}
+
 async function togglFetch(
   token: string,
   method: string,
@@ -210,4 +218,59 @@ exports.stop = functions
     await bookRef.update({activeTimer: null});
 
     return {seconds, minutes: Math.max(1, Math.round(seconds / 60))};
+  });
+
+// Syncs Toggl work queued while the client was offline. Firestore's offline
+// persistence flushes the queue doc when connectivity returns, which fires
+// this trigger — the write itself is the reconnect signal.
+exports.syncqueue = functions
+  .region("europe-west1")
+  .firestore.document("users/{uid}/togglQueue/{queueId}")
+  .onCreate(async (snap, context) => {
+    const item = snap.data() as TogglQueueItem;
+    const toggl = await getTogglConfig(context.params.uid);
+
+    let entryId: number;
+    if (item.type === "create") {
+      // Timer ran fully offline: create a completed entry with the
+      // historical interval.
+      const resp = await togglFetch(
+        toggl.apiToken,
+        "POST",
+        `/workspaces/${toggl.workspaceId}/time_entries`,
+        {
+          created_with: "book-tracker",
+          description: item.bookTitle,
+          project_id: toggl.projectId,
+          workspace_id: toggl.workspaceId,
+          start: item.start,
+          stop: item.stop,
+        },
+      );
+      if (!resp.ok) {
+        throw new Error(
+          `Toggl create failed with status ${resp.status}: ` +
+            `${await resp.text()}`,
+        );
+      }
+      entryId = ((await resp.json()) as TogglTimeEntry).id;
+    } else {
+      // Entry started online but was stopped offline: PUT the recorded stop
+      // time rather than PATCH /stop, which would stamp reconnect time.
+      const resp = await togglFetch(
+        toggl.apiToken,
+        "PUT",
+        `/workspaces/${toggl.workspaceId}/time_entries/${item.entryId}`,
+        {stop: item.stop},
+      );
+      if (!resp.ok) {
+        throw new Error(
+          `Toggl stop-update failed with status ${resp.status}: ` +
+            `${await resp.text()}`,
+        );
+      }
+      entryId = item.entryId as number;
+    }
+
+    await snap.ref.update({status: "synced", entryId});
   });

@@ -18,6 +18,7 @@ test("preserves the deployed function export names", () => {
     "savetoken",
     "start",
     "stop",
+    "syncqueue",
   ]);
 });
 
@@ -30,6 +31,7 @@ test("keeps every function on first generation in europe-west1", () => {
     functions.toggl.savetoken,
     functions.toggl.start,
     functions.toggl.stop,
+    functions.toggl.syncqueue,
   ];
 
   for (const deployedFunction of deployedFunctions) {
@@ -55,6 +57,14 @@ test("preserves the Firestore and Authentication event contracts", () => {
     functions.deleteUserDocument.__trigger.eventTrigger.eventType,
     "providers/firebase.auth/eventTypes/user.delete",
   );
+  assert.equal(
+    functions.toggl.syncqueue.__trigger.eventTrigger.eventType,
+    "providers/cloud.firestore/eventTypes/document.create",
+  );
+  assert.match(
+    functions.toggl.syncqueue.__trigger.eventTrigger.resource,
+    /documents\/users\/\{uid\}\/togglQueue\/\{queueId\}$/,
+  );
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
@@ -75,6 +85,12 @@ test("binds the migrated Runtime Config secret only to booksapi", () => {
       togglFunction.__endpoint.secretEnvironmentVariables,
       undefined,
     );
-    assert.notEqual(togglFunction.__endpoint.callableTrigger, undefined);
+  }
+  for (const callable of [
+    functions.toggl.savetoken,
+    functions.toggl.start,
+    functions.toggl.stop,
+  ]) {
+    assert.notEqual(callable.__endpoint.callableTrigger, undefined);
   }
 });

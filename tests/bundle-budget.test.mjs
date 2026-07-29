@@ -17,12 +17,14 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   const totalBytes = gzipSizes.reduce((total, chunk) => total + chunk.bytes, 0);
   const largestChunk = gzipSizes.toSorted((a, b) => b.bytes - a.bytes)[0];
 
+  // Budgets raised 230/145 -> 255/170 KiB when Firestore offline persistence
+  // (persistentLocalCache) was enabled; it adds ~16 KiB to the Firestore chunk.
   assert.ok(
-    totalBytes <= 230 * 1024,
-    `Expected at most 230 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 255 * 1024,
+    `Expected at most 255 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
-    largestChunk.bytes <= 145 * 1024,
+    largestChunk.bytes <= 170 * 1024,
     `Largest compressed chunk is ${largestChunk.file} at ${(largestChunk.bytes / 1024).toFixed(1)} KiB`
   );
 });

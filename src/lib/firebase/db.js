@@ -198,6 +198,17 @@ class Database {
     });
   }
 
+  // Queue a Toggl operation for the toggl-syncqueue Cloud Function. The doc
+  // write sits in the offline queue with everything else, so the trigger
+  // fires exactly when connectivity returns — no client-side sync loop.
+  static async enqueueTogglEntry(userId, entry) {
+    await addDoc(collection(db, 'users', userId, 'togglQueue'), {
+      ...entry,
+      status: 'pending',
+      createdAt: Timestamp.now(),
+    });
+  }
+
   static async deleteBook(userId, bookId) {
     const bookRef = doc(db, 'users', userId, 'books', bookId);
     const updates = await getDocs(
