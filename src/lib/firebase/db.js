@@ -21,6 +21,7 @@ import {
 } from 'firebase/firestore';
 import { writable } from 'svelte/store';
 import { app } from './index.js';
+import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
@@ -119,6 +120,7 @@ class Database {
     // offline writes sync hours later and would otherwise be stamped with
     // the reconnect time, landing on the wrong day in the heatmap.
     batch.set(updateRef, {
+      owner: doc(db, 'users', userId),
       book: bookRef,
       type: 'update',
       fromPage: previousPage,
@@ -259,15 +261,29 @@ class Database {
       return;
     }
     // Items past the retry cap are poison: the sweep below skips them
-    // forever. Every fetched status counts — attempts increments at claim
-    // time, so a doc whose fifth invocation died mid-run sits at
-    // 'processing' with attempts 5, just as stuck as a five-time 'error'.
-    // Counted before the requeue transactions so a transaction failure
-    // can't swallow the report.
-    const stuck = items.docs.filter((item) => (item.data().attempts ?? 0) >= 5).length;
-    if (stuck > 0) {
-      addError(`${stuck} Toggl ${stuck === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
+    // forever, and the rules allow no client delete, so they sit in the
+    // queue for good. Report each one once per device (localStorage), not
+    // on every launch — the user can't act on it beyond taking note.
+    // attempts increments at claim time, so a doc whose fifth invocation
+    // died mid-run sits at 'processing' with attempts 5, just as stuck as
+    // a five-time 'error' — but a *live* fifth claim isn't stuck yet, so
+    // 'processing' only counts past the same six-hour window the requeue
+    // uses. Counted before the requeue transactions so a transaction
+    // failure can't swallow the report.
+    const stuck = items.docs.filter((item) => {
+      const { status, attempts = 0, claimedAt } = item.data();
+      if (attempts < 5) return false;
+      if (status === 'processing') {
+        return claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000;
+      }
+      return status === 'error';
+    });
+    const reported = new Set(JSON.parse(localStorage.getItem('togglStuckReported') ?? '[]'));
+    const fresh = stuck.filter((item) => !reported.has(item.id));
+    if (fresh.length > 0) {
+      addError(`${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
     }
+    localStorage.setItem('togglStuckReported', JSON.stringify(stuck.map((item) => item.id)));
 
     await Promise.all(items.docs.map((item) => runTransaction(db, async (tx) => {
       const snap = await tx.get(item.ref);
@@ -417,10 +433,12 @@ class Database {
 // rejections, batch.update on a doc another device deleted) would otherwise
 // vanish — the local cache already showed success and callers deliberately
 // don't await. Wrap every write so its rejection lands in the global error
-// banner, then rethrow so a future awaiting caller still sees it. Only
-// rejections observable in THIS tab session are catchable: writes replayed
-// from IndexedDB after an app restart have no promise, and the SDK exposes
-// no API for them.
+// banner, then rethrow so a future awaiting caller still sees it. Only the
+// tab that issued a write can observe its rejection: if that tab closes,
+// another tab (or the next app start) replays the queued batch with no
+// promise attached and the SDK exposes no API for its outcome — the
+// multi-tab mutation channel deliberately no-ops callbacks for batches
+// that originated elsewhere. Best-effort by design.
 const writeLabels = {
   addPageUpdate: ({ title }) => `save the page update for "${title}"`,
   addReading: ({ title }) => `save the reading session for "${title}"`,
@@ -440,7 +458,15 @@ for (const [name, label] of Object.entries(writeLabels)) {
   if (!method) throw new Error(`writeLabels: no Database.${name}`);
   Database[name] = (...args) =>
     method.apply(Database, args).catch((error) => {
-      addError(`Couldn't ${label(...args)} (${error.code ?? error.message}).`);
+      // Only banner the account that issued the write: a rejection can
+      // arrive after a sign-out or account switch (the offline queue
+      // flushes on reconnect, denied by rules for the stale uid), and it
+      // must not paint one user's book titles over another's screen.
+      // Every write method takes userId first, bare or in an args object.
+      const writer = typeof args[0] === 'object' ? args[0].userId : args[0];
+      if (auth.currentUser?.uid === writer) {
+        addError(`Couldn't ${label(...args)} (${error.code ?? error.message}).`);
+      }
       throw error;
     });
 }

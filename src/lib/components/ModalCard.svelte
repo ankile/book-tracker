@@ -132,9 +132,6 @@
     onclick={handleBackdropClick}
     oncancel={handleCancel}
     class="background">
-    <!-- Inside the dialog subtree so it stays interactive while this modal
-         is open; see ErrorBanner.svelte for the inertness rationale. -->
-    <ErrorBanner />
     <form class="card hover" onsubmit={handleSubmit}>
       {#if header}
         <h4 class="header">{header}</h4>
@@ -153,5 +150,10 @@
         {/if}
       </div>
     </form>
+    <!-- Inside the dialog subtree so it stays interactive while this modal
+         is open (see ErrorBanner.svelte for the inertness rationale), and
+         after the form so showModal()'s initial focus lands on the modal's
+         first field, not the banner's dismiss button. -->
+    <ErrorBanner />
   </dialog>
 {/if}

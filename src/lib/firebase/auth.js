@@ -12,7 +12,7 @@ import { app } from './index.js';
 import { browser } from '$app/environment';
 import { clearErrors } from '../stores/errors.js';
 
-const auth = getAuth(app);
+export const auth = getAuth(app);
 
 const authPersistenceReady = browser
   ? setPersistence(auth, browserLocalPersistence)

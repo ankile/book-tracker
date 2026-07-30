@@ -1,5 +1,5 @@
 <script>
-  import { errors, dismissError } from '$lib/stores/errors.js';
+  import { errors, dismissError, clearErrors } from '$lib/stores/errors.js';
 
   // Mounted twice: once in +layout.svelte and once inside ModalCard's
   // <dialog>. A modal dialog makes everything outside its subtree inert —
@@ -13,7 +13,10 @@
 
 <style>
   /* Below the navbar so nav links stay clickable while errors are shown.
-     pointer-events splits so the empty container never intercepts taps. */
+     The container intercepts its whole box — including the margin gaps
+     between alerts — because inside ModalCard a click falling through any
+     gap lands on the dialog backdrop and closes the modal. Rendering only
+     when non-empty keeps the empty state from intercepting anything. */
   .error-banner {
     position: fixed;
     left: 0.75rem;
@@ -24,23 +27,31 @@
     max-height: 50vh;
     overflow-y: auto;
     z-index: 1080;
-    pointer-events: none;
   }
 
-  .error-banner .alert {
-    pointer-events: auto;
+  .dismiss-all {
+    display: block;
+    margin-left: auto;
   }
 </style>
 
-<div class="error-banner">
-  {#each $errors as error (error.id)}
-    <div class="alert alert-danger alert-dismissible mb-2" role="alert">
-      {error.message}
+{#if $errors.length}
+  <div class="error-banner">
+    {#if $errors.length > 1}
       <button
         type="button"
-        class="btn-close"
-        aria-label="Dismiss"
-        onclick={() => dismissError(error.id)}></button>
-    </div>
-  {/each}
-</div>
+        class="btn btn-sm btn-danger dismiss-all mb-2"
+        onclick={clearErrors}>Dismiss all</button>
+    {/if}
+    {#each $errors as error (error.id)}
+      <div class="alert alert-danger alert-dismissible mb-2" role="alert">
+        {error.message}
+        <button
+          type="button"
+          class="btn-close"
+          aria-label="Dismiss"
+          onclick={() => dismissError(error.id)}></button>
+      </div>
+    {/each}
+  </div>
+{/if}
