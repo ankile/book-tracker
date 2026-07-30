@@ -11,6 +11,7 @@ import {
   deleteDoc,
   getDoc,
   getDocsFromServer,
+  runTransaction,
   writeBatch,
   increment,
   Timestamp,
@@ -214,14 +215,20 @@ class Database {
   }
 
   // Requeue Toggl sync items that failed or got stuck, once per session.
-  // Flipping status back to 'pending' re-fires the syncqueue onWrite
-  // trigger. Must read from the server, never the cache: the client has no
-  // togglQueue listener, so cached docs are frozen at the locally-written
-  // 'pending' and requeuing from them would replay already-synced items.
-  // 'error' items retry up to the attempt cap; 'processing' only when the
-  // claim is older than 10 minutes (far beyond the 60s function timeout,
-  // so no live invocation can still own the item); 'pending' only when
-  // stale, meaning the original trigger event was lost.
+  // Flipping status back to 'pending' re-fires the syncqueue trigger. Must
+  // read from the server, never the cache: the client has no togglQueue
+  // listener, so cached docs are frozen at the locally-written 'pending'
+  // and requeuing from them would replay already-synced items.
+  //
+  // Each flip runs in a transaction so the decision is made against the
+  // doc's live state, never the query snapshot: a reconnect-flushed item
+  // that a function invocation claimed in the meantime reads 'processing'
+  // with a fresh claimedAt and is left alone. Requeuing 'pending' (lost
+  // trigger event) and 'error' items is always safe — the server's own
+  // claim transaction dedupes concurrent runs — but un-claiming
+  // 'processing' could double-sync a live invocation, so that window is
+  // six hours: far beyond any function timeout or plausible device clock
+  // skew, while still recovering claims whose invocation died.
   static async retryStalledTogglSync(userId) {
     if (togglSweepDone || !navigator.onLine) return;
     togglSweepDone = true;
@@ -237,16 +244,19 @@ class Database {
       togglSweepDone = false;
       return;
     }
-    const staleBefore = Date.now() - 10 * 60 * 1000;
-    await Promise.all(items.docs.map((item) => {
-      const { status, attempts = 0, claimedAt, createdAt } = item.data();
-      const stale = (claimedAt ?? createdAt).toMillis() < staleBefore;
-      const retry = status === 'error' ? attempts < 5 : stale;
-      return retry ? updateDoc(item.ref, { status: 'pending' }) : null;
-    }));
+    await Promise.all(items.docs.map((item) => runTransaction(db, async (tx) => {
+      const snap = await tx.get(item.ref);
+      const { status, attempts = 0, claimedAt, createdAt } = snap.data() ?? {};
+      if (attempts >= 5) return;
+      const retry =
+        status === 'error' ||
+        (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
+        (status === 'processing' && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
+      if (retry) tx.update(item.ref, { status: 'pending' });
+    })));
   }
 
-  // Only deletes the book document; the deleteBookUpdates trigger cascades
+  // Only deletes the book document; the deletebookupdates trigger cascades
   // to the updates subcollection server-side. Deleting the subcollection
   // here would be wrong offline: an offline getDocs silently returns only
   // whatever happens to be cached, orphaning the rest forever.

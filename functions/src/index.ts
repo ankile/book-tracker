@@ -31,8 +31,14 @@ exports.bookIsFinished = functions
 // whatever was not cached). v2 trigger: the eur3 multi-region database
 // rejects newly created gen1 Firestore triggers, and gen2 requires
 // lowercase function names.
+// Generous timeout: recursiveDelete of a long-lived book's updates
+// subcollection can outrun the 60s default.
 exports.deletebookupdates = onDocumentDeleted(
-  {document: "users/{userId}/books/{bookId}", region: "europe-west1"},
+  {
+    document: "users/{userId}/books/{bookId}",
+    region: "europe-west1",
+    timeoutSeconds: 300,
+  },
   async (event) => {
     if (!event.data) return;
     await db.recursiveDelete(event.data.ref);

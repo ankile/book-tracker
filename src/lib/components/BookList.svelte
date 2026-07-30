@@ -164,9 +164,12 @@
       setModalBook(book, 'addReading');
     } catch (error) {
       if (['functions/unavailable', 'functions/internal', 'functions/deadline-exceeded'].includes(error.code)) {
-        // navigator.onLine lied (wifi with no route, captive portal): the
-        // callable never reached the server. Fall back to the queue so the
-        // timer cannot get stuck running and block every start button.
+        // These codes mean the outcome is unknown (no route to the server,
+        // a server-side throw, or the client-side deadline with the server
+        // possibly still running). Falling back to the queue keeps the
+        // timer from getting stuck and is replay-safe here ONLY because a
+        // 'stop' item PUTs the same entryId — do not extend this list on
+        // the 'create' path, where a replay would duplicate the entry.
         stopTimerViaQueue(book);
       } else {
         alert(error.message);

@@ -29,10 +29,10 @@ interface TogglTimeEntry {
 
 interface TogglQueueItem {
   type: "create" | "stop";
+  bookTitle: string;
+  start: string;
   stop: string;
-  bookTitle?: string;
-  start?: string;
-  entryId?: number;
+  entryId?: number; // required for "stop" items
 }
 
 async function togglFetch(
@@ -262,11 +262,15 @@ async function syncQueueItem(
   }
   let duration = secs(item.stop) - secs(item.start);
   if (item.type === "stop") {
-    // A 'stop' item mixes clocks: start is Toggl's server timestamp,
-    // stop is the device clock. A device clock a few seconds slow would
-    // make the interval non-positive, and throwing here would strand the
-    // Toggl entry running forever — clamp to one second instead.
-    duration = Math.max(1, duration);
+    // A 'stop' item mixes clocks: start is Toggl's server timestamp, stop
+    // is the device clock, and throwing on a bad interval would strand the
+    // Toggl entry running forever. A slow device clock (non-positive
+    // interval) clamps to one second; a fast one is capped at the elapsed
+    // time this function's own clock has observed since the entry started.
+    duration = Math.max(1, Math.min(
+      duration,
+      Math.floor(Date.now() / 1000) - secs(item.start),
+    ));
   } else if (!(duration > 0)) {
     throw new Error(`invalid interval ${item.start}..${item.stop}`);
   }
@@ -326,14 +330,21 @@ async function syncQueueItem(
 
 // Syncs Toggl work queued while the client was offline. Firestore's offline
 // persistence flushes the queue doc when connectivity returns, which fires
-// this trigger — the write itself is the reconnect signal. onWrite (not
-// onCreate) so a failed item can be re-run by setting status back to
-// 'pending', which the client's retryStalledTogglSync sweep does on app
-// load (the rules only permit the owner that exact status flip); the
-// transactional claim below makes at-least-once event delivery safe
-// against duplicate Toggl entries.
+// this trigger — the write itself is the reconnect signal. onDocumentWritten
+// (not onDocumentCreated) so a failed item can be re-run by setting status
+// back to 'pending', which the client's retryStalledTogglSync sweep does on
+// app load (the rules only permit the owner that exact status flip); the
+// transactional claim below makes at-least-once event delivery safe against
+// duplicate Toggl entries. timeoutSeconds leaves headroom for the 429
+// backoff in togglFetch; maxInstances keeps a reconnect burst from fanning
+// out unboundedly against Toggl's per-token rate limit.
 exports.syncqueue = onDocumentWritten(
-  {document: "users/{uid}/togglQueue/{queueId}", region: "europe-west1"},
+  {
+    document: "users/{uid}/togglQueue/{queueId}",
+    region: "europe-west1",
+    timeoutSeconds: 120,
+    maxInstances: 5,
+  },
   async (event) => {
     const after = event.data?.after;
     if (!after?.exists || after.data()?.status !== "pending") {

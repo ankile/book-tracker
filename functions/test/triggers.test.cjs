@@ -48,6 +48,13 @@ test("keeps every function in europe-west1 on its required generation", () => {
   for (const deployedFunction of gen2Functions) {
     assert.equal(deployedFunction.__endpoint.platform, "gcfv2");
     assert.deepEqual(deployedFunction.__endpoint.region, ["europe-west1"]);
+    // Guards the id/location confusion: DocumentOptions.database takes a
+    // database id, and "eur3" (a location) would deploy fine but bind a
+    // trigger to a nonexistent database that silently never fires.
+    assert.deepEqual(deployedFunction.__endpoint.eventTrigger.eventFilters, {
+      database: "(default)",
+      namespace: "(default)",
+    });
   }
 });
 
