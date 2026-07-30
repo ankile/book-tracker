@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "book-tracker-d8f24",
     "public": "public",
     "ignore": [
       "firebase.json",
