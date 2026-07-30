@@ -13,9 +13,13 @@
   $effect(() => {
     if ($user) {
       const booksStore = Database.getBooks($user.uid, true);
-      return booksStore.subscribe((data) => {
+      const unsubscribe = booksStore.subscribe((data) => {
         allBooks = data;
       });
+      return () => {
+        unsubscribe();
+        booksStore.unsubscribe();
+      };
     }
   });
 

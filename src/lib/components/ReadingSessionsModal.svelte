@@ -51,6 +51,7 @@
     Database.updateReadingSession({
       userId,
       bookId: book.id,
+      title: book.title,
       ...data
     });
   }
@@ -62,7 +63,7 @@
   function deleteSession(session) {
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
-      Database.deleteReadingSession(userId, book.id, session.id);
+      Database.deleteReadingSession(userId, book.id, session.id, book.title);
     }
   }
 </script>

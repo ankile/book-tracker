@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from "$lib/components/Button.svelte";
+  import ErrorBanner from "$lib/components/ErrorBanner.svelte";
   import type { Snippet } from "svelte";
 
   let {
@@ -131,6 +132,9 @@
     onclick={handleBackdropClick}
     oncancel={handleCancel}
     class="background">
+    <!-- Inside the dialog subtree so it stays interactive while this modal
+         is open; see ErrorBanner.svelte for the inertness rationale. -->
+    <ErrorBanner />
     <form class="card hover" onsubmit={handleSubmit}>
       {#if header}
         <h4 class="header">{header}</h4>

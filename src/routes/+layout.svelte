@@ -4,6 +4,7 @@
   import Navbar from '$lib/components/Navbar.svelte';
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
+  import ErrorBanner from '$lib/components/ErrorBanner.svelte';
 
   let { children } = $props();
 </script>
@@ -30,6 +31,8 @@
     background: white;
   }
 </style>
+
+<ErrorBanner />
 
 {#if $user === undefined}
   <LaunchScreen />

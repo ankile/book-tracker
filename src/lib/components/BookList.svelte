@@ -28,15 +28,27 @@
   const showSessions = (book) => (sessionsBook = book);
   const closeSessions = () => (sessionsBook = null);
 
-  // Use provided books prop if available, otherwise fetch from database
-  let books = $derived(booksProp !== null ? { subscribe: (fn) => { fn(booksProp); return () => {}; } } : Database.getBooks(userId, finished));
+  // Use provided books prop if available, otherwise fetch from database.
+  // The fetch lives in an $effect (not $derived) so the snapshot listener
+  // is torn down when the component unmounts or userId/finished change.
+  let fetchedBooks = $state([]);
+  $effect(() => {
+    if (booksProp !== null) return;
+    const booksStore = Database.getBooks(userId, finished);
+    const unsubscribe = booksStore.subscribe((data) => (fetchedBooks = data));
+    return () => {
+      unsubscribe();
+      booksStore.unsubscribe();
+    };
+  });
+  let books = $derived(booksProp ?? fetchedBooks);
 
   function hasEstimate(book) {
     return book.pagesRead !== 0 && book.timeRead !== 0;
   }
 
   function addReading(detail) {
-    Database.addReading({ userId, ...detail });
+    Database.addReading({ userId, title: currentBook.title, ...detail });
   }
 
   // Timer state; the running timer itself lives on the book doc
@@ -64,7 +76,7 @@
     if (hasToggl) Database.retryStalledTogglSync(userId);
   });
 
-  let anyTimerRunning = $derived($books.some((b) => b.activeTimer));
+  let anyTimerRunning = $derived(books.some((b) => b.activeTimer));
 
   // Set synchronously when a fire-and-forget timer write is issued so a
   // double-tap in the IndexedDB round-trip window cannot start two timers
@@ -80,7 +92,7 @@
     timerPendingTimeout = setTimeout(() => (timerPending = false), 3000);
   }
   $effect(() => {
-    $books;
+    books;
     timerPending = false;
   });
 
@@ -102,8 +114,9 @@
     if (!hasToggl || !navigator.onLine) {
       // Not awaited: offline, the promise only resolves after reconnect, but
       // the local cache applies the write instantly via the books snapshot.
+      // A flush-time rejection surfaces via the global error banner.
       markTimerPending();
-      Database.startLocalTimer(userId, book.id);
+      Database.startLocalTimer(userId, book.id, book.title);
       return;
     }
     busy = true;
@@ -127,7 +140,7 @@
     prefillMinutes = Math.max(1, Math.round(seconds / 60));
     markTimerPending();
     // Not awaited, same as startTimer: must not hang offline.
-    Database.stopLocalTimer(userId, book.id);
+    Database.stopLocalTimer(userId, book.id, book.title);
     if (book.activeTimer.entryId) {
       // start and bookTitle ride along so the sync function can build the
       // full PUT body without a Toggl read (the GET /me endpoints have a
@@ -180,7 +193,7 @@
   }
 
   function updateCurrentPage(detail) {
-    Database.addPageUpdate({ userId, ...detail });
+    Database.addPageUpdate({ userId, title: currentBook.title, ...detail });
   }
 
 </script>
@@ -449,7 +462,7 @@
 {/snippet}
 
 <div class="container">
-  {#each $books as book (book.id)}
+  {#each books as book (book.id)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
     <div class="book-row">
       <div class="row">

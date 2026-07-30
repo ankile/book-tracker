@@ -10,6 +10,7 @@ import {
 } from 'firebase/auth';
 import { app } from './index.js';
 import { browser } from '$app/environment';
+import { clearErrors } from '../stores/errors.js';
 
 const auth = getAuth(app);
 
@@ -23,7 +24,10 @@ function createUserStore() {
   const { subscribe, set } = writable(undefined);
 
   if (browser) {
-    onAuthStateChanged(auth, set);
+    onAuthStateChanged(auth, (u) => {
+      clearErrors();
+      set(u);
+    });
   }
 
   return {

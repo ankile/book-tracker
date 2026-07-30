@@ -21,6 +21,7 @@ import {
 } from 'firebase/firestore';
 import { writable } from 'svelte/store';
 import { app } from './index.js';
+import { addError } from '../stores/errors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -32,6 +33,17 @@ const db = initializeFirestore(app, {
 // remount of the book list.
 let togglSweepDone = false;
 
+// With the persistent cache, listeners never error on network loss (they
+// serve from IndexedDB), so anything reaching this callback is a real
+// problem (e.g. permission-denied) that would otherwise render empty lists.
+// The listener is dead after this fires; the banner is the only signal.
+// Log the full error too: supplying an observer mutes the SDK's own console
+// output, which carries details like index-creation URLs.
+const listenError = (label) => (error) => {
+  console.error(error);
+  addError(`Couldn't ${label} (${error.code}).`);
+};
+
 class Database {
   // Returns a Svelte store that listens to the user document.
   // Starts as undefined (loading) so consumers can distinguish "not yet
@@ -42,7 +54,7 @@ class Database {
 
     const unsubscribe = onSnapshot(doc(db, 'users', userId), (snapshot) => {
       store.set(snapshot.data() ?? null);
-    });
+    }, listenError('load your profile'));
 
     return {
       subscribe: store.subscribe,
@@ -66,7 +78,7 @@ class Database {
         books.push({ id: doc.id, ...doc.data() });
       });
       store.set(books);
-    });
+    }, listenError('load your books'));
 
     // Return store with unsubscribe method
     return {
@@ -90,7 +102,7 @@ class Database {
         books.push({ id: doc.id, ...doc.data() });
       });
       store.set(books);
-    });
+    }, listenError('load your books'));
 
     return {
       subscribe: store.subscribe,
@@ -191,13 +203,15 @@ class Database {
   // Local (non-Toggl) timers reuse the activeTimer field the Toggl flow
   // writes server-side; no entryId marks the timer as local. updatedAt is
   // deliberately untouched so the book list doesn't reorder mid-session.
-  static async startLocalTimer(userId, bookId) {
+  // The trailing `title` on this and the other positional write methods is
+  // not used by the method body — writeLabels reads it for error messages.
+  static async startLocalTimer(userId, bookId, title) {
     await updateDoc(doc(db, 'users', userId, 'books', bookId), {
       activeTimer: { start: new Date().toISOString() },
     });
   }
 
-  static async stopLocalTimer(userId, bookId) {
+  static async stopLocalTimer(userId, bookId, title) {
     await updateDoc(doc(db, 'users', userId, 'books', bookId), {
       activeTimer: null,
     });
@@ -244,6 +258,17 @@ class Database {
       togglSweepDone = false;
       return;
     }
+    // Items past the retry cap are poison: the sweep below skips them
+    // forever. Every fetched status counts — attempts increments at claim
+    // time, so a doc whose fifth invocation died mid-run sits at
+    // 'processing' with attempts 5, just as stuck as a five-time 'error'.
+    // Counted before the requeue transactions so a transaction failure
+    // can't swallow the report.
+    const stuck = items.docs.filter((item) => (item.data().attempts ?? 0) >= 5).length;
+    if (stuck > 0) {
+      addError(`${stuck} Toggl ${stuck === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
+    }
+
     await Promise.all(items.docs.map((item) => runTransaction(db, async (tx) => {
       const snap = await tx.get(item.ref);
       const { status, attempts = 0, claimedAt, createdAt } = snap.data() ?? {};
@@ -260,7 +285,7 @@ class Database {
   // to the updates subcollection server-side. Deleting the subcollection
   // here would be wrong offline: an offline getDocs silently returns only
   // whatever happens to be cached, orphaning the rest forever.
-  static async deleteBook(userId, bookId) {
+  static async deleteBook(userId, bookId, title) {
     await deleteDoc(doc(db, 'users', userId, 'books', bookId));
   }
 
@@ -303,7 +328,7 @@ class Database {
     await batch.commit();
   }
 
-  static async deleteReadingSession(userId, bookId, sessionId) {
+  static async deleteReadingSession(userId, bookId, sessionId, title) {
     const batch = writeBatch(db);
     const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
@@ -354,7 +379,7 @@ class Database {
         return bTime - aTime;
       });
       store.set(sessions);
-    });
+    }, listenError('load reading sessions'));
 
     return {
       subscribe: store.subscribe,
@@ -379,13 +404,45 @@ class Database {
         sessions.push({ id: doc.id, ...doc.data() });
       });
       store.set(sessions);
-    });
+    }, listenError('load reading sessions'));
 
     return {
       subscribe: store.subscribe,
       unsubscribe
     };
   }
+}
+
+// Flush-time rejections (offline-queued writes failing on reconnect: rules
+// rejections, batch.update on a doc another device deleted) would otherwise
+// vanish — the local cache already showed success and callers deliberately
+// don't await. Wrap every write so its rejection lands in the global error
+// banner, then rethrow so a future awaiting caller still sees it. Only
+// rejections observable in THIS tab session are catchable: writes replayed
+// from IndexedDB after an app restart have no promise, and the SDK exposes
+// no API for them.
+const writeLabels = {
+  addPageUpdate: ({ title }) => `save the page update for "${title}"`,
+  addReading: ({ title }) => `save the reading session for "${title}"`,
+  addBook: ({ title }) => `add "${title}"`,
+  updateBook: ({ title }) => `save changes to "${title}"`,
+  startLocalTimer: (userId, bookId, title) => `start the timer for "${title}"`,
+  stopLocalTimer: (userId, bookId, title) => `stop the timer for "${title}"`,
+  enqueueTogglEntry: (userId, entry) => `queue the Toggl entry for "${entry.bookTitle}"`,
+  retryStalledTogglSync: () => `retry stalled Toggl syncs`,
+  deleteBook: (userId, bookId, title) => `delete "${title}"`,
+  updateReadingSession: ({ title }) => `update the reading session for "${title}"`,
+  deleteReadingSession: (userId, bookId, sessionId, title) => `delete the reading session for "${title}"`,
+};
+
+for (const [name, label] of Object.entries(writeLabels)) {
+  const method = Database[name];
+  if (!method) throw new Error(`writeLabels: no Database.${name}`);
+  Database[name] = (...args) =>
+    method.apply(Database, args).catch((error) => {
+      addError(`Couldn't ${label(...args)} (${error.code ?? error.message}).`);
+      throw error;
+    });
 }
 
 export { Database };

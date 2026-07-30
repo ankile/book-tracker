@@ -60,8 +60,9 @@
     const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
     if (confirmed) {
       // Not awaited: offline, the promise only resolves after reconnect,
-      // but the local cache removes the book from the list instantly.
-      Database.deleteBook(userId, book.id);
+      // but the local cache removes the book from the list instantly. A
+      // flush-time rejection surfaces via the global error banner.
+      Database.deleteBook(userId, book.id, book.title);
       onclose();
     }
   }
