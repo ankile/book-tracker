@@ -2,26 +2,24 @@ import * as functions from "firebase-functions/v1";
 import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
+import {finishedTransition} from "./finished";
 
 initializeApp();
 const db = getFirestore();
 
-// Automatically mark book as finished when currentPage reaches pageCount
+// Transitional backstop: the client now maintains finished in the same
+// writeBatch as every page mutation (src/lib/utils/finished.js applies the
+// same rule), and this trigger exists only to cover stale cached clients
+// that still write pages without the flag. Once the audit shows no drift
+// from old clients, delete this function (and its triggers.test.cjs
+// entries) — do NOT convert it to gen2 or extend it. It stays gen1 because
+// eur3 rejects newly created gen1 triggers but updates existing ones fine.
 exports.bookIsFinished = functions
   .region("europe-west1")
   .firestore.document("/users/{userId}/books/{bookId}")
   .onUpdate(async (snap) => {
-    // Grab the current value of what was written to Cloud Firestore.
-    const { currentPage, pageCount, finished } = snap.after.data();
-
-    if (currentPage === pageCount) {
-      if (!finished) {
-        return snap.after.ref.set({ finished: true }, { merge: true });
-      }
-    } else if (finished) {
-      return snap.after.ref.set({ finished: false }, { merge: true });
-    }
-
+    const write = finishedTransition(snap.before.data(), snap.after.data());
+    if (write) return snap.after.ref.set(write, {merge: true});
     return null;
   });
 

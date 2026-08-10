@@ -48,7 +48,7 @@
   }
 
   function addReading(detail) {
-    Database.addReading({ userId, title: currentBook.title, ...detail });
+    Database.addReading({ userId, title: currentBook.title, pageCount: currentBook.pageCount, ...detail });
   }
 
   // Timer state; the running timer itself lives on the book doc
@@ -193,7 +193,7 @@
   }
 
   function updateCurrentPage(detail) {
-    Database.addPageUpdate({ userId, title: currentBook.title, ...detail });
+    Database.addPageUpdate({ userId, title: currentBook.title, pageCount: currentBook.pageCount, ...detail });
   }
 
 </script>

@@ -43,6 +43,7 @@
       author,
       title,
       pageCount,
+      currentPage: book.currentPage,
       isbn,
     });
     onclose();

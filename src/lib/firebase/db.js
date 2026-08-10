@@ -24,6 +24,7 @@ import { writable } from 'svelte/store';
 import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
+import { isFinished } from '../utils/finished.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -151,7 +152,7 @@ class Database {
     };
   }
 
-  static async addPageUpdate({ userId, id, currentPage, previousPage }) {
+  static async addPageUpdate({ userId, id, currentPage, previousPage, pageCount }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', id);
     const updateRef = doc(collection(db, 'users', userId, 'books', id, 'updates'));
@@ -173,13 +174,14 @@ class Database {
     // Update book with new currentPage and updatedAt
     batch.update(bookRef, {
       currentPage,
+      finished: isFinished(currentPage, pageCount),
       updatedAt: Timestamp.now(),
     });
 
     await batch.commit();
   }
 
-  static async addReading({ userId, id, previousPage, currentPage, timeRead }) {
+  static async addReading({ userId, id, previousPage, currentPage, timeRead, pageCount }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', id);
     const ownerRef = doc(db, 'users', userId);
@@ -204,6 +206,7 @@ class Database {
     // Update book with incremented aggregates
     batch.update(bookRef, {
       currentPage,
+      finished: isFinished(currentPage, pageCount),
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
       updatedAt: Timestamp.now(),
@@ -218,7 +221,7 @@ class Database {
     await addDoc(collection(db, 'users', userId, 'books'), {
       author,
       currentPage,
-      finished: false,
+      finished: isFinished(currentPage, pageCount),
       owner: ownerRef,
       pageCount,
       pagesRead: 0,
@@ -230,13 +233,17 @@ class Database {
     });
   }
 
-  static async updateBook({ userId, bookId, author, title, pageCount, isbn }) {
+  static async updateBook({ userId, bookId, author, title, pageCount, currentPage, isbn }) {
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
+    // currentPage is the book's existing value, passed in only so the
+    // finished flag tracks the (possibly edited) pageCount; the page
+    // itself is not written here.
     await updateDoc(bookRef, {
       author,
       title,
       pageCount,
+      finished: isFinished(currentPage, pageCount),
       isbn,
       updatedAt: Timestamp.now(),
     });
@@ -350,7 +357,7 @@ class Database {
     await deleteDoc(doc(db, 'users', userId, 'books', bookId));
   }
 
-  static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage }) {
+  static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage, pageCount }) {
     const batch = writeBatch(db);
     const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
@@ -381,6 +388,7 @@ class Database {
     // Update book aggregates with deltas and new currentPage
     batch.update(bookRef, {
       currentPage: toPage,
+      finished: isFinished(toPage, pageCount),
       pagesRead: increment(deltaPages),
       timeRead: increment(deltaTime),
       updatedAt: Timestamp.now(),
@@ -389,7 +397,7 @@ class Database {
     await batch.commit();
   }
 
-  static async deleteReadingSession(userId, bookId, sessionId, title) {
+  static async deleteReadingSession(userId, bookId, sessionId, title, pageCount) {
     const batch = writeBatch(db);
     const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
@@ -410,6 +418,7 @@ class Database {
     // Update book by decrementing aggregates and setting currentPage to fromPage
     batch.update(bookRef, {
       currentPage: sessionData.fromPage,
+      finished: isFinished(sessionData.fromPage, pageCount),
       pagesRead: increment(-pagesRead),
       timeRead: increment(-timeRead),
       updatedAt: Timestamp.now(),

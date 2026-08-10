@@ -52,6 +52,7 @@
       userId,
       bookId: book.id,
       title: book.title,
+      pageCount: book.pageCount,
       ...data
     });
   }
@@ -63,7 +64,7 @@
   function deleteSession(session) {
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
-      Database.deleteReadingSession(userId, book.id, session.id, book.title);
+      Database.deleteReadingSession(userId, book.id, session.id, book.title, book.pageCount);
     }
   }
 </script>
