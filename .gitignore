@@ -142,4 +142,4 @@ dmypy.json
 .vscode
 
 serviceAccountKey.json
-migrate-add-owner.js
+/snapshots/
