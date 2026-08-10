@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+    }
+    match /users/{userId}/books/{bookId} {
+      allow read, write: if request.auth != null && userId == request.auth.uid;
+
+      // Writes are validated so a client cannot forge owner — which the
+      // collectionGroup rule below trusts for cross-book stats reads — nor
+      // point book at another document or invent an unknown type.
+      match /updates/{updateId} {
+        allow read, delete: if request.auth != null && userId == request.auth.uid;
+        allow create, update: if request.auth != null && userId == request.auth.uid
+                      && request.resource.data.owner == /databases/$(database)/documents/users/$(userId)
+                      && request.resource.data.book == /databases/$(database)/documents/users/$(userId)/books/$(bookId)
+                      && request.resource.data.type in ['reading', 'update'];
+      }
+    }
+    // Offline Toggl sync queue: owner enqueues and reads status; the
+    // toggl-syncqueue function (Admin SDK) processes items. The only
+    // client update allowed is the retry sweep flipping a stalled item's
+    // status back to 'pending' to re-fire the trigger.
+    //
+    // The attempts cap is enforced here, not just in the client sweep:
+    // each flip re-invokes the function, so an unbounded loop of flips is
+    // unbounded Toggl calls and unbounded logEvents rows. attempts is
+    // absent on items queued before the cap existed, hence the default.
+    match /users/{userId}/togglQueue/{queueId} {
+      allow read, create: if request.auth != null && userId == request.auth.uid;
+      allow update: if request.auth != null && userId == request.auth.uid
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+                    && request.resource.data.status == 'pending'
+                    && resource.data.status in ['pending', 'processing', 'error']
+                    && resource.data.get('attempts', 0) < 5;
+    }
+
+    // Durable issue log read by the admin overview (Admin SDK only — no
+    // client read, so one user's failures are never visible to another).
+    // Create-only so telemetry cannot be scrubbed, and uid is pinned to the
+    // session so rows cannot be attributed to someone else. Anonymous
+    // creates are allowed with uid == null so failed sign-ins before any
+    // session exists still land (detail.email carries the attempted
+    // address) — that path is unauthenticated and therefore spammable, so
+    // everything it can influence is constrained:
+    //
+    //   - createdAt == request.time. The admin panel orders by this field
+    //     and shows a fixed number of rows, so a client-chosen timestamp
+    //     was a blinding attack: rows dated year 9999 pin every slot
+    //     permanently (no client delete exists), and back-dated rows fall
+    //     out of the query window unseen.
+    //   - expiresAt is bounded, so the TTL policy on it caps retention and
+    //     the collection cannot grow without limit. The window is wide
+    //     because a device with a skewed clock must still be able to log.
+    //   - event is an allowlist, and the anonymous set is narrower than
+    //     the authenticated one, so forged rows cannot impersonate app
+    //     subsystems the caller could not actually have reached.
+    //
+    // adminAudit intentionally has no match block: it is written and read
+    // exclusively by the Admin SDK.
+    match /logEvents/{eventId} {
+      allow create: if validIssue()
+                    && (request.auth == null
+                          ? (request.resource.data.uid == null
+                             && request.resource.data.event in ['auth.sign_in_failed', 'auth.sign_up_failed'])
+                          : (request.resource.data.uid == request.auth.uid
+                             && request.resource.data.event in ['firestore.listener_failed',
+                                                                'firestore.write_failed',
+                                                                'toggl.sync_stuck']));
+    }
+
+    function validIssue() {
+      let issue = request.resource.data;
+      return issue.keys().hasAll(['level', 'event', 'message', 'code', 'uid', 'detail', 'createdAt', 'expiresAt'])
+             && issue.keys().hasOnly(['level', 'event', 'message', 'code', 'uid', 'detail', 'createdAt', 'expiresAt'])
+             && issue.level in ['warn', 'error']
+             && issue.event is string
+             && issue.message is string
+             && issue.message.size() <= 1000
+             && (issue.code == null || (issue.code is string && issue.code.size() <= 100))
+             && (issue.detail == null
+                 || (issue.detail is map
+                     && issue.detail.keys().hasOnly(['email'])
+                     && (!issue.detail.keys().hasAny(['email'])
+                         || (issue.detail.email is string && issue.detail.email.size() <= 320))))
+             && issue.createdAt == request.time
+             && issue.expiresAt is timestamp
+             && issue.expiresAt > request.time
+             && issue.expiresAt < request.time + duration.value(120, 'd');
+    }
+
+    match /{path=**}/updates/{updateId} {
+      allow read: if request.auth != null &&
+                     resource.data.owner == /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+  }
+}

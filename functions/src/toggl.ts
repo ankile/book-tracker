@@ -3,6 +3,7 @@ import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {getFirestore, Timestamp} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {setTimeout as delay} from "node:timers/promises";
+import {logIssue} from "./logging";
 
 const db = getFirestore();
 
@@ -376,6 +377,22 @@ exports.syncqueue = onDocumentWritten(
       await after.ref.update({
         status: "error",
         error: (error as Error).message,
+      });
+      // Also record it durably where the admin overview looks: a sync that
+      // exhausts its retries otherwise only surfaces if the user notices.
+      // The raw message can carry the book title — the malformed-item dump
+      // below includes it, and a Toggl error body echoes back the
+      // description field it was sent — so it is stripped before landing in
+      // a log the operator reads. The untouched message still goes to the
+      // queue doc, which only its owner can read, and to the function log.
+      const title = typeof item.bookTitle === "string" ? item.bookTitle : "";
+      const raw = (error as Error).message;
+      await logIssue({
+        level: "error",
+        event: "toggl.sync_failed",
+        message: (title.length > 0 ? raw.replaceAll(title, "<title>") : raw)
+          .slice(0, 1000),
+        uid: event.params.uid,
       });
       throw error;
     }

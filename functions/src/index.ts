@@ -64,5 +64,6 @@ exports.deleteUserDocument = functions
     return null;
   });
 
+exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
 exports.toggl = require("./toggl");

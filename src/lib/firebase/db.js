@@ -15,6 +15,7 @@ import {
   writeBatch,
   increment,
   Timestamp,
+  serverTimestamp,
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager
@@ -43,7 +44,45 @@ let togglSweepDone = false;
 const listenError = (label) => (error) => {
   console.error(error);
   addError(`Couldn't ${label} (${error.code}).`);
+  logIssue({ level: 'error', event: 'firestore.listener_failed', message: `Couldn't ${label}`, code: error.code });
 };
+
+// How long a logged issue is kept. Written as an absolute expiry because
+// that is what a Firestore TTL policy consumes: the policy deletes a doc
+// once the timestamp in its TTL field has passed.
+const ISSUE_RETENTION_DAYS = 90;
+
+// Persist a warn/error event to the logEvents collection, where the admin
+// overview surfaces it. Rules pin uid to the current session (null when
+// signed out — failed sign-ins carry the attempted address in detail.email
+// instead). Never pass secrets in message/code/detail, and prefer operation
+// names over user content: the operator reads this log, so another user's
+// book titles do not belong in it. Fire-and-forget with a console-only
+// catch: the logger reporting the app's failures must not feed back into
+// addError, or a Firestore outage would recurse.
+//
+// createdAt is serverTimestamp(), not a device clock, because the admin
+// panel orders by it: a client-chosen value lets anyone pin rows to the top
+// of that view forever, and a skewed clock silently drops honest rows out
+// of the query window. The cost is that an issue logged offline is stamped
+// when the queue flushes rather than when it happened — the right trade for
+// a feed whose ordering has to be trustworthy.
+export function logIssue({ level, event, message, code = null, detail = null }) {
+  addDoc(collection(db, 'logEvents'), {
+    level,
+    // Every field is truncated to the cap the rules enforce; one oversized
+    // value would otherwise reject the whole row and lose the event.
+    event: event.slice(0, 100),
+    message: message.slice(0, 1000),
+    code: code === null ? null : String(code).slice(0, 100),
+    uid: auth.currentUser?.uid ?? null,
+    detail: detail?.email ? { email: detail.email.slice(0, 320) } : null,
+    createdAt: serverTimestamp(),
+    expiresAt: Timestamp.fromMillis(
+      Date.now() + ISSUE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    ),
+  }).catch((error) => console.error('logIssue failed', error));
+}
 
 class Database {
   // Returns a Svelte store that listens to the user document.
@@ -88,14 +127,15 @@ class Database {
     };
   }
 
-  // Returns a Svelte store with all books (for statistics)
+  // Returns a Svelte store with all books (for statistics). Deliberately
+  // unordered: orderBy('createdAt') silently omits documents that lack the
+  // field, and books created by early versions of the app do — which made
+  // this store, and every statistic derived from it, quietly undercount.
+  // Nothing downstream depends on the order.
   static getAllBooks(userId) {
     const store = writable([]);
 
-    const q = query(
-      collection(db, 'users', userId, 'books'),
-      orderBy('createdAt', 'desc')
-    );
+    const q = query(collection(db, 'users', userId, 'books'));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const books = [];
@@ -282,6 +322,11 @@ class Database {
     const fresh = stuck.filter((item) => !reported.has(item.id));
     if (fresh.length > 0) {
       addError(`${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
+      logIssue({
+        level: 'warn',
+        event: 'toggl.sync_stuck',
+        message: `${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync`,
+      });
     }
     localStorage.setItem('togglStuckReported', JSON.stringify(stuck.map((item) => item.id)));
 
@@ -464,8 +509,20 @@ for (const [name, label] of Object.entries(writeLabels)) {
       // must not paint one user's book titles over another's screen.
       // Every write method takes userId first, bare or in an args object.
       const writer = typeof args[0] === 'object' ? args[0].userId : args[0];
+      // Same guard for the durable log: the rules pin the row's uid to the
+      // current session, so a rejection flushed after an account switch
+      // would be misattributed to whoever is signed in now.
       if (auth.currentUser?.uid === writer) {
         addError(`Couldn't ${label(...args)} (${error.code ?? error.message}).`);
+        // The banner names the book because it is the user's own screen;
+        // the log names only the operation, because the operator reads it
+        // and other people's book titles are their private content.
+        logIssue({
+          level: 'error',
+          event: 'firestore.write_failed',
+          message: `${name} failed`,
+          code: error.code ?? null,
+        });
       }
       throw error;
     });

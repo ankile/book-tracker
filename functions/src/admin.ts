@@ -1,0 +1,290 @@
+import * as functions from "firebase-functions/v1";
+import {getAuth, UserRecord} from "firebase-admin/auth";
+import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
+
+const db = getFirestore();
+
+// The operator's immutable Firebase Auth UID. Deliberately not the email:
+// signups are open and unverified, so an email address is a claimable
+// string — if the operator account were ever deleted (or the project
+// restored) anyone could re-register the address and inherit an email
+// gate. A UID is never reissued.
+const ADMIN_UID = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
+
+const ISSUE_WINDOW_DAYS = 14;
+const AUDIT_RETENTION_DAYS = 365;
+
+// Issues are fetched in two independent budgets rather than one ranked
+// list. Anonymous rows come from an unauthenticated write path, so a flood
+// of them would otherwise evict every authenticated row from a single
+// shared limit and blind the panel — which is the one thing it exists to
+// prevent. The event names mirror the allowlists in firestore.rules.
+const APP_EVENTS = [
+  "firestore.listener_failed",
+  "firestore.write_failed",
+  "toggl.sync_stuck",
+  "toggl.sync_failed",
+];
+const ANON_EVENTS = ["auth.sign_in_failed", "auth.sign_up_failed"];
+const APP_ISSUE_LIMIT = 100;
+const ANON_ISSUE_LIMIT = 25;
+
+async function audit(
+  type: "view" | "denied",
+  caller: {uid: string; email: string | null},
+): Promise<void> {
+  const now = Timestamp.now();
+  await db.collection("adminAudit").add({
+    type,
+    uid: caller.uid,
+    email: caller.email,
+    at: now,
+    expiresAt: Timestamp.fromMillis(
+      now.toMillis() + AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ),
+  });
+}
+
+// Decides on context.auth only, which the callables runtime populates from
+// a server-verified ID token; requires the operator UID plus a verified
+// email as defense in depth; and runs before any privileged read, so no
+// cross-user data is touched for a non-admin.
+//
+// Unauthenticated callers are rejected without writing anything. They carry
+// no uid and no email, so the audit row would hold no forensic signal — and
+// writing one on an unauthenticated request means any anonymous flood of
+// this endpoint becomes billed Firestore writes and buries the real denial
+// records. Authenticated denials are the ones worth keeping: those name a
+// real account that went looking.
+//
+// Note that rejecting with "not-found" does NOT hide the endpoint's
+// existence — a callable answers a malformed token with a structured 401
+// and an OPTIONS preflight with a 204, both of which a nonexistent function
+// never does. Treat this as an authorization boundary, not a secret one.
+async function requireAdmin(
+  context: functions.https.CallableContext,
+): Promise<void> {
+  const caller = context.auth;
+  if (!caller) {
+    throw new functions.https.HttpsError("not-found", "Not found.");
+  }
+  const identity = {uid: caller.uid, email: caller.token.email ?? null};
+  if (caller.uid === ADMIN_UID && caller.token.email_verified === true) {
+    await audit("view", identity);
+    return;
+  }
+  await audit("denied", identity);
+  throw new functions.https.HttpsError("not-found", "Not found.");
+}
+
+// Every admin endpoint is built through this wrapper so the gate is
+// inherited by construction. Declaring a callable directly in this file
+// would compile and deploy perfectly well while being wide open — the
+// wrapper is what makes forgetting the check impossible rather than
+// merely unlikely.
+function adminCallable(
+  handler: () => Promise<unknown>,
+): functions.HttpsFunction {
+  return functions
+    .region("europe-west1")
+    .https.onCall(async (data, context) => {
+      await requireAdmin(context);
+      return handler();
+    });
+}
+
+// Auth metadata timestamps are RFC-2822 strings while Firestore hands back
+// Timestamps; comparing mixed formats as strings orders wrongly, so every
+// time becomes epoch millis. null (never recorded) stays distinct from 0.
+function millis(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+// All aggregation runs inside Firestore — a user's updates subcollection
+// can hold thousands of docs and must not be streamed here. The sources
+// mirror the Me page exactly so the numbers match the product: pagesRead/
+// timeRead sum the books' own aggregate fields, and reading sessions come
+// from owner == user && type == 'reading' on the updates collection group.
+async function domainStats(uid: string) {
+  const books = db.collection(`users/${uid}/books`);
+  const sessions = db.collectionGroup("updates")
+    .where("owner", "==", db.doc(`users/${uid}`))
+    .where("type", "==", "reading");
+  // One aggregate per query: combining count + two sums in a single
+  // aggregate requires a composite (pagesRead, timeRead) index, while
+  // single-field aggregates run on the automatic indexes.
+  const [bookAgg, pagesAgg, timeAgg, finishedAgg, sessionAgg, lastEdit, lastRead] =
+    await Promise.all([
+      books.count().get(),
+      books.aggregate({pagesRead: AggregateField.sum("pagesRead")}).get(),
+      books.aggregate({timeRead: AggregateField.sum("timeRead")}).get(),
+      books.where("finished", "==", true).count().get(),
+      sessions.count().get(),
+      books.orderBy("updatedAt", "desc").limit(1).get(),
+      sessions.orderBy("createdAt", "desc").limit(1).get(),
+    ]);
+  // "Last read" is the newest reading session, not the newest book write.
+  // A book's updatedAt also moves when the title is edited or a page
+  // correction is filed, and it deliberately does not move when a local
+  // timer runs — so using it here dated reading activity for users who had
+  // never logged a single session.
+  const readAt = lastRead.docs[0]?.get("createdAt") as Timestamp | undefined;
+  const editAt = lastEdit.docs[0]?.get("updatedAt") as Timestamp | undefined;
+  return {
+    books: bookAgg.data().count,
+    pagesRead: pagesAgg.data().pagesRead,
+    timeRead: timeAgg.data().timeRead,
+    finishedBooks: finishedAgg.data().count,
+    readingSessions: sessionAgg.data().count,
+    lastReadAt: readAt?.toMillis() ?? null,
+    lastEditAt: editAt?.toMillis() ?? null,
+  };
+}
+
+interface IssueRow {
+  id: string;
+  at: number;
+  level: string;
+  event: string;
+  code: string | null;
+  message: string;
+  uid: string | null;
+  email: string;
+  emailVerified: boolean;
+}
+
+interface Identity {
+  email: string;
+  verified: boolean;
+}
+
+// Reads one issue budget. Returns the rows plus whether the limit was hit,
+// so the page can say so instead of silently showing a truncated feed.
+async function readIssues(
+  events: string[],
+  limit: number,
+  cutoff: Timestamp,
+  identities: Map<string, Identity>,
+): Promise<{rows: IssueRow[]; truncated: boolean}> {
+  const snap = await db.collection("logEvents")
+    .where("event", "in", events)
+    .where("createdAt", ">=", cutoff)
+    .orderBy("createdAt", "desc")
+    .limit(limit + 1)
+    .get();
+  const truncated = snap.size > limit;
+  const rows = snap.docs.slice(0, limit).flatMap((doc) => {
+    const issue = doc.data();
+    // Firestore orders across types, so a non-Timestamp createdAt would
+    // satisfy the range filter and then throw on toMillis(), taking the
+    // whole page down with it. Rules block that today; skip it anyway.
+    const at = issue.createdAt;
+    if (!(at instanceof Timestamp)) return [];
+    const uid = (issue.uid as string | null) ?? null;
+    const detailEmail =
+      (issue.detail as {email?: string} | null)?.email ?? null;
+    const identity = uid ?
+      // A uid with no entry belongs to an account that no longer exists in
+      // either auth or the profile collection.
+      identities.get(uid) ?? {email: "(deleted user)", verified: false} :
+      // Anonymous rows (failed sign-ins before any session exists) carry
+      // the attempted address in detail.email. It is attacker-supplied and
+      // unverified, so it is flagged as such rather than being rendered
+      // like an address that came from a real session.
+      {email: detailEmail ?? "(anonymous)", verified: false};
+    return [{
+      id: doc.id,
+      at: at.toMillis(),
+      level: issue.level as string,
+      event: issue.event as string,
+      code: (issue.code as string | null) ?? null,
+      message: (issue.message as string | null) ?? "",
+      uid,
+      email: identity.email,
+      emailVerified: identity.verified,
+    }];
+  });
+  return {rows, truncated};
+}
+
+exports.overview = adminCallable(async () => {
+  // listUsers returns one capped page; stopping there would silently
+  // truncate the table and undercount every total, so follow pageToken
+  // until the API stops handing one back.
+  const authUsers: UserRecord[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = await getAuth().listUsers(1000, pageToken);
+    authUsers.push(...page.users);
+    pageToken = page.pageToken;
+  } while (pageToken);
+
+  // Render off the union of auth users and profile docs: the
+  // createUserDocument/deleteUserDocument triggers keep them in sync but
+  // are not transactional with the auth record, so an orphan on either
+  // side must surface as an anomaly instead of vanishing from the table.
+  // listDocuments() rather than get() because deleting a user document
+  // leaves its books subcollection behind, and only listDocuments()
+  // reports those phantom parents — a get() would show nothing at all
+  // while the orphaned reading data sat in the database unnoticed.
+  const profiles = await db.collection("users").get();
+  const profileIds = (await db.collection("users").listDocuments())
+    .map((ref) => ref.id);
+  const authByUid = new Map(authUsers.map((user) => [user.uid, user]));
+  const profileByUid = new Map(profiles.docs.map((snap) => [snap.id, snap]));
+  const uids = [...new Set([...authByUid.keys(), ...profileIds])];
+
+  const users = await Promise.all(uids.map(async (uid) => {
+    const authUser = authByUid.get(uid);
+    const stats = await domainStats(uid);
+    const lastSignInAt = millis(authUser?.metadata.lastSignInTime);
+    const lastRefreshAt = millis(authUser?.metadata.lastRefreshTime);
+    const activity = [stats.lastReadAt, stats.lastEditAt, lastSignInAt, lastRefreshAt]
+      .filter((t): t is number => t !== null);
+    return {
+      uid,
+      email: authUser?.email ??
+        (profileByUid.get(uid)?.get("email") as string | undefined) ?? null,
+      emailVerified: authUser?.emailVerified ?? null,
+      signedUpAt: millis(authUser?.metadata.creationTime),
+      lastSignInAt,
+      lastActiveAt: activity.length > 0 ? Math.max(...activity) : null,
+      anomaly: !authUser ?
+        (profileByUid.has(uid) ? "auth user deleted" : "orphaned data") :
+        !profileByUid.has(uid) ? "profile doc missing" : null,
+      ...stats,
+    };
+  }));
+  users.sort((a, b) => (b.lastActiveAt ?? -1) - (a.lastActiveAt ?? -1));
+
+  // Distinguishes "this uid has no auth record" from "this account exists
+  // but has no email address" — collapsing both into "(deleted user)"
+  // stated something false about live accounts.
+  const identities = new Map<string, Identity>(uids.map((uid) => {
+    const authUser = authByUid.get(uid);
+    if (!authUser) return [uid, {email: "(deleted user)", verified: false}];
+    const profileEmail = profileByUid.get(uid)?.get("email") as
+      string | undefined;
+    return [uid, {email: authUser.email ?? profileEmail ?? uid, verified: true}];
+  }));
+
+  const cutoff =
+    Timestamp.fromMillis(Date.now() - ISSUE_WINDOW_DAYS * 24 * 3600 * 1000);
+  const [app, anon] = await Promise.all([
+    readIssues(APP_EVENTS, APP_ISSUE_LIMIT, cutoff, identities),
+    readIssues(ANON_EVENTS, ANON_ISSUE_LIMIT, cutoff, identities),
+  ]);
+  const issues = [...app.rows, ...anon.rows].sort((a, b) => b.at - a.at);
+
+  return {
+    users,
+    issues,
+    issueWindowDays: ISSUE_WINDOW_DAYS,
+    truncated: {
+      app: app.truncated ? APP_ISSUE_LIMIT : null,
+      anonymous: anon.truncated ? ANON_ISSUE_LIMIT : null,
+    },
+  };
+});

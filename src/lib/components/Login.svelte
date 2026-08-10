@@ -1,6 +1,7 @@
 <script>
   import Button from "./Button.svelte";
   import { signIn, signUp } from "$lib/firebase/auth.js";
+  import { logIssue } from "$lib/firebase/db.js";
 
   let login = $state(true);
   let email = $state("");
@@ -14,6 +15,19 @@
         await signUp(email, password);
       }
     } catch (error) {
+      // No session exists yet, so the row is anonymous; detail.email keeps
+      // the attempt attributable. Only an address-shaped value is recorded:
+      // typing a password into the email box is a common slip, and logging
+      // whatever was in the field would write that credential to the issue
+      // log verbatim. The password field itself is never read here.
+      const isAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      logIssue({
+        level: "warn",
+        event: login ? "auth.sign_in_failed" : "auth.sign_up_failed",
+        message: error.message,
+        code: error.code,
+        detail: isAddress ? { email } : null,
+      });
       alert(error.message);
     }
   }

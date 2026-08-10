@@ -7,6 +7,7 @@ const functions = require("../lib");
 
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
+    "admin",
     "bookIsFinished",
     "booksapi",
     "createUserDocument",
@@ -14,6 +15,7 @@ test("preserves the deployed function export names", () => {
     "deletebookupdates",
     "toggl",
   ]);
+  assert.deepEqual(Object.keys(functions.admin), ["overview"]);
   assert.deepEqual(Object.keys(functions.booksapi), ["searchisbn"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "savetoken",
@@ -28,6 +30,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
   // triggers, so the two triggers added for offline support must be gen2;
   // everything that predates that constraint stays gen1.
   const gen1Functions = [
+    functions.admin.overview,
     functions.bookIsFinished,
     functions.createUserDocument,
     functions.deleteUserDocument,
