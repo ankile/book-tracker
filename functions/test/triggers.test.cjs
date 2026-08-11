@@ -8,7 +8,6 @@ const functions = require("../lib");
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
     "admin",
-    "bookIsFinished",
     "booksapi",
     "createUserDocument",
     "deleteUserDocument",
@@ -31,7 +30,6 @@ test("keeps every function in europe-west1 on its required generation", () => {
   // everything that predates that constraint stays gen1.
   const gen1Functions = [
     functions.admin.overview,
-    functions.bookIsFinished,
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.searchisbn,
@@ -62,14 +60,6 @@ test("keeps every function in europe-west1 on its required generation", () => {
 });
 
 test("preserves the Firestore and Authentication event contracts", () => {
-  assert.equal(
-    functions.bookIsFinished.__trigger.eventTrigger.eventType,
-    "providers/cloud.firestore/eventTypes/document.update",
-  );
-  assert.match(
-    functions.bookIsFinished.__trigger.eventTrigger.resource,
-    /documents\/users\/\{userId\}\/books\/\{bookId\}$/,
-  );
   assert.equal(
     functions.createUserDocument.__trigger.eventTrigger.eventType,
     "providers/firebase.auth/eventTypes/user.create",
@@ -106,10 +96,6 @@ test("binds the migrated Runtime Config secret only to booksapi", () => {
   assert.deepEqual(
     functions.booksapi.searchisbn.__endpoint.httpsTrigger.invoker,
     ["public"],
-  );
-  assert.equal(
-    functions.bookIsFinished.__endpoint.secretEnvironmentVariables,
-    undefined,
   );
   for (const togglFunction of Object.values(functions.toggl)) {
     assert.equal(

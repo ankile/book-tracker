@@ -7,6 +7,9 @@
 //   finished:true, both pages numeric, unequal  -> currentPage := pageCount
 //   finished:true, page(s) missing/non-numeric  -> report + skip (human call)
 //   finished missing                            -> := isFinished(pages)
+//   finished:false but pages equal              -> := true (a stale client
+//     wrote pages without the flag; the backstop trigger that used to
+//     reconcile this live was deleted 2026-08-11, this re-run repairs it)
 //   createdAt missing                           -> earliest update createdAt,
 //                                                  else book updatedAt, else report
 //   pagesRead / timeRead missing                -> := 0
@@ -42,6 +45,7 @@ for (const user of users.docs) {
       }
     }
     if (b.finished === undefined) patch.finished = isFinished(b.currentPage, b.pageCount);
+    if (b.finished === false && isFinished(b.currentPage, b.pageCount)) patch.finished = true;
 
     if (b.createdAt === undefined) {
       const first = await book.ref.collection('updates').orderBy('createdAt').limit(1).get();
