@@ -57,6 +57,22 @@ export function resolveChip(name, authors) {
   return { id: null, name: normalized };
 }
 
+// Legacy-wins resolution of a book's authorship. Legacy fields present
+// means the last writer was a pre-authorIds client and any authorIds
+// alongside them are stale, so legacy is the truth; otherwise authorIds
+// resolve strictly against the loaded author map (a dangling id crashes —
+// that is corrupt data, not a state to paper over). Returns null while
+// the author store is still loading (authorMap === null) for books that
+// need the join.
+export function bookAuthors(book, authorMap) {
+  if (book.author !== undefined || book.authors !== undefined) {
+    if (Array.isArray(book.authors) && book.authors.length > 0) return book.authors;
+    return splitAuthors(book.author ?? '').map((name) => ({ name }));
+  }
+  if (authorMap === null) return null;
+  return book.authorIds.map((id) => authorMap.get(id));
+}
+
 // Presentation-only: never stored. sortName is the per-author escape
 // hatch for names the last-token rule mangles ("Le Guin" → "Guin");
 // non-person kinds keep their full name. Legacy {id, name} entries

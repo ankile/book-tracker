@@ -3,6 +3,7 @@
   import BookList from '$lib/components/BookList.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { formatTime } from '$lib/utils/format.js';
+  import { bookAuthors, joinAuthors } from '$lib/utils/authors.js';
 
   let sortBy = $state('updatedAt'); // 'updatedAt', 'pageCount', 'timeRead', 'title'
   let filterYear = $state('all'); // 'all', '2020', '2021', etc.
@@ -34,14 +35,29 @@
     return Array.from(years).sort((a, b) => b - a); // Descending
   });
 
+  // Author docs for resolving each book's authorIds into searchable names.
+  let authorList = $state(undefined);
+  $effect(() => {
+    if ($user) {
+      const authorsStore = Database.getAuthors($user.uid);
+      const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
+      return () => {
+        unsubscribe();
+        authorsStore.unsubscribe();
+      };
+    }
+  });
+  let authorMap = $derived(authorList === undefined ? null : new Map(authorList.map((a) => [a.id, a])));
+
   // Filter books by search term (title or author)
   let searchedBooks = $derived.by(() => {
     if (!searchTerm.trim()) return allBooks;
     const term = searchTerm.toLowerCase();
     return allBooks.filter(book => {
       const title = (book.title || '').toLowerCase();
-      const author = (book.author || '').toLowerCase();
-      return title.includes(term) || author.includes(term);
+      const authors = bookAuthors(book, authorMap);
+      const authorText = authors ? joinAuthors(authors.map((a) => a.name)).toLowerCase() : '';
+      return title.includes(term) || authorText.includes(term);
     });
   });
 

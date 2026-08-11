@@ -169,10 +169,12 @@ class Database {
     };
   }
 
-  // All author docs for autocomplete. Deliberately unordered (see
-  // getAllBooks for why orderBy is a trap); sorted client-side.
+  // All author docs, for autocomplete and the book-list join. Deliberately
+  // unordered (see getAllBooks for why orderBy is a trap); sorted
+  // client-side. Starts as undefined (loading, getUser convention) so the
+  // join can distinguish "not yet loaded" from an empty collection.
   static getAuthors(userId) {
-    const store = writable([]);
+    const store = writable(undefined);
 
     const q = query(collection(db, 'users', userId, 'authors'));
 

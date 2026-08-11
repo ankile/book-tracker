@@ -14,7 +14,7 @@
   $effect(() => {
     if (!open || !userId) return;
     const store = Database.getAuthors(userId);
-    const unsubscribeStore = store.subscribe((authors) => (authorList = authors));
+    const unsubscribeStore = store.subscribe((authors) => (authorList = authors ?? []));
     return () => {
       unsubscribeStore();
       store.unsubscribe();

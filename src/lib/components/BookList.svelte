@@ -8,7 +8,7 @@
   import { Database } from "../firebase/db";
   import { togglStart, togglStop } from "../firebase/functions.js";
   import { formatTime } from "../utils/format";
-  import { formatAuthors } from "../utils/authors.js";
+  import { bookAuthors, formatAuthors, joinAuthors } from "../utils/authors.js";
 
   let { finished, userId, books: booksProp = null } = $props();
 
@@ -43,6 +43,21 @@
     };
   });
   let books = $derived(booksProp ?? fetchedBooks);
+
+  // Books reference authors by id; resolve them against the user's author
+  // docs. undefined = still loading, during which authorIds books render
+  // an empty author line for a frame rather than strict-looking-up into a
+  // map that isn't there yet.
+  let authorList = $state(undefined);
+  $effect(() => {
+    const authorsStore = Database.getAuthors(userId);
+    const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
+    return () => {
+      unsubscribe();
+      authorsStore.unsubscribe();
+    };
+  });
+  let authorMap = $derived(authorList === undefined ? null : new Map(authorList.map((a) => [a.id, a])));
 
   function hasEstimate(book) {
     return book.pagesRead !== 0 && book.timeRead !== 0;
@@ -465,6 +480,7 @@
 <div class="container">
   {#each books as book (book.id)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
+    {@const resolvedAuthors = bookAuthors(book, authorMap)}
     <div class="book-row">
       <div class="row">
         <div class="col">
@@ -477,7 +493,7 @@
             <Icon data={edit} scale="0.8" style="color: #666;" />
           </button>
           <br />
-          <span class="author" title={book.author}>{book.authors?.length ? formatAuthors(book.authors) : book.author}:</span>
+          <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
           <br />
           <span class="title">{book.title}</span>
         </div>
