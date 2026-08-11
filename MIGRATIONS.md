@@ -162,18 +162,15 @@ Lighter PITR path (no scratch database): the Admin SDK can read the live
 database as of any point in the PITR window via read-time reads — good
 enough to recover individual fields without a full restore.
 
-## Current transitional state
+## Triggers and book content
 
-`bookIsFinished` (gen1, europe-west1) is a temporary backstop: since
-2026-08-10 the client computes `finished` itself in the same batch as every
-page write, and the trigger only covers stale cached clients. Once a
-follow-up audit shows no drift from stragglers, delete it
-(`firebase functions:delete bookIsFinished --region europe-west1`), remove
-its entries from `functions/test/triggers.test.cjs`, and delete
-`functions/src/finished.ts` + `functions/test/finished.test.cjs`. Do NOT
-convert it to gen2 — the end state is no Firestore trigger touching book
-content at all. (Historical constraint, for the record: eur3 rejects newly
-*created* gen1 Firestore triggers; existing ones can be updated in place.)
+No Firestore trigger touches book *content*: the client computes every
+book invariant (finished, aggregates) in the same `writeBatch` as the
+mutation, and `migrate-normalize-books.js` re-runs repair anything a stale
+client leaves behind. The transitional `bookIsFinished` backstop was
+deleted 2026-08-11. Standing constraint for any future trigger: eur3
+rejects newly *created* gen1 Firestore triggers, so it must be gen2
+(lowercase name, `database: "(default)"` — see triggers.test.cjs).
 
 ## Migration history
 
@@ -181,3 +178,4 @@ content at all. (Historical constraint, for the record: eur3 rejects newly
 |---|---|---|
 | 2025-06 | `migrate-add-owner.js` | backfilled `owner` refs on books/updates |
 | 2026-08-11 | `migrate-normalize-books.js` | backfilled `isbn: ''` on 6 legacy books; carries the full normalize policy table for re-runs |
+| 2026-08-11 | `migrate-authors.js` | authors as first-class entities: split 220 books' author strings into `users/{uid}/authors` docs + `authors` arrays (459 ops); audit went to 0 findings |
