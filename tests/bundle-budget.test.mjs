@@ -21,9 +21,13 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // (persistentLocalCache) was enabled; it adds ~16 KiB to the Firestore chunk.
   // Total raised 255 -> 258 KiB for the authors entity (autocomplete
   // component + name utilities, ~1 KiB) — the old budget had <1 KiB headroom.
+  // Total raised 258 -> 261 KiB for id-only author refs: the chips input
+  // and client-side join fit inside the old budget (the legacy write path
+  // they replaced paid for them), the ~2 KiB is the /authors management
+  // route (rename/merge/sortName) and its author mutations.
   assert.ok(
-    totalBytes <= 258 * 1024,
-    `Expected at most 258 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 261 * 1024,
+    `Expected at most 261 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

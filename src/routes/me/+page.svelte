@@ -32,6 +32,19 @@
     }
   });
 
+  // Author docs, for the Authors management card's count.
+  let authorList = $state(undefined);
+  $effect(() => {
+    if ($user) {
+      const authorsStore = Database.getAuthors($user.uid);
+      const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
+      return () => {
+        unsubscribe();
+        authorsStore.unsubscribe();
+      };
+    }
+  });
+
   // User document (for the Toggl connection status)
   let userDoc = $state(null);
   $effect(() => {
@@ -435,6 +448,12 @@
         <div class="stat-label">Currently Reading</div>
         <div class="stat-value">{stats().readingBooks}</div>
         <div class="stat-subtext">In progress</div>
+      </a>
+
+      <a href="/authors" class="stat-card clickable">
+        <div class="stat-label">Authors</div>
+        <div class="stat-value">{authorList?.length ?? '…'}</div>
+        <div class="stat-subtext">Rename, merge, sort names</div>
       </a>
 
       <div class="stat-card">

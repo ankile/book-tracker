@@ -310,6 +310,55 @@ class Database {
     await batch.commit();
   }
 
+  // Author entity mutations, driven by the /authors page. Rename and
+  // kind/sortName edits touch only the author doc — every book shows the
+  // new values through the id join, which is the point of id-only refs.
+  // The doc id deliberately stays put (opaque after creation).
+  static async updateAuthor({ userId, authorId, name, kind, sortName }) {
+    await updateDoc(doc(db, 'users', userId, 'authors', authorId), {
+      name,
+      nameLower: name.toLowerCase(),
+      kind,
+      sortName: sortName ? sortName : deleteField(),
+      updatedAt: Timestamp.now(),
+    });
+  }
+
+  // The caller passes the referencing books ({id, authorIds}, legacy refs
+  // already resolved) from its live snapshot, so the merge is one
+  // offline-capable batch with no server read. Replacing source with
+  // target in place preserves author order and dedupes when a book lists
+  // both; legacy fields are deleted on every touched book (old-client-
+  // wrote-last invariant); updatedAt is deliberately untouched so a merge
+  // never reorders the reading list; and the source doc is deleted LAST
+  // so nothing ever references a doc the batch didn't also fix. One op
+  // per referencing book + 1 delete stays far under the 500-op batch
+  // limit at this library's size — commit() throws loudly if that ever
+  // changes. sourceName/targetName exist for writeLabels only.
+  static async mergeAuthors({ userId, sourceId, targetId, sourceName, targetName, books }) {
+    const batch = writeBatch(db);
+    for (const book of books) {
+      const authorIds = [];
+      for (const id of book.authorIds) {
+        const mapped = id === sourceId ? targetId : id;
+        if (!authorIds.includes(mapped)) authorIds.push(mapped);
+      }
+      batch.update(doc(db, 'users', userId, 'books', book.id), {
+        authorIds,
+        author: deleteField(),
+        authors: deleteField(),
+      });
+    }
+    batch.delete(doc(db, 'users', userId, 'authors', sourceId));
+    await batch.commit();
+  }
+
+  // Only reachable from the authors page at zero references; the page's
+  // live count is the guard, not a re-check here.
+  static async deleteAuthor({ userId, authorId, name }) {
+    await deleteDoc(doc(db, 'users', userId, 'authors', authorId));
+  }
+
   // Local (non-Toggl) timers reuse the activeTimer field the Toggl flow
   // writes server-side; no entryId marks the timer as local. updatedAt is
   // deliberately untouched so the book list doesn't reorder mid-session.
@@ -559,6 +608,9 @@ const writeLabels = {
   addReading: ({ title }) => `save the reading session for "${title}"`,
   addBook: ({ title }) => `add "${title}"`,
   updateBook: ({ title }) => `save changes to "${title}"`,
+  updateAuthor: ({ name }) => `save changes to author "${name}"`,
+  mergeAuthors: ({ sourceName, targetName }) => `merge "${sourceName}" into "${targetName}"`,
+  deleteAuthor: ({ name }) => `delete author "${name}"`,
   startLocalTimer: (userId, bookId, title) => `start the timer for "${title}"`,
   stopLocalTimer: (userId, bookId, title) => `stop the timer for "${title}"`,
   enqueueTogglEntry: (userId, entry) => `queue the Toggl entry for "${entry.bookTitle}"`,
