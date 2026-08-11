@@ -4,21 +4,29 @@
   import AuthorInput from "$lib/components/AuthorInput.svelte";
 
   import { Database } from "../firebase/db";
+  import { resolveChip, splitAuthors } from "../utils/authors.js";
 
   let { open, userId, book = null, onclose } = $props();
 
-  let author = $state("");
-  // Existing authors for autocomplete; the listener only lives while the
-  // modal is open.
+  let authorChips = $state([]);
+  // Existing authors for autocomplete and chip seeding; the listener only
+  // lives while the modal is open. undefined from the store means still
+  // loading (near-instant from the persistent cache, even offline).
   let authorList = $state([]);
+  let authorsLoaded = $state(false);
   $effect(() => {
     if (!open || !userId) return;
     const store = Database.getAuthors(userId);
-    const unsubscribeStore = store.subscribe((authors) => (authorList = authors ?? []));
+    const unsubscribeStore = store.subscribe((authors) => {
+      if (authors === undefined) return;
+      authorList = authors;
+      authorsLoaded = true;
+    });
     return () => {
       unsubscribeStore();
       store.unsubscribe();
       authorList = [];
+      authorsLoaded = false;
     };
   });
   let title = $state("");
@@ -31,17 +39,50 @@
   let lookupError = $state("");
 
   $effect(() => {
-    author = book?.author ?? "";
     title = book?.title ?? "";
     pageCount = book?.pageCount;
     currentPage = book?.currentPage ?? 1;
     isbn = book?.isbn ?? "";
   });
 
+  // Chips seed separately from the plain fields: resolving authorIds
+  // needs the author docs, and the seed must run exactly once per opened
+  // book so a later authors snapshot can't wipe in-progress edits.
+  // Plain variable, not $state — bookkeeping the effect must not track.
+  let seededBookId;
+  $effect(() => {
+    if (!open) {
+      seededBookId = undefined;
+      authorChips = [];
+      return;
+    }
+    if (!authorsLoaded) return;
+    const bookId = book?.id ?? null;
+    if (seededBookId === bookId) return;
+    seededBookId = bookId;
+    authorChips = book === null ? [] : seedChips(book);
+  });
+
+  // Legacy-wins, mirroring the read rule: legacy fields on a book mean an
+  // old client wrote last and any authorIds beside them are stale. Saving
+  // such a book converts it to the id-only shape — self-healing.
+  function seedChips(book) {
+    if (book.author !== undefined || book.authors !== undefined) {
+      if (Array.isArray(book.authors) && book.authors.length > 0) {
+        return book.authors.map((a) => ({ id: a.id, name: a.name }));
+      }
+      return splitAuthors(book.author ?? "").map((name) => resolveChip(name, authorList));
+    }
+    return book.authorIds.map((id) => {
+      const author = authorList.find((a) => a.id === id);
+      return { id: author.id, name: author.name };
+    });
+  }
+
   function addBook() {
     Database.addBook({
       userId,
-      authorText: author,
+      authorChips,
       title,
       pageCount,
       currentPage,
@@ -54,7 +95,7 @@
     Database.updateBook({
       userId,
       bookId: book.id,
-      authorText: author,
+      authorChips,
       title,
       pageCount,
       currentPage: book.currentPage,
@@ -114,7 +155,7 @@
       }
 
       if (bookData.authors && bookData.authors.length > 0) {
-        author = bookData.authors.map(a => a.name).join(", ");
+        authorChips = bookData.authors.map((a) => resolveChip(a.name, authorList));
       }
 
       if (bookData.number_of_pages) {
@@ -197,7 +238,7 @@
   primaryText={isEditMode ? 'Update book' : 'Add book'}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <AuthorInput bind:value={author} authors={authorList} inputId="author" />
+    <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />
   </Input>
 
   <div class="space"></div>

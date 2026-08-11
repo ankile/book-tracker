@@ -9,6 +9,7 @@ import {
   addDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   getDoc,
   getDocsFromServer,
   runTransaction,
@@ -25,7 +26,7 @@ import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
 import { isFinished } from '../utils/finished.js';
-import { authorIdFor, splitAuthors, joinAuthors } from '../utils/authors.js';
+import { authorIdFor } from '../utils/authors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -86,19 +87,24 @@ export function logIssue({ level, event, message, code = null, detail = null }) 
   }).catch((error) => console.error('logIssue failed', error));
 }
 
-// Merge-upsert one author doc per name into the batch that writes the
-// book, so the authors collection can never disagree with the books that
-// reference it — offline included. Deterministic ids make the upsert
-// convergent with no prior read. Returns the array stored on the book.
-function upsertAuthors(batch, userId, names) {
-  return names.map((name) => {
-    const id = authorIdFor(name);
+// Resolve author chips ({id, name}; id null = new author) into the id
+// array stored on the book, minting author docs for new names in the same
+// batch as the book write so the collection can never disagree with the
+// books that reference it — offline included. Existing chips pass through
+// untouched: a book write must never rewrite an author doc, or renames
+// made on the authors page would be silently reverted. New mints get the
+// deterministic creation-time id (convergent offline merge-upserts) and
+// kind 'person'; entity/placeholder are assigned on the authors page.
+function resolveAuthorIds(batch, userId, chips) {
+  return chips.map((chip) => {
+    if (chip.id !== null) return chip.id;
+    const id = authorIdFor(chip.name);
     batch.set(
       doc(db, 'users', userId, 'authors', id),
-      { name, nameLower: name.toLowerCase(), updatedAt: Timestamp.now() },
+      { name: chip.name, nameLower: chip.name.toLowerCase(), kind: 'person', updatedAt: Timestamp.now() },
       { merge: true }
     );
-    return { id, name };
+    return id;
   });
 }
 
@@ -256,23 +262,18 @@ class Database {
     await batch.commit();
   }
 
-  // Books store authors two ways: the authors array of {id, name} refs
-  // into the authors collection (the source of truth for the entity), and
-  // the legacy author string that /finished search, old clients, and
-  // rollback keep reading. The string is the canonical join of the entity
-  // names — except when the text yields no entities (empty, or a
-  // placeholder like "Various Authors"), where the raw text is kept as
-  // display-only with authors: [].
-  static async addBook({ userId, authorText, title, pageCount, currentPage, isbn }) {
+  // Books reference authors by id only; names live on the author docs and
+  // are joined client-side (bookAuthors). updateBook also deletes the
+  // legacy author/authors fields, so their presence on any doc proves an
+  // old client wrote it last — the invariant the legacy-wins read rule
+  // and the migration re-run policy both stand on.
+  static async addBook({ userId, authorChips, title, pageCount, currentPage, isbn }) {
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
 
-    const names = splitAuthors(authorText);
-    const authors = upsertAuthors(batch, userId, names);
     batch.set(bookRef, {
-      author: names.length > 0 ? joinAuthors(names) : authorText.trim(),
-      authors,
+      authorIds: resolveAuthorIds(batch, userId, authorChips),
       currentPage,
       finished: isFinished(currentPage, pageCount),
       owner: ownerRef,
@@ -288,18 +289,17 @@ class Database {
     await batch.commit();
   }
 
-  static async updateBook({ userId, bookId, authorText, title, pageCount, currentPage, isbn }) {
+  static async updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
-    const names = splitAuthors(authorText);
-    const authors = upsertAuthors(batch, userId, names);
     // currentPage is the book's existing value, passed in only so the
     // finished flag tracks the (possibly edited) pageCount; the page
     // itself is not written here.
     batch.update(bookRef, {
-      author: names.length > 0 ? joinAuthors(names) : authorText.trim(),
-      authors,
+      authorIds: resolveAuthorIds(batch, userId, authorChips),
+      author: deleteField(),
+      authors: deleteField(),
       title,
       pageCount,
       finished: isFinished(currentPage, pageCount),
