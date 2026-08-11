@@ -4,9 +4,9 @@ import {
   authorIdFor,
   splitAuthors,
   joinAuthors,
-  lastNameOf,
+  resolveChip,
+  abbreviatedName,
   formatAuthors,
-  isPlaceholderAuthor,
 } from '../src/lib/utils/authors.js';
 
 test('authorIdFor normalizes case, whitespace, and slashes', () => {
@@ -46,13 +46,12 @@ test('splitAuthors drops empties and dedupes by id', () => {
   assert.deepEqual(splitAuthors('Tolkien, tolkien'), ['Tolkien']);
 });
 
-test('placeholder attributions are recognized and never become entities', () => {
-  assert.ok(isPlaceholderAuthor('Various Authors'));
-  assert.ok(isPlaceholderAuthor('  various  authors '));
-  assert.ok(isPlaceholderAuthor('Unknown'));
-  assert.ok(!isPlaceholderAuthor('Vario Us'));
-  assert.deepEqual(splitAuthors('Various Authors'), []);
-  assert.deepEqual(splitAuthors('Various Authors & Tolkien'), ['Tolkien']);
+test('placeholder attributions are ordinary names, not special-cased', () => {
+  assert.deepEqual(splitAuthors('Various Authors'), ['Various Authors']);
+  assert.deepEqual(
+    splitAuthors('Various Authors & Tolkien'),
+    ['Various Authors', 'Tolkien'],
+  );
 });
 
 test('joinAuthors round-trips through splitAuthors', () => {
@@ -60,27 +59,65 @@ test('joinAuthors round-trips through splitAuthors', () => {
   assert.deepEqual(splitAuthors(joinAuthors(names)), names);
 });
 
-test('lastNameOf takes the last whitespace token', () => {
-  assert.equal(lastNameOf('J. R. R. Tolkien'), 'Tolkien');
-  // Documented limitation: multi-token surnames lose their particle.
-  assert.equal(lastNameOf('Ursula K. Le Guin'), 'Guin');
+test('resolveChip matches loaded authors by name, else mints a new chip', () => {
+  const authors = [
+    { id: 'daniel kahneman', name: 'Daniel Kahneman', nameLower: 'daniel kahneman', kind: 'person' },
+  ];
+  assert.deepEqual(
+    resolveChip('  daniel   KAHNEMAN ', authors),
+    { id: 'daniel kahneman', name: 'Daniel Kahneman' },
+  );
+  assert.deepEqual(
+    resolveChip('  Amos  Tversky ', authors),
+    { id: null, name: 'Amos Tversky' },
+  );
 });
 
-test('corporate authors keep their full name in abbreviations', () => {
-  assert.equal(lastNameOf('Harvard  Business Review'), 'Harvard Business Review');
-  const a = (name) => ({ id: authorIdFor(name), name });
+test('resolveChip matches a renamed author by its creation-time id', () => {
+  // Doc created as "J.R.R. Tolkien", later renamed: id stays, name changes.
+  const authors = [
+    { id: 'j.r.r. tolkien', name: 'John Ronald Reuel Tolkien', nameLower: 'john ronald reuel tolkien', kind: 'person' },
+  ];
+  // Typing the pre-rename name must resolve to the renamed doc, not mint a
+  // colliding "new" author that would revert the rename.
+  assert.deepEqual(
+    resolveChip('J.R.R. Tolkien', authors),
+    { id: 'j.r.r. tolkien', name: 'John Ronald Reuel Tolkien' },
+  );
+});
+
+test('abbreviatedName takes the last token for persons', () => {
+  assert.equal(abbreviatedName({ name: 'J. R. R. Tolkien', kind: 'person' }), 'Tolkien');
+  // Documented limitation: multi-token surnames lose their particle —
+  // that is what sortName is for.
+  assert.equal(abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person' }), 'Guin');
+});
+
+test('abbreviatedName prefers sortName over any rule', () => {
   assert.equal(
-    formatAuthors([a('Harvard Business Review'), a('Clayton Christensen')]),
-    'Harvard Business Review & Christensen',
+    abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person', sortName: 'Le Guin' }),
+    'Le Guin',
+  );
+});
+
+test('abbreviatedName keeps the full name for non-person kinds', () => {
+  assert.equal(
+    abbreviatedName({ name: 'Harvard  Business Review', kind: 'entity' }),
+    'Harvard Business Review',
   );
   assert.equal(
-    formatAuthors([a('Harvard Business Review'), a('Clayton Christensen'), a('Michael Porter')]),
-    'Harvard Business Review et al.',
+    abbreviatedName({ name: 'Various Authors', kind: 'placeholder' }),
+    'Various Authors',
   );
+});
+
+test('abbreviatedName treats kindless legacy entries as persons', () => {
+  // Legacy {id, name} entries embedded on unmigrated books carry no kind.
+  assert.equal(abbreviatedName({ id: 'x', name: 'Amos Tversky' }), 'Tversky');
 });
 
 test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
-  const a = (name) => ({ id: authorIdFor(name), name });
+  const a = (name) => ({ id: authorIdFor(name), name, kind: 'person' });
   assert.equal(formatAuthors([]), '');
   // A lone author keeps the full name; only lists abbreviate.
   assert.equal(formatAuthors([a('J. R. R. Tolkien')]), 'J. R. R. Tolkien');
@@ -91,5 +128,18 @@ test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
   assert.equal(
     formatAuthors([a('Daniel Kahneman'), a('Amos Tversky'), a('Richard Thaler')]),
     'Kahneman et al.',
+  );
+});
+
+test('formatAuthors respects kind in multi-author lists', () => {
+  const hbr = { id: 'harvard business review', name: 'Harvard Business Review', kind: 'entity' };
+  const p = (name) => ({ id: authorIdFor(name), name, kind: 'person' });
+  assert.equal(
+    formatAuthors([hbr, p('Clayton Christensen')]),
+    'Harvard Business Review & Christensen',
+  );
+  assert.equal(
+    formatAuthors([hbr, p('Clayton Christensen'), p('Michael Porter')]),
+    'Harvard Business Review et al.',
   );
 });

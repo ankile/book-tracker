@@ -2,31 +2,32 @@
 // AuthorInput, BookList) and the migration/audit scripts — plain module
 // with no Firebase imports so Node can load it directly.
 
-// Deterministic author doc id from a display name, so offline merge-set
-// upserts converge on one doc per author with no prior read. '/' would
-// read as a path separator in a document id.
+// Deterministic author doc id from a display name — at creation time ONLY.
+// Ids are opaque afterward: rename edits name/nameLower in place, so a
+// doc's id need not match its current name, and nothing may assert
+// id === authorIdFor(name) against a live author doc. '/' would read as a
+// path separator in a document id.
 export function authorIdFor(name) {
   return name.trim().replace(/\s+/g, ' ').toLowerCase().replaceAll('/', '_');
 }
 
-// Placeholder attributions ("Various Authors" on the Bible) are display
-// text, not people: splitAuthors drops them so no author entity is ever
-// created, and the book keeps the raw string with authors: [].
-const PLACEHOLDERS = new Set(['various', 'various authors', 'unknown', 'unknown author']);
-export function isPlaceholderAuthor(name) {
-  return PLACEHOLDERS.has(authorIdFor(name));
-}
+// Every author doc stores an explicit kind — 'person' (has a last name to
+// abbreviate to), 'entity' (corporate/collective, "Harvard Business
+// Review"), or 'placeholder' ("Various Authors") — so non-person authors
+// are modeled as data instead of hardcoded name sets.
+export const AUTHOR_KINDS = ['person', 'entity', 'placeholder'];
 
-// One input field holds all authors: split on commas and ampersands, never
-// on the word "and" inside a name — but a segment LEADING with "and" is an
-// Oxford-comma conjunction ("Dawkins, Dennett, Harris, and Hitchens"), not
-// part of the name. Dedupe by id so "Tolkien, tolkien" is one author.
+// Split a pasted or legacy author string into names: split on commas and
+// ampersands, never on the word "and" inside a name — but a segment
+// LEADING with "and" is an Oxford-comma conjunction ("Dawkins, Dennett,
+// Harris, and Hitchens"), not part of the name. Dedupe by id so
+// "Tolkien, tolkien" is one author.
 export function splitAuthors(text) {
   const seen = new Set();
   const names = [];
   for (const piece of text.split(/[,&]/)) {
     const name = piece.replace(/^\s*and\s+/i, '').trim().replace(/\s+/g, ' ');
-    if (name === '' || isPlaceholderAuthor(name)) continue;
+    if (name === '') continue;
     const id = authorIdFor(name);
     if (seen.has(id)) continue;
     seen.add(id);
@@ -35,32 +36,46 @@ export function splitAuthors(text) {
   return names;
 }
 
-// The canonical legacy `author` string kept on every book: /finished
-// search, stats, and old clients all keep reading it.
+// Display join for tooltips and search; the inverse of splitAuthors.
 export function joinAuthors(names) {
   return names.join(', ');
 }
 
-// Corporate authors ("Harvard Business Review") have no last name, so
-// abbreviation keeps the full name — "Harvard Business Review et al.",
-// never "Review et al.". Extend the set as more show up.
-const CORPORATE = new Set(['harvard business review']);
-
-// Presentation-only: never stored.
-export function lastNameOf(name) {
+// Resolve a typed name against the loaded author list into a chip:
+// {id, name} for an existing author, {id: null, name} for a new one (the
+// id is minted at write time). The second, by-id pass is load-bearing:
+// after a rename, authorIdFor(oldName) still equals the renamed doc's id,
+// and without it a typed pre-rename name would mint a "new" author whose
+// merge-set lands on the renamed doc and reverts the rename.
+export function resolveChip(name, authors) {
   const normalized = name.trim().replace(/\s+/g, ' ');
-  if (CORPORATE.has(authorIdFor(name))) return normalized;
+  const lower = normalized.toLowerCase();
+  const byName = authors.find((a) => a.nameLower === lower);
+  if (byName) return { id: byName.id, name: byName.name };
+  const byId = authors.find((a) => a.id === authorIdFor(normalized));
+  if (byId) return { id: byId.id, name: byId.name };
+  return { id: null, name: normalized };
+}
+
+// Presentation-only: never stored. sortName is the per-author escape
+// hatch for names the last-token rule mangles ("Le Guin" → "Guin");
+// non-person kinds keep their full name. Legacy {id, name} entries
+// embedded on unmigrated books carry no kind and are all persons.
+export function abbreviatedName(author) {
+  if (author.sortName) return author.sortName;
+  const normalized = author.name.trim().replace(/\s+/g, ' ');
+  if (author.kind !== undefined && author.kind !== 'person') return normalized;
   const tokens = normalized.split(' ');
   return tokens[tokens.length - 1];
 }
 
 // Compact list display: a lone author keeps their full name ("J. R. R.
-// Tolkien"); only multi-author lists abbreviate to last names ("Kahneman
-// & Tversky", "Kahneman et al.") — full names belong in the tooltip.
+// Tolkien"); only multi-author lists abbreviate ("Kahneman & Tversky",
+// "Kahneman et al.") — full names belong in the tooltip.
 export function formatAuthors(authors) {
   if (authors.length === 0) return '';
   if (authors.length === 1) return authors[0].name;
-  const names = authors.map((author) => lastNameOf(author.name));
+  const names = authors.map(abbreviatedName);
   if (names.length === 2) return `${names[0]} & ${names[1]}`;
   return `${names[0]} et al.`;
 }

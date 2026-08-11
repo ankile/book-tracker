@@ -10,7 +10,7 @@
 //   node db-audit.js --prod     # production (read-only)
 import { parseFlags, connect } from './migrate-lib.js';
 import { isFinished } from './src/lib/utils/finished.js';
-import { authorIdFor, joinAuthors, isPlaceholderAuthor } from './src/lib/utils/authors.js';
+import { AUTHOR_KINDS } from './src/lib/utils/authors.js';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -20,30 +20,43 @@ const found = (cls, path, detail = '') => findings.push({ cls, path, detail });
 
 const users = await db.collection('users').get();
 
+// Info-level author bookkeeping (summary lines, not findings): orphaned
+// author docs are a legitimate steady state — deleting or editing a book
+// never garbage-collects its authors, and an orphan is still useful for
+// autocomplete — but the counts make drift visible in audit diffs.
+let authorDocCount = 0;
+let authorOrphanCount = 0;
+
 for (const user of users.docs) {
   const books = await user.ref.collection('books').get();
 
-  // Author entity checks: doc shape, deterministic id, and (below, per
-  // book) that every referenced author doc exists.
+  // Author entity checks: doc shape only. Ids are deterministic at
+  // creation but OPAQUE afterward (rename edits name/nameLower in place),
+  // so id === authorIdFor(name) is deliberately NOT an invariant.
   const authorDocs = await user.ref.collection('authors').get();
-  const authorIds = new Set(authorDocs.docs.map((d) => d.id));
+  const authorDocIds = new Set(authorDocs.docs.map((d) => d.id));
+  authorDocCount += authorDocs.size;
   for (const authorDoc of authorDocs.docs) {
     const a = authorDoc.data();
     const ap = authorDoc.ref.path;
     if (typeof a.name !== 'string' || a.name.trim() === '') {
       found('authordoc.bad-name', ap, JSON.stringify(a.name));
-    } else {
-      if (a.nameLower !== a.name.toLowerCase()) found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
-      if (authorDoc.id !== authorIdFor(a.name)) found('authordoc.id-mismatch', ap, a.name);
-      if (isPlaceholderAuthor(a.name)) found('authordoc.placeholder', ap, a.name);
+    } else if (a.nameLower !== a.name.toLowerCase()) {
+      found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
+    }
+    if (!AUTHOR_KINDS.includes(a.kind)) found('authordoc.bad-kind', ap, String(a.kind));
+    if (a.sortName !== undefined && (typeof a.sortName !== 'string' || a.sortName.trim() === '')) {
+      found('authordoc.bad-sortname', ap, JSON.stringify(a.sortName));
     }
   }
+
+  const referencedAuthorIds = new Set();
 
   for (const book of books.docs) {
     const b = book.data();
     const p = book.ref.path;
 
-    for (const field of ['createdAt', 'updatedAt', 'author', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'pageCount']) {
+    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'pageCount']) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
     }
     for (const field of ['currentPage', 'pageCount', 'pagesRead', 'timeRead']) {
@@ -64,30 +77,31 @@ for (const user of users.docs) {
     }
     if (b.activeTimer) found('book.active-timer', p, JSON.stringify(b.activeTimer));
 
-    // Author pre-flight, only for books the authors migration has not
-    // reached yet (post-migration the canonical string is comma-joined,
-    // so these separator checks would be pure noise).
-    if (b.authors === undefined && typeof b.author === 'string') {
-      if (b.author.trim() === '') found('author.empty', p);
-      if (b.author.includes(',')) found('author.has-comma', p, b.author);
-      if (b.author.includes('&')) found('author.has-ampersand', p, b.author);
-      if (/\band\b/i.test(b.author)) found('author.has-and', p, b.author);
+    // Author references: every id resolves to an author doc, no dupes.
+    if (b.authorIds !== undefined) {
+      if (
+        !Array.isArray(b.authorIds) ||
+        b.authorIds.some((id) => typeof id !== 'string' || id === '') ||
+        new Set(b.authorIds).size !== b.authorIds.length
+      ) {
+        found('book.authorids-bad-shape', p, JSON.stringify(b.authorIds));
+      } else {
+        for (const id of b.authorIds) {
+          referencedAuthorIds.add(id);
+          if (!authorDocIds.has(id)) found('book.author-doc-missing', p, id);
+        }
+      }
     }
 
-    // Post-migration author invariants: every book carries the array, the
-    // legacy string is exactly the join (except authors: [] books, whose
-    // string is free display text — empty or a placeholder), ids are
-    // deterministic, no entity is a placeholder, and every referenced
-    // author doc exists.
-    if (b.authors === undefined) {
-      found('book.missing.authors', p);
-    } else {
-      const names = b.authors.map((a) => a.name);
-      if (b.authors.length > 0 && b.author !== joinAuthors(names)) found('book.author-join-mismatch', p, `${b.author} != ${joinAuthors(names)}`);
-      for (const a of b.authors) {
-        if (a.id !== authorIdFor(a.name)) found('book.author-id-mismatch', p, `${a.id} != ${authorIdFor(a.name)}`);
-        if (!authorIds.has(a.id)) found('book.author-doc-missing', p, a.id);
-        if (isPlaceholderAuthor(a.name)) found('book.author-placeholder-entity', p, a.name);
+    // Legacy authorship fields mean the last writer was an old client (the
+    // current client deletes them on every write): this is the migration
+    // pre-flight before the authorIds run, and the straggler detector
+    // after it — a migration re-run clears it either way.
+    if (b.author !== undefined || b.authors !== undefined) {
+      const which = ['author', 'authors'].filter((f) => b[f] !== undefined).join('+');
+      found('book.legacy-author-field', p, which);
+      if (Array.isArray(b.authors)) {
+        for (const a of b.authors) referencedAuthorIds.add(a.id);
       }
     }
 
@@ -103,6 +117,10 @@ for (const user of users.docs) {
         found('update.pages-arithmetic', up, `${u.fromPage}->${u.toPage} pagesRead=${u.pagesRead}`);
       }
     }
+  }
+
+  for (const authorDoc of authorDocs.docs) {
+    if (!referencedAuthorIds.has(authorDoc.id)) authorOrphanCount += 1;
   }
 }
 
@@ -121,16 +139,6 @@ for (const user of users.docs) {
   }
 }
 
-// Distinct author strings, for the authors-migration pre-flight summary.
-const authorSet = new Set();
-for (const user of users.docs) {
-  const books = await user.ref.collection('books').get();
-  for (const book of books.docs) {
-    const a = book.data().author;
-    if (typeof a === 'string' && a.trim() !== '') authorSet.add(a.trim());
-  }
-}
-
 findings.sort((a, b) => (a.cls === b.cls ? (a.path < b.path ? -1 : 1) : a.cls < b.cls ? -1 : 1));
 for (const f of findings) {
   console.log(`${f.cls} ${f.path}${f.detail ? ` [${f.detail}]` : ''}`);
@@ -140,5 +148,6 @@ const counts = {};
 for (const f of findings) counts[f.cls] = (counts[f.cls] ?? 0) + 1;
 for (const cls of Object.keys(counts).sort()) console.log(`${cls}: ${counts[cls]}`);
 console.log(`users: ${users.size}`);
-console.log(`distinct-author-strings: ${authorSet.size}`);
+console.log(`author-docs: ${authorDocCount}`);
+console.log(`author-orphans: ${authorOrphanCount}`);
 console.log(`findings: ${findings.length}`);
