@@ -6,6 +6,7 @@ import {
   joinAuthors,
   lastNameOf,
   formatAuthors,
+  isPlaceholderAuthor,
 } from '../src/lib/utils/authors.js';
 
 test('authorIdFor normalizes case, whitespace, and slashes', () => {
@@ -45,6 +46,15 @@ test('splitAuthors drops empties and dedupes by id', () => {
   assert.deepEqual(splitAuthors('Tolkien, tolkien'), ['Tolkien']);
 });
 
+test('placeholder attributions are recognized and never become entities', () => {
+  assert.ok(isPlaceholderAuthor('Various Authors'));
+  assert.ok(isPlaceholderAuthor('  various  authors '));
+  assert.ok(isPlaceholderAuthor('Unknown'));
+  assert.ok(!isPlaceholderAuthor('Vario Us'));
+  assert.deepEqual(splitAuthors('Various Authors'), []);
+  assert.deepEqual(splitAuthors('Various Authors & Tolkien'), ['Tolkien']);
+});
+
 test('joinAuthors round-trips through splitAuthors', () => {
   const names = ['Daniel Kahneman', 'Amos Tversky'];
   assert.deepEqual(splitAuthors(joinAuthors(names)), names);
@@ -59,7 +69,8 @@ test('lastNameOf takes the last whitespace token', () => {
 test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
   const a = (name) => ({ id: authorIdFor(name), name });
   assert.equal(formatAuthors([]), '');
-  assert.equal(formatAuthors([a('J. R. R. Tolkien')]), 'Tolkien');
+  // A lone author keeps the full name; only lists abbreviate.
+  assert.equal(formatAuthors([a('J. R. R. Tolkien')]), 'J. R. R. Tolkien');
   assert.equal(
     formatAuthors([a('Daniel Kahneman'), a('Amos Tversky')]),
     'Kahneman & Tversky',

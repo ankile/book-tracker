@@ -179,3 +179,4 @@ rejects newly *created* gen1 Firestore triggers, so it must be gen2
 | 2025-06 | `migrate-add-owner.js` | backfilled `owner` refs on books/updates |
 | 2026-08-11 | `migrate-normalize-books.js` | backfilled `isbn: ''` on 6 legacy books; carries the full normalize policy table for re-runs |
 | 2026-08-11 | `migrate-authors.js` | authors as first-class entities: split 220 books' author strings into `users/{uid}/authors` docs + `authors` arrays (459 ops); audit went to 0 findings |
+| 2026-08-11 | `migrate-placeholder-authors.js` | placeholder attributions ("Various Authors") are display text, not entities: stripped 1 book's array, deleted 1 author doc |

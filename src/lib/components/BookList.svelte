@@ -477,7 +477,7 @@
             <Icon data={edit} scale="0.8" style="color: #666;" />
           </button>
           <br />
-          <span class="author" title={book.author}>{book.authors ? formatAuthors(book.authors) : book.author}:</span>
+          <span class="author" title={book.author}>{book.authors?.length ? formatAuthors(book.authors) : book.author}:</span>
           <br />
           <span class="title">{book.title}</span>
         </div>

@@ -25,7 +25,7 @@ import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
 import { isFinished } from '../utils/finished.js';
-import { authorIdFor, joinAuthors } from '../utils/authors.js';
+import { authorIdFor, splitAuthors, joinAuthors } from '../utils/authors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -256,16 +256,20 @@ class Database {
 
   // Books store authors two ways: the authors array of {id, name} refs
   // into the authors collection (the source of truth for the entity), and
-  // the legacy joined author string that /finished search, old clients,
-  // and rollback keep reading.
-  static async addBook({ userId, authorNames, title, pageCount, currentPage, isbn }) {
+  // the legacy author string that /finished search, old clients, and
+  // rollback keep reading. The string is the canonical join of the entity
+  // names — except when the text yields no entities (empty, or a
+  // placeholder like "Various Authors"), where the raw text is kept as
+  // display-only with authors: [].
+  static async addBook({ userId, authorText, title, pageCount, currentPage, isbn }) {
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
 
-    const authors = upsertAuthors(batch, userId, authorNames);
+    const names = splitAuthors(authorText);
+    const authors = upsertAuthors(batch, userId, names);
     batch.set(bookRef, {
-      author: joinAuthors(authorNames),
+      author: names.length > 0 ? joinAuthors(names) : authorText.trim(),
       authors,
       currentPage,
       finished: isFinished(currentPage, pageCount),
@@ -282,16 +286,17 @@ class Database {
     await batch.commit();
   }
 
-  static async updateBook({ userId, bookId, authorNames, title, pageCount, currentPage, isbn }) {
+  static async updateBook({ userId, bookId, authorText, title, pageCount, currentPage, isbn }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
-    const authors = upsertAuthors(batch, userId, authorNames);
+    const names = splitAuthors(authorText);
+    const authors = upsertAuthors(batch, userId, names);
     // currentPage is the book's existing value, passed in only so the
     // finished flag tracks the (possibly edited) pageCount; the page
     // itself is not written here.
     batch.update(bookRef, {
-      author: joinAuthors(authorNames),
+      author: names.length > 0 ? joinAuthors(names) : authorText.trim(),
       authors,
       title,
       pageCount,

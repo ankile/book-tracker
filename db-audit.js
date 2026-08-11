@@ -10,7 +10,7 @@
 //   node db-audit.js --prod     # production (read-only)
 import { parseFlags, connect } from './migrate-lib.js';
 import { isFinished } from './src/lib/utils/finished.js';
-import { authorIdFor, joinAuthors } from './src/lib/utils/authors.js';
+import { authorIdFor, joinAuthors, isPlaceholderAuthor } from './src/lib/utils/authors.js';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -35,6 +35,7 @@ for (const user of users.docs) {
     } else {
       if (a.nameLower !== a.name.toLowerCase()) found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
       if (authorDoc.id !== authorIdFor(a.name)) found('authordoc.id-mismatch', ap, a.name);
+      if (isPlaceholderAuthor(a.name)) found('authordoc.placeholder', ap, a.name);
     }
   }
 
@@ -74,16 +75,19 @@ for (const user of users.docs) {
     }
 
     // Post-migration author invariants: every book carries the array, the
-    // legacy string is exactly the join, ids are deterministic, and every
-    // referenced author doc exists.
+    // legacy string is exactly the join (except authors: [] books, whose
+    // string is free display text — empty or a placeholder), ids are
+    // deterministic, no entity is a placeholder, and every referenced
+    // author doc exists.
     if (b.authors === undefined) {
       found('book.missing.authors', p);
     } else {
       const names = b.authors.map((a) => a.name);
-      if (b.author !== joinAuthors(names)) found('book.author-join-mismatch', p, `${b.author} != ${joinAuthors(names)}`);
+      if (b.authors.length > 0 && b.author !== joinAuthors(names)) found('book.author-join-mismatch', p, `${b.author} != ${joinAuthors(names)}`);
       for (const a of b.authors) {
         if (a.id !== authorIdFor(a.name)) found('book.author-id-mismatch', p, `${a.id} != ${authorIdFor(a.name)}`);
         if (!authorIds.has(a.id)) found('book.author-doc-missing', p, a.id);
+        if (isPlaceholderAuthor(a.name)) found('book.author-placeholder-entity', p, a.name);
       }
     }
 

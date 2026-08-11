@@ -60,8 +60,9 @@ test("batcher set allows updatedAt and dry-run counts without committing", async
   for (let i = 0; i < 750; i++) {
     await writer.set(db.doc(`users/abc/authors/a${i}`), { updatedAt: Timestamp.now() });
   }
+  await writer.delete(db.doc("users/abc/authors/gone"));
   await writer.flush();
-  assert.equal(writer.count(), 750);
+  assert.equal(writer.count(), 751);
 });
 
 test("flags parse and unknown flags crash", () => {

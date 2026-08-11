@@ -97,6 +97,10 @@ export function batcher(db, { apply }) {
       batch.update(ref, data);
       await flushIfFull();
     },
+    async delete(ref) {
+      batch.delete(ref);
+      await flushIfFull();
+    },
     async flush() {
       if (pending > 0 && apply) await batch.commit();
       batch = db.batch();

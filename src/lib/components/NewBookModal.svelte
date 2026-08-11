@@ -4,7 +4,6 @@
   import AuthorInput from "$lib/components/AuthorInput.svelte";
 
   import { Database } from "../firebase/db";
-  import { splitAuthors } from "../utils/authors.js";
 
   let { open, userId, book = null, onclose } = $props();
 
@@ -42,7 +41,7 @@
   function addBook() {
     Database.addBook({
       userId,
-      authorNames: splitAuthors(author),
+      authorText: author,
       title,
       pageCount,
       currentPage,
@@ -55,7 +54,7 @@
     Database.updateBook({
       userId,
       bookId: book.id,
-      authorNames: splitAuthors(author),
+      authorText: author,
       title,
       pageCount,
       currentPage: book.currentPage,
