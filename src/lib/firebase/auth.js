@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import {
   browserLocalPersistence,
+  connectAuthEmulator,
   getAuth,
   onAuthStateChanged,
   setPersistence,
@@ -13,6 +14,11 @@ import { browser } from '$app/environment';
 import { clearErrors } from '../stores/errors.js';
 
 export const auth = getAuth(app);
+
+// Migration-rehearsal hook, paired with the one in db.js.
+if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
+  connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+}
 
 const authPersistenceReady = browser
   ? setPersistence(auth, browserLocalPersistence)

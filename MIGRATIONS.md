@@ -71,6 +71,27 @@ triggers work in the emulator; the eur3 gen1 restriction is deploy-time
 only), so trigger–migration interaction is rehearsed for real, not assumed.
 Inspect anything suspicious in the emulator UI at http://127.0.0.1:4000.
 
+### 2b. Rehearse the real client against the migrated data
+
+When a migration changes what the client reads or writes, run the actual
+client against the migrated emulator data before deploying anything. Start
+the emulators with `--only firestore,functions,auth`, then create an auth
+user with your own prod uid so the snapshot's data is yours:
+
+```sh
+FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --input-type=module -e "
+import { initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+initializeApp({ projectId: 'book-tracker-d8f24' });
+await getAuth().createUser({ uid: '<your-prod-uid>', email: 'me@test.local', password: 'test1234' });"
+VITE_EMULATOR=1 npm run dev
+```
+
+`VITE_EMULATOR` flips the DEV-gated hooks in `src/lib/firebase/db.js` and
+`auth.js` to the local emulators. Exercise every read and write path the
+migration touches, then re-run the migration dry-run: the writes the fresh
+client just made must be invisible to it (0 ops against new-shape docs).
+
 ### 3. Deploy code changes, in this order
 
 1. **Functions** (`firebase deploy --only functions:<name>`) — trigger
@@ -127,6 +148,22 @@ re-run, and why the follow-up audit exists.
   batched writes make partial progress harmless and the guards make re-runs
   free. Fix the surprise, re-run.
 - Migration scripts are committed and kept — they are the schema history.
+  They may crash on import once `src/lib/utils/` moves past the vocabulary
+  they were written against; that is correct — re-running them against a
+  newer schema would be wrong, and loud beats silent.
+- **Audit-changing migrations**: when a migration ships together with new
+  `db-audit.js` invariants, the baseline audit runs the NEW audit — the
+  pre file then shows exactly the defect classes the migration will clear,
+  and the pre/post diff is the intended-change signature.
+- **Author ids are opaque after creation** (as of `migrate-author-ids.js`):
+  deterministic `authorIdFor(name)` at mint time only; rename edits
+  `name`/`nameLower` in place. No script or audit may assert
+  `id === authorIdFor(name)` on an author doc. One sanctioned exception:
+  legacy `authors` arrays on book docs, which only pre-rename old clients
+  produce, may be asserted during that migration's re-runs.
+- **Legacy author fields mean an old client wrote last**: the current
+  client deletes `author`/`authors` on every book write, so their presence
+  is proof of a stale writer and re-runs rebuild `authorIds` from them.
 
 ## Backups and disaster recovery
 
@@ -161,6 +198,12 @@ Notes on `db-restore.js --prod` (disaster recovery only):
 Lighter PITR path (no scratch database): the Admin SDK can read the live
 database as of any point in the PITR window via read-time reads — good
 enough to recover individual fields without a full restore.
+
+Posture change with `migrate-author-ids.js`: the legacy `author` string on
+book docs used to double as an informal rollback affordance; it is gone
+from docs once that migration applies. Rollback is now explicitly: redeploy
+the previous hosting build, then recover fields from the immediately-prior
+snapshot or PITR. The affordances above fully replace it.
 
 ## Triggers and book content
 

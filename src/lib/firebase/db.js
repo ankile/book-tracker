@@ -18,6 +18,7 @@ import {
   Timestamp,
   serverTimestamp,
   initializeFirestore,
+  connectFirestoreEmulator,
   persistentLocalCache,
   persistentMultipleTabManager
 } from 'firebase/firestore';
@@ -33,6 +34,13 @@ import { authorIdFor } from '../utils/authors.js';
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
+
+// Migration-rehearsal hook (MIGRATIONS.md): VITE_EMULATOR=1 npm run dev
+// points the dev client at the local emulators to exercise real client
+// code against migrated snapshot data. DEV-gated so it cannot ship.
+if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
+  connectFirestoreEmulator(db, '127.0.0.1', 8080);
+}
 
 // The stalled-Toggl-sync sweep runs at most once per session, not on every
 // remount of the book list.
