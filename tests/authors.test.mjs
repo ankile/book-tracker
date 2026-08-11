@@ -66,6 +66,19 @@ test('lastNameOf takes the last whitespace token', () => {
   assert.equal(lastNameOf('Ursula K. Le Guin'), 'Guin');
 });
 
+test('corporate authors keep their full name in abbreviations', () => {
+  assert.equal(lastNameOf('Harvard  Business Review'), 'Harvard Business Review');
+  const a = (name) => ({ id: authorIdFor(name), name });
+  assert.equal(
+    formatAuthors([a('Harvard Business Review'), a('Clayton Christensen')]),
+    'Harvard Business Review & Christensen',
+  );
+  assert.equal(
+    formatAuthors([a('Harvard Business Review'), a('Clayton Christensen'), a('Michael Porter')]),
+    'Harvard Business Review et al.',
+  );
+});
+
 test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
   const a = (name) => ({ id: authorIdFor(name), name });
   assert.equal(formatAuthors([]), '');

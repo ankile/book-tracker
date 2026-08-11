@@ -41,9 +41,16 @@ export function joinAuthors(names) {
   return names.join(', ');
 }
 
+// Corporate authors ("Harvard Business Review") have no last name, so
+// abbreviation keeps the full name — "Harvard Business Review et al.",
+// never "Review et al.". Extend the set as more show up.
+const CORPORATE = new Set(['harvard business review']);
+
 // Presentation-only: never stored.
 export function lastNameOf(name) {
-  const tokens = name.trim().split(/\s+/);
+  const normalized = name.trim().replace(/\s+/g, ' ');
+  if (CORPORATE.has(authorIdFor(name))) return normalized;
+  const tokens = normalized.split(' ');
   return tokens[tokens.length - 1];
 }
 
