@@ -10,6 +10,7 @@
 //   node db-audit.js --prod     # production (read-only)
 import { parseFlags, connect } from './migrate-lib.js';
 import { isFinished } from './src/lib/utils/finished.js';
+import { authorIdFor, joinAuthors } from './src/lib/utils/authors.js';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -21,6 +22,21 @@ const users = await db.collection('users').get();
 
 for (const user of users.docs) {
   const books = await user.ref.collection('books').get();
+
+  // Author entity checks: doc shape, deterministic id, and (below, per
+  // book) that every referenced author doc exists.
+  const authorDocs = await user.ref.collection('authors').get();
+  const authorIds = new Set(authorDocs.docs.map((d) => d.id));
+  for (const authorDoc of authorDocs.docs) {
+    const a = authorDoc.data();
+    const ap = authorDoc.ref.path;
+    if (typeof a.name !== 'string' || a.name.trim() === '') {
+      found('authordoc.bad-name', ap, JSON.stringify(a.name));
+    } else {
+      if (a.nameLower !== a.name.toLowerCase()) found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
+      if (authorDoc.id !== authorIdFor(a.name)) found('authordoc.id-mismatch', ap, a.name);
+    }
+  }
 
   for (const book of books.docs) {
     const b = book.data();
@@ -47,12 +63,28 @@ for (const user of users.docs) {
     }
     if (b.activeTimer) found('book.active-timer', p, JSON.stringify(b.activeTimer));
 
-    // Author pre-flight for the authors migration.
-    if (typeof b.author === 'string') {
+    // Author pre-flight, only for books the authors migration has not
+    // reached yet (post-migration the canonical string is comma-joined,
+    // so these separator checks would be pure noise).
+    if (b.authors === undefined && typeof b.author === 'string') {
       if (b.author.trim() === '') found('author.empty', p);
       if (b.author.includes(',')) found('author.has-comma', p, b.author);
       if (b.author.includes('&')) found('author.has-ampersand', p, b.author);
       if (/\band\b/i.test(b.author)) found('author.has-and', p, b.author);
+    }
+
+    // Post-migration author invariants: every book carries the array, the
+    // legacy string is exactly the join, ids are deterministic, and every
+    // referenced author doc exists.
+    if (b.authors === undefined) {
+      found('book.missing.authors', p);
+    } else {
+      const names = b.authors.map((a) => a.name);
+      if (b.author !== joinAuthors(names)) found('book.author-join-mismatch', p, `${b.author} != ${joinAuthors(names)}`);
+      for (const a of b.authors) {
+        if (a.id !== authorIdFor(a.name)) found('book.author-id-mismatch', p, `${a.id} != ${authorIdFor(a.name)}`);
+        if (!authorIds.has(a.id)) found('book.author-doc-missing', p, a.id);
+      }
     }
 
     const updates = await book.ref.collection('updates').get();

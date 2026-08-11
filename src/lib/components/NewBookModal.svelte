@@ -1,12 +1,27 @@
 <script>
   import ModalCard from "$lib/components/ModalCard.svelte";
   import Input from "$lib/components/Input.svelte";
+  import AuthorInput from "$lib/components/AuthorInput.svelte";
 
   import { Database } from "../firebase/db";
+  import { splitAuthors } from "../utils/authors.js";
 
   let { open, userId, book = null, onclose } = $props();
 
   let author = $state("");
+  // Existing authors for autocomplete; the listener only lives while the
+  // modal is open.
+  let authorList = $state([]);
+  $effect(() => {
+    if (!open || !userId) return;
+    const store = Database.getAuthors(userId);
+    const unsubscribeStore = store.subscribe((authors) => (authorList = authors));
+    return () => {
+      unsubscribeStore();
+      store.unsubscribe();
+      authorList = [];
+    };
+  });
   let title = $state("");
   let pageCount = $state();
   let currentPage = $state(1);
@@ -27,7 +42,7 @@
   function addBook() {
     Database.addBook({
       userId,
-      author,
+      authorNames: splitAuthors(author),
       title,
       pageCount,
       currentPage,
@@ -40,7 +55,7 @@
     Database.updateBook({
       userId,
       bookId: book.id,
-      author,
+      authorNames: splitAuthors(author),
       title,
       pageCount,
       currentPage: book.currentPage,
@@ -183,7 +198,7 @@
   primaryText={isEditMode ? 'Update book' : 'Add book'}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <input id="author" class="form-control" type="text" bind:value={author} placeholder="Name of author(s)" />
+    <AuthorInput bind:value={author} authors={authorList} inputId="author" />
   </Input>
 
   <div class="space"></div>

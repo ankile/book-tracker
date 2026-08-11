@@ -19,9 +19,11 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
 
   // Budgets raised 230/145 -> 255/170 KiB when Firestore offline persistence
   // (persistentLocalCache) was enabled; it adds ~16 KiB to the Firestore chunk.
+  // Total raised 255 -> 258 KiB for the authors entity (autocomplete
+  // component + name utilities, ~1 KiB) — the old budget had <1 KiB headroom.
   assert.ok(
-    totalBytes <= 255 * 1024,
-    `Expected at most 255 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 258 * 1024,
+    `Expected at most 258 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

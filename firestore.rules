@@ -18,6 +18,13 @@ service cloud.firestore {
                       && request.resource.data.type in ['reading', 'update'];
       }
     }
+    // Author entities, written in the same client batch as the book that
+    // references them. Own-user private data, so books-level strictness
+    // applies (the validation-heavy style is for anonymous surfaces).
+    match /users/{userId}/authors/{authorId} {
+      allow read, write: if request.auth != null && userId == request.auth.uid;
+    }
+
     // Offline Toggl sync queue: owner enqueues and reads status; the
     // toggl-syncqueue function (Admin SDK) processes items. The only
     // client update allowed is the retry sweep flipping a stalled item's

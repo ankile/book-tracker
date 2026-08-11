@@ -8,6 +8,7 @@
   import { Database } from "../firebase/db";
   import { togglStart, togglStop } from "../firebase/functions.js";
   import { formatTime } from "../utils/format";
+  import { formatAuthors } from "../utils/authors.js";
 
   let { finished, userId, books: booksProp = null } = $props();
 
@@ -476,7 +477,7 @@
             <Icon data={edit} scale="0.8" style="color: #666;" />
           </button>
           <br />
-          <span class="author">{book.author}:</span>
+          <span class="author" title={book.author}>{book.authors ? formatAuthors(book.authors) : book.author}:</span>
           <br />
           <span class="title">{book.title}</span>
         </div>

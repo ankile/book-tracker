@@ -25,6 +25,7 @@ import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
 import { isFinished } from '../utils/finished.js';
+import { authorIdFor, joinAuthors } from '../utils/authors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -83,6 +84,22 @@ export function logIssue({ level, event, message, code = null, detail = null }) 
       Date.now() + ISSUE_RETENTION_DAYS * 24 * 60 * 60 * 1000
     ),
   }).catch((error) => console.error('logIssue failed', error));
+}
+
+// Merge-upsert one author doc per name into the batch that writes the
+// book, so the authors collection can never disagree with the books that
+// reference it — offline included. Deterministic ids make the upsert
+// convergent with no prior read. Returns the array stored on the book.
+function upsertAuthors(batch, userId, names) {
+  return names.map((name) => {
+    const id = authorIdFor(name);
+    batch.set(
+      doc(db, 'users', userId, 'authors', id),
+      { name, nameLower: name.toLowerCase(), updatedAt: Timestamp.now() },
+      { merge: true }
+    );
+    return { id, name };
+  });
 }
 
 class Database {
@@ -145,6 +162,28 @@ class Database {
       });
       store.set(books);
     }, listenError('load your books'));
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
+
+  // All author docs for autocomplete. Deliberately unordered (see
+  // getAllBooks for why orderBy is a trap); sorted client-side.
+  static getAuthors(userId) {
+    const store = writable([]);
+
+    const q = query(collection(db, 'users', userId, 'authors'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const authors = [];
+      snapshot.forEach((doc) => {
+        authors.push({ id: doc.id, ...doc.data() });
+      });
+      authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
+      store.set(authors);
+    }, listenError('load your authors'));
 
     return {
       subscribe: store.subscribe,
@@ -215,11 +254,19 @@ class Database {
     await batch.commit();
   }
 
-  static async addBook({ userId, author, title, pageCount, currentPage, isbn }) {
+  // Books store authors two ways: the authors array of {id, name} refs
+  // into the authors collection (the source of truth for the entity), and
+  // the legacy joined author string that /finished search, old clients,
+  // and rollback keep reading.
+  static async addBook({ userId, authorNames, title, pageCount, currentPage, isbn }) {
+    const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
+    const bookRef = doc(collection(db, 'users', userId, 'books'));
 
-    await addDoc(collection(db, 'users', userId, 'books'), {
-      author,
+    const authors = upsertAuthors(batch, userId, authorNames);
+    batch.set(bookRef, {
+      author: joinAuthors(authorNames),
+      authors,
       currentPage,
       finished: isFinished(currentPage, pageCount),
       owner: ownerRef,
@@ -231,22 +278,29 @@ class Database {
       updatedAt: Timestamp.now(),
       createdAt: Timestamp.now(),
     });
+
+    await batch.commit();
   }
 
-  static async updateBook({ userId, bookId, author, title, pageCount, currentPage, isbn }) {
+  static async updateBook({ userId, bookId, authorNames, title, pageCount, currentPage, isbn }) {
+    const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
+    const authors = upsertAuthors(batch, userId, authorNames);
     // currentPage is the book's existing value, passed in only so the
     // finished flag tracks the (possibly edited) pageCount; the page
     // itself is not written here.
-    await updateDoc(bookRef, {
-      author,
+    batch.update(bookRef, {
+      author: joinAuthors(authorNames),
+      authors,
       title,
       pageCount,
       finished: isFinished(currentPage, pageCount),
       isbn,
       updatedAt: Timestamp.now(),
     });
+
+    await batch.commit();
   }
 
   // Local (non-Toggl) timers reuse the activeTimer field the Toggl flow
