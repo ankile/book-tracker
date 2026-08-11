@@ -5,7 +5,7 @@
   // dashed, existing ones solid. Hand-rolled (bundle budget): a relative
   // wrapper with an absolutely positioned suggestion list, which works
   // inside the <dialog> top layer without a portal.
-  import { resolveChip, splitAuthors } from "../utils/authors.js";
+  import { resolveChip, splitAuthors, joinPersonName } from "../utils/authors.js";
 
   let { chips = $bindable(), authors, inputId } = $props();
 
@@ -182,7 +182,7 @@
     }}>
     {#each chips as chip, index (chip.id ?? `new:${chip.name.toLowerCase()}`)}
       <span class="chip" class:new-author={chip.id === null} title={chip.id === null ? "New author" : chip.name}>
-        {chip.name}
+        {chip.id === null && chip.kind === "person" ? joinPersonName(chip) : chip.name}
         <button
           type="button"
           class="chip-remove"

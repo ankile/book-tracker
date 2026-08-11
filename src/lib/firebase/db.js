@@ -27,7 +27,7 @@ import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
 import { isFinished } from '../utils/finished.js';
-import { authorIdFor } from '../utils/authors.js';
+import { authorIdFor, joinPersonName } from '../utils/authors.js';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -95,21 +95,41 @@ export function logIssue({ level, event, message, code = null, detail = null }) 
   }).catch((error) => console.error('logIssue failed', error));
 }
 
-// Resolve author chips ({id, name}; id null = new author) into the id
-// array stored on the book, minting author docs for new names in the same
-// batch as the book write so the collection can never disagree with the
-// books that reference it — offline included. Existing chips pass through
-// untouched: a book write must never rewrite an author doc, or renames
-// made on the authors page would be silently reverted. New mints get the
-// deterministic creation-time id (convergent offline merge-upserts) and
-// kind 'person'; entity/placeholder are assigned on the authors page.
+// The stored author-doc name fields for a given kind: persons derive the
+// display name from their explicit, user-confirmed parts; other kinds are
+// just the raw name. Shared by minting and the authors-page edit.
+function authorNameFields({ kind, name, givenName, familyName }) {
+  const person = kind === 'person';
+  const displayName = person
+    ? joinPersonName({ givenName: givenName.trim().replace(/\s+/g, ' '), familyName: familyName.trim().replace(/\s+/g, ' ') })
+    : name.trim().replace(/\s+/g, ' ');
+  return {
+    name: displayName,
+    nameLower: displayName.toLowerCase(),
+    kind,
+    // deleteField() rather than omission so an edit can change kind or
+    // clear a mononym's given name without leaving stale parts behind.
+    givenName: person && givenName.trim() !== '' ? givenName.trim().replace(/\s+/g, ' ') : deleteField(),
+    familyName: person ? familyName.trim().replace(/\s+/g, ' ') : deleteField(),
+  };
+}
+
+// Resolve author chips into the id array stored on the book, minting
+// author docs for new authors in the same batch as the book write so the
+// collection can never disagree with the books that reference it —
+// offline included. Existing chips ({id, name}) pass through untouched: a
+// book write must never rewrite an author doc, or renames made on the
+// authors page would be silently reverted. New chips carry the kind and
+// the user-confirmed name parts from the entry form and mint with the
+// deterministic creation-time id (convergent offline merge-upserts).
 function resolveAuthorIds(batch, userId, chips) {
   return chips.map((chip) => {
     if (chip.id !== null) return chip.id;
-    const id = authorIdFor(chip.name);
+    const fields = authorNameFields(chip);
+    const id = authorIdFor(fields.name);
     batch.set(
       doc(db, 'users', userId, 'authors', id),
-      { name: chip.name, nameLower: chip.name.toLowerCase(), kind: 'person', updatedAt: Timestamp.now() },
+      { ...fields, updatedAt: Timestamp.now() },
       { merge: true }
     );
     return id;
@@ -319,15 +339,13 @@ class Database {
   }
 
   // Author entity mutations, driven by the /authors page. Rename and
-  // kind/sortName edits touch only the author doc — every book shows the
+  // kind/name-part edits touch only the author doc — every book shows the
   // new values through the id join, which is the point of id-only refs.
-  // The doc id deliberately stays put (opaque after creation).
-  static async updateAuthor({ userId, authorId, name, kind, sortName }) {
+  // The doc id deliberately stays put (opaque after creation). `name` is
+  // read only for non-person kinds; persons derive it from the parts.
+  static async updateAuthor({ userId, authorId, name, kind, givenName, familyName }) {
     await updateDoc(doc(db, 'users', userId, 'authors', authorId), {
-      name,
-      nameLower: name.toLowerCase(),
-      kind,
-      sortName: sortName ? sortName : deleteField(),
+      ...authorNameFields({ kind, name, givenName, familyName }),
       updatedAt: Timestamp.now(),
     });
   }

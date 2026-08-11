@@ -4,7 +4,7 @@
   import AuthorInput from "$lib/components/AuthorInput.svelte";
 
   import { Database } from "../firebase/db";
-  import { resolveChip, splitAuthors } from "../utils/authors.js";
+  import { resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.js";
 
   let { open, userId, book = null, onclose } = $props();
 
@@ -176,6 +176,21 @@
     height: 1em;
   }
 
+  .new-author-detail {
+    display: flex;
+    gap: 0.4rem;
+    margin: 0.4rem 2em 0;
+  }
+
+  .new-author-detail .detail-kind {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  .new-author-detail input {
+    min-width: 0;
+  }
+
   .delete-button {
     background: none;
     border: none;
@@ -240,6 +255,45 @@
   <Input label="Author" inputId="author">
     <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />
   </Input>
+
+  <!-- Each new author gets its parts confirmed at entry: the last-token
+       split is only a prefill, so "Le Guin"-style surnames are fixed in
+       the box, not by a heuristic later. Existing authors need nothing. -->
+  {#each authorChips.filter((c) => c.id === null) as chip (chip)}
+    <div class="new-author-detail">
+      <select
+        class="form-select detail-kind"
+        aria-label={`Kind of new author ${chip.name}`}
+        bind:value={chip.kind}>
+        {#each AUTHOR_KINDS as kind (kind)}
+          <option value={kind}>{kind}</option>
+        {/each}
+      </select>
+      {#if chip.kind === "person"}
+        <input
+          type="text"
+          class="form-control"
+          placeholder="First name(s)"
+          aria-label={`First name(s) of ${chip.name}`}
+          bind:value={chip.givenName} />
+        <input
+          type="text"
+          class="form-control"
+          placeholder="Last name"
+          aria-label={`Last name of ${chip.name}`}
+          required
+          bind:value={chip.familyName} />
+      {:else}
+        <input
+          type="text"
+          class="form-control"
+          placeholder="Name"
+          aria-label={`Name of ${chip.name}`}
+          required
+          bind:value={chip.name} />
+      {/if}
+    </div>
+  {/each}
 
   <div class="space"></div>
 

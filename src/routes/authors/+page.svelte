@@ -3,7 +3,7 @@
   import { Database } from '$lib/firebase/db.js';
   import ModalCard from '$lib/components/ModalCard.svelte';
   import Input from '$lib/components/Input.svelte';
-  import { AUTHOR_KINDS } from '$lib/utils/authors.js';
+  import { AUTHOR_KINDS, splitPersonName, joinPersonName } from '$lib/utils/authors.js';
 
   let authorList = $state(undefined);
   $effect(() => {
@@ -29,7 +29,9 @@
     }
   });
 
-  const authors = $derived(authorList ?? []);
+  // Persons sort by their explicit family name — the point of storing it.
+  const sortKey = (a) => (a.kind === 'person' && a.familyName ? `${a.familyName} ${a.name}` : a.name).toLowerCase();
+  const authors = $derived((authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
 
   // Books still carrying legacy fields reference authors through their
   // embedded {id, name} entries; those references count too — delete
@@ -54,22 +56,29 @@
   let editAuthor = $state(null);
   let editName = $state('');
   let editKind = $state('person');
-  let editSortName = $state('');
+  let editGivenName = $state('');
+  let editFamilyName = $state('');
   function openEdit(author) {
     editAuthor = author;
     editName = author.name;
-    // Docs written before the kind migration lack the field; the form
-    // defaults them to person and saving backfills it.
+    // Docs written before the kind/parts migrations lack the fields; the
+    // form defaults kind to person and prefills the parts from the split,
+    // and saving backfills both.
     editKind = author.kind ?? 'person';
-    editSortName = author.sortName ?? '';
+    const parts = author.familyName !== undefined ? author : splitPersonName(author.name);
+    editGivenName = parts.givenName ?? '';
+    editFamilyName = parts.familyName;
   }
   function saveEdit() {
     Database.updateAuthor({
       userId: $user.uid,
       authorId: editAuthor.id,
-      name: editName.trim().replace(/\s+/g, ' '),
+      // name is the write value for non-person kinds and the error-banner
+      // label either way.
+      name: editKind === 'person' ? joinPersonName({ givenName: editGivenName, familyName: editFamilyName }) : editName,
       kind: editKind,
-      sortName: editSortName.trim(),
+      givenName: editGivenName,
+      familyName: editFamilyName,
     });
     editAuthor = null;
   }
@@ -205,7 +214,7 @@
           <tr>
             <th>Name</th>
             <th>Kind</th>
-            <th>Sort name</th>
+            <th>Family name</th>
             <th class="count">Books</th>
             <th></th>
           </tr>
@@ -216,7 +225,7 @@
             <tr>
               <td>{author.name}</td>
               <td class="kind">{author.kind ?? 'person'}</td>
-              <td class="sort-name">{author.sortName ?? '—'}</td>
+              <td class="sort-name">{author.familyName ?? '—'}</td>
               <td class="count">{count}</td>
               <td class="actions-cell">
                 <button type="button" class="row-action" onclick={() => openEdit(author)}>Edit</button>
@@ -241,10 +250,6 @@
   header="Edit author"
   primaryText="Save"
   primaryAction={saveEdit}>
-  <Input label="Name" inputId="author-name">
-    <input id="author-name" class="form-control" type="text" required bind:value={editName} />
-  </Input>
-  <div style="height: 1em"></div>
   <Input label="Kind" inputId="author-kind">
     <select id="author-kind" class="form-select" bind:value={editKind}>
       {#each AUTHOR_KINDS as kind (kind)}
@@ -253,14 +258,30 @@
     </select>
   </Input>
   <div style="height: 1em"></div>
-  <Input label="Sort name (optional)" inputId="author-sort-name">
-    <input
-      id="author-sort-name"
-      class="form-control"
-      type="text"
-      bind:value={editSortName}
-      placeholder='Abbreviation override, e.g. "Le Guin"' />
-  </Input>
+  {#if editKind === 'person'}
+    <Input label="First name(s)" inputId="author-given-name">
+      <input
+        id="author-given-name"
+        class="form-control"
+        type="text"
+        bind:value={editGivenName}
+        placeholder="Empty for mononyms (Homer)" />
+    </Input>
+    <div style="height: 1em"></div>
+    <Input label="Last name" inputId="author-family-name">
+      <input
+        id="author-family-name"
+        class="form-control"
+        type="text"
+        required
+        bind:value={editFamilyName}
+        placeholder='Sorts and abbreviates, e.g. "Le Guin"' />
+    </Input>
+  {:else}
+    <Input label="Name" inputId="author-name">
+      <input id="author-name" class="form-control" type="text" required bind:value={editName} />
+    </Input>
+  {/if}
 </ModalCard>
 
 <ModalCard

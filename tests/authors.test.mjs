@@ -4,6 +4,8 @@ import {
   authorIdFor,
   splitAuthors,
   joinAuthors,
+  splitPersonName,
+  joinPersonName,
   resolveChip,
   abbreviatedName,
   formatAuthors,
@@ -59,7 +61,18 @@ test('joinAuthors round-trips through splitAuthors', () => {
   assert.deepEqual(splitAuthors(joinAuthors(names)), names);
 });
 
-test('resolveChip matches loaded authors by name, else mints a new chip', () => {
+test('splitPersonName prefills last token as family name, round-trips through join', () => {
+  assert.deepEqual(splitPersonName(' J.  R. R.  Tolkien '), { givenName: 'J. R. R.', familyName: 'Tolkien' });
+  // Mononyms are family-name-only.
+  assert.deepEqual(splitPersonName('Homer'), { givenName: '', familyName: 'Homer' });
+  assert.equal(joinPersonName(splitPersonName('Daniel Kahneman')), 'Daniel Kahneman');
+  assert.equal(joinPersonName({ givenName: '', familyName: 'Homer' }), 'Homer');
+  // The prefill is editable, which is the whole point: the corrected
+  // parts still join to a display name.
+  assert.equal(joinPersonName({ givenName: 'Ursula K.', familyName: 'Le Guin' }), 'Ursula K. Le Guin');
+});
+
+test('resolveChip matches loaded authors by name, else mints a new person chip with parts', () => {
   const authors = [
     { id: 'daniel kahneman', name: 'Daniel Kahneman', nameLower: 'daniel kahneman', kind: 'person' },
   ];
@@ -69,7 +82,7 @@ test('resolveChip matches loaded authors by name, else mints a new chip', () => 
   );
   assert.deepEqual(
     resolveChip('  Amos  Tversky ', authors),
-    { id: null, name: 'Amos Tversky' },
+    { id: null, name: 'Amos Tversky', kind: 'person', givenName: 'Amos', familyName: 'Tversky' },
   );
 });
 
@@ -86,16 +99,12 @@ test('resolveChip matches a renamed author by its creation-time id', () => {
   );
 });
 
-test('abbreviatedName takes the last token for persons', () => {
-  assert.equal(abbreviatedName({ name: 'J. R. R. Tolkien', kind: 'person' }), 'Tolkien');
-  // Documented limitation: multi-token surnames lose their particle —
-  // that is what sortName is for.
-  assert.equal(abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person' }), 'Guin');
-});
-
-test('abbreviatedName prefers sortName over any rule', () => {
+test('abbreviatedName reads the explicit familyName for persons', () => {
+  assert.equal(abbreviatedName({ name: 'J. R. R. Tolkien', kind: 'person', givenName: 'J. R. R.', familyName: 'Tolkien' }), 'Tolkien');
+  // Multi-token surnames are exactly why the parts are explicit: the
+  // entry form captured "Le Guin", so no heuristic can mangle it.
   assert.equal(
-    abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person', sortName: 'Le Guin' }),
+    abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person', givenName: 'Ursula K.', familyName: 'Le Guin' }),
     'Le Guin',
   );
 });
@@ -117,7 +126,7 @@ test('abbreviatedName treats kindless legacy entries as persons', () => {
 });
 
 test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
-  const a = (name) => ({ id: authorIdFor(name), name, kind: 'person' });
+  const a = (name) => ({ id: authorIdFor(name), name, kind: 'person', ...splitPersonName(name) });
   assert.equal(formatAuthors([]), '');
   // A lone author keeps the full name; only lists abbreviate.
   assert.equal(formatAuthors([a('J. R. R. Tolkien')]), 'J. R. R. Tolkien');
@@ -133,7 +142,7 @@ test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
 
 test('formatAuthors respects kind in multi-author lists', () => {
   const hbr = { id: 'harvard business review', name: 'Harvard Business Review', kind: 'entity' };
-  const p = (name) => ({ id: authorIdFor(name), name, kind: 'person' });
+  const p = (name) => ({ id: authorIdFor(name), name, kind: 'person', ...splitPersonName(name) });
   assert.equal(
     formatAuthors([hbr, p('Clayton Christensen')]),
     'Harvard Business Review & Christensen',

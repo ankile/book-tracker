@@ -10,7 +10,7 @@
 //   node db-audit.js --prod     # production (read-only)
 import { parseFlags, connect } from './migrate-lib.js';
 import { isFinished } from './src/lib/utils/finished.js';
-import { AUTHOR_KINDS } from './src/lib/utils/authors.js';
+import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.js';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -45,8 +45,20 @@ for (const user of users.docs) {
       found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
     }
     if (!AUTHOR_KINDS.includes(a.kind)) found('authordoc.bad-kind', ap, String(a.kind));
-    if (a.sortName !== undefined && (typeof a.sortName !== 'string' || a.sortName.trim() === '')) {
-      found('authordoc.bad-sortname', ap, JSON.stringify(a.sortName));
+    // Persons carry explicit name parts; the stored name is exactly their
+    // join, so display, sorting, and abbreviation can never disagree.
+    if (a.kind === 'person') {
+      if (typeof a.familyName !== 'string' || a.familyName.trim() === '') {
+        found('authordoc.missing-familyname', ap, a.name);
+      } else {
+        if (a.givenName !== undefined && (typeof a.givenName !== 'string' || a.givenName.trim() === '')) {
+          found('authordoc.bad-givenname', ap, JSON.stringify(a.givenName));
+        }
+        const joined = joinPersonName({ givenName: a.givenName ?? '', familyName: a.familyName });
+        if (a.name !== joined) found('authordoc.name-parts-mismatch', ap, `${a.name} != ${joined}`);
+      }
+    } else if (a.givenName !== undefined || a.familyName !== undefined) {
+      found('authordoc.parts-on-nonperson', ap, a.name);
     }
   }
 

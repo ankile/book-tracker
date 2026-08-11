@@ -41,12 +41,32 @@ export function joinAuthors(names) {
   return names.join(', ');
 }
 
+// Split a person's display name into explicit parts: last token is the
+// family name, the rest the given name(s). This is only a PREFILL — the
+// split is shown and editable wherever a new person is created, so "Le
+// Guin"-style corrections happen at entry, and it runs nowhere at render
+// time. Mononyms (Homer) are family-name-only.
+export function splitPersonName(name) {
+  const tokens = name.trim().replace(/\s+/g, ' ').split(' ');
+  return {
+    givenName: tokens.slice(0, -1).join(' '),
+    familyName: tokens[tokens.length - 1],
+  };
+}
+
+// The stored display name derived from parts; for persons, name is always
+// this join (audited), so the typed parts are the single source of truth.
+export function joinPersonName({ givenName, familyName }) {
+  return [givenName, familyName].filter(Boolean).join(' ');
+}
+
 // Resolve a typed name against the loaded author list into a chip:
-// {id, name} for an existing author, {id: null, name} for a new one (the
-// id is minted at write time). The second, by-id pass is load-bearing:
-// after a rename, authorIdFor(oldName) still equals the renamed doc's id,
-// and without it a typed pre-rename name would mint a "new" author whose
-// merge-set lands on the renamed doc and reverts the rename.
+// {id, name} for an existing author, or a new-person chip carrying the
+// editable split parts (the id is minted at write time). The second,
+// by-id pass is load-bearing: after a rename, authorIdFor(oldName) still
+// equals the renamed doc's id, and without it a typed pre-rename name
+// would mint a "new" author whose merge-set lands on the renamed doc and
+// reverts the rename.
 export function resolveChip(name, authors) {
   const normalized = name.trim().replace(/\s+/g, ' ');
   const lower = normalized.toLowerCase();
@@ -54,7 +74,7 @@ export function resolveChip(name, authors) {
   if (byName) return { id: byName.id, name: byName.name };
   const byId = authors.find((a) => a.id === authorIdFor(normalized));
   if (byId) return { id: byId.id, name: byId.name };
-  return { id: null, name: normalized };
+  return { id: null, name: normalized, kind: 'person', ...splitPersonName(normalized) };
 }
 
 // Legacy-wins resolution of a book's authorship. Legacy fields present
@@ -73,16 +93,15 @@ export function bookAuthors(book, authorMap) {
   return book.authorIds.map((id) => authorMap.get(id));
 }
 
-// Presentation-only: never stored. sortName is the per-author escape
-// hatch for names the last-token rule mangles ("Le Guin" → "Guin");
-// non-person kinds keep their full name. Legacy {id, name} entries
-// embedded on unmigrated books carry no kind and are all persons.
+// Presentation-only: persons abbreviate to their explicit familyName —
+// no heuristic runs here — and non-person kinds keep their full name.
+// Legacy {id, name} entries embedded on unmigrated books carry neither
+// kind nor parts; they get the last-token split until the straggler
+// cleanup removes the legacy path.
 export function abbreviatedName(author) {
-  if (author.sortName) return author.sortName;
-  const normalized = author.name.trim().replace(/\s+/g, ' ');
-  if (author.kind !== undefined && author.kind !== 'person') return normalized;
-  const tokens = normalized.split(' ');
-  return tokens[tokens.length - 1];
+  if (author.kind === undefined) return splitPersonName(author.name).familyName;
+  if (author.kind !== 'person') return author.name.trim().replace(/\s+/g, ' ');
+  return author.familyName;
 }
 
 // Compact list display: a lone author keeps their full name ("J. R. R.
