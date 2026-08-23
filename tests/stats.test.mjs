@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  aggregateSessionsByDay,
   buildProfilePayload,
   computeStats,
   profilePayloadEqual,
@@ -27,9 +28,23 @@ test("computeStats aggregates the library", () => {
   assert.equal(stats.avgTimePerBook, 450);
 });
 
+test("sessions aggregate per day with the 3 AM boundary, ascending", () => {
+  const days = aggregateSessionsByDay([
+    { createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
+    { createdAt: ts("2026-08-20T22:00:00"), pagesRead: 5, timeRead: 10 },
+    // 1 AM local time counts as the evening of the 20th, not the 21st.
+    { createdAt: ts("2026-08-21T01:00:00"), pagesRead: 3, timeRead: 6 },
+    { createdAt: ts("2026-08-05T12:00:00"), pagesRead: 7, timeRead: 14 },
+  ]);
+  assert.deepEqual(days, [
+    { day: "2026-08-05", pagesRead: 7, timeRead: 14, sessions: 1 },
+    { day: "2026-08-20", pagesRead: 18, timeRead: 36, sessions: 3 },
+  ]);
+});
+
 test("payload carries only aggregate numbers — no titles, no book objects", () => {
   const payload = buildProfilePayload(books);
-  assert.deepEqual(Object.keys(payload).sort(), ["stats", "years"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["days", "stats", "years"]);
   for (const value of Object.values(payload.stats)) {
     assert.equal(typeof value, "number");
   }
@@ -65,6 +80,24 @@ test("a changed stat or year row marks the published doc dirty", () => {
   const staleYear = JSON.parse(JSON.stringify(payload));
   staleYear.years[0].count += 1;
   assert.equal(profilePayloadEqual(staleYear, payload), false);
+});
+
+test("a changed day aggregate marks the published doc dirty", () => {
+  const days = aggregateSessionsByDay([
+    { createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
+  ]);
+  const payload = buildProfilePayload(books, days);
+  const published = JSON.parse(JSON.stringify(payload));
+  assert.equal(profilePayloadEqual(published, payload), true);
+
+  const stale = JSON.parse(JSON.stringify(payload));
+  stale.days[0].pagesRead += 1;
+  assert.equal(profilePayloadEqual(stale, payload), false);
+
+  // A pre-heatmap doc without days must read as dirty so it upgrades.
+  const legacy = JSON.parse(JSON.stringify(payload));
+  delete legacy.days;
+  assert.equal(profilePayloadEqual(legacy, payload), false);
 });
 
 test("missing or malformed published doc reads as dirty", () => {

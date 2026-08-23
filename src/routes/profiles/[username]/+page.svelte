@@ -4,6 +4,7 @@
   import { Database } from '$lib/firebase/db.js';
   import { formatTime } from '$lib/utils/format.js';
   import { joinPersonName } from '$lib/utils/authors.js';
+  import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
 
   const username = $derived(page.params.username);
 
@@ -267,6 +268,10 @@
           </table>
         </div>
       </div>
+    {/if}
+
+    {#if profile.days?.length > 0}
+      <ReadingHeatmap days={profile.days} />
     {/if}
   </div>
 {/if}

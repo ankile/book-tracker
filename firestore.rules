@@ -76,8 +76,8 @@ service cloud.firestore {
       let profile = request.resource.data;
       let statKeys = ['totalBooks', 'finishedBooks', 'readingBooks', 'totalTimeReadHours',
                       'totalPagesRead', 'booksPerYear', 'avgTimePerBook'];
-      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'updatedAt'])
-             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'updatedAt'])
+      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'days', 'updatedAt'])
+             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'days', 'updatedAt'])
              && profile.uid == request.auth.uid
              && profile.public is bool
              && profile.givenName is string
@@ -97,6 +97,11 @@ service cloud.firestore {
              // One row per year with finished books; 200 outlives everyone.
              && profile.years is list
              && profile.years.size() <= 200
+             // Per-day heatmap aggregates: one entry per active reading
+             // day, so 4000 is over a decade of daily reading. The client
+             // clamps to the newest 4000 (PROFILE_MAX_DAYS) to match.
+             && profile.days is list
+             && profile.days.size() <= 4000
              && profile.updatedAt is timestamp;
     }
 

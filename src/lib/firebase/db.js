@@ -271,7 +271,7 @@ class Database {
   // doc and reject it, so the caller sees permission-denied and reports
   // "taken" inline — which is why this method is not in writeLabels.
   // isPublic is the explicit share checkbox; profiles are born private.
-  static async createProfile({ userId, username, givenName, familyName, isPublic, stats, years }) {
+  static async createProfile({ userId, username, givenName, familyName, isPublic, stats, years, days }) {
     await setDoc(doc(db, 'profiles', username), {
       uid: userId,
       public: isPublic,
@@ -279,6 +279,7 @@ class Database {
       familyName,
       stats,
       years,
+      days,
       updatedAt: Timestamp.now(),
     });
   }
@@ -286,7 +287,7 @@ class Database {
   // Full overwrite with the freshly computed payload (the Me page keeps the
   // published doc in step with live stats whenever it differs, and the
   // profile-edit form and visibility checkbox write through here too).
-  static async updateProfile({ userId, username, givenName, familyName, isPublic, stats, years }) {
+  static async updateProfile({ userId, username, givenName, familyName, isPublic, stats, years, days }) {
     await setDoc(doc(db, 'profiles', username), {
       uid: userId,
       public: isPublic,
@@ -294,6 +295,7 @@ class Database {
       familyName,
       stats,
       years,
+      days,
       updatedAt: Timestamp.now(),
     });
   }
@@ -303,7 +305,7 @@ class Database {
   // profile is never gone or doubled — offline included. A taken new
   // username rejects the whole batch (see createProfile), which is why
   // this, like createProfile, stays out of writeLabels and reports inline.
-  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, isPublic, stats, years }) {
+  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, isPublic, stats, years, days }) {
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newUsername), {
       uid: userId,
@@ -312,6 +314,7 @@ class Database {
       familyName,
       stats,
       years,
+      days,
       updatedAt: Timestamp.now(),
     });
     batch.delete(doc(db, 'profiles', oldUsername));
@@ -688,9 +691,12 @@ class Database {
     };
   }
 
-  // Get all reading sessions across all books for a user using collectionGroup
+  // Get all reading sessions across all books for a user using
+  // collectionGroup. Starts as undefined (loading, getUser convention): the
+  // Me page's profile sync must be able to tell "no snapshot yet" from "no
+  // sessions", or it would blank the published heatmap on page load.
   static getAllReadingSessions(userId) {
-    const store = writable([]);
+    const store = writable(undefined);
 
     const ownerRef = doc(db, 'users', userId);
     const q = query(

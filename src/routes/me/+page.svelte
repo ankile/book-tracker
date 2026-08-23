@@ -10,6 +10,7 @@
   import {
     computeStats,
     computeBooksByYear,
+    aggregateSessionsByDay,
     buildProfilePayload,
     profilePayloadEqual,
     USERNAME_PATTERN,
@@ -40,6 +41,24 @@
       };
     }
   });
+
+  // All reading sessions, aggregated per day for the heatmap and the
+  // published profile; undefined until the first snapshot (same loading
+  // sentinel as allBooks, and for the same reason).
+  let allSessions = $state(undefined);
+  $effect(() => {
+    if ($user) {
+      const sessionsStore = Database.getAllReadingSessions($user.uid);
+      const unsubscribe = sessionsStore.subscribe((sessions) => {
+        allSessions = sessions;
+      });
+      return () => {
+        unsubscribe();
+        sessionsStore.unsubscribe();
+      };
+    }
+  });
+  const sessionDays = $derived(aggregateSessionsByDay(allSessions ?? []));
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -148,17 +167,17 @@
         // explicit visibility checkbox below.
         await Database.createProfile({
           userId: $user.uid, username: chosenSlug, ...names,
-          isPublic: false, ...buildProfilePayload(allBooks),
+          isPublic: false, ...buildProfilePayload(allBooks, sessionDays),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: $user.uid, username: chosenSlug, ...names,
-          isPublic: myProfile.public, ...buildProfilePayload(allBooks),
+          isPublic: myProfile.public, ...buildProfilePayload(allBooks, sessionDays),
         });
       } else {
         await Database.renameProfile({
           userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
-          ...names, isPublic: myProfile.public, ...buildProfilePayload(allBooks),
+          ...names, isPublic: myProfile.public, ...buildProfilePayload(allBooks, sessionDays),
         });
       }
       profileGivenName = chosenGiven;
@@ -188,7 +207,7 @@
       userId: $user.uid, username: myProfile.username,
       givenName: myProfile.givenName ?? '', familyName: myProfile.familyName ?? '',
       isPublic,
-      ...buildProfilePayload(allBooks),
+      ...buildProfilePayload(allBooks, sessionDays),
     });
   }
 
@@ -203,8 +222,8 @@
   // check excludes updatedAt, so the listener echo of our own write reads
   // as clean and the effect settles instead of looping.
   $effect(() => {
-    if (!$user || !myProfile || allBooks === undefined) return;
-    const payload = buildProfilePayload(allBooks);
+    if (!$user || !myProfile || allBooks === undefined || allSessions === undefined) return;
+    const payload = buildProfilePayload(allBooks, sessionDays);
     if (profilePayloadEqual(myProfile, payload)) return;
     Database.updateProfile({
       userId: $user.uid, username: myProfile.username,
@@ -635,7 +654,7 @@
               class="form-control"
               placeholder="Profile slug"
               bind:value={profileSlug} />
-            <button type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined}>
+            <button type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -778,6 +797,6 @@
       </div>
     {/if}
 
-    <ReadingHeatmap userId={$user.uid} />
+    <ReadingHeatmap days={sessionDays} />
   </div>
 {/if}

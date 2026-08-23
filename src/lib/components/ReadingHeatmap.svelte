@@ -1,8 +1,13 @@
 <script>
-  import { Database } from '../firebase/db.js';
   import { formatTime } from '../utils/format.js';
+  import { DAY_BOUNDARY_OFFSET_HOURS } from '../utils/stats.js';
 
-  let { userId } = $props();
+  // Per-day aggregates ({day: 'YYYY-MM-DD', pagesRead, timeRead, sessions},
+  // the aggregateSessionsByDay shape). The component no longer loads
+  // sessions itself: the Me page aggregates its live session listener, and
+  // the public profile page passes the aggregates published on the profile
+  // doc — same renderer, no private data required.
+  let { days = [] } = $props();
 
   let tooltipVisible = $state(false);
   let tooltipContent = $state('');
@@ -10,74 +15,31 @@
   let tooltipY = $state(0);
   let focusedDayKey = $state(null);
 
-  // Day boundary offset: sessions before 3 AM count as previous day
-  const DAY_BOUNDARY_OFFSET_HOURS = 3;
-
   // Year selection for heatmap view
   let selectedYear = $state('last12months');
 
-  // Get all reading sessions across all books using a single query
-  let allSessions = $state([]);
-
-  $effect(() => {
-    if (!userId) {
-      allSessions = [];
-      return;
-    }
-
-    const sessionsStore = Database.getAllReadingSessions(userId);
-    const unsubscribe = sessionsStore.subscribe((sessions) => {
-      allSessions = sessions;
-    });
-
-    return () => {
-      unsubscribe();
-      sessionsStore.unsubscribe();
-    };
-  });
-
-  // Aggregate sessions by day
+  // Index the day aggregates by their day key
   let activityByDay = $derived.by(() => {
     const dayMap = new Map();
 
-    allSessions.forEach(session => {
-      const timestamp = session.createdAt?.toDate?.();
-      if (!timestamp) return;
-
-      // Subtract offset hours so sessions before 3 AM count as previous day
-      const date = new Date(timestamp);
-      date.setHours(date.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
-
-      const dayKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-
-      if (!dayMap.has(dayKey)) {
-        dayMap.set(dayKey, {
-          date: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-          pagesRead: 0,
-          timeRead: 0,
-          sessions: 0
-        });
-      }
-
-      const day = dayMap.get(dayKey);
-      day.pagesRead += session.pagesRead || 0;
-      day.timeRead += session.timeRead || 0;
-      day.sessions += 1;
+    days.forEach((entry) => {
+      const [year, month, dayOfMonth] = entry.day.split('-').map(Number);
+      dayMap.set(entry.day, {
+        date: new Date(year, month - 1, dayOfMonth),
+        pagesRead: entry.pagesRead,
+        timeRead: entry.timeRead,
+        sessions: entry.sessions
+      });
     });
 
     return dayMap;
   });
 
-  // Get available years from session data
+  // Get available years from the day aggregates
   let availableYears = $derived.by(() => {
     const years = new Set();
-    allSessions.forEach(session => {
-      const timestamp = session.createdAt?.toDate?.();
-      if (!timestamp) return;
-
-      const date = new Date(timestamp);
-      date.setHours(date.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
-      years.add(date.getFullYear());
+    days.forEach((entry) => {
+      years.add(Number(entry.day.slice(0, 4)));
     });
     return Array.from(years).sort((a, b) => b - a); // Descending order
   });
