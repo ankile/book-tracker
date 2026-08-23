@@ -3,6 +3,7 @@
   import { user } from '$lib/firebase/auth.js';
   import { Database } from '$lib/firebase/db.js';
   import { formatTime } from '$lib/utils/format.js';
+  import { joinPersonName } from '$lib/utils/authors.js';
 
   const username = $derived(page.params.username);
 
@@ -195,7 +196,7 @@
 {:else}
   <div class="profile-container">
     <div class="profile-header">
-      <h1>{profile.displayName || profile.username}</h1>
+      <h1>{joinPersonName(profile) || profile.username}</h1>
       <p class="subtitle">@{profile.username} — reading stats</p>
       {#if !profile.public}
         <p class="private-note">Private — only you can see this page.</p>

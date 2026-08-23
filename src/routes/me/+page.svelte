@@ -106,14 +106,19 @@
 
   // Profile-edit form. Seeded from the loaded profile exactly once: the
   // stat-sync effect below rewrites the doc while the page is open, and
-  // reseeding on every listener echo would stomp in-progress typing.
-  let profileDisplayName = $state('');
-  let profileUsername = $state('');
+  // reseeding on every listener echo would stomp in-progress typing. With
+  // no profile yet, the slug defaults to the email prefix (sanitized to
+  // the slug charset) so there's always something sensible to start from.
+  let profileGivenName = $state('');
+  let profileFamilyName = $state('');
+  let profileSlug = $state('');
   let profileFormSeeded = $state(false);
   $effect(() => {
-    if (!profileFormSeeded && myProfile !== undefined) {
-      profileDisplayName = myProfile?.displayName ?? '';
-      profileUsername = myProfile?.username ?? '';
+    if (!profileFormSeeded && myProfile !== undefined && $user) {
+      profileGivenName = myProfile?.givenName ?? '';
+      profileFamilyName = myProfile?.familyName ?? '';
+      profileSlug = myProfile?.username
+        ?? username.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30);
       profileFormSeeded = true;
     }
   });
@@ -126,43 +131,46 @@
   const profileUrl = $derived(myProfile ? `${page.url.origin}/profiles/${myProfile.username}` : '');
 
   async function saveProfile() {
-    const chosenUsername = profileUsername.trim().toLowerCase();
-    const chosenName = profileDisplayName.trim().replace(/\s+/g, ' ').slice(0, 50);
-    if (!USERNAME_PATTERN.test(chosenUsername)) {
-      profileError = 'Username: 3–30 characters, lowercase letters, numbers, and dashes.';
+    const chosenSlug = profileSlug.trim().toLowerCase();
+    const chosenGiven = profileGivenName.trim().replace(/\s+/g, ' ').slice(0, 50);
+    const chosenFamily = profileFamilyName.trim().replace(/\s+/g, ' ').slice(0, 50);
+    if (!USERNAME_PATTERN.test(chosenSlug)) {
+      profileError = 'Profile slug: 3–30 characters, lowercase letters, numbers, and dashes.';
       return;
     }
     savingProfile = true;
     profileError = '';
     profileSaved = false;
+    const names = { givenName: chosenGiven, familyName: chosenFamily };
     try {
       if (!myProfile) {
         // Born private: the page is only ever opened to the world by the
         // explicit visibility checkbox below.
         await Database.createProfile({
-          userId: $user.uid, username: chosenUsername, displayName: chosenName,
+          userId: $user.uid, username: chosenSlug, ...names,
           isPublic: false, ...buildProfilePayload(allBooks),
         });
-      } else if (chosenUsername === myProfile.username) {
+      } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
-          userId: $user.uid, username: chosenUsername, displayName: chosenName,
+          userId: $user.uid, username: chosenSlug, ...names,
           isPublic: myProfile.public, ...buildProfilePayload(allBooks),
         });
       } else {
         await Database.renameProfile({
-          userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenUsername,
-          displayName: chosenName, isPublic: myProfile.public, ...buildProfilePayload(allBooks),
+          userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
+          ...names, isPublic: myProfile.public, ...buildProfilePayload(allBooks),
         });
       }
-      profileDisplayName = chosenName;
-      profileUsername = chosenUsername;
+      profileGivenName = chosenGiven;
+      profileFamilyName = chosenFamily;
+      profileSlug = chosenSlug;
       profileSaved = true;
       setTimeout(() => (profileSaved = false), 2000);
     } catch (error) {
-      // The rules turn "username taken" into permission-denied (create on
-      // an existing doc evaluates as an update of someone else's doc).
+      // The rules turn "slug taken" into permission-denied (create on an
+      // existing doc evaluates as an update of someone else's doc).
       profileError = error.code === 'permission-denied'
-        ? `"${chosenUsername}" is already taken.`
+        ? `"${chosenSlug}" is already taken.`
         : error.message;
     } finally {
       savingProfile = false;
@@ -178,7 +186,8 @@
   function setProfileVisibility(isPublic) {
     Database.updateProfile({
       userId: $user.uid, username: myProfile.username,
-      displayName: myProfile.displayName ?? '', isPublic,
+      givenName: myProfile.givenName ?? '', familyName: myProfile.familyName ?? '',
+      isPublic,
       ...buildProfilePayload(allBooks),
     });
   }
@@ -199,7 +208,8 @@
     if (profilePayloadEqual(myProfile, payload)) return;
     Database.updateProfile({
       userId: $user.uid, username: myProfile.username,
-      displayName: myProfile.displayName ?? '', isPublic: myProfile.public,
+      givenName: myProfile.givenName ?? '', familyName: myProfile.familyName ?? '',
+      isPublic: myProfile.public,
       ...payload,
     });
   });
@@ -260,14 +270,17 @@
     }
   }
 
+  // The <details> element itself is the card: the summary is its header
+  // row and the sections expand inside the same box, so opening it grows
+  // the card instead of conjuring disconnected boxes below it.
   .settings {
+    background: white;
+    border-radius: 5px;
+    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
     margin-bottom: 2rem;
 
     summary {
-      background: white;
       padding: 1rem 2rem;
-      border-radius: 5px;
-      box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
       font-size: 1rem;
       font-weight: 600;
       color: #333;
@@ -276,13 +289,7 @@
     }
 
     .settings-body {
-      padding-top: 2rem;
-
-      // The cards carry their own 2rem bottom margin; the section's own
-      // margin provides the gap after the last one.
-      .toggl-card:last-child {
-        margin-bottom: 0;
-      }
+      padding: 0 2rem 2rem;
     }
   }
 
@@ -335,12 +342,15 @@
     }
   }
 
+  // Flat sections inside the settings card, divided by hairlines (the
+  // first line separates the summary row from the body).
   .toggl-card {
-    background: white;
-    padding: 2rem;
-    border-radius: 5px;
-    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
-    margin-bottom: 2rem;
+    border-top: 1px solid #e0e0e0;
+    padding: 1.5rem 0 2rem;
+
+    &:last-child {
+      padding-bottom: 0;
+    }
 
     h2 {
       font-size: 1.5rem;
@@ -537,9 +547,18 @@
       width: 100%;
     }
 
-    .toggl-card,
     .books-by-year {
       padding: 1.25rem;
+    }
+
+    .settings {
+      summary {
+        padding: 1rem 1.25rem;
+      }
+
+      .settings-body {
+        padding: 0 1.25rem 1.25rem;
+      }
     }
 
     .books-by-year table {
@@ -559,7 +578,7 @@
 
   <div class="profile-container">
     <div class="profile-header">
-      <h1>Welcome back, {myProfile?.displayName || username}!</h1>
+      <h1>Welcome back, {myProfile?.givenName || username}!</h1>
       <p class="email">{$user.email}</p>
     </div>
 
@@ -587,10 +606,11 @@
             {/if}
           {:else if myProfile === null}
             <p class="toggl-status">
-              Set your name and pick a username to create your profile page
-              at a shareable link. The page starts private (visible only to
-              you) until you make it public. Only aggregate numbers are
-              published — never your book titles or reading sessions.
+              Set your name and pick a profile slug (the last part of your
+              profile page's link) to create your profile page. The page
+              starts private (visible only to you) until you make it
+              public. Only aggregate numbers are published — never your
+              book titles or reading sessions.
             </p>
           {/if}
           <form
@@ -601,15 +621,21 @@
             <input
               type="text"
               class="form-control"
-              placeholder="Your name"
+              placeholder="First name"
               maxlength="50"
-              bind:value={profileDisplayName} />
+              bind:value={profileGivenName} />
             <input
               type="text"
               class="form-control"
-              placeholder="username"
-              bind:value={profileUsername} />
-            <button type="submit" disabled={savingProfile || !profileUsername || allBooks === undefined}>
+              placeholder="Last name"
+              maxlength="50"
+              bind:value={profileFamilyName} />
+            <input
+              type="text"
+              class="form-control"
+              placeholder="Profile slug"
+              bind:value={profileSlug} />
+            <button type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
