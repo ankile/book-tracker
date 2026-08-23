@@ -104,45 +104,83 @@
     }
   });
 
+  // Profile-edit form. Seeded from the loaded profile exactly once: the
+  // stat-sync effect below rewrites the doc while the page is open, and
+  // reseeding on every listener echo would stomp in-progress typing.
+  let profileDisplayName = $state('');
   let profileUsername = $state('');
+  let profileFormSeeded = $state(false);
+  $effect(() => {
+    if (!profileFormSeeded && myProfile !== undefined) {
+      profileDisplayName = myProfile?.displayName ?? '';
+      profileUsername = myProfile?.username ?? '';
+      profileFormSeeded = true;
+    }
+  });
+
   let profileError = $state('');
+  let profileSaved = $state(false);
   let savingProfile = $state(false);
   let linkCopied = $state(false);
 
   const profileUrl = $derived(myProfile ? `${page.url.origin}/profiles/${myProfile.username}` : '');
 
-  async function enableProfile() {
-    const chosen = profileUsername.trim().toLowerCase();
-    if (!USERNAME_PATTERN.test(chosen)) {
-      profileError = '3–30 characters: lowercase letters, numbers, and dashes.';
+  async function saveProfile() {
+    const chosenUsername = profileUsername.trim().toLowerCase();
+    const chosenName = profileDisplayName.trim().replace(/\s+/g, ' ').slice(0, 50);
+    if (!USERNAME_PATTERN.test(chosenUsername)) {
+      profileError = 'Username: 3–30 characters, lowercase letters, numbers, and dashes.';
       return;
     }
     savingProfile = true;
     profileError = '';
+    profileSaved = false;
     try {
-      // Born private: the page is only ever opened to the world by the
-      // explicit visibility checkbox below.
-      await Database.createProfile({ userId: $user.uid, username: chosen, isPublic: false, ...buildProfilePayload(allBooks) });
-      profileUsername = '';
+      if (!myProfile) {
+        // Born private: the page is only ever opened to the world by the
+        // explicit visibility checkbox below.
+        await Database.createProfile({
+          userId: $user.uid, username: chosenUsername, displayName: chosenName,
+          isPublic: false, ...buildProfilePayload(allBooks),
+        });
+      } else if (chosenUsername === myProfile.username) {
+        await Database.updateProfile({
+          userId: $user.uid, username: chosenUsername, displayName: chosenName,
+          isPublic: myProfile.public, ...buildProfilePayload(allBooks),
+        });
+      } else {
+        await Database.renameProfile({
+          userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenUsername,
+          displayName: chosenName, isPublic: myProfile.public, ...buildProfilePayload(allBooks),
+        });
+      }
+      profileDisplayName = chosenName;
+      profileUsername = chosenUsername;
+      profileSaved = true;
+      setTimeout(() => (profileSaved = false), 2000);
     } catch (error) {
       // The rules turn "username taken" into permission-denied (create on
       // an existing doc evaluates as an update of someone else's doc).
       profileError = error.code === 'permission-denied'
-        ? `"${chosen}" is already taken.`
+        ? `"${chosenUsername}" is already taken.`
         : error.message;
     } finally {
       savingProfile = false;
     }
   }
 
-  async function disableProfile() {
+  async function deleteProfile() {
     savingProfile = true;
     await Database.deleteProfile({ userId: $user.uid, username: myProfile.username });
     savingProfile = false;
   }
 
   function setProfileVisibility(isPublic) {
-    Database.updateProfile({ userId: $user.uid, username: myProfile.username, isPublic, ...buildProfilePayload(allBooks) });
+    Database.updateProfile({
+      userId: $user.uid, username: myProfile.username,
+      displayName: myProfile.displayName ?? '', isPublic,
+      ...buildProfilePayload(allBooks),
+    });
   }
 
   async function copyProfileLink() {
@@ -159,7 +197,11 @@
     if (!$user || !myProfile || allBooks === undefined) return;
     const payload = buildProfilePayload(allBooks);
     if (profilePayloadEqual(myProfile, payload)) return;
-    Database.updateProfile({ userId: $user.uid, username: myProfile.username, isPublic: myProfile.public, ...payload });
+    Database.updateProfile({
+      userId: $user.uid, username: myProfile.username,
+      displayName: myProfile.displayName ?? '', isPublic: myProfile.public,
+      ...payload,
+    });
   });
 </script>
 
@@ -214,6 +256,32 @@
       &:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 12px 0 rgba(0, 0, 0, 0.25), 0 8px 24px 0 rgba(0, 0, 0, 0.22);
+      }
+    }
+  }
+
+  .settings {
+    margin-bottom: 2rem;
+
+    summary {
+      background: white;
+      padding: 1rem 2rem;
+      border-radius: 5px;
+      box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
+      font-size: 1rem;
+      font-weight: 600;
+      color: #333;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .settings-body {
+      padding-top: 2rem;
+
+      // The cards carry their own 2rem bottom margin; the section's own
+      // margin provides the gap after the last one.
+      .toggl-card:last-child {
+        margin-bottom: 0;
       }
     }
   }
@@ -323,6 +391,7 @@
       align-items: center;
       gap: 1rem;
       flex-wrap: wrap;
+      margin-top: 1rem;
 
       a {
         font-size: 1.1rem;
@@ -490,7 +559,7 @@
 
   <div class="profile-container">
     <div class="profile-header">
-      <h1>Welcome back, {username}!</h1>
+      <h1>Welcome back, {myProfile?.displayName || username}!</h1>
       <p class="email">{$user.email}</p>
     </div>
 
@@ -498,6 +567,107 @@
       <button onclick={toggleModal}>Add New Book</button>
       <button onclick={handleSignOut}>Sign Out</button>
     </div>
+
+    <details class="settings">
+      <summary>Settings</summary>
+      <div class="settings-body">
+        <div class="toggl-card share-card">
+          <h2>Profile</h2>
+          {#if myProfile}
+            {#if myProfile.public}
+              <p class="toggl-status connected">
+                Public — anyone with the link can see your reading stats (no
+                book titles). Stats refresh whenever you open this page.
+              </p>
+            {:else}
+              <p class="toggl-status">
+                Private — only you can see your profile page while signed
+                in. Check the box below to make it publicly available.
+              </p>
+            {/if}
+          {:else if myProfile === null}
+            <p class="toggl-status">
+              Set your name and pick a username to create your profile page
+              at a shareable link. The page starts private (visible only to
+              you) until you make it public. Only aggregate numbers are
+              published — never your book titles or reading sessions.
+            </p>
+          {/if}
+          <form
+            onsubmit={(event) => {
+              event.preventDefault();
+              saveProfile();
+            }}>
+            <input
+              type="text"
+              class="form-control"
+              placeholder="Your name"
+              maxlength="50"
+              bind:value={profileDisplayName} />
+            <input
+              type="text"
+              class="form-control"
+              placeholder="username"
+              bind:value={profileUsername} />
+            <button type="submit" disabled={savingProfile || !profileUsername || allBooks === undefined}>
+              {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
+            </button>
+          </form>
+          {#if profileError}
+            <p class="share-error">{profileError}</p>
+          {/if}
+          {#if myProfile}
+            <div class="profile-link">
+              <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
+            </div>
+            <label class="share-visibility">
+              <input
+                type="checkbox"
+                checked={myProfile.public}
+                onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
+              Make my profile publicly available
+            </label>
+            <div class="share-actions">
+              <button type="button" onclick={copyProfileLink}>
+                {linkCopied ? 'Copied!' : 'Copy Link'}
+              </button>
+              <button type="button" onclick={deleteProfile} disabled={savingProfile}>
+                Delete Profile
+              </button>
+            </div>
+          {/if}
+        </div>
+
+        <div class="toggl-card">
+          <h2>Toggl Track</h2>
+          {#if userDoc?.toggl}
+            <p class="toggl-status connected">
+              Connected — timers log to your "Reading" project in Toggl.
+            </p>
+          {:else}
+            <p class="toggl-status">
+              Paste your Toggl API token (found under Profile settings in
+              Toggl) to start reading timers from your book list. Requires a
+              Toggl project named "Reading".
+            </p>
+          {/if}
+          <form
+            onsubmit={(event) => {
+              event.preventDefault();
+              saveTogglToken();
+            }}>
+            <input
+              type="password"
+              class="form-control"
+              placeholder="Toggl API token"
+              bind:value={togglToken} />
+            <button type="submit" disabled={savingToken || !togglToken}>
+              {userDoc?.toggl ? 'Replace Token' : 'Connect'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </details>
 
     <div class="stats-grid">
       <a href="/finished" class="stat-card clickable">
@@ -541,94 +711,6 @@
         <div class="stat-value">{stats.totalBooks}</div>
         <div class="stat-subtext">In your library</div>
       </div>
-    </div>
-
-    <div class="toggl-card">
-      <h2>Toggl Track</h2>
-      {#if userDoc?.toggl}
-        <p class="toggl-status connected">
-          Connected — timers log to your "Reading" project in Toggl.
-        </p>
-      {:else}
-        <p class="toggl-status">
-          Paste your Toggl API token (found under Profile settings in Toggl) to
-          start reading timers from your book list. Requires a Toggl project
-          named "Reading".
-        </p>
-      {/if}
-      <form
-        onsubmit={(event) => {
-          event.preventDefault();
-          saveTogglToken();
-        }}>
-        <input
-          type="password"
-          class="form-control"
-          placeholder="Toggl API token"
-          bind:value={togglToken} />
-        <button type="submit" disabled={savingToken || !togglToken}>
-          {userDoc?.toggl ? 'Replace Token' : 'Connect'}
-        </button>
-      </form>
-    </div>
-
-    <div class="toggl-card share-card">
-      <h2>Public Profile</h2>
-      {#if myProfile}
-        {#if myProfile.public}
-          <p class="toggl-status connected">
-            Public — anyone with the link can see your reading stats (no
-            book titles). Stats refresh whenever you open this page.
-          </p>
-        {:else}
-          <p class="toggl-status">
-            Private — only you can see your profile page while signed in.
-            Check the box below to make it publicly available.
-          </p>
-        {/if}
-        <div class="profile-link">
-          <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
-        </div>
-        <label class="share-visibility">
-          <input
-            type="checkbox"
-            checked={myProfile.public}
-            onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
-          Make my profile publicly available
-        </label>
-        <div class="share-actions">
-          <button type="button" onclick={copyProfileLink}>
-            {linkCopied ? 'Copied!' : 'Copy Link'}
-          </button>
-          <button type="button" onclick={disableProfile} disabled={savingProfile}>
-            Delete Profile
-          </button>
-        </div>
-      {:else if myProfile === null}
-        <p class="toggl-status">
-          Pick a username to get a link to your reading stats. The page
-          starts private (visible only to you) until you make it public.
-          Only aggregate numbers are published — never your book titles or
-          reading sessions.
-        </p>
-        <form
-          onsubmit={(event) => {
-            event.preventDefault();
-            enableProfile();
-          }}>
-          <input
-            type="text"
-            class="form-control"
-            placeholder="username"
-            bind:value={profileUsername} />
-          <button type="submit" disabled={savingProfile || !profileUsername || allBooks === undefined}>
-            Enable
-          </button>
-        </form>
-        {#if profileError}
-          <p class="share-error">{profileError}</p>
-        {/if}
-      {/if}
     </div>
 
     {#if booksByYear.length > 0}

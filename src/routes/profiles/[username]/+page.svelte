@@ -195,8 +195,8 @@
 {:else}
   <div class="profile-container">
     <div class="profile-header">
-      <h1>{profile.username}</h1>
-      <p class="subtitle">Reading stats</p>
+      <h1>{profile.displayName || profile.username}</h1>
+      <p class="subtitle">@{profile.username} — reading stats</p>
       {#if !profile.public}
         <p class="private-note">Private — only you can see this page.</p>
       {/if}

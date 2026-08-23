@@ -55,8 +55,9 @@ service cloud.firestore {
     // uniqueness is first-writer-wins: a create against an existing doc
     // evaluates as an update and fails the uid pin. Anonymous-readable
     // surface, so the validation-heavy style applies: the shape is pinned
-    // so the doc can only ever hold aggregate reading numbers — no titles,
-    // no free-form text a profile link could be used to host.
+    // so the doc can only ever hold aggregate reading numbers plus one
+    // deliberately short display name — nothing a profile link could be
+    // used to host arbitrary content on.
     match /profiles/{username} {
       allow get: if resource.data.public == true
                  || (request.auth != null && resource.data.uid == request.auth.uid);
@@ -74,10 +75,12 @@ service cloud.firestore {
       let profile = request.resource.data;
       let statKeys = ['totalBooks', 'finishedBooks', 'readingBooks', 'totalTimeReadHours',
                       'totalPagesRead', 'booksPerYear', 'avgTimePerBook'];
-      return profile.keys().hasAll(['uid', 'public', 'stats', 'years', 'updatedAt'])
-             && profile.keys().hasOnly(['uid', 'public', 'stats', 'years', 'updatedAt'])
+      return profile.keys().hasAll(['uid', 'public', 'displayName', 'stats', 'years', 'updatedAt'])
+             && profile.keys().hasOnly(['uid', 'public', 'displayName', 'stats', 'years', 'updatedAt'])
              && profile.uid == request.auth.uid
              && profile.public is bool
+             && profile.displayName is string
+             && profile.displayName.size() <= 50
              && profile.stats is map
              && profile.stats.keys().hasAll(statKeys)
              && profile.stats.keys().hasOnly(statKeys)
