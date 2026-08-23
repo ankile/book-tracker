@@ -76,14 +76,21 @@ service cloud.firestore {
       let profile = request.resource.data;
       let statKeys = ['totalBooks', 'finishedBooks', 'readingBooks', 'totalTimeReadHours',
                       'totalPagesRead', 'booksPerYear', 'avgTimePerBook'];
-      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'days', 'updatedAt'])
-             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'stats', 'years', 'days', 'updatedAt'])
+      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'years', 'days', 'updatedAt'])
+             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'years', 'days', 'updatedAt'])
              && profile.uid == request.auth.uid
              && profile.public is bool
              && profile.givenName is string
              && profile.givenName.size() <= 50
              && profile.familyName is string
              && profile.familyName.size() <= 50
+             // Public handles ({type, value, label?}); rules can't iterate
+             // list elements, so the per-entry shape and string caps are
+             // client-enforced (utils/links.js). Owner-authenticated
+             // writes only, and the client renders values as text and
+             // scheme-guarded hrefs, so the count cap bounds the surface.
+             && profile.links is list
+             && profile.links.size() <= 10
              && profile.stats is map
              && profile.stats.keys().hasAll(statKeys)
              && profile.stats.keys().hasOnly(statKeys)

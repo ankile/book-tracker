@@ -44,43 +44,45 @@
     return Array.from(years).sort((a, b) => b - a); // Descending order
   });
 
-  // Generate grid for selected year or last 52 weeks
-  let weeks = $derived.by(() => {
-    let startDate, endDate;
+  // Date range for the last 52 weeks, ending this week
+  function last12MonthsRange() {
+    const today = new Date();
+    const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - (52 * 7)); // Go back 52 weeks
 
-    if (selectedYear === 'last12months') {
-      // Last 52 weeks (current behavior)
-      const today = new Date();
-      endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      startDate = new Date(endDate);
-      startDate.setDate(startDate.getDate() - (52 * 7)); // Go back 52 weeks
+    // Start from the most recent Sunday (so Monday is first in our grid)
+    const dayOfWeek = endDate.getDay();
+    const daysToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+    endDate.setDate(endDate.getDate() + daysToSunday);
 
-      // Start from the most recent Sunday (so Monday is first in our grid)
-      const dayOfWeek = endDate.getDay();
-      const daysToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
-      endDate.setDate(endDate.getDate() + daysToSunday);
+    // Go back to the first Monday
+    const startDayOfWeek = startDate.getDay();
+    startDate.setDate(startDate.getDate() - startDayOfWeek);
+    startDate.setDate(startDate.getDate() + 1);
 
-      // Go back to the first Monday
-      const startDayOfWeek = startDate.getDay();
-      startDate.setDate(startDate.getDate() - startDayOfWeek);
-      startDate.setDate(startDate.getDate() + 1);
-    } else {
-      // Specific calendar year
-      const year = parseInt(selectedYear);
-      startDate = new Date(year, 0, 1); // Jan 1
-      endDate = new Date(year, 11, 31); // Dec 31
+    return { startDate, endDate };
+  }
 
-      // Start from Monday of the week containing Jan 1
-      const startDayOfWeek = startDate.getDay();
-      const daysToMonday = startDayOfWeek === 0 ? 6 : startDayOfWeek - 1;
-      startDate.setDate(startDate.getDate() - daysToMonday);
+  // Date range for one calendar year, padded to whole Monday–Sunday weeks
+  function yearRange(year) {
+    const startDate = new Date(year, 0, 1); // Jan 1
+    const endDate = new Date(year, 11, 31); // Dec 31
 
-      // End on Sunday of the week containing Dec 31
-      const endDayOfWeek = endDate.getDay();
-      const daysToSunday = endDayOfWeek === 0 ? 0 : 7 - endDayOfWeek;
-      endDate.setDate(endDate.getDate() + daysToSunday);
-    }
+    // Start from Monday of the week containing Jan 1
+    const startDayOfWeek = startDate.getDay();
+    const daysToMonday = startDayOfWeek === 0 ? 6 : startDayOfWeek - 1;
+    startDate.setDate(startDate.getDate() - daysToMonday);
 
+    // End on Sunday of the week containing Dec 31
+    const endDayOfWeek = endDate.getDay();
+    const daysToSunday = endDayOfWeek === 0 ? 0 : 7 - endDayOfWeek;
+    endDate.setDate(endDate.getDate() + daysToSunday);
+
+    return { startDate, endDate };
+  }
+
+  function buildWeeks({ startDate, endDate }) {
     const weeks = [];
     let currentDate = new Date(startDate);
 
@@ -104,15 +106,32 @@
     }
 
     return weeks;
+  }
+
+  // The grids to render: one for "last 12 months" or a single year, or —
+  // for "All time" — a stack of per-year grids, newest first (the GitHub
+  // activity-wall convention; one continuous strip would be thousands of
+  // pixels of horizontal scroll).
+  let grids = $derived.by(() => {
+    if (selectedYear === 'all') {
+      return availableYears.map((year) => ({
+        label: String(year),
+        weeks: buildWeeks(yearRange(year))
+      }));
+    }
+    const range = selectedYear === 'last12months'
+      ? last12MonthsRange()
+      : yearRange(parseInt(selectedYear));
+    return [{ label: null, weeks: buildWeeks(range) }];
   });
 
   $effect(() => {
-    const focusedDayIsVisible = weeks.some((week) =>
-      week.some((day) => day.dayKey === focusedDayKey)
+    const focusedDayIsVisible = grids.some((grid) =>
+      grid.weeks.some((week) => week.some((day) => day.dayKey === focusedDayKey))
     );
 
     if (!focusedDayIsVisible) {
-      focusedDayKey = weeks[0]?.[0]?.dayKey ?? null;
+      focusedDayKey = grids[0]?.weeks[0]?.[0]?.dayKey ?? null;
     }
   });
 
@@ -189,8 +208,8 @@
     }
   }
 
-  // Get month labels
-  let monthLabels = $derived.by(() => {
+  // Get month labels for one grid's weeks
+  function buildMonthLabels(weeks) {
     const labels = [];
     let lastMonth = -1;
 
@@ -222,7 +241,7 @@
     });
 
     return labels;
-  });
+  }
 
   // Calculate stats
   let stats = $derived.by(() => {
@@ -360,6 +379,14 @@
     padding-bottom: 1rem;
   }
 
+  .year-label {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #333;
+    margin: 0 0 0.5rem 0;
+    text-align: left;
+  }
+
   .heatmap {
     display: inline-flex;
     gap: 3px;
@@ -476,6 +503,7 @@
       <h2>Reading Activity</h2>
       <select bind:value={selectedYear} class="year-selector">
         <option value="last12months">Last 12 months</option>
+        <option value="all">All time</option>
         {#each availableYears as year}
           <option value={year.toString()}>{year}</option>
         {/each}
@@ -497,48 +525,53 @@
     </div>
   </div>
 
-  <div class="heatmap-wrapper">
-    <div class="month-labels" style="position: relative; height: 15px;">
-      {#each monthLabels as label}
-        <span class="month-label" style="left: {(label.weekIndex + 1) * 14}px;">{label.month}</span>
-      {/each}
-    </div>
-
-    <div class="heatmap-grid">
-      <div class="day-labels">
-        <div class="day-label">Mon</div>
-        <div class="day-label"></div>
-        <div class="day-label">Wed</div>
-        <div class="day-label"></div>
-        <div class="day-label">Fri</div>
-        <div class="day-label"></div>
-        <div class="day-label"></div>
-      </div>
-
-      <div class="heatmap" role="group" aria-label="Daily reading activity">
-        {#each weeks as week}
-          <div class="week-column">
-            {#each week as day}
-              <button
-                type="button"
-                data-day-key={day.dayKey}
-                tabindex={day.dayKey === focusedDayKey ? 0 : -1}
-                aria-label={formatTooltip(day).replaceAll('\n', ', ')}
-                class="day-cell"
-                style="background-color: {getColor(day.pagesRead)}"
-                onmouseenter={(e) => showTooltip(e, day)}
-                onmousemove={updateTooltipPosition}
-                onmouseleave={hideTooltip}
-                onfocus={(e) => showKeyboardTooltip(e, day)}
-                onblur={hideTooltip}
-                onkeydown={(e) => handleDayKeydown(e, day)}>
-              </button>
-            {/each}
-          </div>
+  {#each grids as grid (grid.label ?? 'single')}
+    <div class="heatmap-wrapper">
+      {#if grid.label}
+        <h3 class="year-label">{grid.label}</h3>
+      {/if}
+      <div class="month-labels" style="position: relative; height: 15px;">
+        {#each buildMonthLabels(grid.weeks) as label}
+          <span class="month-label" style="left: {(label.weekIndex + 1) * 14}px;">{label.month}</span>
         {/each}
       </div>
+
+      <div class="heatmap-grid">
+        <div class="day-labels">
+          <div class="day-label">Mon</div>
+          <div class="day-label"></div>
+          <div class="day-label">Wed</div>
+          <div class="day-label"></div>
+          <div class="day-label">Fri</div>
+          <div class="day-label"></div>
+          <div class="day-label"></div>
+        </div>
+
+        <div class="heatmap" role="group" aria-label="Daily reading activity{grid.label ? ` in ${grid.label}` : ''}">
+          {#each grid.weeks as week}
+            <div class="week-column">
+              {#each week as day}
+                <button
+                  type="button"
+                  data-day-key={day.dayKey}
+                  tabindex={day.dayKey === focusedDayKey ? 0 : -1}
+                  aria-label={formatTooltip(day).replaceAll('\n', ', ')}
+                  class="day-cell"
+                  style="background-color: {getColor(day.pagesRead)}"
+                  onmouseenter={(e) => showTooltip(e, day)}
+                  onmousemove={updateTooltipPosition}
+                  onmouseleave={hideTooltip}
+                  onfocus={(e) => showKeyboardTooltip(e, day)}
+                  onblur={hideTooltip}
+                  onkeydown={(e) => handleDayKeydown(e, day)}>
+                </button>
+              {/each}
+            </div>
+          {/each}
+        </div>
+      </div>
     </div>
-  </div>
+  {/each}
 
   <div class="legend">
     <span>Less</span>

@@ -28,9 +28,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 261 -> 268 KiB for public profiles: the anonymous
   // /profiles/<username> route, the Me page share card + payload sync, and
   // the profile Database methods (~4 KiB), plus ~3 KiB headroom.
+  // Total raised 268 -> 275 KiB for profile handles + the all-time
+  // heatmap: nine svelte-awesome icon paths, the links editor/renderer,
+  // and the per-year grid stack (~5 KiB), plus ~2 KiB headroom.
   assert.ok(
-    totalBytes <= 268 * 1024,
-    `Expected at most 268 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 275 * 1024,
+    `Expected at most 275 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

@@ -15,6 +15,8 @@
     profilePayloadEqual,
     USERNAME_PATTERN,
   } from '$lib/utils/stats.js';
+  import { LINK_TYPES, MAX_PROFILE_LINKS, linkIcon, linkTypeName } from '$lib/utils/links.js';
+  import Icon from 'svelte-awesome';
 
   let newBookModal = $state(false);
 
@@ -166,18 +168,20 @@
         // Born private: the page is only ever opened to the world by the
         // explicit visibility checkbox below.
         await Database.createProfile({
-          userId: $user.uid, username: chosenSlug, ...names,
+          userId: $user.uid, username: chosenSlug, ...names, links: [],
           isPublic: false, ...buildProfilePayload(allBooks, sessionDays),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: $user.uid, username: chosenSlug, ...names,
-          isPublic: myProfile.public, ...buildProfilePayload(allBooks, sessionDays),
+          links: myProfile.links ?? [], isPublic: myProfile.public,
+          ...buildProfilePayload(allBooks, sessionDays),
         });
       } else {
         await Database.renameProfile({
           userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
-          ...names, isPublic: myProfile.public, ...buildProfilePayload(allBooks, sessionDays),
+          ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
+          ...buildProfilePayload(allBooks, sessionDays),
         });
       }
       profileGivenName = chosenGiven;
@@ -202,13 +206,49 @@
     savingProfile = false;
   }
 
-  function setProfileVisibility(isPublic) {
-    Database.updateProfile({
-      userId: $user.uid, username: myProfile.username,
-      givenName: myProfile.givenName ?? '', familyName: myProfile.familyName ?? '',
-      isPublic,
+  // Full-doc rewrite from the current profile plus fresh stats; overrides
+  // carry the one field an immediate-write control (visibility checkbox,
+  // handle add/remove) is changing.
+  function persistProfile(overrides = {}) {
+    return Database.updateProfile({
+      userId: $user.uid,
+      username: myProfile.username,
+      givenName: myProfile.givenName ?? '',
+      familyName: myProfile.familyName ?? '',
+      links: myProfile.links ?? [],
+      isPublic: myProfile.public,
       ...buildProfilePayload(allBooks, sessionDays),
+      ...overrides,
     });
+  }
+
+  function setProfileVisibility(isPublic) {
+    persistProfile({ isPublic });
+  }
+
+  // Handle editor: the plus opens the picker, choosing a platform reveals
+  // the value field, Add writes immediately (like the visibility checkbox).
+  let linkPickerOpen = $state(false);
+  let newLinkType = $state('');
+  let newLinkLabel = $state('');
+  let newLinkValue = $state('');
+
+  function addLink() {
+    const value = newLinkValue.trim().slice(0, 200);
+    if (!value) return;
+    const link = { type: newLinkType, value };
+    if (newLinkType === 'other' && newLinkLabel.trim()) {
+      link.label = newLinkLabel.trim().slice(0, 50);
+    }
+    persistProfile({ links: [...(myProfile.links ?? []), link] });
+    linkPickerOpen = false;
+    newLinkType = '';
+    newLinkLabel = '';
+    newLinkValue = '';
+  }
+
+  function removeLink(index) {
+    persistProfile({ links: (myProfile.links ?? []).filter((_, i) => i !== index) });
   }
 
   async function copyProfileLink() {
@@ -225,12 +265,7 @@
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined) return;
     const payload = buildProfilePayload(allBooks, sessionDays);
     if (profilePayloadEqual(myProfile, payload)) return;
-    Database.updateProfile({
-      userId: $user.uid, username: myProfile.username,
-      givenName: myProfile.givenName ?? '', familyName: myProfile.familyName ?? '',
-      isPublic: myProfile.public,
-      ...payload,
-    });
+    persistProfile();
   });
 </script>
 
@@ -431,6 +466,70 @@
     .share-error {
       color: #dc3545;
       margin: 0.75rem 0 0 0;
+    }
+
+    .handles {
+      margin-top: 1rem;
+
+      .handle-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 0;
+        color: #333;
+
+        .handle-name {
+          font-weight: 600;
+        }
+
+        .handle-value {
+          color: #666;
+          overflow-wrap: anywhere;
+        }
+
+        .handle-remove {
+          border: none;
+          background: none;
+          color: #dc3545;
+          font-size: 1.2rem;
+          line-height: 1;
+          cursor: pointer;
+          padding: 0 0.25rem;
+        }
+      }
+
+      .handle-add {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-top: 0.5rem;
+
+        select, input {
+          flex: 1;
+          min-width: 160px;
+        }
+      }
+
+      .handle-add button,
+      .handle-plus {
+        border: none;
+        background: white;
+        padding: 0.5rem 1.5rem;
+        font-weight: 600;
+        color: #333;
+        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+        border-radius: 5px;
+        cursor: pointer;
+
+        &:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
+      }
+
+      .handle-plus {
+        margin-top: 0.5rem;
+      }
     }
 
     .share-visibility {
@@ -664,6 +763,54 @@
           {#if myProfile}
             <div class="profile-link">
               <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
+            </div>
+            <div class="handles">
+              {#each myProfile.links ?? [] as link, i}
+                <div class="handle-row">
+                  <Icon data={linkIcon(link)} />
+                  <span class="handle-name">{linkTypeName(link)}</span>
+                  <span class="handle-value">{link.value}</span>
+                  <button
+                    type="button"
+                    class="handle-remove"
+                    aria-label="Remove {linkTypeName(link)}"
+                    onclick={() => removeLink(i)}>×</button>
+                </div>
+              {/each}
+              {#if linkPickerOpen}
+                <div class="handle-add">
+                  <select class="form-control" bind:value={newLinkType}>
+                    <option value="" disabled>Choose platform…</option>
+                    {#each LINK_TYPES as linkType}
+                      <option value={linkType.type}>{linkType.name}</option>
+                    {/each}
+                  </select>
+                  {#if newLinkType === 'other'}
+                    <input
+                      type="text"
+                      class="form-control"
+                      placeholder="Label (e.g. Blog)"
+                      maxlength="50"
+                      bind:value={newLinkLabel} />
+                  {/if}
+                  {#if newLinkType}
+                    <input
+                      type="text"
+                      class="form-control"
+                      placeholder="Link or handle"
+                      maxlength="200"
+                      bind:value={newLinkValue} />
+                    <button type="button" onclick={addLink} disabled={!newLinkValue.trim()}>
+                      Add
+                    </button>
+                  {/if}
+                  <button type="button" onclick={() => (linkPickerOpen = false)}>Cancel</button>
+                </div>
+              {:else if (myProfile.links ?? []).length < MAX_PROFILE_LINKS}
+                <button type="button" class="handle-plus" onclick={() => (linkPickerOpen = true)}>
+                  + Add handle
+                </button>
+              {/if}
             </div>
             <label class="share-visibility">
               <input

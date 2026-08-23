@@ -5,6 +5,8 @@
   import { formatTime } from '$lib/utils/format.js';
   import { joinPersonName } from '$lib/utils/authors.js';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
+  import { linkHref, linkDisplay, linkIcon } from '$lib/utils/links.js';
+  import Icon from 'svelte-awesome';
 
   const username = $derived(page.params.username);
 
@@ -57,6 +59,27 @@
       font-size: 0.9rem;
       color: #997404;
       margin: 0.5rem 0 0 0;
+    }
+
+    .handles {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      margin-top: 1rem;
+
+      .handle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: #0d6efd;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
     }
   }
 
@@ -199,6 +222,16 @@
     <div class="profile-header">
       <h1>{joinPersonName(profile) || profile.username}</h1>
       <p class="subtitle">@{profile.username} — reading stats</p>
+      {#if profile.links?.length > 0}
+        <div class="handles">
+          {#each profile.links as link}
+            <a class="handle" href={linkHref(link)} target="_blank" rel="noopener noreferrer nofollow">
+              <Icon data={linkIcon(link)} />
+              <span>{linkDisplay(link)}</span>
+            </a>
+          {/each}
+        </div>
+      {/if}
       {#if !profile.public}
         <p class="private-note">Private — only you can see this page.</p>
       {/if}

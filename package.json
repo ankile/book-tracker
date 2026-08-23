@@ -10,7 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "npm run check && npm run test:unit && npm run test:pwa && npm run test:functions",
-    "test:unit": "node --test tests/finished.test.mjs tests/migrate-lib.test.mjs tests/authors.test.mjs tests/stats.test.mjs",
+    "test:unit": "node --test tests/finished.test.mjs tests/migrate-lib.test.mjs tests/authors.test.mjs tests/stats.test.mjs tests/links.test.mjs",
     "test:bundle": "node --test tests/bundle-budget.test.mjs",
     "test:pwa": "node --test tests/pwa.test.mjs",
     "test:functions": "npm --prefix functions test",
