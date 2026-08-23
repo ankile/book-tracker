@@ -22,10 +22,29 @@
   let inputTime = $state<number>(initialTime);
   let inputPages = $state<number>(undefined);
 
+  // Projected end page from this book's historical pace (pages per minute)
+  // and the minutes entered. Shown only as a placeholder until the user
+  // either saves (the guess becomes the value) or adjusts it with the
+  // ± buttons (which materialize it into the field).
+  const guessedPage = $derived.by(() => {
+    if (!book.pagesRead || !book.timeRead) return undefined;
+    if (!Number.isFinite(inputTime) || inputTime <= 0) return undefined;
+    const projected = book.currentPage + Math.round(inputTime * (book.pagesRead / book.timeRead));
+    return Math.min(projected, book.pageCount);
+  });
+
+  const fieldEmpty = $derived(inputPages === undefined || inputPages === null || (inputPages as unknown) === "");
+  const effectivePages = $derived(fieldEmpty ? guessedPage : inputPages);
+
+  function adjustPage(delta: number) {
+    const base = fieldEmpty ? guessedPage : inputPages;
+    inputPages = Math.max(0, Math.min(book.pageCount, base + delta));
+  }
+
   function addReading() {
     const { valid, message } = validateReading({
       inputTime,
-      inputPages,
+      inputPages: effectivePages,
       previousPage: book.currentPage,
       pageCount: book.pageCount,
     });
@@ -37,7 +56,7 @@
     onaddReading({
       id: book.id,
       timeRead: inputTime,
-      currentPage: inputPages,
+      currentPage: effectivePages,
       previousPage: book.currentPage,
     });
     oncloseModal();
@@ -47,6 +66,15 @@
     oncloseModal();
   }
 </script>
+
+<style>
+  .adjust-row {
+    display: flex;
+    gap: 0.5em;
+    justify-content: flex-end;
+    margin: 0 2em 0.5em;
+  }
+</style>
 
 <ModalCard
   open={!!book}
@@ -70,7 +98,15 @@
       class="form-control"
       type="number"
       inputmode="numeric"
-      placeholder="What page are you on"
+      placeholder={guessedPage !== undefined ? String(guessedPage) : "What page are you on"}
       bind:value={inputPages} />
   </Input>
+  {#if guessedPage !== undefined || !fieldEmpty}
+    <div class="adjust-row">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick={() => adjustPage(-5)}>−5</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick={() => adjustPage(-1)}>−1</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick={() => adjustPage(1)}>+1</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick={() => adjustPage(5)}>+5</button>
+    </div>
+  {/if}
 </ModalCard>

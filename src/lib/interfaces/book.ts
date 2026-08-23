@@ -2,6 +2,9 @@ export interface Book {
   id: string;
   currentPage: number;
   pageCount: number;
+  // Lifetime aggregates over reading sessions; used to project pace.
+  pagesRead?: number;
+  timeRead?: number;
   title: string;
   // Author doc ids into users/{uid}/authors, in display order.
   authorIds?: string[];
