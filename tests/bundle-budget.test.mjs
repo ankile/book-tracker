@@ -31,9 +31,13 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 268 -> 275 KiB for profile handles + the all-time
   // heatmap: nine svelte-awesome icon paths, the links editor/renderer,
   // and the per-year grid stack (~5 KiB), plus ~2 KiB headroom.
+  // Total raised 275 -> 290 KiB for the Me-page analytics: the session
+  // stats module, hand-rolled bar/line chart primitives, and six section
+  // components (speed, clock, cadence, in-progress, authors, records,
+  // ~7 KiB), plus headroom.
   assert.ok(
-    totalBytes <= 275 * 1024,
-    `Expected at most 275 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 290 * 1024,
+    `Expected at most 290 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

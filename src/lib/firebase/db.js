@@ -694,8 +694,11 @@ class Database {
     };
   }
 
-  // Get all reading sessions across all books for a user using
-  // collectionGroup. Starts as undefined (loading, getUser convention): the
+  // Get all update docs across all books for a user using collectionGroup:
+  // 'reading' sessions plus page-only 'update' corrections. The analytics
+  // need both — a page-only update can be what finishes a book — and the
+  // 'in' filter rides the same owner+type composite index the equality
+  // filter used. Starts as undefined (loading, getUser convention): the
   // Me page's profile sync must be able to tell "no snapshot yet" from "no
   // sessions", or it would blank the published heatmap on page load.
   static getAllReadingSessions(userId) {
@@ -705,7 +708,7 @@ class Database {
     const q = query(
       collectionGroup(db, 'updates'),
       where('owner', '==', ownerRef),
-      where('type', '==', 'reading')
+      where('type', 'in', ['reading', 'update'])
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {

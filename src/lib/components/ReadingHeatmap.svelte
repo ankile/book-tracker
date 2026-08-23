@@ -257,7 +257,9 @@
       if (day.pagesRead > 0) activeDays++;
     });
 
-    // Calculate streaks (using same offset as activity aggregation)
+    // Calculate streaks (using same offset as activity aggregation),
+    // walking back from today to the earliest recorded day — a fixed
+    // lookback would silently cap "longest streak" at its window.
     const now = new Date();
     now.setHours(now.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -265,7 +267,11 @@
     let tempStreak = 0;
     let foundCurrentStreak = false;
 
-    for (let i = 0; i < 365; i++) {
+    // days is ascending by day key, so the first entry is the earliest.
+    const [firstYear, firstMonth, firstDay] = (days[0]?.day ?? '9999-01-01').split('-').map(Number);
+    const earliestDate = new Date(firstYear, firstMonth - 1, firstDay);
+
+    while (checkDate >= earliestDate) {
       const dayKey = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
       const activity = activityByDay.get(dayKey);
 
@@ -387,26 +393,22 @@
     text-align: left;
   }
 
+  /* grid-template-columns comes from the markup (one 1fr track per week).
+     min-width keeps cells from shrinking below ~10px — narrower screens
+     scroll the wrapper instead. */
   .heatmap {
-    display: inline-flex;
+    display: grid;
     gap: 3px;
-    min-width: 100%;
-  }
-
-  .week-column {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
+    min-width: 720px;
   }
 
   .day-cell {
     border: 0;
-    width: 11px;
-    height: 11px;
+    width: 100%;
+    aspect-ratio: 1 / 1;
     padding: 0;
     border-radius: 2px;
     cursor: pointer;
-    position: relative;
   }
 
   .day-cell:hover {
@@ -414,37 +416,19 @@
     outline-offset: 1px;
   }
 
-  .month-labels {
-    display: flex;
-    margin-bottom: 0.5rem;
-    font-size: 0.75rem;
-    color: #666;
-    padding-left: 30px;
-  }
-
   .month-label {
-    position: absolute;
+    grid-row: 1;
     font-size: 0.75rem;
     color: #666;
-  }
-
-  .day-labels {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin-right: 5px;
-    font-size: 0.75rem;
-    color: #666;
+    white-space: nowrap;
   }
 
   .day-label {
-    height: 11px;
-    display: flex;
-    align-items: center;
-  }
-
-  .heatmap-grid {
-    display: flex;
+    grid-column: 1;
+    align-self: center;
+    padding-right: 5px;
+    font-size: 0.75rem;
+    color: #666;
   }
 
   .legend {
@@ -530,45 +514,40 @@
       {#if grid.label}
         <h3 class="year-label">{grid.label}</h3>
       {/if}
-      <div class="month-labels" style="position: relative; height: 15px;">
+      <!-- One CSS grid per heatmap: an auto label column plus one 1fr track
+           per week, so the wall stretches to the card's full width (cells
+           take their height from the track via aspect-ratio). Month labels
+           are grid items on row 1 placed by week index — no pixel math to
+           fall out of step with the scaling cells. -->
+      <div
+        class="heatmap"
+        style="grid-template-columns: auto repeat({grid.weeks.length}, 1fr);"
+        role="group"
+        aria-label="Daily reading activity{grid.label ? ` in ${grid.label}` : ''}">
         {#each buildMonthLabels(grid.weeks) as label}
-          <span class="month-label" style="left: {(label.weekIndex + 1) * 14}px;">{label.month}</span>
+          <span class="month-label" style="grid-column: {label.weekIndex + 2};">{label.month}</span>
         {/each}
-      </div>
-
-      <div class="heatmap-grid">
-        <div class="day-labels">
-          <div class="day-label">Mon</div>
-          <div class="day-label"></div>
-          <div class="day-label">Wed</div>
-          <div class="day-label"></div>
-          <div class="day-label">Fri</div>
-          <div class="day-label"></div>
-          <div class="day-label"></div>
-        </div>
-
-        <div class="heatmap" role="group" aria-label="Daily reading activity{grid.label ? ` in ${grid.label}` : ''}">
-          {#each grid.weeks as week}
-            <div class="week-column">
-              {#each week as day}
-                <button
-                  type="button"
-                  data-day-key={day.dayKey}
-                  tabindex={day.dayKey === focusedDayKey ? 0 : -1}
-                  aria-label={formatTooltip(day).replaceAll('\n', ', ')}
-                  class="day-cell"
-                  style="background-color: {getColor(day.pagesRead)}"
-                  onmouseenter={(e) => showTooltip(e, day)}
-                  onmousemove={updateTooltipPosition}
-                  onmouseleave={hideTooltip}
-                  onfocus={(e) => showKeyboardTooltip(e, day)}
-                  onblur={hideTooltip}
-                  onkeydown={(e) => handleDayKeydown(e, day)}>
-                </button>
-              {/each}
-            </div>
+        <span class="day-label" style="grid-row: 2;">Mon</span>
+        <span class="day-label" style="grid-row: 4;">Wed</span>
+        <span class="day-label" style="grid-row: 6;">Fri</span>
+        {#each grid.weeks as week, weekIndex}
+          {#each week as day, dayIndex}
+            <button
+              type="button"
+              data-day-key={day.dayKey}
+              tabindex={day.dayKey === focusedDayKey ? 0 : -1}
+              aria-label={formatTooltip(day).replaceAll('\n', ', ')}
+              class="day-cell"
+              style="grid-column: {weekIndex + 2}; grid-row: {dayIndex + 2}; background-color: {getColor(day.pagesRead)}"
+              onmouseenter={(e) => showTooltip(e, day)}
+              onmousemove={updateTooltipPosition}
+              onmouseleave={hideTooltip}
+              onfocus={(e) => showKeyboardTooltip(e, day)}
+              onblur={hideTooltip}
+              onkeydown={(e) => handleDayKeydown(e, day)}>
+            </button>
           {/each}
-        </div>
+        {/each}
       </div>
     </div>
   {/each}

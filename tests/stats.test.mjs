@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   aggregateSessionsByDay,
   buildProfilePayload,
+  computeBooksByYear,
   computeStats,
   profilePayloadEqual,
   USERNAME_PATTERN,
@@ -26,6 +27,54 @@ test("computeStats aggregates the library", () => {
   assert.equal(stats.totalTimeReadHours, Math.round(990 / 60));
   assert.equal(stats.totalPagesRead, 900);
   assert.equal(stats.avgTimePerBook, 450);
+});
+
+test("computeStats reports the date range endpoints", () => {
+  const stats = computeStats(books);
+  assert.equal(stats.firstFinishedAt.getTime(), new Date("2024-03-01T12:00:00Z").getTime());
+  assert.equal(stats.lastFinishedAt.getTime(), new Date("2025-06-01T12:00:00Z").getTime());
+  assert.equal(stats.firstBookAddedAt.getTime(), new Date("2024-03-01T12:00:00Z").getTime());
+  const empty = computeStats([]);
+  assert.equal(empty.firstFinishedAt, null);
+  assert.equal(empty.firstBookAddedAt, null);
+});
+
+test("computeStats prefers session-derived finish dates when given", () => {
+  const withIds = books.map((book, i) => ({ ...book, id: `b${i}` }));
+  const finishedAt = new Map([["b0", new Date("2023-11-15T12:00:00Z")]]);
+  const stats = computeStats(withIds, finishedAt);
+  assert.equal(stats.firstFinishedAt.getTime(), new Date("2023-11-15T12:00:00Z").getTime());
+});
+
+test("computeBooksByYear counts unique/new authors and tracks book extremes", () => {
+  const library = [
+    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: ["x", "y"], createdAt: ts("2024-02-01T12:00:00Z") },
+    { id: "b2", finished: true, timeRead: 60, pagesRead: 500, pageCount: 500, authorIds: ["x"], createdAt: ts("2024-06-01T12:00:00Z") },
+    { id: "b3", finished: true, timeRead: 60, pagesRead: 300, pageCount: 300, authorIds: ["x", "z"], createdAt: ts("2025-01-05T12:00:00Z") },
+    { id: "b4", finished: false, timeRead: 60, pagesRead: 50, pageCount: 400, authorIds: ["w"], createdAt: ts("2025-02-01T12:00:00Z") },
+  ];
+  const years = computeBooksByYear(library);
+  assert.equal(years.length, 2);
+  const [y2025, y2024] = years;
+  assert.equal(y2024.uniqueAuthors, 2);
+  assert.equal(y2024.newAuthors, 2);
+  assert.equal(y2024.longestBook.pageCount, 500);
+  assert.equal(y2024.shortestBook.pageCount, 100);
+  // 2025: x is returning, z is new; the unfinished b4 counts nowhere.
+  assert.equal(y2025.uniqueAuthors, 2);
+  assert.equal(y2025.newAuthors, 1);
+  assert.equal(y2025.longestBook.pageCount, 300);
+  assert.equal(y2025.shortestBook.pageCount, 300);
+});
+
+test("computeBooksByYear reattributes by session-derived finish dates", () => {
+  const library = [
+    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: [], createdAt: ts("2024-12-20T12:00:00Z") },
+  ];
+  const finishedAt = new Map([["b1", new Date("2025-01-10T12:00:00Z")]]);
+  const years = computeBooksByYear(library, finishedAt);
+  assert.equal(years.length, 1);
+  assert.equal(years[0].year, "2025");
 });
 
 test("sessions aggregate per day with the 3 AM boundary, ascending", () => {

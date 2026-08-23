@@ -4,9 +4,15 @@
   import { page } from '$app/state';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
+  import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
+  import SpeedSection from '$lib/components/SpeedSection.svelte';
+  import ClockSection from '$lib/components/ClockSection.svelte';
+  import CadenceSection from '$lib/components/CadenceSection.svelte';
+  import ProgressSection from '$lib/components/ProgressSection.svelte';
+  import AuthorLeaderboardSection from '$lib/components/AuthorLeaderboardSection.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { togglSaveToken } from '$lib/firebase/functions.js';
-  import { formatTime } from '$lib/utils/format.js';
+  import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.js';
   import {
     computeStats,
     computeBooksByYear,
@@ -15,6 +21,7 @@
     profilePayloadEqual,
     USERNAME_PATTERN,
   } from '$lib/utils/stats.js';
+  import { buildBookTimelines, finishedAtByBook } from '$lib/utils/sessions.js';
   import { LINK_TYPES, MAX_PROFILE_LINKS, linkIcon, linkTypeName } from '$lib/utils/links.js';
   import Icon from 'svelte-awesome';
 
@@ -44,9 +51,10 @@
     }
   });
 
-  // All reading sessions, aggregated per day for the heatmap and the
-  // published profile; undefined until the first snapshot (same loading
-  // sentinel as allBooks, and for the same reason).
+  // All update docs ('reading' sessions plus page-only 'update'
+  // corrections), for the heatmap, the published profile, and the session
+  // analytics; undefined until the first snapshot (same loading sentinel
+  // as allBooks, and for the same reason).
   let allSessions = $state(undefined);
   $effect(() => {
     if ($user) {
@@ -60,7 +68,17 @@
       };
     }
   });
-  const sessionDays = $derived(aggregateSessionsByDay(allSessions ?? []));
+  // Day aggregation (heatmap + published profile) stays reading-only,
+  // exactly as before the query was widened to include 'update' docs.
+  const readingSessions = $derived((allSessions ?? []).filter((s) => s.type === 'reading'));
+  const sessionDays = $derived(aggregateSessionsByDay(readingSessions));
+
+  // Session-derived finish dates (a book finishes at its last update of
+  // any type): feed the per-year table, the card ranges, and the published
+  // payload, so a book read across a year boundary counts in the year it
+  // was actually finished.
+  const timelines = $derived(buildBookTimelines(allSessions ?? []));
+  const finishedAt = $derived(finishedAtByBook(allBooks ?? [], timelines));
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -106,8 +124,8 @@
   }
 
   // Statistics (shared with the public-profile payload, see utils/stats.js)
-  const stats = $derived(computeStats(allBooks ?? []));
-  const booksByYear = $derived(computeBooksByYear(allBooks ?? []));
+  const stats = $derived(computeStats(allBooks ?? [], finishedAt));
+  const booksByYear = $derived(computeBooksByYear(allBooks ?? [], finishedAt));
 
   // Extract username from email
   const username = $derived($user ? $user.email.split('@')[0] : '');
@@ -169,19 +187,19 @@
         // explicit visibility checkbox below.
         await Database.createProfile({
           userId: $user.uid, username: chosenSlug, ...names, links: [],
-          isPublic: false, ...buildProfilePayload(allBooks, sessionDays),
+          isPublic: false, ...buildProfilePayload(allBooks, sessionDays, finishedAt),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: $user.uid, username: chosenSlug, ...names,
           links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays),
+          ...buildProfilePayload(allBooks, sessionDays, finishedAt),
         });
       } else {
         await Database.renameProfile({
           userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays),
+          ...buildProfilePayload(allBooks, sessionDays, finishedAt),
         });
       }
       profileGivenName = chosenGiven;
@@ -217,7 +235,7 @@
       familyName: myProfile.familyName ?? '',
       links: myProfile.links ?? [],
       isPublic: myProfile.public,
-      ...buildProfilePayload(allBooks, sessionDays),
+      ...buildProfilePayload(allBooks, sessionDays, finishedAt),
       ...overrides,
     });
   }
@@ -263,7 +281,7 @@
   // as clean and the effect settles instead of looping.
   $effect(() => {
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined) return;
-    const payload = buildProfilePayload(allBooks, sessionDays);
+    const payload = buildProfilePayload(allBooks, sessionDays, finishedAt);
     if (profilePayloadEqual(myProfile, payload)) return;
     persistProfile();
   });
@@ -588,7 +606,7 @@
 
     table {
       width: 100%;
-      min-width: 480px;
+      min-width: 640px;
       border-collapse: collapse;
 
       th, td {
@@ -865,7 +883,11 @@
       <a href="/finished" class="stat-card clickable">
         <div class="stat-label">Books Read</div>
         <div class="stat-value">{stats.finishedBooks}</div>
-        <div class="stat-subtext">Completed books</div>
+        <div class="stat-subtext">
+          {stats.firstFinishedAt
+            ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt)
+            : 'Completed books'}
+        </div>
       </a>
 
       <a href="/" class="stat-card clickable">
@@ -883,27 +905,46 @@
       <div class="stat-card">
         <div class="stat-label">Total Time Read</div>
         <div class="stat-value">{stats.totalTimeReadHours} hrs</div>
-        <div class="stat-subtext">{stats.totalPagesRead.toLocaleString()} pages read</div>
+        <div class="stat-subtext">
+          {stats.totalPagesRead.toLocaleString()} pages{stats.firstBookAddedAt
+            ? ` since ${formatMonthYear(stats.firstBookAddedAt)}`
+            : ' read'}
+        </div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Books Per Year</div>
         <div class="stat-value">{stats.booksPerYear}</div>
-        <div class="stat-subtext">Average rate</div>
+        <div class="stat-subtext">
+          {stats.firstFinishedAt
+            ? formatDateRange(stats.firstFinishedAt, new Date())
+            : 'Average rate'}
+        </div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Avg. Time Per Book</div>
         <div class="stat-value">{formatTime(stats.avgTimePerBook)}</div>
-        <div class="stat-subtext">For finished books</div>
+        <div class="stat-subtext">Across {stats.finishedBooks} finished books</div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Total Books</div>
         <div class="stat-value">{stats.totalBooks}</div>
-        <div class="stat-subtext">In your library</div>
+        <div class="stat-subtext">
+          {stats.firstBookAddedAt
+            ? `First added ${formatMonthYear(stats.firstBookAddedAt)}`
+            : 'In your library'}
+        </div>
       </div>
     </div>
+
+    <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} />
+    <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} />
+    <ClockSection sessions={allSessions ?? []} />
+    <CadenceSection sessions={allSessions ?? []} />
+    <ProgressSection sessions={allSessions ?? []} books={allBooks ?? []} />
+    <AuthorLeaderboardSection books={allBooks ?? []} authors={authorList ?? []} />
 
     {#if booksByYear.length > 0}
       <div class="books-by-year">
@@ -916,21 +957,34 @@
               <th>Books</th>
               <th>Hours</th>
               <th>Pages</th>
+              <th>Authors</th>
               <th>Longest Book</th>
+              <th>Shortest Book</th>
             </tr>
           </thead>
           <tbody>
-            {#each booksByYear as { year, count, totalTimeRead, totalPages, longestBook }}
+            {#each booksByYear as { year, count, totalTimeRead, totalPages, longestBook, shortestBook, uniqueAuthors, newAuthors }}
               <tr>
                 <td>{year}</td>
                 <td>{count}</td>
                 <td>{Math.round(totalTimeRead / 60)}</td>
                 <td>{totalPages.toLocaleString()}</td>
+                <td>{uniqueAuthors} ({newAuthors} new)</td>
                 <td>
                   {#if longestBook}
                     <span class="book-info">
                       <span class="book-title">{longestBook.title}</span>
                       <span class="book-pages">({longestBook.pageCount} pages)</span>
+                    </span>
+                  {:else}
+                    -
+                  {/if}
+                </td>
+                <td>
+                  {#if shortestBook}
+                    <span class="book-info">
+                      <span class="book-title">{shortestBook.title}</span>
+                      <span class="book-pages">({shortestBook.pageCount} pages)</span>
                     </span>
                   {:else}
                     -

@@ -3,19 +3,29 @@
 // displays — the shared /profiles/<username> link can never disagree with
 // what the owner sees on their own screen.
 
-export function computeStats(allBooks) {
+// finishedAtByBookId (optional Map<bookId, Date>, see computeBooksByYear)
+// upgrades finish dates from the createdAt fallback to session-derived.
+export function computeStats(allBooks, finishedAtByBookId) {
   const finishedBooks = allBooks.filter(b => b.finished);
   const readingBooks = allBooks.filter(b => !b.finished);
   const totalTimeRead = allBooks.reduce((sum, book) => sum + (book.timeRead || 0), 0);
   const totalPagesRead = allBooks.reduce((sum, book) => sum + (book.pagesRead || 0), 0);
 
+  // First/last finish dates, for the stat-card range subtexts and the
+  // books-per-year denominator.
+  const finishedDates = finishedBooks
+    .map(b => finishedAtByBookId?.get(b.id) ?? b.createdAt?.toDate?.())
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+  const addedDates = allBooks
+    .map(b => b.createdAt?.toDate?.())
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+
   // Calculate books per year (from first book created date)
   let booksPerYear = 0;
-  if (finishedBooks.length > 0) {
-    const dates = finishedBooks
-      .map(b => b.createdAt?.toDate?.() || new Date())
-      .sort((a, b) => a - b);
-    const firstBook = dates[0];
+  if (finishedDates.length > 0) {
+    const firstBook = finishedDates[0];
     const yearsSinceFirst = (new Date() - firstBook) / (1000 * 60 * 60 * 24 * 365);
     booksPerYear = yearsSinceFirst > 0 ? (finishedBooks.length / yearsSinceFirst).toFixed(1) : 0;
   }
@@ -37,15 +47,22 @@ export function computeStats(allBooks) {
     totalPagesRead,
     booksPerYear,
     avgTimePerBook,
+    firstFinishedAt: finishedDates[0] ?? null,
+    lastFinishedAt: finishedDates.at(-1) ?? null,
+    firstBookAddedAt: addedDates[0] ?? null,
   };
 }
 
-export function computeBooksByYear(allBooks) {
+// finishedAtByBookId is an optional Map<bookId, Date> of session-derived
+// finish dates; without it a book's finish year falls back to createdAt
+// (the pre-session-analytics behavior, still used by callers that have no
+// session data at hand).
+export function computeBooksByYear(allBooks, finishedAtByBookId) {
   const finishedBooks = allBooks.filter(b => b.finished);
   const yearData = {};
 
   finishedBooks.forEach(book => {
-    const date = book.createdAt?.toDate?.();
+    const date = finishedAtByBookId?.get(book.id) ?? book.createdAt?.toDate?.();
     if (date) {
       const year = date.getFullYear();
       if (!yearData[year]) {
@@ -54,19 +71,42 @@ export function computeBooksByYear(allBooks) {
           totalTimeRead: 0,
           totalPages: 0,
           longestBook: null,
+          shortestBook: null,
+          authorIds: new Set(),
         };
       }
 
       yearData[year].count += 1;
       yearData[year].totalTimeRead += book.timeRead || 0;
       yearData[year].totalPages += book.pagesRead || 0;
+      (book.authorIds ?? []).forEach(id => yearData[year].authorIds.add(id));
 
-      // Track longest book
+      // Track longest and shortest books
       if (!yearData[year].longestBook || book.pageCount > yearData[year].longestBook.pageCount) {
         yearData[year].longestBook = book;
       }
+      if (!yearData[year].shortestBook || book.pageCount < yearData[year].shortestBook.pageCount) {
+        yearData[year].shortestBook = book;
+      }
     }
   });
+
+  // Authors first read in a given year, walked oldest-first so "new" means
+  // never seen in any earlier year.
+  const seenAuthors = new Set();
+  const newAuthorsByYear = {};
+  Object.keys(yearData)
+    .sort((a, b) => a - b)
+    .forEach((year) => {
+      let newAuthors = 0;
+      yearData[year].authorIds.forEach((id) => {
+        if (!seenAuthors.has(id)) {
+          seenAuthors.add(id);
+          newAuthors += 1;
+        }
+      });
+      newAuthorsByYear[year] = newAuthors;
+    });
 
   return Object.entries(yearData)
     .sort(([a], [b]) => b - a)
@@ -76,6 +116,9 @@ export function computeBooksByYear(allBooks) {
       totalTimeRead: data.totalTimeRead,
       totalPages: data.totalPages,
       longestBook: data.longestBook,
+      shortestBook: data.shortestBook,
+      uniqueAuthors: data.authorIds.size,
+      newAuthors: newAuthorsByYear[year],
     }));
 }
 
@@ -84,8 +127,17 @@ export function computeBooksByYear(allBooks) {
 // sessions exactly the way the owner's own heatmap does.
 export const DAY_BOUNDARY_OFFSET_HOURS = 3;
 
-const dayKey = (date) =>
+export const dayKeyOf = (date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+// A copy of the date shifted so the pre-3-AM hours belong to the previous
+// day — every per-day bucketing (heatmap, streaks, session analytics)
+// must go through this to agree on what "a day" is.
+export const shiftedDay = (date) => {
+  const shifted = new Date(date);
+  shifted.setHours(shifted.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
+  return shifted;
+};
 
 // Collapse reading sessions into one entry per active day, ascending by
 // day. This is both the heatmap's input and the `days` list published to
@@ -97,9 +149,7 @@ export function aggregateSessionsByDay(sessions) {
     const timestamp = session.createdAt?.toDate?.();
     if (!timestamp) return;
 
-    const date = new Date(timestamp);
-    date.setHours(date.getHours() - DAY_BOUNDARY_OFFSET_HOURS);
-    const day = dayKey(date);
+    const day = dayKeyOf(shiftedDay(timestamp));
 
     if (!dayMap.has(day)) {
       dayMap.set(day, { day, pagesRead: 0, timeRead: 0, sessions: 0 });
@@ -128,8 +178,8 @@ export const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
 // the equality check below.
 export const PROFILE_MAX_DAYS = 4000;
 
-export function buildProfilePayload(allBooks, sessionDays = []) {
-  const stats = computeStats(allBooks);
+export function buildProfilePayload(allBooks, sessionDays = [], finishedAtByBookId) {
+  const stats = computeStats(allBooks, finishedAtByBookId);
   return {
     days: sessionDays.slice(-PROFILE_MAX_DAYS),
     stats: {
@@ -141,7 +191,7 @@ export function buildProfilePayload(allBooks, sessionDays = []) {
       booksPerYear: Number(stats.booksPerYear),
       avgTimePerBook: stats.avgTimePerBook,
     },
-    years: computeBooksByYear(allBooks).map(({ year, count, totalTimeRead, totalPages }) => ({
+    years: computeBooksByYear(allBooks, finishedAtByBookId).map(({ year, count, totalTimeRead, totalPages }) => ({
       year: Number(year),
       count,
       hours: Math.round(totalTimeRead / 60),
