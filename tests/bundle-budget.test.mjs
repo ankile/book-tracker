@@ -25,9 +25,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // and client-side join fit inside the old budget (the legacy write path
   // they replaced paid for them), the ~2 KiB is the /authors management
   // route (rename/merge/sortName) and its author mutations.
+  // Total raised 261 -> 268 KiB for public profiles: the anonymous
+  // /profiles/<username> route, the Me page share card + payload sync, and
+  // the profile Database methods (~4 KiB), plus ~3 KiB headroom.
   assert.ok(
-    totalBytes <= 261 * 1024,
-    `Expected at most 261 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 268 * 1024,
+    `Expected at most 268 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

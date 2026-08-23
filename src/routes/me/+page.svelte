@@ -1,11 +1,19 @@
 <script>
   import { user, signOut } from '$lib/firebase/auth.js';
   import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { togglSaveToken } from '$lib/firebase/functions.js';
   import { formatTime } from '$lib/utils/format.js';
+  import {
+    computeStats,
+    computeBooksByYear,
+    buildProfilePayload,
+    profilePayloadEqual,
+    USERNAME_PATTERN,
+  } from '$lib/utils/stats.js';
 
   let newBookModal = $state(false);
 
@@ -17,8 +25,9 @@
   const toggleModal = () => (newBookModal = !newBookModal);
   const closeModal = () => (newBookModal = false);
 
-  // Get all books for statistics
-  let allBooks = $state([]);
+  // Get all books for statistics; undefined until the first snapshot (the
+  // profile sync below must not run against the pre-snapshot empty list).
+  let allBooks = $state(undefined);
   $effect(() => {
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
@@ -75,86 +84,83 @@
     }
   }
 
-  // Calculate statistics
-  const stats = $derived(() => {
-    const finishedBooks = allBooks.filter(b => b.finished);
-    const readingBooks = allBooks.filter(b => !b.finished);
-    const totalTimeRead = allBooks.reduce((sum, book) => sum + (book.timeRead || 0), 0);
-    const totalPagesRead = allBooks.reduce((sum, book) => sum + (book.pagesRead || 0), 0);
-
-    // Calculate books per year (from first book created date)
-    let booksPerYear = 0;
-    if (finishedBooks.length > 0) {
-      const dates = finishedBooks
-        .map(b => b.createdAt?.toDate?.() || new Date())
-        .sort((a, b) => a - b);
-      const firstBook = dates[0];
-      const yearsSinceFirst = (new Date() - firstBook) / (1000 * 60 * 60 * 24 * 365);
-      booksPerYear = yearsSinceFirst > 0 ? (finishedBooks.length / yearsSinceFirst).toFixed(1) : 0;
-    }
-
-    // Average time per finished book
-    const avgTimePerBook = finishedBooks.length > 0
-      ? Math.round(finishedBooks.reduce((sum, b) => sum + (b.timeRead || 0), 0) / finishedBooks.length)
-      : 0;
-
-    // Round total time read to nearest hour
-    const totalTimeReadHours = Math.round(totalTimeRead / 60);
-
-    return {
-      totalBooks: allBooks.length,
-      finishedBooks: finishedBooks.length,
-      readingBooks: readingBooks.length,
-      totalTimeRead,
-      totalTimeReadHours,
-      totalPagesRead,
-      booksPerYear,
-      avgTimePerBook,
-    };
-  });
-
-  // Calculate books per year breakdown for table
-  const booksByYear = $derived(() => {
-    const finishedBooks = allBooks.filter(b => b.finished);
-    const yearData = {};
-
-    finishedBooks.forEach(book => {
-      const date = book.createdAt?.toDate?.();
-      if (date) {
-        const year = date.getFullYear();
-        if (!yearData[year]) {
-          yearData[year] = {
-            count: 0,
-            totalTimeRead: 0,
-            totalPages: 0,
-            longestBook: null,
-          };
-        }
-
-        yearData[year].count += 1;
-        yearData[year].totalTimeRead += book.timeRead || 0;
-        yearData[year].totalPages += book.pagesRead || 0;
-
-        // Track longest book
-        if (!yearData[year].longestBook || book.pageCount > yearData[year].longestBook.pageCount) {
-          yearData[year].longestBook = book;
-        }
-      }
-    });
-
-    return Object.entries(yearData)
-      .sort(([a], [b]) => b - a)
-      .map(([year, data]) => ({
-        year,
-        count: data.count,
-        totalTimeRead: data.totalTimeRead,
-        totalPages: data.totalPages,
-        longestBook: data.longestBook,
-      }));
-  });
+  // Statistics (shared with the public-profile payload, see utils/stats.js)
+  const stats = $derived(computeStats(allBooks ?? []));
+  const booksByYear = $derived(computeBooksByYear(allBooks ?? []));
 
   // Extract username from email
   const username = $derived($user ? $user.email.split('@')[0] : '');
+
+  // Public profile: undefined → loading, null → none enabled.
+  let myProfile = $state(undefined);
+  $effect(() => {
+    if ($user) {
+      const profileStore = Database.getMyProfile($user.uid);
+      const unsubscribe = profileStore.subscribe((data) => (myProfile = data));
+      return () => {
+        unsubscribe();
+        profileStore.unsubscribe();
+      };
+    }
+  });
+
+  let profileUsername = $state('');
+  let profileError = $state('');
+  let savingProfile = $state(false);
+  let linkCopied = $state(false);
+
+  const profileUrl = $derived(myProfile ? `${page.url.origin}/profiles/${myProfile.username}` : '');
+
+  async function enableProfile() {
+    const chosen = profileUsername.trim().toLowerCase();
+    if (!USERNAME_PATTERN.test(chosen)) {
+      profileError = '3–30 characters: lowercase letters, numbers, and dashes.';
+      return;
+    }
+    savingProfile = true;
+    profileError = '';
+    try {
+      // Born private: the page is only ever opened to the world by the
+      // explicit visibility checkbox below.
+      await Database.createProfile({ userId: $user.uid, username: chosen, isPublic: false, ...buildProfilePayload(allBooks) });
+      profileUsername = '';
+    } catch (error) {
+      // The rules turn "username taken" into permission-denied (create on
+      // an existing doc evaluates as an update of someone else's doc).
+      profileError = error.code === 'permission-denied'
+        ? `"${chosen}" is already taken.`
+        : error.message;
+    } finally {
+      savingProfile = false;
+    }
+  }
+
+  async function disableProfile() {
+    savingProfile = true;
+    await Database.deleteProfile({ userId: $user.uid, username: myProfile.username });
+    savingProfile = false;
+  }
+
+  function setProfileVisibility(isPublic) {
+    Database.updateProfile({ userId: $user.uid, username: myProfile.username, isPublic, ...buildProfilePayload(allBooks) });
+  }
+
+  async function copyProfileLink() {
+    await navigator.clipboard.writeText(profileUrl);
+    linkCopied = true;
+    setTimeout(() => (linkCopied = false), 2000);
+  }
+
+  // Keep the published doc in step with live stats: whenever this page
+  // recomputes and the public copy differs, overwrite it. The equality
+  // check excludes updatedAt, so the listener echo of our own write reads
+  // as clean and the effect settles instead of looping.
+  $effect(() => {
+    if (!$user || !myProfile || allBooks === undefined) return;
+    const payload = buildProfilePayload(allBooks);
+    if (profilePayloadEqual(myProfile, payload)) return;
+    Database.updateProfile({ userId: $user.uid, username: myProfile.username, isPublic: myProfile.public, ...payload });
+  });
 </script>
 
 <style lang="scss">
@@ -311,6 +317,62 @@
     }
   }
 
+  .share-card {
+    .profile-link {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+
+      a {
+        font-size: 1.1rem;
+        word-break: break-all;
+      }
+    }
+
+    .share-error {
+      color: #dc3545;
+      margin: 0.75rem 0 0 0;
+    }
+
+    .share-visibility {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 1rem;
+      color: #333;
+      cursor: pointer;
+
+      input {
+        width: 1.1rem;
+        height: 1.1rem;
+        cursor: pointer;
+      }
+    }
+
+    .share-actions {
+      display: flex;
+      gap: 1rem;
+      margin-top: 1rem;
+
+      button {
+        border: none;
+        background: white;
+        padding: 0.5rem 1.5rem;
+        font-weight: 600;
+        color: #333;
+        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+        border-radius: 5px;
+        cursor: pointer;
+
+        &:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
+      }
+    }
+  }
+
   .books-by-year {
     background: white;
     padding: 2rem;
@@ -440,13 +502,13 @@
     <div class="stats-grid">
       <a href="/finished" class="stat-card clickable">
         <div class="stat-label">Books Read</div>
-        <div class="stat-value">{stats().finishedBooks}</div>
+        <div class="stat-value">{stats.finishedBooks}</div>
         <div class="stat-subtext">Completed books</div>
       </a>
 
       <a href="/" class="stat-card clickable">
         <div class="stat-label">Currently Reading</div>
-        <div class="stat-value">{stats().readingBooks}</div>
+        <div class="stat-value">{stats.readingBooks}</div>
         <div class="stat-subtext">In progress</div>
       </a>
 
@@ -458,25 +520,25 @@
 
       <div class="stat-card">
         <div class="stat-label">Total Time Read</div>
-        <div class="stat-value">{stats().totalTimeReadHours} hrs</div>
-        <div class="stat-subtext">{stats().totalPagesRead.toLocaleString()} pages read</div>
+        <div class="stat-value">{stats.totalTimeReadHours} hrs</div>
+        <div class="stat-subtext">{stats.totalPagesRead.toLocaleString()} pages read</div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Books Per Year</div>
-        <div class="stat-value">{stats().booksPerYear}</div>
+        <div class="stat-value">{stats.booksPerYear}</div>
         <div class="stat-subtext">Average rate</div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Avg. Time Per Book</div>
-        <div class="stat-value">{formatTime(stats().avgTimePerBook)}</div>
+        <div class="stat-value">{formatTime(stats.avgTimePerBook)}</div>
         <div class="stat-subtext">For finished books</div>
       </div>
 
       <div class="stat-card">
         <div class="stat-label">Total Books</div>
-        <div class="stat-value">{stats().totalBooks}</div>
+        <div class="stat-value">{stats.totalBooks}</div>
         <div class="stat-subtext">In your library</div>
       </div>
     </div>
@@ -510,7 +572,66 @@
       </form>
     </div>
 
-    {#if booksByYear().length > 0}
+    <div class="toggl-card share-card">
+      <h2>Public Profile</h2>
+      {#if myProfile}
+        {#if myProfile.public}
+          <p class="toggl-status connected">
+            Public — anyone with the link can see your reading stats (no
+            book titles). Stats refresh whenever you open this page.
+          </p>
+        {:else}
+          <p class="toggl-status">
+            Private — only you can see your profile page while signed in.
+            Check the box below to make it publicly available.
+          </p>
+        {/if}
+        <div class="profile-link">
+          <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
+        </div>
+        <label class="share-visibility">
+          <input
+            type="checkbox"
+            checked={myProfile.public}
+            onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
+          Make my profile publicly available
+        </label>
+        <div class="share-actions">
+          <button type="button" onclick={copyProfileLink}>
+            {linkCopied ? 'Copied!' : 'Copy Link'}
+          </button>
+          <button type="button" onclick={disableProfile} disabled={savingProfile}>
+            Delete Profile
+          </button>
+        </div>
+      {:else if myProfile === null}
+        <p class="toggl-status">
+          Pick a username to get a link to your reading stats. The page
+          starts private (visible only to you) until you make it public.
+          Only aggregate numbers are published — never your book titles or
+          reading sessions.
+        </p>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault();
+            enableProfile();
+          }}>
+          <input
+            type="text"
+            class="form-control"
+            placeholder="username"
+            bind:value={profileUsername} />
+          <button type="submit" disabled={savingProfile || !profileUsername || allBooks === undefined}>
+            Enable
+          </button>
+        </form>
+        {#if profileError}
+          <p class="share-error">{profileError}</p>
+        {/if}
+      {/if}
+    </div>
+
+    {#if booksByYear.length > 0}
       <div class="books-by-year">
         <h2>Books by Year</h2>
         <div class="table-scroll">
@@ -525,7 +646,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each booksByYear() as { year, count, totalTimeRead, totalPages, longestBook }}
+            {#each booksByYear as { year, count, totalTimeRead, totalPages, longestBook }}
               <tr>
                 <td>{year}</td>
                 <td>{count}</td>

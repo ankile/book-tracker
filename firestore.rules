@@ -43,6 +43,57 @@ service cloud.firestore {
                     && resource.data.get('attempts', 0) < 5;
     }
 
+    // Opt-in public profile pages: /profiles/<username> renders this doc.
+    // `get` is open only while the owner has explicitly flipped the doc's
+    // `public` flag; otherwise only the signed-in owner can read it — a
+    // private profile reads as permission-denied to everyone else, which
+    // the client renders as not-found so username existence never leaks.
+    // (A get on a missing doc also lands here as an evaluation error →
+    // denied, deliberately the same signal.) `list` is owner-only — the Me
+    // page finds its own doc by querying on uid, and strangers must not be
+    // able to enumerate usernames. The username is the doc id, so
+    // uniqueness is first-writer-wins: a create against an existing doc
+    // evaluates as an update and fails the uid pin. Anonymous-readable
+    // surface, so the validation-heavy style applies: the shape is pinned
+    // so the doc can only ever hold aggregate reading numbers — no titles,
+    // no free-form text a profile link could be used to host.
+    match /profiles/{username} {
+      allow get: if resource.data.public == true
+                 || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow list: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow create: if request.auth != null
+                    && username.matches('[a-z0-9-]{3,30}')
+                    && validProfile();
+      allow update: if request.auth != null
+                    && resource.data.uid == request.auth.uid
+                    && validProfile();
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
+    function validProfile() {
+      let profile = request.resource.data;
+      let statKeys = ['totalBooks', 'finishedBooks', 'readingBooks', 'totalTimeReadHours',
+                      'totalPagesRead', 'booksPerYear', 'avgTimePerBook'];
+      return profile.keys().hasAll(['uid', 'public', 'stats', 'years', 'updatedAt'])
+             && profile.keys().hasOnly(['uid', 'public', 'stats', 'years', 'updatedAt'])
+             && profile.uid == request.auth.uid
+             && profile.public is bool
+             && profile.stats is map
+             && profile.stats.keys().hasAll(statKeys)
+             && profile.stats.keys().hasOnly(statKeys)
+             && profile.stats.totalBooks is number
+             && profile.stats.finishedBooks is number
+             && profile.stats.readingBooks is number
+             && profile.stats.totalTimeReadHours is number
+             && profile.stats.totalPagesRead is number
+             && profile.stats.booksPerYear is number
+             && profile.stats.avgTimePerBook is number
+             // One row per year with finished books; 200 outlives everyone.
+             && profile.years is list
+             && profile.years.size() <= 200
+             && profile.updatedAt is timestamp;
+    }
+
     // Durable issue log read by the admin overview (Admin SDK only — no
     // client read, so one user's failures are never visible to another).
     // Create-only so telemetry cannot be scrubbed, and uid is pinned to the

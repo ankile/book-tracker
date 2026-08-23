@@ -21,7 +21,7 @@
   $effect(() => {
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
-      const unsubscribe = booksStore.subscribe((data) => (allBooks = data));
+      const unsubscribe = booksStore.subscribe((data) => (allBooks = data ?? []));
       return () => {
         unsubscribe();
         booksStore.unsubscribe();

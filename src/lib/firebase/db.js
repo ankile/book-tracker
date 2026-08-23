@@ -7,6 +7,7 @@ import {
   orderBy,
   onSnapshot,
   addDoc,
+  setDoc,
   updateDoc,
   deleteDoc,
   deleteField,
@@ -184,8 +185,12 @@ class Database {
   // field, and books created by early versions of the app do — which made
   // this store, and every statistic derived from it, quietly undercount.
   // Nothing downstream depends on the order.
+  //
+  // Starts as undefined (loading, getUser convention): the Me page's
+  // profile sync must be able to tell "no snapshot yet" from "library is
+  // empty", or it would publish zeroed stats on every page load.
   static getAllBooks(userId) {
-    const store = writable([]);
+    const store = writable(undefined);
 
     const q = query(collection(db, 'users', userId, 'books'));
 
@@ -225,6 +230,72 @@ class Database {
       subscribe: store.subscribe,
       unsubscribe
     };
+  }
+
+  // The signed-in user's own public profile doc, found by uid because the
+  // username is the doc id and only the doc itself records the mapping.
+  // The rules restrict list to uid == auth.uid, which this query provably
+  // satisfies. undefined → loading, null → no profile (getUser convention).
+  static getMyProfile(userId) {
+    const store = writable(undefined);
+
+    const q = query(collection(db, 'profiles'), where('uid', '==', userId));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const profileDoc = snapshot.docs[0];
+      store.set(profileDoc ? { username: profileDoc.id, ...profileDoc.data() } : null);
+    }, listenError('load your public profile'));
+
+    return {
+      subscribe: store.subscribe,
+      unsubscribe
+    };
+  }
+
+  // One-shot read for the /profiles/<username> page; null when the profile
+  // doesn't exist or isn't visible to this viewer. The rules answer
+  // permission-denied both for a private profile read by a non-owner and
+  // for a missing doc, so the two are deliberately indistinguishable here
+  // (username existence must not leak). No listener — a shared link is a
+  // snapshot view.
+  static async getProfile(username) {
+    const snapshot = await getDoc(doc(db, 'profiles', username)).catch((error) => {
+      if (error.code === 'permission-denied') return null;
+      throw error;
+    });
+    return snapshot?.exists() ? { username: snapshot.id, ...snapshot.data() } : null;
+  }
+
+  // setDoc, not addDoc: the username is the doc id. If the username is
+  // already taken the rules evaluate this as an update of someone else's
+  // doc and reject it, so the caller sees permission-denied and reports
+  // "taken" inline — which is why this method is not in writeLabels.
+  // isPublic is the explicit share checkbox; profiles are born private.
+  static async createProfile({ userId, username, isPublic, stats, years }) {
+    await setDoc(doc(db, 'profiles', username), {
+      uid: userId,
+      public: isPublic,
+      stats,
+      years,
+      updatedAt: Timestamp.now(),
+    });
+  }
+
+  // Full overwrite with the freshly computed payload (the Me page keeps the
+  // published doc in step with live stats whenever it differs, and the
+  // visibility checkbox writes through here too).
+  static async updateProfile({ userId, username, isPublic, stats, years }) {
+    await setDoc(doc(db, 'profiles', username), {
+      uid: userId,
+      public: isPublic,
+      stats,
+      years,
+      updatedAt: Timestamp.now(),
+    });
+  }
+
+  static async deleteProfile({ userId, username }) {
+    await deleteDoc(doc(db, 'profiles', username));
   }
 
   static async addPageUpdate({ userId, id, currentPage, previousPage, pageCount }) {
@@ -630,6 +701,8 @@ class Database {
 // multi-tab mutation channel deliberately no-ops callbacks for batches
 // that originated elsewhere. Best-effort by design.
 const writeLabels = {
+  updateProfile: ({ username }) => `update your public profile "${username}"`,
+  deleteProfile: ({ username }) => `disable your public profile "${username}"`,
   addPageUpdate: ({ title }) => `save the page update for "${title}"`,
   addReading: ({ title }) => `save the reading session for "${title}"`,
   addBook: ({ title }) => `add "${title}"`,
