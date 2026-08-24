@@ -35,6 +35,14 @@ This responsive single-page app allows one to keep track of what one's reading, 
   - Current reading streak and longest streak tracking
   - Detailed tooltips with session information
 
+### Book Metadata
+- **ISBN Lookup**: One button fills title, author, page count, cover, genres and
+  a fiction/non-fiction flag from the book's ISBN
+- **Book Covers**: Shown on the reading and finished lists, hot-linked from the
+  source catalogue (no image storage)
+- **Metadata Repair**: `/isbns` lists books whose ISBN is missing or mistyped —
+  the only cases the automatic enrichment cannot fix
+
 ### Organization & Filtering
 - **Finished Books Page**: Browse completed books with:
   - Sort options: recently finished, title (A-Z), length, or time spent
@@ -42,6 +50,90 @@ This responsive single-page app allows one to keep track of what one's reading, 
   - Summary statistics for filtered view
 
 - **Currently Reading**: View all books in progress
+
+## Book metadata
+
+Covers, genres and the fiction/non-fiction flag are all derived from a book's
+ISBN. Four sources are consulted in a fixed order, each filling only the fields
+the previous ones left empty (`mergeMetadata` in `src/lib/utils/googleBooks.js`).
+An earlier source always wins — the order encodes which source is most
+trustworthy for a given field, not which one answered first.
+
+| # | Source | Why it is at this position | Parser |
+|---|---|---|---|
+| 1 | **Open Library** | Richest subject lists and stable, hot-linkable cover URLs. Free, no key. | `utils/bookMetadata.js` |
+| 2 | **Google Books** | BISAC top-level categories ("Business & Economics", "Science") settle fiction/non-fiction where Open Library's free-form subjects cannot. Needs an API key. | `utils/googleBooks.js` |
+| 3 | **Nasjonalbiblioteket** | The only source that reliably knows Norwegian editions. MODS genres ("Romaner", "Skuespill", the explicit `notfiction` marker) classify them. Free, no key. | `utils/nasjonalbiblioteket.js` |
+| 4 | **Goodreads** | Last resort, **backfill only** — see the caveat below. | `utils/goodreads.js` |
+
+Books store the result in `coverUrl`, `publisher`, `publishedDate`, `subjects`
+and `fiction` (`null` when genuinely unknown). The fields are advisory display
+data: Firestore rules give owners blanket write access to their own book
+documents, so nothing may ever depend on them being accurate.
+
+### In the app
+
+The **Look up** button in the add/edit book modal queries sources 1-3 live.
+Sources 1 and 3 are called straight from the browser; Google Books goes through
+the `booksapi-lookupisbn` callable, because it proxies a metered API key and must
+not be reachable unauthenticated. A failure of any single source degrades to
+"one fewer source" rather than discarding the others' results.
+
+Goodreads is **not** in the app and should not be added: it sends no CORS
+headers, so a browser cannot call it at all.
+
+### Backfilling existing books
+
+One migration per source, run in numeric order and following the
+[MIGRATIONS.md](MIGRATIONS.md) loop. Each is gap-fill only and idempotent, and
+each caches its lookups (`ol-cache.json`, `gb-cache.json`, `nb-cache.json`,
+`gr-cache.json`, all gitignored) so re-runs and the prod pass cost no requests.
+
+```bash
+node migrate-enrich-books.js --prod --apply      # 1. Open Library
+node migrate-enrich-google.js --prod --apply     # 2. Google Books (needs GOOGLE_BOOKS_KEY)
+node migrate-enrich-nb.js --prod --apply         # 3. Nasjonalbiblioteket
+node migrate-enrich-goodreads.js --prod --apply  # 4. Goodreads
+```
+
+Order matters: running a later pass first lets it claim fields an earlier,
+more trustworthy source should own.
+
+The Google Books key comes from the same secret the Cloud Function reads:
+
+```bash
+export GOOGLE_BOOKS_KEY=$(gcloud secrets versions access latest \
+  --secret=FUNCTIONS_CONFIG_EXPORT --project book-tracker-d8f24 \
+  --account=lars.ankile@gmail.com \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['booksapi']['key'])")
+```
+
+### The Goodreads caveat
+
+Goodreads retired its public API in December 2020 and its Terms of Service
+disallow automated access. `migrate-enrich-goodreads.js` is therefore a
+deliberate, hand-run exception rather than infrastructure, and it is written to
+stay one:
+
+- it runs only over books the three open sources left empty (a few dozen
+  requests across the whole library), never on a schedule;
+- it requests `/book/isbn/<isbn>`, which `robots.txt` permits — **not**
+  `/search`, which `robots.txt` disallows;
+- it reads schema.org JSON-LD, which is machine-intended and far more stable
+  than the surrounding markup;
+- it identifies itself, waits 5s between requests, and aborts on the first
+  403/429 instead of retrying into a ban.
+
+If it ever needs to run at volume, or on a schedule, or over books that are not
+the owner's own, that is the point to stop and buy the data instead —
+[Bokbasen](https://www.bokbasen.no/hjelp/fa-tilgang-til-metadata) is the
+authoritative commercial source for Norwegian titles.
+
+### What automation cannot fix
+
+A book with no ISBN, or a mistyped one, has nothing to look up. Those are listed
+at `/isbns`, grouped by problem, and repaired through the normal edit modal. The
+Me-page "Needs an ISBN" card links there and shows the count.
 
 ## Version 2.0 - Major Upgrade 🎉
 
