@@ -4,7 +4,7 @@
   import AuthorInput from "$lib/components/AuthorInput.svelte";
 
   import { Database } from "../firebase/db.ts";
-  import { canonicalAuthorIds, resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.ts";
+  import { editableBookAuthorChips, resolveChip, AUTHOR_KINDS } from "../utils/authors.ts";
   import { normalizeIsbn } from "../utils/isbn.ts";
   import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.ts";
   import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.ts";
@@ -13,7 +13,7 @@
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
-  import { validateBookPages, validateBookTitle } from "../utils/validation.ts";
+  import { executeBookWrite, prepareBookWrite } from "../utils/bookForm.ts";
 
   let {
     open, userId, book = null, onclose,
@@ -50,6 +50,9 @@
   let isEditMode = $derived(!!book);
   let isLookingUp = $state(false);
   let lookupError = $state("");
+  const unresolvedAuthorCount = $derived(authorChips.filter(
+    (chip) => chip.id !== null && 'unresolved' in chip,
+  ).length);
 
   $effect(() => {
     title = book?.title ?? "";
@@ -81,31 +84,16 @@
     const bookId = book?.id ?? null;
     if (seededBookId === bookId) return;
     seededBookId = bookId;
-    authorChips = book === null ? [] : seedChips(book);
-  });
-
-  // Legacy-wins, mirroring the read rule: legacy fields on a book mean an
-  // old client wrote last and any authorIds beside them are stale. Saving
-  // such a book converts it to the id-only shape — self-healing.
-  function seedChips(book: Book): AuthorChip[] {
-    if (book.author !== undefined || book.authors !== undefined) {
-      if (Array.isArray(book.authors) && book.authors.length > 0) {
-        const authorMap = new Map(authorList.map((author) => [author.id, author]));
-        return canonicalAuthorIds(book.authors.map((author) => author.id), authorMap).map((id) => {
-          const author = authorMap.get(id);
-          if (author === undefined) throw new Error(`Missing author document: ${id}`);
-          return { id: author.id, name: author.name };
-        });
-      }
-      return splitAuthors(book.author ?? "").map((name) => resolveChip(name, authorList));
+    if (book === null) {
+      authorChips = [];
+      return;
     }
-    const authorMap = new Map(authorList.map((author) => [author.id, author]));
-    return canonicalAuthorIds(book.authorIds, authorMap).map((id) => {
-      const author = authorMap.get(id);
-      if (author === undefined) throw new Error(`Missing author document: ${id}`);
-      return { id: author.id, name: author.name };
-    });
-  }
+    const seeded = editableBookAuthorChips(book, authorList);
+    authorChips = seeded.chips;
+    for (const reference of seeded.unresolved) {
+      console.error(`Cannot resolve author reference ${reference.id}: ${reference.problem}`);
+    }
+  });
 
   function handleSubmit() {
     lookupError = "";
@@ -113,46 +101,23 @@
       lookupError = 'Authors loading.';
       return;
     }
-    const titleResult = validateBookTitle(title);
-    if (!titleResult.valid) {
-      lookupError = titleResult.message;
-      return;
-    }
-    const pages = validateBookPages({
+    const prepared = prepareBookWrite({
+      userId,
+      book,
+      authorChips,
+      title,
       pageCount,
-      currentPage: book?.currentPage ?? currentPage,
+      currentPage,
+      isbn,
+      metadata: $state.snapshot(metadata),
     });
-    if (!pages.valid) {
-      lookupError = pages.message;
+    if (!prepared.valid) {
+      lookupError = prepared.message;
       return;
-    }
-    const savedMetadata = $state.snapshot(metadata);
-    let write: Promise<void>;
-    if (book === null) {
-      write = Database.addBook({
-        userId,
-        authorChips,
-        title: titleResult.title,
-        pageCount: pages.pageCount,
-        currentPage: pages.currentPage,
-        isbn,
-        metadata: savedMetadata,
-      });
-    } else {
-      write = Database.updateBook({
-        userId,
-        bookId: book.id,
-        authorChips,
-        title: titleResult.title,
-        pageCount: pages.pageCount,
-        currentPage: book.currentPage,
-        isbn,
-        metadata: savedMetadata,
-      });
     }
     // reportWriteFailures renders the rejection in this modal's ErrorBanner;
     // handling it here keeps the form open without an unhandled promise.
-    void write.then(onclose, () => {});
+    void executeBookWrite(Database, prepared.write).then(onclose, () => {});
   }
 
   function handleDelete() {
@@ -424,6 +389,13 @@
   <Input label="Author" inputId="author">
     <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />
   </Input>
+
+  {#if unresolvedAuthorCount > 0}
+    <div class="lookup-error" role="alert">
+      This book has {unresolvedAuthorCount} unresolved author {unresolvedAuthorCount === 1 ? 'reference' : 'references'}.
+      Remove each marked chip and select or create a replacement before saving.
+    </div>
+  {/if}
 
   <!-- Each new author gets its parts confirmed at entry: the last-token
        split is only a prefill, so "Le Guin"-style surnames are fixed in

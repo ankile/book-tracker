@@ -2,7 +2,7 @@
   import { user } from '$lib/firebase/auth.ts';
   import { Database } from '$lib/firebase/db.ts';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
-  import { bookAuthors, formatAuthors } from '$lib/utils/authors.ts';
+  import { repairableBookAuthors, formatAuthors } from '$lib/utils/authors.ts';
   import { groupByStatus } from '$lib/utils/metadataHealth.ts';
   import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
@@ -36,7 +36,7 @@
   let editBook = $state<Book | null>(null);
 
   function authorNames(book: Book): string {
-    const resolved = bookAuthors(book, authorMap);
+    const resolved = repairableBookAuthors(book, authorMap);
     return resolved === null ? '' : formatAuthors(resolved);
   }
 </script>

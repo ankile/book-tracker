@@ -8,7 +8,7 @@
   import { Database } from "../firebase/db.ts";
   import { togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
-  import { bookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
+  import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { FirebaseError } from "firebase/app";
   import type { Author } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
@@ -605,7 +605,7 @@
 <div class="container">
   {#each books as book (book.id)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
-    {@const resolvedAuthors = bookAuthors(book, authorMap)}
+    {@const resolvedAuthors = repairableBookAuthors(book, authorMap)}
     <div class="book-row">
       <div class="row">
         <div class="col">

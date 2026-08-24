@@ -3,7 +3,7 @@
   import BookList from '$lib/components/BookList.svelte';
   import { Database } from '$lib/firebase/db.ts';
   import { formatTime } from '$lib/utils/format.ts';
-  import { bookAuthors, joinAuthors } from '$lib/utils/authors.ts';
+  import { repairableBookAuthors, joinAuthors } from '$lib/utils/authors.ts';
   import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
 
@@ -51,7 +51,7 @@
     const term = searchTerm.toLowerCase();
     return allBooks.filter(book => {
       const title = (book.title || '').toLowerCase();
-      const authors = bookAuthors(book, authorMap);
+      const authors = repairableBookAuthors(book, authorMap);
       const authorText = authors ? joinAuthors(authors.map((a) => a.name)).toLowerCase() : '';
       return title.includes(term) || authorText.includes(term);
     });

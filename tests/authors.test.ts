@@ -8,6 +8,8 @@ import {
   joinPersonName,
   resolveChip,
   canonicalAuthorIds,
+  editableBookAuthorChips,
+  repairableBookAuthors,
   selectableAuthors,
   bookAuthors,
   abbreviatedName,
@@ -131,6 +133,195 @@ test('bookAuthors rejects corrupt normalized joins', () => {
   assert.throws(
     () => bookAuthors({}, new Map()),
     /neither legacy authorship nor authorIds/,
+  );
+});
+
+test('editableBookAuthorChips exposes a missing author as a removable repair chip', () => {
+  const result = editableBookAuthorChips({ authorIds: ['missing'] }, []);
+
+  assert.deepEqual(result.chips, [
+    { id: 'missing', name: '[Unresolved author] missing', unresolved: true },
+  ]);
+  assert.deepEqual(result.unresolved, [
+    { id: 'missing', problem: 'Missing author document: missing' },
+  ]);
+});
+
+test('editableBookAuthorChips exposes a missing merge target without discarding valid authors', () => {
+  const valid: Author = {
+    id: 'valid',
+    name: 'Valid Author',
+    nameLower: 'valid author',
+    kind: 'person',
+    givenName: 'Valid',
+    familyName: 'Author',
+  };
+  const broken: Author = {
+    id: 'broken',
+    name: 'Broken Author',
+    nameLower: 'broken author',
+    kind: 'person',
+    givenName: 'Broken',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'missing-target' },
+  };
+
+  const result = editableBookAuthorChips(
+    { authorIds: ['valid', 'broken'] },
+    [valid, broken],
+  );
+
+  assert.deepEqual(result.chips, [
+    { id: 'valid', name: 'Valid Author' },
+    { id: 'broken', name: '[Unresolved author] Broken Author', unresolved: true },
+  ]);
+  assert.deepEqual(result.unresolved, [{
+    id: 'broken',
+    problem: 'Merged author broken has missing target missing-target',
+  }]);
+});
+
+test('editableBookAuthorChips exposes cyclic merge chains for repair', () => {
+  const first: Author = {
+    id: 'first',
+    name: 'First Author',
+    nameLower: 'first author',
+    kind: 'person',
+    givenName: 'First',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'second' },
+  };
+  const second: Author = {
+    id: 'second',
+    name: 'Second Author',
+    nameLower: 'second author',
+    kind: 'person',
+    givenName: 'Second',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'first' },
+  };
+
+  const result = editableBookAuthorChips({ authorIds: ['first'] }, [first, second]);
+
+  assert.deepEqual(result.chips, [
+    { id: 'first', name: '[Unresolved author] First Author', unresolved: true },
+  ]);
+  assert.deepEqual(result.unresolved, [
+    { id: 'first', problem: 'Cyclic author merge at first' },
+  ]);
+});
+
+test('editableBookAuthorChips preserves a legacy embedded name for a missing document', () => {
+  const result = editableBookAuthorChips({
+    authors: [{ id: 'missing', name: 'Remembered Name' }],
+  }, []);
+
+  assert.deepEqual(result.chips, [{
+    id: 'missing',
+    name: '[Unresolved author] Remembered Name',
+    unresolved: true,
+  }]);
+  assert.deepEqual(result.unresolved, [
+    { id: 'missing', problem: 'Missing author document: missing' },
+  ]);
+});
+
+test('editableBookAuthorChips repairs legacy strings with broken redirects instead of throwing', () => {
+  const broken: Author = {
+    id: 'broken',
+    name: 'Broken Author',
+    nameLower: 'broken author',
+    kind: 'person',
+    givenName: 'Broken',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'missing-target' },
+  };
+  const first: Author = {
+    id: 'first',
+    name: 'First Author',
+    nameLower: 'first author',
+    kind: 'person',
+    givenName: 'First',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'second' },
+  };
+  const second: Author = {
+    id: 'second',
+    name: 'Second Author',
+    nameLower: 'second author',
+    kind: 'person',
+    givenName: 'Second',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'first' },
+  };
+
+  const missingTarget = editableBookAuthorChips({ author: 'Broken Author' }, [broken]);
+  const cycle = editableBookAuthorChips({ author: 'First Author' }, [first, second]);
+
+  assert.equal(missingTarget.chips[0]?.id, 'broken');
+  assert.equal('unresolved' in missingTarget.chips[0], true);
+  assert.match(missingTarget.unresolved[0]?.problem ?? '', /missing target/);
+  assert.equal(cycle.chips[0]?.id, 'first');
+  assert.equal('unresolved' in cycle.chips[0], true);
+  assert.match(cycle.unresolved[0]?.problem ?? '', /Cyclic author merge/);
+});
+
+test('editableBookAuthorChips deduplicates legacy aliases that resolve to one author', () => {
+  const target: Author = {
+    id: 'target',
+    name: 'Target Author',
+    nameLower: 'target author',
+    kind: 'person',
+    givenName: 'Target',
+    familyName: 'Author',
+  };
+  const source: Author = {
+    id: 'old author',
+    name: 'Old Author',
+    nameLower: 'old author',
+    kind: 'person',
+    givenName: 'Old',
+    familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'target' },
+  };
+
+  const result = editableBookAuthorChips(
+    { author: 'Old Author, Target Author' },
+    [source, target],
+  );
+
+  assert.deepEqual(result, {
+    chips: [{ id: 'target', name: 'Target Author' }],
+    unresolved: [],
+  });
+});
+
+test('repairableBookAuthors keeps corrupt rows renderable with an explicit marker', () => {
+  const resolved = repairableBookAuthors({ authorIds: ['missing'] }, new Map());
+
+  assert.deepEqual(resolved, [{
+    id: 'missing',
+    name: '[Unresolved author] missing',
+    kind: 'placeholder',
+  }]);
+});
+
+test('repairableBookAuthors keeps legacy string authorship authoritative', () => {
+  const renamed: Author = {
+    id: 'old author',
+    name: 'Renamed Author',
+    nameLower: 'renamed author',
+    kind: 'person',
+    givenName: 'Renamed',
+    familyName: 'Author',
+  };
+
+  assert.deepEqual(
+    repairableBookAuthors(
+      { author: 'Old Author', authorIds: ['stale'] },
+      new Map([[renamed.id, renamed]]),
+    ),
+    [{ name: 'Old Author' }],
   );
 });
 

@@ -37,6 +37,10 @@ export type LegacyEmbeddedAuthor = AuthorSummary;
 
 export type ExistingAuthorChip = AuthorSummary;
 
+export interface UnresolvedAuthorChip extends AuthorSummary {
+  unresolved: true;
+}
+
 export interface NewPersonAuthorChip {
   id: null;
   name: string;
@@ -53,4 +57,4 @@ export interface NewNonPersonAuthorChip {
   familyName?: never;
 }
 
-export type AuthorChip = ExistingAuthorChip | NewPersonAuthorChip | NewNonPersonAuthorChip;
+export type AuthorChip = ExistingAuthorChip | UnresolvedAuthorChip | NewPersonAuthorChip | NewNonPersonAuthorChip;

@@ -35,26 +35,54 @@ export interface ResolvableAuthor {
   retirement?: AuthorRetirement;
 }
 
+export interface UnresolvedAuthorReference {
+  id: string;
+  problem: string;
+}
+
+export interface EditableAuthorChips {
+  chips: AuthorChip[];
+  unresolved: UnresolvedAuthorReference[];
+}
+
 export function selectableAuthors<T extends ResolvableAuthor>(authors: readonly T[]): T[] {
   return authors.filter((author) => author.retirement === undefined);
+}
+
+type AuthorRedirectResult<T extends ResolvableAuthor> =
+  | { ok: true; author: T }
+  | { ok: false; problem: string };
+
+function inspectAuthorRedirect<T extends ResolvableAuthor>(
+  author: T,
+  authorMap: ReadonlyMap<string, T>,
+): AuthorRedirectResult<T> {
+  let current = author;
+  const visited = new Set<string>();
+  while (current.retirement?.reason === 'merged') {
+    if (visited.has(current.id)) {
+      return { ok: false, problem: `Cyclic author merge at ${current.id}` };
+    }
+    visited.add(current.id);
+    const target = authorMap.get(current.retirement.targetId);
+    if (target === undefined) {
+      return {
+        ok: false,
+        problem: `Merged author ${current.id} has missing target ${current.retirement.targetId}`,
+      };
+    }
+    current = target;
+  }
+  return { ok: true, author: current };
 }
 
 export function resolveAuthorRedirect(
   author: Author,
   authorMap: ReadonlyMap<string, Author>,
 ): Author {
-  let current = author;
-  const visited = new Set<string>();
-  while (current.retirement?.reason === 'merged') {
-    if (visited.has(current.id)) throw new Error(`Cyclic author merge at ${current.id}`);
-    visited.add(current.id);
-    const target = authorMap.get(current.retirement.targetId);
-    if (target === undefined) {
-      throw new Error(`Merged author ${current.id} has missing target ${current.retirement.targetId}`);
-    }
-    current = target;
-  }
-  return current;
+  const result = inspectAuthorRedirect(author, authorMap);
+  if (!result.ok) throw new Error(result.problem);
+  return result.author;
 }
 
 export function canonicalAuthorIds(
@@ -69,6 +97,102 @@ export function canonicalAuthorIds(
     if (!canonical.includes(targetId)) canonical.push(targetId);
   }
   return canonical;
+}
+
+// The regular join stays deliberately strict so corrupt authorship cannot be
+// rendered as if it were valid. The edit modal is the repair boundary: it
+// needs to open even when a referenced author is missing or has a broken
+// redirect. Such references become visibly marked, removable chips and are
+// reported separately so the caller can prevent them from being saved.
+export function editableBookAuthorChips(
+  book: AuthorshipBookView,
+  authors: readonly Author[],
+): EditableAuthorChips {
+  const authorMap = new Map(authors.map((author) => [author.id, author]));
+  const addedIds = new Set<string>();
+  if (book.author !== undefined || book.authors !== undefined) {
+    if (!Array.isArray(book.authors) || book.authors.length === 0) {
+      const chips: AuthorChip[] = [];
+      const unresolved: UnresolvedAuthorReference[] = [];
+      for (const name of splitAuthors(book.author ?? '')) {
+        const normalized = normalizeAuthorName(name);
+        const existing = matchingAuthor(normalized, authors);
+        if (existing === undefined) {
+          chips.push(newPersonChip(normalized));
+          continue;
+        }
+        const resolution = inspectAuthorRedirect(existing, authorMap);
+        if (!resolution.ok) {
+          if (addedIds.has(existing.id)) continue;
+          addedIds.add(existing.id);
+          chips.push({ id: existing.id, name: `[Unresolved author] ${existing.name}`, unresolved: true });
+          unresolved.push({ id: existing.id, problem: resolution.problem });
+        } else if (resolution.author.retirement?.reason === 'deleted') {
+          chips.push(newPersonChip(normalized));
+        } else {
+          if (addedIds.has(resolution.author.id)) continue;
+          addedIds.add(resolution.author.id);
+          chips.push({ id: resolution.author.id, name: resolution.author.name });
+        }
+      }
+      return { chips, unresolved };
+    }
+  }
+
+  const embeddedNames = new Map((book.authors ?? []).map((author) => [author.id, author.name]));
+  const ids = book.authors?.map((author) => author.id) ?? book.authorIds;
+  if (ids === undefined) throw new Error('Book has neither legacy authorship nor authorIds.');
+
+  const chips: AuthorChip[] = [];
+  const unresolved: UnresolvedAuthorReference[] = [];
+
+  for (const id of ids) {
+    const source = authorMap.get(id);
+    const resolution = source === undefined
+      ? { ok: false as const, problem: `Missing author document: ${id}` }
+      : inspectAuthorRedirect(source, authorMap);
+
+    if (!resolution.ok) {
+      if (addedIds.has(id)) continue;
+      addedIds.add(id);
+      const fallbackName = embeddedNames.get(id) ?? source?.name ?? id;
+      chips.push({ id, name: `[Unresolved author] ${fallbackName}`, unresolved: true });
+      unresolved.push({ id, problem: resolution.problem });
+      continue;
+    }
+
+    if (addedIds.has(resolution.author.id)) continue;
+    addedIds.add(resolution.author.id);
+    chips.push({ id: resolution.author.id, name: resolution.author.name });
+  }
+
+  return { chips, unresolved };
+}
+
+// A row containing corrupt authorship must retain its Edit/Fix control so the
+// tolerant modal above is reachable. Other consumers keep using bookAuthors,
+// whose strict join continues to expose corruption immediately.
+export function repairableBookAuthors(
+  book: AuthorshipBookView,
+  authorMap: ReadonlyMap<string, Author> | null,
+): DisplayAuthor[] | null {
+  if (
+    (book.author !== undefined || book.authors !== undefined)
+    && (!Array.isArray(book.authors) || book.authors.length === 0)
+  ) {
+    return splitAuthors(book.author ?? '').map((name) => ({ name }));
+  }
+  if (authorMap === null) return bookAuthors(book, null);
+  const result = editableBookAuthorChips(book, [...authorMap.values()]);
+  return result.chips.map((chip) => {
+    if (chip.id === null) return { name: chip.name };
+    if ('unresolved' in chip) {
+      return { id: chip.id, name: chip.name, kind: 'placeholder' };
+    }
+    const author = authorMap.get(chip.id);
+    if (author === undefined) throw new Error(`Missing repaired author document: ${chip.id}`);
+    return author;
+  });
 }
 
 interface AuthorshipBookView {
@@ -141,28 +265,32 @@ export function joinPersonName({
 // would mint a "new" author whose merge-set lands on the renamed doc and
 // reverts the rename.
 export function resolveChip(name: string, authors: readonly ResolvableAuthor[]): AuthorChip {
-  const normalized = name.trim().replace(/\s+/g, ' ');
-  const lower = normalized.toLowerCase();
-  const byName = authors.find((a) => a.nameLower === lower);
-  const byId = authors.find((a) => a.id === authorIdFor(normalized));
-  const existing = byName ?? byId;
+  const normalized = normalizeAuthorName(name);
+  const existing = matchingAuthor(normalized, authors);
   if (existing) {
     const byAuthorId = new Map(authors.map((author) => [author.id, author]));
-    let current = existing;
-    const visited = new Set<string>();
-    while (current.retirement?.reason === 'merged') {
-      if (visited.has(current.id)) throw new Error(`Cyclic author merge at ${current.id}`);
-      visited.add(current.id);
-      const target = byAuthorId.get(current.retirement.targetId);
-      if (target === undefined) {
-        throw new Error(`Merged author ${current.id} has missing target ${current.retirement.targetId}`);
-      }
-      current = target;
-    }
+    const resolution = inspectAuthorRedirect(existing, byAuthorId);
+    if (!resolution.ok) throw new Error(resolution.problem);
+    const current = resolution.author;
     if (current.retirement?.reason !== 'deleted') {
       return { id: current.id, name: current.name };
     }
   }
+  return newPersonChip(normalized);
+}
+
+function normalizeAuthorName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ');
+}
+
+function matchingAuthor<T extends ResolvableAuthor>(normalized: string, authors: readonly T[]): T | undefined {
+  const lower = normalized.toLowerCase();
+  const byName = authors.find((author) => author.nameLower === lower);
+  const byId = authors.find((author) => author.id === authorIdFor(normalized));
+  return byName ?? byId;
+}
+
+function newPersonChip(normalized: string): AuthorChip {
   return { id: null, name: normalized, kind: 'person', ...splitPersonName(normalized) };
 }
 
