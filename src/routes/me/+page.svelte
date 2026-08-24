@@ -10,6 +10,8 @@
   import CadenceSection from '$lib/components/CadenceSection.svelte';
   import ProgressSection from '$lib/components/ProgressSection.svelte';
   import AuthorLeaderboardSection from '$lib/components/AuthorLeaderboardSection.svelte';
+  import StatCard from '$lib/components/StatCard.svelte';
+  import StatGrid from '$lib/components/StatGrid.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { togglSaveToken } from '$lib/firebase/functions.js';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.js';
@@ -294,6 +296,7 @@
     max-width: 1200px;
     margin: 0 auto;
     padding: 2rem;
+    text-align: left;
   }
 
   .profile-header {
@@ -364,55 +367,6 @@
 
     .settings-body {
       padding: 0 2rem 2rem;
-    }
-  }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1.5rem;
-    margin-bottom: 2rem;
-  }
-
-  .stat-card {
-    background: white;
-    padding: 2rem;
-    border-radius: 5px;
-    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
-    transition: transform 0.2s, box-shadow 0.2s;
-    text-decoration: none;
-    color: inherit;
-    display: block;
-
-    &:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 6px 12px 0 rgba(0, 0, 0, 0.25), 0 8px 24px 0 rgba(0, 0, 0, 0.22);
-    }
-
-    &.clickable {
-      cursor: pointer;
-    }
-
-    .stat-label {
-      font-size: 0.9rem;
-      color: #666;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 0.5rem;
-      font-weight: 600;
-    }
-
-    .stat-value {
-      font-size: 2.5rem;
-      font-weight: 700;
-      color: #333;
-      margin: 0;
-    }
-
-    .stat-subtext {
-      font-size: 0.85rem;
-      color: #999;
-      margin-top: 0.25rem;
     }
   }
 
@@ -673,14 +627,6 @@
       }
     }
 
-    .stats-grid {
-      grid-template-columns: 1fr;
-    }
-
-    .stat-card .stat-value {
-      font-size: 2rem;
-    }
-
     .actions button {
       width: 100%;
     }
@@ -881,65 +827,19 @@
       </div>
     </details>
 
-    <div class="stats-grid">
-      <a href="/finished" class="stat-card clickable">
-        <div class="stat-label">Books Read</div>
-        <div class="stat-value">{stats.finishedBooks}</div>
-        <div class="stat-subtext">
-          {stats.firstFinishedAt
-            ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt)
-            : 'Completed books'}
-        </div>
-      </a>
-
-      <a href="/" class="stat-card clickable">
-        <div class="stat-label">Currently Reading</div>
-        <div class="stat-value">{stats.readingBooks}</div>
-        <div class="stat-subtext">In progress</div>
-      </a>
-
-      <a href="/authors" class="stat-card clickable">
-        <div class="stat-label">Authors</div>
-        <div class="stat-value">{authorList?.length ?? '…'}</div>
-        <div class="stat-subtext">Rename, merge, sort names</div>
-      </a>
-
-      <div class="stat-card">
-        <div class="stat-label">Total Time Read</div>
-        <div class="stat-value">{stats.totalTimeReadHours} hrs</div>
-        <div class="stat-subtext">
-          {stats.totalPagesRead.toLocaleString()} pages{stats.firstBookAddedAt
-            ? ` since ${formatMonthYear(stats.firstBookAddedAt)}`
-            : ' read'}
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Books Per Year</div>
-        <div class="stat-value">{stats.booksPerYear}</div>
-        <div class="stat-subtext">
-          {stats.firstFinishedAt
-            ? formatDateRange(stats.firstFinishedAt, new Date())
-            : 'Average rate'}
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Avg. Time Per Book</div>
-        <div class="stat-value">{formatTime(stats.avgTimePerBook)}</div>
-        <div class="stat-subtext">Across {stats.finishedBooks} finished books</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Total Books</div>
-        <div class="stat-value">{stats.totalBooks}</div>
-        <div class="stat-subtext">
-          {stats.firstBookAddedAt
-            ? `First added ${formatMonthYear(stats.firstBookAddedAt)}`
-            : 'In your library'}
-        </div>
-      </div>
-    </div>
+    <StatGrid>
+      <StatCard label="Books Read" value={stats.finishedBooks} href="/finished"
+        subtext={stats.firstFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
+      <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
+      <StatCard label="Authors" value={authorList?.length ?? '…'} subtext="Rename, merge, sort names" href="/authors" />
+      <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}
+        subtext={`${stats.totalPagesRead.toLocaleString()} pages${stats.firstBookAddedAt ? ` since ${formatMonthYear(stats.firstBookAddedAt)}` : ' read'}`} />
+      <StatCard label="Books Per Year" value={stats.booksPerYear}
+        subtext={stats.firstFinishedAt ? formatDateRange(stats.firstFinishedAt, new Date()) : 'Average rate'} />
+      <StatCard label="Avg. Time Per Book" value={formatTime(stats.avgTimePerBook)} subtext={`Across ${stats.finishedBooks} finished books`} />
+      <StatCard label="Total Books" value={stats.totalBooks}
+        subtext={stats.firstBookAddedAt ? `First added ${formatMonthYear(stats.firstBookAddedAt)}` : 'In your library'} />
+    </StatGrid>
 
     <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
     <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} {months} />

@@ -5,6 +5,8 @@
   import { formatTime } from '$lib/utils/format.js';
   import { joinPersonName } from '$lib/utils/authors.js';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
+  import StatCard from '$lib/components/StatCard.svelte';
+  import StatGrid from '$lib/components/StatGrid.svelte';
   import { linkHref, linkDisplay, linkIcon } from '$lib/utils/links.js';
   import Icon from 'svelte-awesome';
 
@@ -83,42 +85,6 @@
     }
   }
 
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1.5rem;
-    margin-bottom: 2rem;
-  }
-
-  .stat-card {
-    background: white;
-    padding: 2rem;
-    border-radius: 5px;
-    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
-
-    .stat-label {
-      font-size: 0.9rem;
-      color: #666;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 0.5rem;
-      font-weight: 600;
-    }
-
-    .stat-value {
-      font-size: 2.5rem;
-      font-weight: 700;
-      color: #333;
-      margin: 0;
-    }
-
-    .stat-subtext {
-      font-size: 0.85rem;
-      color: #999;
-      margin-top: 0.25rem;
-    }
-  }
-
   .books-by-year {
     background: white;
     padding: 2rem;
@@ -189,14 +155,6 @@
       }
     }
 
-    .stats-grid {
-      grid-template-columns: 1fr;
-    }
-
-    .stat-card .stat-value {
-      font-size: 2rem;
-    }
-
     .books-by-year {
       padding: 1.25rem;
 
@@ -237,43 +195,14 @@
       {/if}
     </div>
 
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Books Read</div>
-        <div class="stat-value">{profile.stats.finishedBooks}</div>
-        <div class="stat-subtext">Completed books</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Currently Reading</div>
-        <div class="stat-value">{profile.stats.readingBooks}</div>
-        <div class="stat-subtext">In progress</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Total Time Read</div>
-        <div class="stat-value">{profile.stats.totalTimeReadHours} hrs</div>
-        <div class="stat-subtext">{profile.stats.totalPagesRead.toLocaleString()} pages read</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Books Per Year</div>
-        <div class="stat-value">{profile.stats.booksPerYear}</div>
-        <div class="stat-subtext">Average rate</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Avg. Time Per Book</div>
-        <div class="stat-value">{formatTime(profile.stats.avgTimePerBook)}</div>
-        <div class="stat-subtext">For finished books</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Total Books</div>
-        <div class="stat-value">{profile.stats.totalBooks}</div>
-        <div class="stat-subtext">In their library</div>
-      </div>
-    </div>
+    <StatGrid>
+      <StatCard label="Books Read" value={profile.stats.finishedBooks} subtext="Completed books" />
+      <StatCard label="Currently Reading" value={profile.stats.readingBooks} subtext="In progress" />
+      <StatCard label="Total Time Read" value={`${profile.stats.totalTimeReadHours} hrs`} subtext={`${profile.stats.totalPagesRead.toLocaleString()} pages read`} />
+      <StatCard label="Books Per Year" value={profile.stats.booksPerYear} subtext="Average rate" />
+      <StatCard label="Avg. Time Per Book" value={formatTime(profile.stats.avgTimePerBook)} subtext="For finished books" />
+      <StatCard label="Total Books" value={profile.stats.totalBooks} subtext="In their library" />
+    </StatGrid>
 
     {#if profile.years.length > 0}
       <div class="books-by-year">
