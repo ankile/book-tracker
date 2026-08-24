@@ -5,6 +5,8 @@
 
   import { Database } from "../firebase/db";
   import { resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.js";
+  import { normalizeIsbn } from "../utils/isbn.js";
+  import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.js";
 
   let { open, userId, book = null, onclose } = $props();
 
@@ -33,6 +35,9 @@
   let pageCount = $state();
   let currentPage = $state(1);
   let isbn = $state("");
+  // ISBN-derived metadata (bookMetadata.js shape). Seeded from the book in
+  // edit mode so saving without a fresh lookup preserves what's stored.
+  let metadata = $state({ ...EMPTY_METADATA });
 
   let isEditMode = $derived(!!book);
   let isLookingUp = $state(false);
@@ -43,6 +48,13 @@
     pageCount = book?.pageCount;
     currentPage = book?.currentPage ?? 1;
     isbn = book?.isbn ?? "";
+    metadata = {
+      coverUrl: book?.coverUrl ?? "",
+      publisher: book?.publisher ?? "",
+      publishedDate: book?.publishedDate ?? "",
+      subjects: book?.subjects ?? [],
+      fiction: book?.fiction ?? null,
+    };
   });
 
   // Chips seed separately from the plain fields: resolving authorIds
@@ -87,6 +99,7 @@
       pageCount,
       currentPage,
       isbn,
+      metadata: $state.snapshot(metadata),
     });
     onclose();
   }
@@ -100,6 +113,7 @@
       pageCount,
       currentPage: book.currentPage,
       isbn,
+      metadata: $state.snapshot(metadata),
     });
     onclose();
   }
@@ -129,12 +143,20 @@
       return;
     }
 
+    const normalized = normalizeIsbn(isbn);
+    if (normalized === null) {
+      lookupError = "Not a valid ISBN-10 or ISBN-13 (check digit mismatch?)";
+      return;
+    }
+    // The stored isbn is the normalized ISBN-13 from here on.
+    isbn = normalized;
+
     isLookingUp = true;
     lookupError = "";
 
     try {
       const response = await fetch(
-        `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn.trim()}&format=json&jscmd=data`
+        `https://openlibrary.org/api/books?bibkeys=ISBN:${normalized}&format=json&jscmd=data`
       );
 
       if (!response.ok) {
@@ -142,7 +164,7 @@
       }
 
       const data = await response.json();
-      const bookData = data[`ISBN:${isbn.trim()}`];
+      const bookData = data[`ISBN:${normalized}`];
 
       if (!bookData) {
         lookupError = "No book found for this ISBN";
@@ -150,17 +172,27 @@
       }
 
       // Auto-fill fields (always overwrite when looking up)
-      if (bookData.title) {
-        title = bookData.title;
+      const parsed = parseOpenLibraryBook(bookData);
+
+      if (parsed.title) {
+        title = parsed.title;
       }
 
-      if (bookData.authors && bookData.authors.length > 0) {
-        authorChips = bookData.authors.map((a) => resolveChip(a.name, authorList));
+      if (parsed.authorNames.length > 0) {
+        authorChips = parsed.authorNames.map((name) => resolveChip(name, authorList));
       }
 
-      if (bookData.number_of_pages) {
-        pageCount = bookData.number_of_pages;
+      if (parsed.pageCount) {
+        pageCount = parsed.pageCount;
       }
+
+      metadata = {
+        coverUrl: parsed.coverUrl,
+        publisher: parsed.publisher,
+        publishedDate: parsed.publishedDate,
+        subjects: parsed.subjects,
+        fiction: parsed.fiction,
+      };
 
     } catch (error) {
       lookupError = "Failed to look up ISBN. Please try again.";
@@ -242,6 +274,32 @@
     color: #d9534f;
     font-size: 0.85rem;
     margin-top: 0.25rem;
+  }
+
+  .metadata-preview {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: #6c757d;
+  }
+
+  .cover-thumb {
+    width: 3.5rem;
+    flex: 0 0 auto;
+    border-radius: 3px;
+  }
+
+  .metadata-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .fiction-label {
+    font-weight: 600;
   }
 
 </style>
@@ -344,6 +402,25 @@
 
   {#if lookupError}
     <div class="lookup-error">{lookupError}</div>
+  {/if}
+
+  {#if metadata.coverUrl || metadata.subjects.length > 0}
+    <div class="metadata-preview">
+      {#if metadata.coverUrl}
+        <img class="cover-thumb" src={metadata.coverUrl} alt="Cover of {title}" />
+      {/if}
+      <div class="metadata-text">
+        {#if metadata.fiction !== null}
+          <div class="fiction-label">{metadata.fiction ? "Fiction" : "Non-fiction"}</div>
+        {/if}
+        {#if metadata.subjects.length > 0}
+          <div>{metadata.subjects.slice(0, 6).join(" · ")}</div>
+        {/if}
+        {#if metadata.publisher || metadata.publishedDate}
+          <div>{[metadata.publisher, metadata.publishedDate].filter(Boolean).join(", ")}</div>
+        {/if}
+      </div>
+    </div>
   {/if}
 
   {#if isEditMode}

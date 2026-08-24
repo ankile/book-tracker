@@ -68,8 +68,16 @@ for (const user of users.docs) {
     const b = book.data();
     const p = book.ref.path;
 
-    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'pageCount']) {
+    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction']) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
+    }
+    // ISBN-derived metadata shapes (see utils/bookMetadata.js); the string
+    // fields ride the missing check above, these two have structure.
+    if (b.subjects !== undefined && (!Array.isArray(b.subjects) || b.subjects.some((s) => typeof s !== 'string' || s === ''))) {
+      found('book.subjects-bad-shape', p, JSON.stringify(b.subjects));
+    }
+    if (b.fiction !== undefined && b.fiction !== null && typeof b.fiction !== 'boolean') {
+      found('book.bad-fiction', p, String(b.fiction));
     }
     for (const field of ['currentPage', 'pageCount', 'pagesRead', 'timeRead']) {
       if (b[field] !== undefined && !Number.isFinite(b[field])) {

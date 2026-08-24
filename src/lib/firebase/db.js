@@ -396,7 +396,7 @@ class Database {
   // legacy author/authors fields, so their presence on any doc proves an
   // old client wrote it last — the invariant the legacy-wins read rule
   // and the migration re-run policy both stand on.
-  static async addBook({ userId, authorChips, title, pageCount, currentPage, isbn }) {
+  static async addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata }) {
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
@@ -411,6 +411,9 @@ class Database {
       timeRead: 0,
       title,
       isbn,
+      // ISBN-derived metadata (utils/bookMetadata.js shape), defaults when
+      // the caller never looked the ISBN up.
+      ...metadata,
       updatedAt: Timestamp.now(),
       createdAt: Timestamp.now(),
     });
@@ -418,7 +421,7 @@ class Database {
     await batch.commit();
   }
 
-  static async updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn }) {
+  static async updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn, metadata }) {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
@@ -433,6 +436,7 @@ class Database {
       pageCount,
       finished: isFinished(currentPage, pageCount),
       isbn,
+      ...metadata,
       updatedAt: Timestamp.now(),
     });
 

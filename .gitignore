@@ -144,3 +144,5 @@ dmypy.json
 serviceAccountKey.json
 /snapshots/
 /audit-*.txt
+/enrich-*.txt
+/ol-cache.json
