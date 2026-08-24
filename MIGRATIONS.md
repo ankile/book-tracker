@@ -87,10 +87,10 @@ await getAuth().createUser({ uid: '<your-prod-uid>', email: 'me@test.local', pas
 VITE_EMULATOR=1 npm run dev
 ```
 
-`VITE_EMULATOR` flips the DEV-gated hooks in `src/lib/firebase/db.ts` and
-`auth.ts` to the local emulators. Exercise every read and write path the
-migration touches, then re-run the migration dry-run: the writes the fresh
-client just made must be invisible to it (0 ops against new-shape docs).
+`VITE_EMULATOR` flips the DEV-gated hooks in `src/lib/firebase/db.ts`,
+`auth.ts`, and `functions.ts` to the local emulators. Exercise every read and
+write path the migration touches, then re-run the migration dry-run: the writes
+the fresh client just made must be invisible to it (0 ops against new-shape docs).
 
 ### 3. Deploy code changes, in this order
 

@@ -1,4 +1,4 @@
-import { getFunctions, httpsCallable } from 'firebase/functions';
+import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
 import { app } from './index.ts';
 
 export interface TogglConfigResponse {
@@ -63,6 +63,10 @@ export interface AdminOverview {
 }
 
 const fns = getFunctions(app, 'europe-west1');
+
+if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
+  connectFunctionsEmulator(fns, '127.0.0.1', 5001);
+}
 
 export const togglSaveToken = httpsCallable<{ token: string }, TogglConfigResponse>(fns, 'toggl-savetoken');
 export const togglStart = httpsCallable<{ bookId: string }, TogglStartResponse>(fns, 'toggl-start');
