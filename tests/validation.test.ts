@@ -25,6 +25,10 @@ test('book page validation requires positive integer bounds', () => {
   assert.equal(validateBookPages({ pageCount: 0, currentPage: 0 }).valid, false);
   assert.equal(validateBookPages({ pageCount: 300, currentPage: 1.5 }).valid, false);
   assert.equal(validateBookPages({ pageCount: 300, currentPage: 301 }).valid, false);
+  assert.equal(
+    validateBookPages({ pageCount: Number.MAX_SAFE_INTEGER + 1, currentPage: 1 }).valid,
+    false,
+  );
 });
 
 test('book title validation trims and bounds persisted queue descriptions', () => {

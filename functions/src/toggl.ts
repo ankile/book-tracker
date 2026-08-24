@@ -8,6 +8,7 @@ import {
 } from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
+import {env} from "node:process";
 import {setTimeout as delay} from "node:timers/promises";
 import {logIssue} from "./logging";
 import {
@@ -32,6 +33,11 @@ const db = getFirestore();
 const TOGGL_BASE = "https://api.track.toggl.com/api/v9";
 const PROJECT_NAME = "Reading";
 
+const EMULATOR_WORKSPACE_ID = 900001;
+const EMULATOR_PROJECT_ID = 900002;
+const EMULATOR_ENTRY_ID = 900003;
+const EMULATOR_STOP_DURATION_SECONDS = 60;
+
 const MAX_QUEUE_ATTEMPTS = 5;
 const START_CLAIM_STALE_MS = 5 * 60 * 1000;
 
@@ -54,12 +60,70 @@ type StartClaimResult =
   | {status: "claimed"; title: string}
   | {status: "recovered-unknown"};
 
+function emulatorJson(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: {"Content-Type": "application/json"},
+  });
+}
+
+// The Functions emulator is used with production snapshots, including the
+// owner's real Toggl token. Never let a rehearsal send that token or mutate
+// real Toggl data. These responses cover every Toggl endpoint this module
+// calls and still drive the real Firestore claim, timer and queue lifecycles.
+function emulatorTogglFetch(
+  method: string,
+  path: string,
+  body?: object,
+): Response {
+  if (method === "GET" && path === "/me") {
+    return emulatorJson({id: 1});
+  }
+  if (method === "GET" && path === "/me/projects") {
+    return emulatorJson([{
+      id: EMULATOR_PROJECT_ID,
+      workspace_id: EMULATOR_WORKSPACE_ID,
+      name: PROJECT_NAME,
+    }]);
+  }
+
+  const timeEntryPath =
+    /^\/workspaces\/\d+\/time_entries(?:\/(\d+)(?:\/stop)?)?$/;
+  const match = timeEntryPath.exec(path);
+  if (method === "POST" && match !== null && match[1] === undefined) {
+    if (body === undefined || !("start" in body) ||
+        typeof body.start !== "string") {
+      return emulatorJson({error: "start is required"}, 400);
+    }
+    return emulatorJson({id: EMULATOR_ENTRY_ID, start: body.start});
+  }
+  if (method === "PATCH" && match?.[1] !== undefined &&
+      path.endsWith("/stop")) {
+    return emulatorJson({duration: EMULATOR_STOP_DURATION_SECONDS});
+  }
+  if (method === "PUT" && match?.[1] !== undefined) {
+    return emulatorJson({id: Number(match[1])});
+  }
+
+  const existingEntry = /^\/me\/time_entries\/(\d+)$/.exec(path);
+  if (method === "GET" && existingEntry !== null) {
+    return emulatorJson({
+      id: Number(existingEntry[1]),
+      duration: EMULATOR_STOP_DURATION_SECONDS,
+    });
+  }
+  return emulatorJson({error: `No Toggl emulator route for ${method} ${path}`}, 501);
+}
+
 async function togglFetch(
   token: string,
   method: string,
   path: string,
   body?: object,
 ): Promise<Response> {
+  if (env.FUNCTIONS_EMULATOR === "true") {
+    return emulatorTogglFetch(method, path, body);
+  }
   const doFetch = () => fetch(TOGGL_BASE + path, {
     method,
     headers: {

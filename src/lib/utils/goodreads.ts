@@ -80,7 +80,8 @@ function decodeGoodreadsBookData(value: unknown): GoodreadsBookData | null {
     name: typeof data.name === 'string' ? data.name : '',
     authorNames,
     numberOfPages:
-      typeof data.numberOfPages === 'number' && Number.isFinite(data.numberOfPages)
+      typeof data.numberOfPages === 'number' &&
+        Number.isSafeInteger(data.numberOfPages) && data.numberOfPages > 0
         ? data.numberOfPages
         : undefined,
     image: typeof data.image === 'string' ? data.image : '',

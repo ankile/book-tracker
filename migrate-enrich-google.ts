@@ -34,7 +34,7 @@ import {
   GOOGLE_BOOKS_URL,
 } from './src/lib/utils/googleBooks.ts';
 import type { BookLookupResult, BookMetadataPatch } from './src/lib/interfaces/metadata.ts';
-import { googleBooksVolume } from './migration-api-envelopes.ts';
+import { bookLookupCache, googleBooksVolume } from './migration-api-envelopes.ts';
 
 const KEY = process.env.GOOGLE_BOOKS_KEY;
 if (!KEY) throw new Error('GOOGLE_BOOKS_KEY is not set (see the header comment)');
@@ -47,7 +47,7 @@ const RETRY_GAPS_MS = [2_000, 10_000, 30_000];
 
 const CACHE_PATH = './gb-cache.json';
 const cache: Record<string, BookLookupResult | null> = existsSync(CACHE_PATH)
-  ? JSON.parse(readFileSync(CACHE_PATH, 'utf8'))
+  ? bookLookupCache(JSON.parse(readFileSync(CACHE_PATH, 'utf8')), CACHE_PATH)
   : {};
 let fetches = 0;
 

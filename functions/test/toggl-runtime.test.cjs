@@ -12,6 +12,21 @@ function snapshot(data, exists = true) {
   return {exists, data: () => data};
 }
 
+function enableFunctionsEmulator(t) {
+  const previous = process.env.FUNCTIONS_EMULATOR;
+  process.env.FUNCTIONS_EMULATOR = "true";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.FUNCTIONS_EMULATOR;
+    } else {
+      process.env.FUNCTIONS_EMULATOR = previous;
+    }
+  });
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("The Functions emulator must not make an outbound fetch.");
+  });
+}
+
 function queueItem(overrides = {}) {
   return {
     type: "create",
@@ -91,6 +106,29 @@ test("queued creates pass through outcome-unknown before synced", async (t) => {
     ["outcome-unknown", "synced"],
   );
   assert.equal(store.queueUpdates[1].entryId, 81);
+});
+
+test("the Functions emulator syncs a queued create without outbound fetch", async (t) => {
+  enableFunctionsEmulator(t);
+  const store = installQueueStore(t, queueItem());
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.deepEqual(
+    store.queueUpdates.map((patch) => patch.status),
+    ["outcome-unknown", "synced"],
+  );
+  assert.equal(store.queueUpdates.at(-1).entryId, 900003);
+});
+
+test("the Functions emulator syncs a queued stop without outbound fetch", async (t) => {
+  enableFunctionsEmulator(t);
+  const store = installQueueStore(t, queueItem({type: "stop", entryId: 52}));
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.equal(store.queueUpdates.at(-1).entryId, 52);
 });
 
 test("a successful create with an invalid response stays outcome-unknown", async (t) => {
@@ -380,6 +418,21 @@ test("stop decodes activeTimer without requiring a title", async (t) => {
   assert.equal(store.book.activeTimer, null);
 });
 
+test("the Functions emulator starts and stops using Firestore state only", async (t) => {
+  enableFunctionsEmulator(t);
+  const store = installBookStore(t, {title: "The Book", activeTimer: null});
+
+  const started = await deployed.toggl.start.run({bookId: "book"}, authContext);
+  assert.equal(started.entryId, 900003);
+  assert.deepEqual(store.book.activeTimer, started);
+
+  assert.deepEqual(
+    await deployed.toggl.stop.run({bookId: "book"}, authContext),
+    {seconds: 60, minutes: 1},
+  );
+  assert.equal(store.book.activeTimer, null);
+});
+
 test("savetoken validates Toggl responses and stores the selected project", async (t) => {
   const writes = [];
   const userRef = {set: async (value, options) => writes.push({value, options})};
@@ -409,4 +462,29 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     options: {merge: true},
   }]);
   assert.equal(requested.length, 2);
+});
+
+test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
+  enableFunctionsEmulator(t);
+  const writes = [];
+  const userRef = {set: async (value, options) => writes.push({value, options})};
+  t.mock.method(db, "doc", (path) => {
+    assert.equal(path, "users/owner");
+    return userRef;
+  });
+
+  assert.deepEqual(
+    await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, authContext),
+    {workspaceId: 900001, projectId: 900002},
+  );
+  assert.deepEqual(writes, [{
+    value: {
+      toggl: {
+        apiToken: "snapshot-production-token",
+        workspaceId: 900001,
+        projectId: 900002,
+      },
+    },
+    options: {merge: true},
+  }]);
 });

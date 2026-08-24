@@ -66,6 +66,12 @@ test("an Open Library record must be an object", () => {
   assert.throws(() => parseOpenLibraryBook([]), /must be an object/);
 });
 
+test("Open Library rejects non-positive, fractional, and unsafe page counts", () => {
+  for (const pageCount of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(parseOpenLibraryBook({ number_of_pages: pageCount }).pageCount, undefined);
+  }
+});
+
 test("feed tags and duplicates are dropped from subjects", () => {
   const parsed = parseOpenLibraryBook({
     subjects: [

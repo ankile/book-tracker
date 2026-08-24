@@ -74,6 +74,7 @@
     if (!open) {
       seededBookId = undefined;
       authorChips = [];
+      lookupError = "";
       return;
     }
     if (!authorsLoaded) return;
@@ -106,56 +107,49 @@
     });
   }
 
-  function requiredBookPages(): { pageCount: number; currentPage: number } {
-    const result = validateBookPages({ pageCount, currentPage });
-    if (!result.valid) throw new Error(result.message);
-    return result;
-  }
-
-  function requiredTitle(): string {
-    const result = validateBookTitle(title);
-    if (!result.valid) throw new Error(result.message);
-    return result.title;
-  }
-
-  function addBook() {
-    const pages = requiredBookPages();
-    Database.addBook({
-      userId,
-      authorChips,
-      title: requiredTitle(),
-      pageCount: pages.pageCount,
-      currentPage: pages.currentPage,
-      isbn,
-      metadata: $state.snapshot(metadata),
-    });
-    onclose();
-  }
-
-  function updateBook() {
-    if (book === null) throw new Error('Cannot update a book before it is loaded.');
-    const pages = validateBookPages({ pageCount, currentPage: book.currentPage });
-    if (!pages.valid) throw new Error(pages.message);
-    Database.updateBook({
-      userId,
-      bookId: book.id,
-      authorChips,
-      title: requiredTitle(),
-      pageCount: pages.pageCount,
-      currentPage: book.currentPage,
-      isbn,
-      metadata: $state.snapshot(metadata),
-    });
-    onclose();
-  }
-
   function handleSubmit() {
-    if (!authorsLoaded) throw new Error('Authors must finish loading before this book can be saved.');
-    if (isEditMode) {
-      updateBook();
-    } else {
-      addBook();
+    lookupError = "";
+    if (!authorsLoaded) {
+      lookupError = 'Authors are still loading.';
+      return;
     }
+    const titleResult = validateBookTitle(title);
+    if (!titleResult.valid) {
+      lookupError = titleResult.message;
+      return;
+    }
+    const pages = validateBookPages({
+      pageCount,
+      currentPage: book?.currentPage ?? currentPage,
+    });
+    if (!pages.valid) {
+      lookupError = pages.message;
+      return;
+    }
+    const savedMetadata = $state.snapshot(metadata);
+    if (book === null) {
+      void Database.addBook({
+        userId,
+        authorChips,
+        title: titleResult.title,
+        pageCount: pages.pageCount,
+        currentPage: pages.currentPage,
+        isbn,
+        metadata: savedMetadata,
+      });
+    } else {
+      void Database.updateBook({
+        userId,
+        bookId: book.id,
+        authorChips,
+        title: titleResult.title,
+        pageCount: pages.pageCount,
+        currentPage: book.currentPage,
+        isbn,
+        metadata: savedMetadata,
+      });
+    }
+    onclose();
   }
 
   function handleDelete() {
@@ -515,7 +509,7 @@
   </div>
 
   {#if lookupError}
-    <div class="lookup-error">{lookupError}</div>
+    <div class="lookup-error" role="alert">{lookupError}</div>
   {/if}
 
   {#if metadata.coverUrl || metadata.subjects.length > 0}

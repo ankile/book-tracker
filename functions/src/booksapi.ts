@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions/v1";
 import {getFirestore, Timestamp} from "firebase-admin/firestore";
 import {defineJsonSecret} from "firebase-functions/params";
+import {env} from "node:process";
 import {
   decodeBooksApiVolume,
   decodeIsbnLookupRequest,
@@ -72,6 +73,13 @@ exports.lookupisbn = functions
     // (utils/isbn.ts); anything else is a bug or a hand-rolled request.
     const {isbn} = decodeIsbnLookupRequest(data, invalidArgument);
     await consumeLookupQuota(context.auth.uid);
+
+    // Emulator rehearsals must not consume the production API key or quota.
+    // Open Library and Nasjonalbiblioteket can still populate the client; a
+    // null Google result exercises the normal partial-source merge path.
+    if (env.FUNCTIONS_EMULATOR === "true") {
+      return {volume: null};
+    }
 
     const {url, key} = runtimeConfig.value().booksapi;
     const response = await fetch(`${url}?key=${key}&q=isbn:${isbn}&country=NO`);

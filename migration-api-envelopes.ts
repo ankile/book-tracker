@@ -1,3 +1,6 @@
+import type {BookLookupResult} from "./src/lib/interfaces/metadata.ts";
+import {normalizeIsbn} from "./src/lib/utils/isbn.ts";
+
 type JsonObject = Record<string, unknown>;
 
 function isObject(value: unknown): value is JsonObject {
@@ -17,6 +20,74 @@ function optionalArray(value: unknown, source: string): unknown[] | undefined {
     throw new TypeError(`${source} must be an array when present`);
   }
   return value;
+}
+
+const LOOKUP_RESULT_KEYS = new Set([
+  "title",
+  "authorNames",
+  "pageCount",
+  "coverUrl",
+  "publisher",
+  "publishedDate",
+  "subjects",
+  "fiction",
+]);
+
+function requireString(value: unknown, source: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError(`${source} must be a string`);
+  }
+  return value;
+}
+
+function requireStringArray(value: unknown, source: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new TypeError(`${source} must be an array of strings`);
+  }
+  return value;
+}
+
+function decodeBookLookupResult(value: unknown, source: string): BookLookupResult {
+  const result = requireObject(value, source);
+  const unknownKey = Object.keys(result).find((key) => !LOOKUP_RESULT_KEYS.has(key));
+  if (unknownKey !== undefined) {
+    throw new TypeError(`${source} has unknown field ${unknownKey}`);
+  }
+  const pageCount = result.pageCount;
+  if (pageCount !== undefined &&
+      (typeof pageCount !== "number" || !Number.isSafeInteger(pageCount) ||
+        pageCount <= 0)) {
+    throw new TypeError(`${source}.pageCount must be a positive safe integer when present`);
+  }
+  if (result.fiction !== null && typeof result.fiction !== "boolean") {
+    throw new TypeError(`${source}.fiction must be a boolean or null`);
+  }
+  return {
+    title: requireString(result.title, `${source}.title`),
+    authorNames: requireStringArray(result.authorNames, `${source}.authorNames`),
+    pageCount: pageCount as number | undefined,
+    coverUrl: requireString(result.coverUrl, `${source}.coverUrl`),
+    publisher: requireString(result.publisher, `${source}.publisher`),
+    publishedDate: requireString(result.publishedDate, `${source}.publishedDate`),
+    subjects: requireStringArray(result.subjects, `${source}.subjects`),
+    fiction: result.fiction,
+  };
+}
+
+export function bookLookupCache(
+  value: unknown,
+  source = "Book lookup cache",
+): Record<string, BookLookupResult | null> {
+  const cache = requireObject(value, source);
+  const decoded: Record<string, BookLookupResult | null> = {};
+  for (const [isbn13, result] of Object.entries(cache)) {
+    if (normalizeIsbn(isbn13) !== isbn13) {
+      throw new TypeError(`${source} key ${JSON.stringify(isbn13)} must be a bare ISBN-13`);
+    }
+    decoded[isbn13] = result === null ? null :
+      decodeBookLookupResult(result, `${source}[${JSON.stringify(isbn13)}]`);
+  }
+  return decoded;
 }
 
 export function openLibraryRecord(payload: unknown, isbn13: string): unknown | undefined {

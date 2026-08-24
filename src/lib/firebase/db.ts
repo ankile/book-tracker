@@ -157,6 +157,29 @@ export function logIssue({
   }).catch((error) => console.error('logIssue failed', error));
 }
 
+// Decoder failures are schema violations, not missing records. Keep them
+// fail-loud so corrupt data can never be mistaken for an empty library or
+// republished as zeroed profile statistics, but surface a visible error before
+// rethrowing: exceptions raised inside an onSnapshot next callback do not flow
+// to the listener's error callback.
+function decodeStored<T>(decode: () => T): T {
+  try {
+    return decode();
+  } catch (error) {
+    addError('Invalid stored data.');
+    // Anonymous clients can read public profiles, but allowing anonymous
+    // decode telemetry would give anyone a free write-spam endpoint.
+    if (auth.currentUser !== null) {
+      logIssue({
+        level: 'error',
+        event: 'firestore.decode_failed',
+        message: 'Invalid stored data.',
+      });
+    }
+    throw error;
+  }
+}
+
 interface AuthorNameInput {
   kind: AuthorKind;
   name: string;
@@ -286,7 +309,11 @@ class Database {
   static getUser(userId: string): Readable<UserDocument | null | undefined> {
     return cachedStore(userStores, userId, undefined, (set) => (
       onSnapshot(doc(db, 'users', userId), (snapshot) => {
-        set(snapshot.exists() ? decodeUser(snapshot.data(), snapshot.ref.path) : null);
+        set(snapshot.exists()
+          ? decodeStored(
+            () => decodeUser(snapshot.data(), snapshot.ref.path),
+          )
+          : null);
       }, listenError('load your profile'))
     ));
   }
@@ -324,8 +351,8 @@ class Database {
       const q = query(collection(db, 'users', userId, 'books'));
 
       return onSnapshot(q, (snapshot) => {
-        const books = snapshot.docs.map((bookDoc) => (
-          decodeBook(bookDoc.id, bookDoc.data(), bookDoc.ref.path)
+        const books = snapshot.docs.map((bookDoc) => decodeStored(
+          () => decodeBook(bookDoc.id, bookDoc.data(), bookDoc.ref.path),
         ));
         set(books);
       }, listenError('load your books'));
@@ -341,8 +368,8 @@ class Database {
       const q = query(collection(db, 'users', userId, 'authors'));
 
       return onSnapshot(q, (snapshot) => {
-        const authors = snapshot.docs.map((authorDoc) => (
-          decodeAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path)
+        const authors = snapshot.docs.map((authorDoc) => decodeStored(
+          () => decodeAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
         ));
         authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
         set(authors);
@@ -360,7 +387,11 @@ class Database {
 
       return onSnapshot(q, (snapshot) => {
         const profileDoc = snapshot.docs[0];
-        set(profileDoc ? decodeProfile(profileDoc.id, profileDoc.data(), profileDoc.ref.path) : null);
+        set(profileDoc
+          ? decodeStored(
+            () => decodeProfile(profileDoc.id, profileDoc.data(), profileDoc.ref.path),
+          )
+          : null);
       }, listenError('load your public profile'));
     });
   }
@@ -377,7 +408,9 @@ class Database {
       throw error;
     });
     return snapshot?.exists()
-      ? decodeProfile(snapshot.id, snapshot.data(), snapshot.ref.path)
+      ? decodeStored(
+        () => decodeProfile(snapshot.id, snapshot.data(), snapshot.ref.path),
+      )
       : null;
   }
 
@@ -831,10 +864,12 @@ class Database {
 
       return onSnapshot(q, (snapshot) => {
         const sessions = snapshot.docs.flatMap((sessionDoc) => {
-          const update = decodeBookUpdate(
-            sessionDoc.id,
-            sessionDoc.data(),
-            sessionDoc.ref.path,
+          const update = decodeStored(
+            () => decodeBookUpdate(
+              sessionDoc.id,
+              sessionDoc.data(),
+              sessionDoc.ref.path,
+            ),
           );
           return update.type === 'reading' ? [update] : [];
         });
@@ -866,8 +901,8 @@ class Database {
       );
 
       return onSnapshot(q, (snapshot) => {
-        const sessions = snapshot.docs.map((sessionDoc) => (
-          decodeBookUpdate(sessionDoc.id, sessionDoc.data(), sessionDoc.ref.path)
+        const sessions = snapshot.docs.map((sessionDoc) => decodeStored(
+          () => decodeBookUpdate(sessionDoc.id, sessionDoc.data(), sessionDoc.ref.path),
         ));
         set(sessions);
       }, listenError('load reading sessions'));

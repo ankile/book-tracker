@@ -276,8 +276,14 @@
       throw new Error('Profile deletion requires an authenticated user and loaded profile.');
     }
     savingProfile = true;
-    await Database.deleteProfile({ userId: currentUser.uid, username: myProfile.username });
-    savingProfile = false;
+    profileError = '';
+    try {
+      await Database.deleteProfile({ userId: currentUser.uid, username: myProfile.username });
+    } catch (error) {
+      profileError = errorMessage(error);
+    } finally {
+      savingProfile = false;
+    }
   }
 
   // Full-doc rewrite from the current profile plus fresh stats; overrides
@@ -304,8 +310,22 @@
     });
   }
 
-  function setProfileVisibility(isPublic: boolean) {
-    persistProfile({ isPublic });
+  async function persistProfileWithFeedback(
+    overrides: { isPublic?: boolean; links?: ProfileLink[] } = {},
+  ): Promise<boolean> {
+    profileError = '';
+    try {
+      await persistProfile(overrides);
+      return true;
+    } catch (error) {
+      profileError = errorMessage(error);
+      return false;
+    }
+  }
+
+  async function setProfileVisibility(input: HTMLInputElement) {
+    const saved = await persistProfileWithFeedback({ isPublic: input.checked });
+    if (!saved) input.checked = myProfile?.public ?? false;
   }
 
   // Handle editor: the plus opens the picker, choosing a platform reveals
@@ -322,7 +342,7 @@
     newLinkValue = '';
   }
 
-  function addLink() {
+  async function addLink() {
     const value = newLinkValue.trim().slice(0, 200);
     if (!value || newLinkType === '') return;
     const link: ProfileLink = { type: newLinkType, value };
@@ -330,13 +350,13 @@
       link.label = newLinkLabel.trim().slice(0, 50);
     }
     if (!myProfile) throw new Error('A loaded profile is required to add a link.');
-    persistProfile({ links: [...myProfile.links, link] });
-    closeLinkPicker();
+    const saved = await persistProfileWithFeedback({ links: [...myProfile.links, link] });
+    if (saved) closeLinkPicker();
   }
 
-  function removeLink(index: number) {
+  async function removeLink(index: number) {
     if (!myProfile) throw new Error('A loaded profile is required to remove a link.');
-    persistProfile({ links: myProfile.links.filter((_, i) => i !== index) });
+    await persistProfileWithFeedback({ links: myProfile.links.filter((_, i) => i !== index) });
   }
 
   async function copyProfileLink() {
@@ -361,7 +381,7 @@
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined || authorList === undefined) return;
     const payload = buildProfilePayload(analyticsBooks, sessionDays, finishedAt, profileRecords);
     if (profilePayloadEqual(myProfile, payload)) return;
-    persistProfile();
+    void persistProfileWithFeedback();
   });
 </script>
 
@@ -1109,7 +1129,7 @@
                   role="switch"
                   checked={myProfile.public}
                   disabled={authorList === undefined}
-                  onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
+                  onchange={(event) => void setProfileVisibility(event.currentTarget)} />
                 <span class="visibility-copy">
                   <span class="visibility-title">Public profile</span>
                   <span class="visibility-detail">Anyone with the link can view your stats.</span>

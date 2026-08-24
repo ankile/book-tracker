@@ -79,6 +79,6 @@ export function groupByStatus<T extends MetadataHealthBook>(
 export function countIsbnProblems(books: readonly MetadataHealthBook[]): number {
   return books.filter((book) => {
     const status = metadataStatus(book);
-    return status === ISBN_MISSING || status === ISBN_INVALID;
+    return status !== null && (ISBN_PROBLEMS as readonly MetadataStatus[]).includes(status);
   }).length;
 }

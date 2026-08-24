@@ -69,14 +69,20 @@ diff audit-pre.txt audit-emulator-post.txt      # exactly the intended lines, no
 The functions emulator runs the real compiled triggers (gen1 Firestore
 triggers work in the emulator; the eur3 gen1 restriction is deploy-time
 only), so trigger–migration interaction is rehearsed for real, not assumed.
+Toggl HTTP calls are replaced with deterministic responses whenever
+`FUNCTIONS_EMULATOR=true`, so production tokens restored in a snapshot never
+leave the machine. Queue and timer documents still follow their real server
+lifecycle in the emulated Firestore database. The metered Google Books proxy
+returns a local miss instead of consuming the production key.
 Inspect anything suspicious in the emulator UI at http://127.0.0.1:4000.
 
 ### 2b. Rehearse the real client against the migrated data
 
 When a migration changes what the client reads or writes, run the actual
-client against the migrated emulator data before deploying anything. Start
-the emulators with `--only firestore,functions,auth`, then create an auth
-user with your own prod uid so the snapshot's data is yours:
+client against the migrated emulator data before deploying anything. Run
+`npm --prefix functions run serve` to start Authentication, Firestore, and
+Functions together, then create an auth user with your own prod uid so the
+snapshot's data is yours:
 
 ```sh
 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 node --input-type=module -e "

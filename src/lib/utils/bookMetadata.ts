@@ -59,8 +59,10 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function optionalFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+function optionalPageCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function namedEntries(value: unknown): string[] {
@@ -80,7 +82,7 @@ export function parseOpenLibraryBook(value: unknown): BookLookupResult {
   return {
     title: optionalString(record.title) ?? "",
     authorNames: namedEntries(record.authors),
-    pageCount: optionalFiniteNumber(record.number_of_pages),
+    pageCount: optionalPageCount(record.number_of_pages),
     coverUrl: optionalString(cover?.medium) ?? "",
     publisher: publisher ?? "",
     publishedDate: optionalString(record.publish_date) ?? "",

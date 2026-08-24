@@ -349,6 +349,7 @@ service cloud.firestore {
                              && request.resource.data.event in ['auth.sign_in_failed', 'auth.sign_up_failed'])
                           : (request.resource.data.uid == request.auth.uid
                              && request.resource.data.event in ['firestore.listener_failed',
+                                                                'firestore.decode_failed',
                                                                 'firestore.write_failed',
                                                                 'toggl.sync_stuck']));
     }

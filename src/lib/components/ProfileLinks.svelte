@@ -164,13 +164,15 @@
           <span class="service">{linkTypeName(link)}</span>
           <span class="destination" title={link.value}>{linkDisplay(link)}</span>
         </span>
-        <button
-          type="button"
-          class="remove"
-          aria-label="Remove {linkTypeName(link)}"
-          onclick={() => onremove?.(index)}>
-          <Icon data={times} />
-        </button>
+        {#if onremove}
+          <button
+            type="button"
+            class="remove"
+            aria-label="Remove {linkTypeName(link)}"
+            onclick={() => onremove(index)}>
+            <Icon data={times} />
+          </button>
+        {/if}
       </li>
     {/each}
   </ul>

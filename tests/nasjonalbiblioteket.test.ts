@@ -55,6 +55,12 @@ test("a catalogue item must be an object", () => {
   assert.throws(() => parseNbItem([]), /must be an object/);
 });
 
+test("Nasjonalbiblioteket rejects non-positive, fractional, and unsafe page counts", () => {
+  for (const pageCount of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(parseNbItem({ metadata: { pageCount } }).pageCount, undefined);
+  }
+});
+
 test("the cover is never taken on trust — parsing leaves it empty", () => {
   // In-copyright scans 403; migrate-enrich-nb.ts verifies the candidate.
   assert.equal(parseNbItem(item, []).coverUrl, "");

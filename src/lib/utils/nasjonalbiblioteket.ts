@@ -70,8 +70,10 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function optionalFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+function optionalPageCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function strings(value: unknown): string[] {
@@ -92,7 +94,7 @@ export function parseNbItem(item: unknown, genres: unknown = []): NbBookLookupRe
   return {
     title: optionalString(md.title) ?? '',
     authorNames: strings(md.creators).map(flipCatalogueName),
-    pageCount: optionalFiniteNumber(md.pageCount),
+    pageCount: optionalPageCount(md.pageCount),
     coverUrl: '',
     publisher: optionalString(originInfo?.publisher) ?? '',
     publishedDate: optionalString(originInfo?.issued) ?? '',

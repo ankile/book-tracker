@@ -28,6 +28,7 @@ import { EMPTY_METADATA, METADATA_FIELDS } from './src/lib/utils/bookMetadata.ts
 import { mergeMetadata } from './src/lib/utils/googleBooks.ts';
 import { goodreadsIsbnUrl, parseGoodreadsHtml } from './src/lib/utils/goodreads.ts';
 import type { BookLookupResult, BookMetadataPatch } from './src/lib/interfaces/metadata.ts';
+import { bookLookupCache } from './migration-api-envelopes.ts';
 
 // A real browser UA: Goodreads serves a JS shell to unknown agents, and
 // the JSON-LD this reads would be absent. The contact URL is the honest
@@ -37,7 +38,7 @@ const REQUEST_GAP_MS = 5000;
 
 const CACHE_PATH = './gr-cache.json';
 const cache: Record<string, BookLookupResult | null> = existsSync(CACHE_PATH)
-  ? JSON.parse(readFileSync(CACHE_PATH, 'utf8'))
+  ? bookLookupCache(JSON.parse(readFileSync(CACHE_PATH, 'utf8')), CACHE_PATH)
   : {};
 let fetches = 0;
 

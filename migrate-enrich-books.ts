@@ -28,7 +28,7 @@ import {
   METADATA_FIELDS,
 } from './src/lib/utils/bookMetadata.ts';
 import type { BookLookupResult, BookMetadata } from './src/lib/interfaces/metadata.ts';
-import { openLibraryRecord } from './migration-api-envelopes.ts';
+import { bookLookupCache, openLibraryRecord } from './migration-api-envelopes.ts';
 
 // Open Library asks polite bulk users to identify themselves.
 const USER_AGENT = 'book-tracker enrichment script (https://book.ankile.com)';
@@ -48,7 +48,7 @@ const RETRY_GAPS_MS = [60_000, 300_000, 900_000];
 // is never re-asked — delete the file to force a fresh sweep.
 const CACHE_PATH = './ol-cache.json';
 const cache: Record<string, BookLookupResult | null> = existsSync(CACHE_PATH)
-  ? JSON.parse(readFileSync(CACHE_PATH, 'utf8'))
+  ? bookLookupCache(JSON.parse(readFileSync(CACHE_PATH, 'utf8')), CACHE_PATH)
   : {};
 let fetches = 0;
 

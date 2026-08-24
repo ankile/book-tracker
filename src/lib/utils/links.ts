@@ -18,7 +18,7 @@ interface LinkTypeDefinition {
   brandIcon?: typeof siGithub;
 }
 
-export const LINK_TYPES: readonly LinkTypeDefinition[] = [
+export const LINK_TYPES = [
   { type: 'twitter', name: 'Twitter', prefix: 'https://twitter.com/', icon: twitter },
   { type: 'github', name: 'GitHub', prefix: 'https://github.com/', icon: github, brandIcon: siGithub },
   { type: 'linkedin', name: 'LinkedIn', prefix: 'https://www.linkedin.com/in/', icon: linkedin },
@@ -28,7 +28,15 @@ export const LINK_TYPES: readonly LinkTypeDefinition[] = [
   { type: 'strava', name: 'Strava', prefix: 'https://www.strava.com/athletes/', icon: bicycle, brandIcon: siStrava },
   { type: 'homepage', name: 'Personal homepage', prefix: 'https://', icon: globe },
   { type: 'other', name: 'Other', prefix: 'https://', icon: chainLink },
-];
+] as const satisfies readonly LinkTypeDefinition[];
+
+// Fails type-checking if a new ProfileLinkType has no runtime definition.
+type AssertNever<Value extends never> = Value;
+type AllLinkTypesDefined = AssertNever<
+  Exclude<ProfileLinkType, (typeof LINK_TYPES)[number]['type']>
+>;
+const allLinkTypesDefined: AllLinkTypesDefined | undefined = undefined;
+void allLinkTypesDefined;
 
 // Matches the cap in firestore.rules.
 export const MAX_PROFILE_LINKS = 10;

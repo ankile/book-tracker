@@ -35,9 +35,7 @@ export interface AuthorSummary {
 
 export type LegacyEmbeddedAuthor = AuthorSummary;
 
-export interface ExistingAuthorChip extends AuthorSummary {
-  id: string;
-}
+export type ExistingAuthorChip = AuthorSummary;
 
 export interface NewPersonAuthorChip {
   id: null;

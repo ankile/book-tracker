@@ -88,6 +88,9 @@ One migration per source, run in numeric order and following the
 [MIGRATIONS.md](MIGRATIONS.md) loop. Each is gap-fill only and idempotent, and
 each caches its lookups (`ol-cache.json`, `gb-cache.json`, `nb-cache.json`,
 `gr-cache.json`, all gitignored) so re-runs and the prod pass cost no requests.
+Cache files are runtime-validated before any migration connects or writes. If a
+cache is truncated or hand-edited into an invalid shape, the script stops with
+the offending field; repair that entry or delete the cache to refetch it.
 
 ```bash
 node migrate-enrich-books.ts --prod --apply      # 1. Open Library
@@ -222,7 +225,16 @@ To test Firebase Functions locally using emulators:
 
 ```bash
 npm --prefix functions run serve
+# in another shell, route the web client to all three emulators
+VITE_EMULATOR=1 npm run dev
 ```
+
+The command starts Authentication, Firestore, and Functions together so an
+emulated function can never fall through to production Firestore. Toggl calls
+use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
+production tokens are never sent to Toggl, and start, stop, token, and queue
+flows still exercise their real Firestore state transitions. The metered Google
+Books proxy also returns a local miss instead of consuming its production key.
 
 ### Run the complete validation suite
 

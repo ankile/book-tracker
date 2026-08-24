@@ -63,6 +63,12 @@ test("a Google Books volume must be an object", () => {
   assert.throws(() => parseGoogleVolume([]), /must be an object/);
 });
 
+test("Google Books rejects non-positive, fractional, and unsafe page counts", () => {
+  for (const pageCount of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(parseGoogleVolume({ pageCount }).pageCount, undefined);
+  }
+});
+
 test("BISAC non-fiction headings classify as non-fiction", () => {
   assert.equal(deriveFictionFromCategories(["Business & Economics"]), false);
   assert.equal(deriveFictionFromCategories(["Biography & Autobiography"]), false);

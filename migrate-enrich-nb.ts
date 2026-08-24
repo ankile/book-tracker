@@ -30,14 +30,14 @@ import {
   extractModsGenres,
 } from './src/lib/utils/nasjonalbiblioteket.ts';
 import type { BookLookupResult, BookMetadataPatch } from './src/lib/interfaces/metadata.ts';
-import { nbSearchItem } from './migration-api-envelopes.ts';
+import { bookLookupCache, nbSearchItem } from './migration-api-envelopes.ts';
 
 const USER_AGENT = 'book-tracker enrichment script (https://book.ankile.com)';
 const REQUEST_GAP_MS = 1000;
 
 const CACHE_PATH = './nb-cache.json';
 const cache: Record<string, BookLookupResult | null> = existsSync(CACHE_PATH)
-  ? JSON.parse(readFileSync(CACHE_PATH, 'utf8'))
+  ? bookLookupCache(JSON.parse(readFileSync(CACHE_PATH, 'utf8')), CACHE_PATH)
   : {};
 let fetches = 0;
 

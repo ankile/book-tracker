@@ -4,7 +4,7 @@
     "test": "npm run lint && npm run build && node --test test/*.test.cjs",
     "lint": "eslint \"src/**/*\"",
     "build": "tsc",
-    "serve": "npm run build && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only functions",
+    "serve": "npm run build && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only auth,firestore,functions",
     "shell": "npm run build && npm exec --yes --package firebase-tools@15.24.0 -- firebase functions:shell",
     "start": "npm run shell",
     "deploy": "npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions",

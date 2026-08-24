@@ -71,6 +71,31 @@ test("lookupisbn returns sanitized partial metadata", async (t) => {
   assert.equal(quota.quota().count, 1);
 });
 
+test("the Functions emulator returns a local miss without outbound fetch", async (t) => {
+  const previous = process.env.FUNCTIONS_EMULATOR;
+  process.env.FUNCTIONS_EMULATOR = "true";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.FUNCTIONS_EMULATOR;
+    } else {
+      process.env.FUNCTIONS_EMULATOR = previous;
+    }
+  });
+  const quota = installQuotaStore(t);
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("The Functions emulator must not call Google Books.");
+  });
+
+  assert.deepEqual(
+    await deployed.booksapi.lookupisbn.run(
+      {isbn: "9780000000002"},
+      authContext,
+    ),
+    {volume: null},
+  );
+  assert.equal(quota.quota().count, 1);
+});
+
 test("lookupisbn enforces the per-user hourly quota before fetch", async (t) => {
   installQuotaStore(t);
   let fetchCalls = 0;

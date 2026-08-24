@@ -26,6 +26,7 @@ const AUDIT_RETENTION_DAYS = 365;
 // prevent. The event names mirror the allowlists in firestore.rules.
 const APP_EVENTS = [
   "firestore.listener_failed",
+  "firestore.decode_failed",
   "firestore.write_failed",
   "toggl.sync_stuck",
   "toggl.sync_failed",

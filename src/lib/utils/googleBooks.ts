@@ -61,8 +61,10 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function optionalFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+function optionalPageCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function strings(value: unknown): string[] {
@@ -78,7 +80,7 @@ export function parseGoogleVolume(value: unknown): BookLookupResult {
   return {
     title: optionalString(volume.title) ?? '',
     authorNames: strings(volume.authors),
-    pageCount: optionalFiniteNumber(volume.pageCount),
+    pageCount: optionalPageCount(volume.pageCount),
     // Google serves some thumbnails over http; force https or the browser
     // blocks them as mixed content on the deployed site.
     coverUrl: (optionalString(imageLinks?.thumbnail) ?? '').replace(/^http:/, 'https:'),

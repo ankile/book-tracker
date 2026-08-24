@@ -118,6 +118,35 @@ const queueItem = (overrides = {}) => ({
   ...overrides,
 });
 
+const issue = (uid: string | null, event: string) => ({
+  level: 'error',
+  event,
+  message: 'Stored data failed runtime validation',
+  code: 'TypeError',
+  uid,
+  detail: null,
+  createdAt: serverTimestamp(),
+  expiresAt: Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000),
+});
+
+test('authenticated clients can report decode failures without opening anonymous telemetry', async () => {
+  const owner = environment.authenticatedContext('issue-owner').firestore();
+  await assertSucceeds(setDoc(
+    doc(owner, 'logEvents', 'decode-failure'),
+    issue('issue-owner', 'firestore.decode_failed'),
+  ));
+  await assertFails(setDoc(
+    doc(owner, 'logEvents', 'forged-decode-failure'),
+    issue('another-owner', 'firestore.decode_failed'),
+  ));
+
+  const anonymous = environment.unauthenticatedContext().firestore();
+  await assertFails(setDoc(
+    doc(anonymous, 'logEvents', 'anonymous-decode-failure'),
+    issue(null, 'firestore.decode_failed'),
+  ));
+});
+
 test('owners can create and read only exact pending Toggl queue payloads', async () => {
   const owner = environment.authenticatedContext('queue-owner').firestore();
   const createRef = doc(owner, 'users', 'queue-owner', 'togglQueue', 'create');

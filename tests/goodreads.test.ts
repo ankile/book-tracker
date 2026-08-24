@@ -75,6 +75,13 @@ test("invalid Goodreads JSON-LD still fails loudly", () => {
   );
 });
 
+test("Goodreads rejects non-positive, fractional, and unsafe page counts", () => {
+  for (const pageCount of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const parsed = parseGoodreadsHtml(page({ ...bookLd, numberOfPages: pageCount }));
+    assert.equal(parsed?.pageCount, undefined);
+  }
+});
+
 test("genres are de-duplicated in page order", () => {
   assert.deepEqual(extractGenres(page(bookLd, ["Fiction", "Novels", "Fiction"])), ["Fiction", "Novels"]);
 });
