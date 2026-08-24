@@ -339,21 +339,21 @@ export function daysToFinishSummary(allBooks, timelines) {
 }
 
 // Unfinished books by staleness, dustiest first. Books with no update docs
-// fall back to updatedAt so a freshly added book doesn't look ancient.
+// fall back to updatedAt (every book write stamps it) so a freshly added
+// book doesn't look ancient.
 export function dustyShelf(allBooks, timelines, now) {
   return allBooks
     .filter((book) => !book.finished)
     .map((book) => {
-      const lastActivityAt =
-        timelines.get(book.id)?.lastAt ?? book.updatedAt?.toDate?.() ?? null;
+      const lastActivityAt = timelines.get(book.id)?.lastAt ?? book.updatedAt.toDate();
       return {
         title: book.title,
         lastActivityAt,
-        daysSince: lastActivityAt ? Math.floor((now - lastActivityAt) / MS_PER_DAY) : null,
+        daysSince: Math.floor((now - lastActivityAt) / MS_PER_DAY),
         percentComplete: book.pageCount > 0 ? Math.round((book.currentPage / book.pageCount) * 100) : 0,
       };
     })
-    .sort((a, b) => (b.daysSince ?? -1) - (a.daysSince ?? -1));
+    .sort((a, b) => b.daysSince - a.daysSince);
 }
 
 // Share of started books (any update ever) that ended up finished.

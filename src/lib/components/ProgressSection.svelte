@@ -19,7 +19,7 @@
   });
   const projections = $derived(projectedFinishes(books, timelines, sessions, now));
   const active = $derived(projections.filter((p) => p.projectedDate !== null).slice(0, 8));
-  const dusty = $derived(dustyShelf(books, timelines, now).filter((b) => (b.daysSince ?? 0) > 60).slice(0, 5));
+  const dusty = $derived(dustyShelf(books, timelines, now).filter((b) => b.daysSince > 60).slice(0, 5));
   const finishSummary = $derived(daysToFinishSummary(books, timelines));
   const rate = $derived(completionRate(books, timelines));
 
@@ -156,7 +156,7 @@
               <li>
                 <span class="book-title">{book.title}</span>
                 <span class="book-detail">
-                  {book.percentComplete}% · {book.daysSince === null ? 'never touched' : formatAgo(book.daysSince)}
+                  {book.percentComplete}% · {formatAgo(book.daysSince)}
                 </span>
               </li>
             {/each}
