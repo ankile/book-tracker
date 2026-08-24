@@ -6,11 +6,9 @@
   import { joinPersonName } from '$lib/utils/authors.js';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
-  import BrandIcon from '$lib/components/BrandIcon.svelte';
+  import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
-  import { linkHref, linkDisplay, linkIcon, linkBrandIcon, linkTypeName } from '$lib/utils/links.js';
-  import Icon from 'svelte-awesome';
 
   const username = $derived(page.params.username);
 
@@ -28,7 +26,7 @@
 </script>
 
 <svelte:head>
-  <title>{username} — Book Tracker</title>
+  <title>{username} | Book Tracker</title>
 </svelte:head>
 
 <style lang="scss">
@@ -40,23 +38,33 @@
   }
 
   .profile-header {
+    max-width: 820px;
+    margin: 0 auto 2rem;
+    padding: 2.25rem 2rem 2rem;
     text-align: center;
-    padding: 2rem;
     background: white;
-    border-radius: 5px;
-    margin-bottom: 2rem;
-    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
+    border: 1px solid #e9e9e9;
+    border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
 
     h1 {
-      font-size: 2rem;
-      margin: 0 0 0.5rem 0;
+      margin: 0;
       color: #333;
+      font-size: clamp(1.8rem, 4vw, 2.35rem);
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      line-height: 1.15;
     }
 
     .subtitle {
-      font-size: 1rem;
-      color: #666;
-      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin: 0.55rem 0 0;
+      color: #6f6f6f;
+      font-size: 0.95rem;
     }
 
     .private-note {
@@ -65,58 +73,8 @@
       margin: 0.5rem 0 0 0;
     }
 
-    .handles {
-      display: flex;
-      justify-content: center;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-      margin-top: 1.25rem;
-
-      .handle {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.65rem;
-        min-width: 0;
-        padding: 0.65rem 0.85rem;
-        color: #333;
-        text-align: left;
-        text-decoration: none;
-        background: #f7f7f7;
-        border: 1px solid #e5e5e5;
-        border-radius: 8px;
-        transition: background 0.15s, border-color 0.15s, transform 0.15s;
-
-        &:hover {
-          color: #111;
-          background: #fff;
-          border-color: #bbb;
-          transform: translateY(-1px);
-        }
-
-        .handle-copy {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-          line-height: 1.15;
-        }
-
-        .handle-service {
-          font-size: 0.72rem;
-          font-weight: 700;
-          color: #666;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-        }
-
-        .handle-value {
-          max-width: 230px;
-          margin-top: 0.15rem;
-          overflow: hidden;
-          font-size: 0.9rem;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-      }
+    .profile-links {
+      margin-top: 1.4rem;
     }
   }
 
@@ -183,10 +141,10 @@
     }
 
     .profile-header {
-      padding: 1.5rem 1rem;
+      padding: 1.75rem 1rem 1.5rem;
 
       h1 {
-        font-size: 1.5rem;
+        font-size: 1.75rem;
       }
     }
 
@@ -214,22 +172,10 @@
   <div class="profile-container">
     <div class="profile-header">
       <h1>{joinPersonName(profile) || profile.username}</h1>
-      <p class="subtitle">@{profile.username} · reading stats</p>
+      <p class="subtitle">@{profile.username}</p>
       {#if profile.links?.length > 0}
-        <div class="handles">
-          {#each profile.links as link}
-            <a class="handle" href={linkHref(link)} target="_blank" rel="noopener noreferrer nofollow">
-              {#if linkBrandIcon(link)}
-                <BrandIcon icon={linkBrandIcon(link)} />
-              {:else}
-                <Icon data={linkIcon(link)} />
-              {/if}
-              <span class="handle-copy">
-                <span class="handle-service">{linkTypeName(link)}</span>
-                <span class="handle-value">{linkDisplay(link)}</span>
-              </span>
-            </a>
-          {/each}
+        <div class="profile-links">
+          <ProfileLinks links={profile.links} />
         </div>
       {/if}
       {#if !profile.public}

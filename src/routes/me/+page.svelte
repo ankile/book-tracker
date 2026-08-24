@@ -10,11 +10,13 @@
   import CadenceSection from '$lib/components/CadenceSection.svelte';
   import ProgressSection from '$lib/components/ProgressSection.svelte';
   import AuthorLeaderboardSection from '$lib/components/AuthorLeaderboardSection.svelte';
+  import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
   import { Database } from '$lib/firebase/db.js';
   import { togglSaveToken } from '$lib/firebase/functions.js';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.js';
+  import { countIsbnProblems } from '$lib/utils/metadataHealth.js';
   import {
     computeStats,
     computeBooksByYear,
@@ -30,8 +32,7 @@
     finishedAtByBook,
     monthlyAggregates,
   } from '$lib/utils/sessions.js';
-  import { LINK_TYPES, MAX_PROFILE_LINKS, linkIcon, linkTypeName } from '$lib/utils/links.js';
-  import Icon from 'svelte-awesome';
+  import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.js';
 
   let newBookModal = $state(false);
 
@@ -110,6 +111,10 @@
       },
     };
   });
+
+  // Books whose metadata cannot be filled in without a human: no ISBN, or
+  // one that fails its check digit. The /isbns page repairs them.
+  let isbnProblems = $derived(countIsbnProblems(allBooks ?? []));
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -282,6 +287,13 @@
   let newLinkLabel = $state('');
   let newLinkValue = $state('');
 
+  function closeLinkPicker() {
+    linkPickerOpen = false;
+    newLinkType = '';
+    newLinkLabel = '';
+    newLinkValue = '';
+  }
+
   function addLink() {
     const value = newLinkValue.trim().slice(0, 200);
     if (!value) return;
@@ -290,10 +302,7 @@
       link.label = newLinkLabel.trim().slice(0, 50);
     }
     persistProfile({ links: [...(myProfile.links ?? []), link] });
-    linkPickerOpen = false;
-    newLinkType = '';
-    newLinkLabel = '';
-    newLinkValue = '';
+    closeLinkPicker();
   }
 
   function removeLink(index) {
@@ -451,121 +460,315 @@
   }
 
   .share-card {
-    .profile-link {
+    .profile-heading {
       display: flex;
       align-items: center;
+      justify-content: space-between;
       gap: 1rem;
-      flex-wrap: wrap;
-      margin-top: 1rem;
+      margin-bottom: 0.4rem;
 
-      a {
-        font-size: 1.1rem;
-        word-break: break-all;
+      h2 {
+        margin: 0;
+      }
+    }
+
+    .visibility-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.32rem 0.58rem;
+      color: #4f5b56;
+      font-size: 0.78rem;
+      font-weight: 650;
+      line-height: 1;
+      background: #f1f3f2;
+      border-radius: 999px;
+
+      &::before {
+        width: 7px;
+        height: 7px;
+        content: '';
+        background: #8b9691;
+        border-radius: 50%;
+      }
+
+      &.public {
+        color: #176b42;
+        background: #eaf7ef;
+
+        &::before {
+          background: #24925d;
+        }
+      }
+    }
+
+    .profile-description {
+      max-width: 720px;
+      margin: 0 0 1.35rem;
+      color: #666;
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+
+    .profile-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr minmax(180px, 1.2fr) auto;
+      align-items: end;
+      gap: 0.85rem;
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.38rem;
+        min-width: 0;
+      }
+
+      label {
+        color: #555;
+        font-size: 0.78rem;
+        font-weight: 650;
+      }
+
+      input {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+
+    .primary-button,
+    .secondary-button,
+    .quiet-button,
+    .danger-button {
+      min-height: 40px;
+      padding: 0.55rem 0.9rem;
+      font-size: 0.88rem;
+      font-weight: 650;
+      line-height: 1.1;
+      border-radius: 8px;
+      box-shadow: none;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+
+      &:disabled {
+        cursor: default;
+        opacity: 0.5;
+      }
+    }
+
+    .primary-button {
+      color: #fff;
+      background: #2f666b;
+      border: 1px solid #2f666b;
+
+      &:hover:not(:disabled) {
+        background: #27575c;
+        border-color: #27575c;
+      }
+    }
+
+    .secondary-button,
+    .quiet-button {
+      color: #333;
+      background: #fff;
+      border: 1px solid #d8d8d8;
+
+      &:hover:not(:disabled) {
+        background: #f7f7f7;
+        border-color: #bdbdbd;
+      }
+    }
+
+    .quiet-button {
+      border-color: transparent;
+    }
+
+    .danger-button {
+      color: #a32d25;
+      background: #fff;
+      border: 1px solid #e2c3c0;
+
+      &:hover:not(:disabled) {
+        background: #fff4f3;
+        border-color: #d69b96;
       }
     }
 
     .share-error {
-      color: #dc3545;
-      margin: 0.75rem 0 0 0;
+      margin: 0.7rem 0 0;
+      color: #b42318;
+      font-size: 0.88rem;
     }
 
-    .handles {
-      margin-top: 1rem;
+    .profile-url {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 1.15rem;
+      padding: 0.75rem 0.75rem 0.75rem 0.9rem;
+      background: #f7f8f8;
+      border: 1px solid #e3e5e5;
+      border-radius: 10px;
 
-      .handle-row {
+      .url-copy {
         display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.35rem 0;
-        color: #333;
-
-        .handle-name {
-          font-weight: 600;
-        }
-
-        .handle-value {
-          color: #666;
-          overflow-wrap: anywhere;
-        }
-
-        .handle-remove {
-          border: none;
-          background: none;
-          color: #dc3545;
-          font-size: 1.2rem;
-          line-height: 1;
-          cursor: pointer;
-          padding: 0 0.25rem;
-        }
+        flex-direction: column;
+        min-width: 0;
       }
 
-      .handle-add {
-        display: flex;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        margin-top: 0.5rem;
-
-        select, input {
-          flex: 1;
-          min-width: 160px;
-        }
+      .url-label {
+        margin-bottom: 0.16rem;
+        color: #6f6f6f;
+        font-size: 0.74rem;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
       }
 
-      .handle-add button,
-      .handle-plus {
-        border: none;
-        background: white;
-        padding: 0.5rem 1.5rem;
-        font-weight: 600;
-        color: #333;
-        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
-        border-radius: 5px;
-        cursor: pointer;
-
-        &:disabled {
-          opacity: 0.5;
-          cursor: default;
-        }
-      }
-
-      .handle-plus {
-        margin-top: 0.5rem;
+      a {
+        overflow: hidden;
+        color: #245e65;
+        font-size: 0.88rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
     }
 
-    .share-visibility {
+    .links-section {
+      margin-top: 1.5rem;
+    }
+
+    .links-heading {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
-      margin-top: 1rem;
-      color: #333;
-      cursor: pointer;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.65rem;
 
-      input {
-        width: 1.1rem;
-        height: 1.1rem;
-        cursor: pointer;
+      h3 {
+        margin: 0;
+        color: #3d3d3d;
+        font-size: 0.95rem;
+        font-weight: 680;
       }
     }
 
-    .share-actions {
+    .links-empty {
+      margin: 0;
+      padding: 1rem;
+      color: #6f6f6f;
+      font-size: 0.88rem;
+      text-align: center;
+      background: #fafafa;
+      border: 1px dashed #d8d8d8;
+      border-radius: 10px;
+    }
+
+    .link-editor {
+      display: grid;
+      grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.5fr) auto auto;
+      align-items: end;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+      padding: 0.9rem;
+      background: #f8f9f9;
+      border: 1px solid #e3e5e5;
+      border-radius: 10px;
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        min-width: 0;
+      }
+
+      label {
+        color: #555;
+        font-size: 0.76rem;
+        font-weight: 650;
+      }
+
+      select,
+      input {
+        width: 100%;
+        min-width: 0;
+      }
+
+      &.with-label {
+        grid-template-columns: minmax(130px, 0.7fr) minmax(130px, 0.7fr) minmax(200px, 1.3fr) auto auto;
+      }
+    }
+
+    .profile-footer {
       display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 1rem;
-      margin-top: 1rem;
+      margin-top: 1.5rem;
+      padding-top: 1.15rem;
+      border-top: 1px solid #ededed;
+    }
 
-      button {
-        border: none;
-        background: white;
-        padding: 0.5rem 1.5rem;
-        font-weight: 600;
+    .visibility-control {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin: 0;
+      cursor: pointer;
+
+      .visibility-copy {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .visibility-title {
         color: #333;
-        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
-        border-radius: 5px;
-        cursor: pointer;
+        font-size: 0.88rem;
+        font-weight: 650;
+      }
 
-        &:disabled {
-          opacity: 0.5;
-          cursor: default;
+      .visibility-detail {
+        margin-top: 0.08rem;
+        color: #6f6f6f;
+        font-size: 0.78rem;
+      }
+
+      input {
+        position: relative;
+        flex: 0 0 auto;
+        width: 42px;
+        height: 24px;
+        margin: 0;
+        appearance: none;
+        background: #c9cecc;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: background 0.2s;
+
+        &::before {
+          position: absolute;
+          top: 3px;
+          left: 3px;
+          width: 18px;
+          height: 18px;
+          content: '';
+          background: #fff;
+          border-radius: 50%;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+          transition: transform 0.2s;
+        }
+
+        &:checked {
+          background: #2e7d55;
+        }
+
+        &:checked::before {
+          transform: translateX(18px);
+        }
+
+        &:focus-visible {
+          outline: 3px solid rgba(31, 111, 120, 0.28);
+          outline-offset: 2px;
         }
       }
     }
@@ -672,6 +875,30 @@
       }
     }
 
+    .share-card {
+      .profile-form,
+      .link-editor,
+      .link-editor.with-label {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+
+      .profile-form .primary-button,
+      .link-editor .primary-button,
+      .link-editor .quiet-button {
+        width: 100%;
+      }
+
+      .profile-footer {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .danger-button {
+        width: 100%;
+      }
+    }
+
     .books-by-year table {
       th, td {
         padding: 0.5rem;
@@ -702,51 +929,66 @@
       <summary>Settings</summary>
       <div class="settings-body">
         <div class="toggl-card share-card">
-          <h2>Profile</h2>
+          <div class="profile-heading">
+            <h2>Profile</h2>
+            {#if myProfile}
+              <span class:public={myProfile.public} class="visibility-badge">
+                {myProfile.public ? 'Public' : 'Private'}
+              </span>
+            {/if}
+          </div>
           {#if myProfile}
             {#if myProfile.public}
-              <p class="toggl-status connected">
-                Public — anyone with the link can see your reading stats (no
-                book titles). Stats refresh whenever you open this page.
+              <p class="profile-description">
+                Anyone with the link can see your reading totals and activity. Book titles and individual sessions stay private.
               </p>
             {:else}
-              <p class="toggl-status">
-                Private — only you can see your profile page while signed
-                in. Check the box below to make it publicly available.
+              <p class="profile-description">
+                Only you can view this profile. Turn on public access below when you are ready to share it.
               </p>
             {/if}
           {:else if myProfile === null}
-            <p class="toggl-status">
-              Set your name and pick a profile slug (the last part of your
-              profile page's link) to create your profile page. The page
-              starts private (visible only to you) until you make it
-              public. Only aggregate numbers are published — never your
-              book titles or reading sessions.
+            <p class="profile-description">
+              Add your name and choose the short address for your profile. New profiles start private.
             </p>
           {/if}
           <form
+            class="profile-form"
             onsubmit={(event) => {
               event.preventDefault();
               saveProfile();
             }}>
-            <input
-              type="text"
-              class="form-control"
-              placeholder="First name"
-              maxlength="50"
-              bind:value={profileGivenName} />
-            <input
-              type="text"
-              class="form-control"
-              placeholder="Last name"
-              maxlength="50"
-              bind:value={profileFamilyName} />
-            <input
-              type="text"
-              class="form-control"
-              placeholder="Profile slug"
-              bind:value={profileSlug} />
-            <button type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined}>
+            <div class="field">
+              <label for="profile-given-name">First name</label>
+              <input
+                id="profile-given-name"
+                type="text"
+                class="form-control"
+                maxlength="50"
+                autocomplete="given-name"
+                bind:value={profileGivenName} />
+            </div>
+            <div class="field">
+              <label for="profile-family-name">Last name</label>
+              <input
+                id="profile-family-name"
+                type="text"
+                class="form-control"
+                maxlength="50"
+                autocomplete="family-name"
+                bind:value={profileFamilyName} />
+            </div>
+            <div class="field">
+              <label for="profile-slug">Profile address</label>
+              <input
+                id="profile-slug"
+                type="text"
+                class="form-control"
+                placeholder="your-name"
+                autocomplete="off"
+                bind:value={profileSlug} />
+            </div>
+            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -754,70 +996,88 @@
             <p class="share-error">{profileError}</p>
           {/if}
           {#if myProfile}
-            <div class="profile-link">
-              <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
+            <div class="profile-url">
+              <div class="url-copy">
+                <span class="url-label">Public profile</span>
+                <a href={profileUrl} target="_blank" rel="noopener">{profileUrl}</a>
+              </div>
+              <button class="secondary-button" type="button" onclick={copyProfileLink}>
+                {linkCopied ? 'Copied' : 'Copy link'}
+              </button>
             </div>
-            <div class="handles">
-              {#each myProfile.links ?? [] as link, i}
-                <div class="handle-row">
-                  <Icon data={linkIcon(link)} />
-                  <span class="handle-name">{linkTypeName(link)}</span>
-                  <span class="handle-value">{link.value}</span>
-                  <button
-                    type="button"
-                    class="handle-remove"
-                    aria-label="Remove {linkTypeName(link)}"
-                    onclick={() => removeLink(i)}>×</button>
-                </div>
-              {/each}
+
+            <div class="links-section">
+              <div class="links-heading">
+                <h3>Links</h3>
+                {#if !linkPickerOpen && (myProfile.links ?? []).length < MAX_PROFILE_LINKS}
+                  <button class="secondary-button" type="button" onclick={() => (linkPickerOpen = true)}>
+                    Add link
+                  </button>
+                {/if}
+              </div>
+
+              {#if (myProfile.links ?? []).length > 0}
+                <ProfileLinks links={myProfile.links} editable onremove={removeLink} />
+              {:else}
+                <p class="links-empty">No links added yet.</p>
+              {/if}
+
               {#if linkPickerOpen}
-                <div class="handle-add">
-                  <select class="form-control" bind:value={newLinkType}>
-                    <option value="" disabled>Choose platform…</option>
-                    {#each LINK_TYPES as linkType}
-                      <option value={linkType.type}>{linkType.name}</option>
-                    {/each}
-                  </select>
+                <div class:with-label={newLinkType === 'other'} class="link-editor">
+                  <div class="field">
+                    <label for="new-link-type">Service</label>
+                    <select id="new-link-type" class="form-control" bind:value={newLinkType}>
+                      <option value="" disabled>Choose a service</option>
+                      {#each LINK_TYPES as linkType}
+                        <option value={linkType.type}>{linkType.name}</option>
+                      {/each}
+                    </select>
+                  </div>
                   {#if newLinkType === 'other'}
-                    <input
-                      type="text"
-                      class="form-control"
-                      placeholder="Label (e.g. Blog)"
-                      maxlength="50"
-                      bind:value={newLinkLabel} />
+                    <div class="field">
+                      <label for="new-link-label">Label</label>
+                      <input
+                        id="new-link-label"
+                        type="text"
+                        class="form-control"
+                        placeholder="Blog"
+                        maxlength="50"
+                        bind:value={newLinkLabel} />
+                    </div>
                   {/if}
-                  {#if newLinkType}
+                  <div class="field">
+                    <label for="new-link-value">Link or handle</label>
                     <input
+                      id="new-link-value"
                       type="text"
                       class="form-control"
-                      placeholder="Link or handle"
+                      placeholder={newLinkType ? 'Paste a URL or enter a handle' : 'Choose a service first'}
                       maxlength="200"
+                      disabled={!newLinkType}
                       bind:value={newLinkValue} />
-                    <button type="button" onclick={addLink} disabled={!newLinkValue.trim()}>
-                      Add
-                    </button>
-                  {/if}
-                  <button type="button" onclick={() => (linkPickerOpen = false)}>Cancel</button>
+                  </div>
+                  <button class="primary-button" type="button" onclick={addLink} disabled={!newLinkType || !newLinkValue.trim()}>
+                    Add
+                  </button>
+                  <button class="quiet-button" type="button" onclick={closeLinkPicker}>Cancel</button>
                 </div>
-              {:else if (myProfile.links ?? []).length < MAX_PROFILE_LINKS}
-                <button type="button" class="handle-plus" onclick={() => (linkPickerOpen = true)}>
-                  + Add handle
-                </button>
               {/if}
             </div>
-            <label class="share-visibility">
-              <input
-                type="checkbox"
-                checked={myProfile.public}
-                onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
-              Make my profile publicly available
-            </label>
-            <div class="share-actions">
-              <button type="button" onclick={copyProfileLink}>
-                {linkCopied ? 'Copied!' : 'Copy Link'}
-              </button>
-              <button type="button" onclick={deleteProfile} disabled={savingProfile}>
-                Delete Profile
+
+            <div class="profile-footer">
+              <label class="visibility-control">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={myProfile.public}
+                  onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
+                <span class="visibility-copy">
+                  <span class="visibility-title">Public profile</span>
+                  <span class="visibility-detail">Anyone with the link can view your stats.</span>
+                </span>
+              </label>
+              <button class="danger-button" type="button" onclick={deleteProfile} disabled={savingProfile}>
+                Delete profile
               </button>
             </div>
           {/if}
@@ -827,7 +1087,7 @@
           <h2>Toggl Track</h2>
           {#if userDoc?.toggl}
             <p class="toggl-status connected">
-              Connected — timers log to your "Reading" project in Toggl.
+              Connected. Timers log to your "Reading" project in Toggl.
             </p>
           {:else}
             <p class="toggl-status">
@@ -859,6 +1119,8 @@
         subtext={stats.firstFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
       <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
       <StatCard label="Authors" value={authorList?.length ?? '…'} subtext="Rename, merge, sort names" href="/authors" />
+      <StatCard label="Needs an ISBN" value={allBooks === undefined ? '…' : isbnProblems}
+        subtext="Missing or mistyped — no cover or genre" href="/isbns" />
       <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}
         subtext={`${stats.totalPagesRead.toLocaleString()} pages${stats.firstBookAddedAt ? ` since ${formatMonthYear(stats.firstBookAddedAt)}` : ' read'}`} />
       <StatCard label="Books Per Year" value={stats.booksPerYear}

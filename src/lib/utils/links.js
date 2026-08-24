@@ -1,7 +1,6 @@
-// Public handles a profile can list. The value is either a full URL or a
-// bare handle; bare handles get the platform prefix. Icons: FA 4.7 (what
-// svelte-awesome ships) has real brand marks for the first four; Scholar,
-// Goodreads, and Strava get recognizable stand-in glyphs.
+// Public links can contain a full URL or a bare handle. Bare handles get
+// the platform prefix. Simple Icons provides current service marks where
+// available; svelte-awesome covers LinkedIn and generic link types.
 import {
   twitter, github, linkedin, instagram,
   graduationCap, book, bicycle, globe, link as chainLink,
