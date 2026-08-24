@@ -30,6 +30,7 @@ function enableFunctionsEmulator(t) {
 function queueItem(overrides = {}) {
   return {
     type: "create",
+    bookId: "book",
     bookTitle: "The Book",
     start: "2026-08-24T12:00:00Z",
     stop: "2026-08-24T12:20:00Z",
@@ -154,6 +155,18 @@ test("the Functions emulator syncs a queued create without outbound fetch", asyn
     ["outcome-unknown", "synced"],
   );
   assert.equal(store.queueUpdates.at(-1).entryId, 900003);
+  assert.equal(store.queueDeleted, true);
+});
+
+test("the Functions emulator still syncs a legacy queue row without bookId", async (t) => {
+  enableFunctionsEmulator(t);
+  const legacyItem = queueItem();
+  delete legacyItem.bookId;
+  const store = installQueueStore(t, legacyItem);
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.equal(store.queueUpdates.at(-1).status, "synced");
   assert.equal(store.queueDeleted, true);
 });
 

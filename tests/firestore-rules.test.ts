@@ -18,6 +18,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
+import { togglQueueId } from '../src/lib/utils/toggl.ts';
 
 let environment: RulesTestEnvironment;
 
@@ -185,6 +186,8 @@ test('Toggl queue creates reject malformed payloads and lifecycle fields', async
   const queue = collection(db, 'users', 'queue-shape', 'togglQueue');
   const cases = [
     queueItem({type: 'other'}),
+    queueItem({bookId: 'books/123'}),
+    queueItem({bookId: '.'}),
     queueItem({bookTitle: ''}),
     queueItem({start: 'August 24, 2026'}),
     queueItem({stop: '2026-08-24'}),
@@ -296,6 +299,7 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     await setDoc(
       doc(context.firestore(), 'users', 'queue-immutable', 'togglQueue', 'error'),
       queueItem({
+        bookId: 'book',
         status: 'error',
         createdAt: oldClaim,
         attempts: 1,
@@ -318,6 +322,11 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     bookTitle: 'Other',
   }));
   await assertFails(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+    bookId: deleteField(),
+  }));
+  await assertFails(updateDoc(ref, {
     status: 'synced',
     retryRequestedAt: serverTimestamp(),
   }));
@@ -337,9 +346,19 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     status: 'pending',
     retryRequestedAt: serverTimestamp(),
   }));
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', 'queue-immutable', 'functionQuotas', 'togglQueue'),
+      {windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000), count: 10},
+    );
+  });
+  await assertSucceeds(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+  }));
 });
 
-test('Toggl queue writes require configuration and an available server quota', async () => {
+test('ordinary Toggl queue creates require configuration and an available server quota', async () => {
   const uid = 'queue-quota';
   const db = environment.authenticatedContext(uid).firestore();
   const queue = collection(db, 'users', uid, 'togglQueue');
@@ -353,6 +372,9 @@ test('Toggl queue writes require configuration and an available server quota', a
 
   await seedToggl(uid, { windowStartedAt: Timestamp.now(), count: 10 });
   await assertFails(setDoc(doc(queue, 'exhausted'), queueItem()));
+  await assertFails(setDoc(doc(queue, 'book_2026-08-24T12:00:00.000Z'), queueItem({
+    bookId: 'book',
+  })));
 
   await seedToggl(uid, {
     windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000),
@@ -480,6 +502,8 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
   const uid = 'atomic-stop';
   const db = environment.authenticatedContext(uid).firestore();
   const bookRef = doc(db, 'users', uid, 'books', 'book');
+  const remoteStart = '2026-08-24T12:00:00.000Z';
+  const remoteQueueId = togglQueueId('book', remoteStart);
   const seedRemoteTimer = async () => environment.withSecurityRulesDisabled(
     async (context: RulesTestContext) => {
       await setDoc(doc(context.firestore(), 'users', uid), {
@@ -489,7 +513,7 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
       });
       await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
         title: 'Book',
-        activeTimer: {entryId: 42, start: '2026-08-24T12:00:00.000Z'},
+        activeTimer: {entryId: 42, start: remoteStart},
       });
     },
   );
@@ -497,23 +521,60 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
 
   const valid = writeBatch(db);
   valid.update(bookRef, {activeTimer: null});
-  valid.set(doc(db, 'users', uid, 'togglQueue', 'valid'), queueItem({
+  valid.set(doc(db, 'users', uid, 'togglQueue', remoteQueueId), queueItem({
     type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Book',
     entryId: 42,
   }));
   await assertSucceeds(valid.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer, null);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await deleteDoc(doc(
+      context.firestore(),
+      'users', uid, 'togglQueue', remoteQueueId,
+    ));
+  });
 
   await seedRemoteTimer();
   const invalid = writeBatch(db);
   invalid.update(bookRef, {activeTimer: null});
-  invalid.set(doc(db, 'users', uid, 'togglQueue', 'invalid'), queueItem({
+  invalid.set(doc(db, 'users', uid, 'togglQueue', remoteQueueId), queueItem({
     type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Book',
     entryId: 42,
-    bookTitle: 'x'.repeat(501),
+    stop: 'not-a-time',
   }));
   await assertFails(invalid.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+  assert.equal(
+    (await getDoc(doc(db, 'users', uid, 'togglQueue', remoteQueueId))).exists(),
+    false,
+  );
+
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await updateDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+      activeTimer: {start: '2026-08-24T12:30:00.000Z'},
+    });
+  });
+  const invalidLocal = writeBatch(db);
+  invalidLocal.update(bookRef, {activeTimer: null});
+  invalidLocal.set(doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T12:30:00.000Z'), queueItem({
+    type: 'create',
+    bookId: 'book',
+    start: '2026-08-24T12:30:00.000Z',
+    bookTitle: 'x'.repeat(501),
+  }));
+  await assertFails(invalidLocal.commit());
+  assert.equal(
+    (await getDoc(bookRef)).data()?.activeTimer.start,
+    '2026-08-24T12:30:00.000Z',
+  );
+  assert.equal(
+    (await getDoc(doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T12:30:00.000Z'))).exists(),
+    false,
+  );
 
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await setDoc(doc(context.firestore(), 'users', uid), {
@@ -522,25 +583,145 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
     });
     await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
       title: 'Book',
-      activeTimer: {entryId: 42, start: '2026-08-24T12:00:00.000Z'},
+      activeTimer: {entryId: 42, start: remoteStart},
     });
   });
   const unconfigured = writeBatch(db);
   unconfigured.update(bookRef, {activeTimer: null});
-  unconfigured.set(doc(db, 'users', uid, 'togglQueue', 'unconfigured'), queueItem({
+  unconfigured.set(doc(db, 'users', uid, 'togglQueue', remoteQueueId), queueItem({
     type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Book',
     entryId: 42,
   }));
   await assertFails(unconfigured.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+  assert.equal(
+    (await getDoc(doc(db, 'users', uid, 'togglQueue', remoteQueueId))).exists(),
+    false,
+  );
 
-  await seedToggl(uid, {windowStartedAt: Timestamp.now(), count: 10});
-  const exhausted = writeBatch(db);
-  exhausted.update(bookRef, {activeTimer: null});
-  exhausted.set(doc(db, 'users', uid, 'togglQueue', 'exhausted'), queueItem({
+  const fullWindow = Timestamp.now();
+  await seedToggl(uid, {windowStartedAt: fullWindow, count: 10});
+
+  const wrongQueueId = writeBatch(db);
+  wrongQueueId.update(bookRef, {activeTimer: null});
+  wrongQueueId.set(doc(db, 'users', uid, 'togglQueue', 'forged'), queueItem({
     type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Book',
     entryId: 42,
   }));
-  await assertFails(exhausted.commit());
+  await assertFails(wrongQueueId.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+
+  const wrongEntry = writeBatch(db);
+  wrongEntry.update(bookRef, {activeTimer: null});
+  wrongEntry.set(doc(db, 'users', uid, 'togglQueue', remoteQueueId), queueItem({
+    type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Book',
+    entryId: 99,
+  }));
+  await assertFails(wrongEntry.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+
+  const wrongRemoteStartValue = '2026-08-24T12:00:01.000Z';
+  const wrongRemoteStart = writeBatch(db);
+  wrongRemoteStart.update(bookRef, {activeTimer: null});
+  wrongRemoteStart.set(
+    doc(db, 'users', uid, 'togglQueue', togglQueueId('book', wrongRemoteStartValue)),
+    queueItem({
+      type: 'stop',
+      bookId: 'book',
+      bookTitle: 'Book',
+      start: wrongRemoteStartValue,
+      entryId: 42,
+    }),
+  );
+  await assertFails(wrongRemoteStart.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer.start, remoteStart);
+
+  await assertFails(setDoc(
+    doc(db, 'users', uid, 'togglQueue', remoteQueueId),
+    queueItem({
+      type: 'stop',
+      bookId: 'book',
+      bookTitle: 'Book',
+      entryId: 42,
+    }),
+  ));
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+
+  // The stopping device may have an older cached title than another device.
+  // Timer identity is bookId + start (+ entryId for remote timers), not title.
+  const staleTitle = writeBatch(db);
+  staleTitle.update(bookRef, {activeTimer: null});
+  staleTitle.set(doc(db, 'users', uid, 'togglQueue', remoteQueueId), queueItem({
+    type: 'stop',
+    bookId: 'book',
+    bookTitle: 'Another book',
+    entryId: 42,
+  }));
+  await assertSucceeds(staleTitle.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer, null);
+  const remoteQueue = (await getDoc(
+    doc(db, 'users', uid, 'togglQueue', remoteQueueId),
+  )).data();
+  assert.equal(remoteQueue?.status, 'pending');
+  assert.equal(remoteQueue?.type, 'stop');
+  assert.equal(remoteQueue?.bookTitle, 'Another book');
+  assert.equal(remoteQueue?.entryId, 42);
+  assert.equal(remoteQueue?.attempts, undefined);
+  assert.equal(remoteQueue?.claimedAt, undefined);
+
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await updateDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+      activeTimer: {start: '2026-08-24T13:00:00.000Z'},
+    });
+  });
+  const wrongLocalStart = writeBatch(db);
+  wrongLocalStart.update(bookRef, {activeTimer: null});
+  wrongLocalStart.set(doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T13:00:01.000Z'), queueItem({
+    type: 'create',
+    bookId: 'book',
+    bookTitle: 'Book',
+    start: '2026-08-24T13:00:01.000Z',
+    stop: '2026-08-24T13:20:00.000Z',
+  }));
+  await assertFails(wrongLocalStart.commit());
+  assert.equal(
+    (await getDoc(bookRef)).data()?.activeTimer.start,
+    '2026-08-24T13:00:00.000Z',
+  );
+
+  const local = writeBatch(db);
+  local.update(bookRef, {activeTimer: null});
+  local.set(doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T13:00:00.000Z'), queueItem({
+    type: 'create',
+    bookId: 'book',
+    bookTitle: 'Book',
+    start: '2026-08-24T13:00:00.000Z',
+    stop: '2026-08-24T13:20:00.000Z',
+  }));
+  await assertSucceeds(local.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer, null);
+  assert.equal(
+    (await getDoc(doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T13:00:00.000Z'))).data()?.type,
+    'create',
+  );
+  const localQueue = (await getDoc(
+    doc(db, 'users', uid, 'togglQueue', 'book_2026-08-24T13:00:00.000Z'),
+  )).data();
+  assert.equal(localQueue?.status, 'pending');
+  assert.equal(localQueue?.entryId, undefined);
+  assert.equal(localQueue?.attempts, undefined);
+  assert.equal(localQueue?.claimedAt, undefined);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const quotaAfter = (
+      await getDoc(doc(context.firestore(), 'users', uid, 'functionQuotas', 'togglQueue'))
+    ).data();
+    assert.equal(quotaAfter?.count, 10);
+    assert.equal(quotaAfter?.windowStartedAt.toMillis(), fullWindow.toMillis());
+  });
 });

@@ -174,6 +174,14 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     retryRequestedAt: undefined,
     error: undefined,
   });
+  assert.equal(decoders.decodeTogglQueueDocument({
+    ...create,
+    bookId: "book-123",
+  }).bookId, "book-123");
+  assert.throws(
+    () => decoders.decodeTogglQueueDocument({...create, bookId: "books/123"}),
+    /one Firestore document id/,
+  );
   const stop = {
     ...create,
     type: "stop",

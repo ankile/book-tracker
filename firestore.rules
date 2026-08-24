@@ -126,8 +126,9 @@ service cloud.firestore {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
-                    && togglQueueQuotaAvailable(userId)
-                    && validInitialTogglQueueItem();
+                    && validInitialTogglQueueItem()
+                    && (togglQueueQuotaAvailable(userId)
+                        || validAtomicTimerStop(userId, queueId));
       allow update: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
                     && togglQueueQuotaAvailable(userId)
@@ -147,7 +148,7 @@ service cloud.firestore {
              && item.status == 'pending'
              && item.createdAt is timestamp
              && item.keys().hasOnly([
-                  'type', 'bookTitle', 'start', 'stop', 'entryId',
+                  'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
                   'status', 'createdAt'
                 ]);
     }
@@ -160,7 +161,7 @@ service cloud.firestore {
              && item.retryRequestedAt is timestamp
              && item.retryRequestedAt == request.time
              && item.keys().hasOnly([
-                  'type', 'bookTitle', 'start', 'stop', 'entryId',
+                  'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
                   'status', 'createdAt', 'attempts', 'claimedAt', 'error',
                   'expiresAt', 'retryRequestedAt'
                 ])
@@ -179,6 +180,11 @@ service cloud.firestore {
                'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt'
              ])
              && item.type in ['create', 'stop']
+             && (!item.keys().hasAny(['bookId'])
+                  || (item.bookId is string
+                      && item.bookId.matches('[^/]{1,500}')
+                      && item.bookId != '.'
+                      && item.bookId != '..'))
              && item.bookTitle is string
              && item.bookTitle.size() > 0
              && item.bookTitle.size() <= 500
@@ -195,6 +201,29 @@ service cloud.firestore {
                   : (item.keys().hasAll(['entryId'])
                      && item.entryId is int
                      && item.entryId > 0));
+    }
+
+    // A full claim quota must not make an offline stop roll its book timer
+    // back. The narrow exception below only accepts the deterministic queue
+    // row written in the same batch that clears that exact timer. Ordinary
+    // creates, including legacy clients without bookId, remain quota-gated.
+    function validAtomicTimerStop(userId, queueId) {
+      let item = request.resource.data;
+      let bookId = item.get('bookId', '');
+      let path = /databases/$(database)/documents/users/$(userId)/books/$(bookId);
+      let before = get(path).data;
+      let timer = before.get('activeTimer', null);
+      return item.keys().hasAll(['bookId'])
+             && queueId == bookId + '_' + item.start
+             && exists(path)
+             && getAfter(path).data.get('activeTimer', null) == null
+             && ((item.type == 'create'
+                  && validLocalTimer(timer)
+                  && timer.start == item.start)
+                 || (item.type == 'stop'
+                     && validRemoteTimer(timer)
+                     && timer.entryId == item.entryId
+                     && timer.start == item.start));
     }
 
     function togglRetryWindowOpen() {

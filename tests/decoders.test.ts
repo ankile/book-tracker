@@ -228,6 +228,19 @@ test('queue decoder accepts changed retries and terminal uncertain creates', () 
   );
 });
 
+test('queue decoder accepts correlated book ids and rejects invalid document ids', () => {
+  const correlated = decodeQueueSweepItem('correlated', queueData({
+    bookId: 'book-123',
+  }), 'users/owner/togglQueue/correlated');
+  assert.equal(correlated.bookId, 'book-123');
+  assert.throws(
+    () => decodeQueueSweepItem('invalid-book', queueData({
+      bookId: 'books/123',
+    }), 'users/owner/togglQueue/invalid-book'),
+    /one Firestore document id/,
+  );
+});
+
 test('queue decoder rejects outcome-unknown stop operations', () => {
   assert.throws(
     () => decodeQueueSweepItem('stop', queueData({

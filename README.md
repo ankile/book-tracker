@@ -297,6 +297,23 @@ npm run build
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
 ```
 
+For the strict-TypeScript migration release, deploy Functions and Hosting
+before the stricter Firestore rules. Then close and reload every active app
+tab (including installed PWAs) before deploying the rules. An already-open
+legacy client clears a timer and enqueues its Toggl operation as separate
+writes; at a full quota, deploying the strict rules while such a client is
+still active can accept the clear and reject its legacy queue write. The
+service worker activates an update only after the previous worker releases
+its clients, so a Hosting deploy alone does not refresh open tabs.
+
+```bash
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
+npm run build
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
+# Close and reload every open browser/PWA client, then:
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
+```
+
 ### Deploy Hosting Only
 
 To deploy just the web app (faster for frontend-only changes):

@@ -347,6 +347,7 @@ export function decodeCreatedTogglEntryId(
 }
 
 interface QueueCommon {
+  bookId?: string;
   bookTitle: string;
   start: string;
   stop: string;
@@ -400,6 +401,7 @@ export function decodeTogglQueueDocument(
     decoded,
     [
       "type", "bookTitle", "start", "stop", "status", "createdAt",
+      "bookId",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
@@ -407,7 +409,13 @@ export function decodeTogglQueueDocument(
     fail,
   );
 
+  const bookId = decoded.bookId === undefined ? undefined :
+    string(decoded.bookId, "queue book id", fail, 500);
+  if (bookId === "." || bookId === ".." || bookId?.includes("/")) {
+    fail("Queue book id must be one Firestore document id.");
+  }
   const common = {
+    ...(bookId === undefined ? {} : {bookId}),
     bookTitle: string(decoded.bookTitle, "queue book title", fail, 500),
     start: isoTimestamp(decoded.start, "queue start", fail),
     stop: isoTimestamp(decoded.stop, "queue stop", fail),

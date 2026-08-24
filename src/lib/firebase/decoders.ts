@@ -48,6 +48,7 @@ export type QueueStatus = 'pending' | 'processing' | 'error';
 
 interface QueueBase {
   id: string;
+  bookId?: string;
   bookTitle: string;
   start: string;
   stop: string;
@@ -530,6 +531,7 @@ export function decodeQueueSweepItem(
     data,
     [
       'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt',
+      'bookId',
       'attempts', 'claimedAt', 'expiresAt', 'retryRequestedAt', 'error',
       ...(type === 'stop' ? ['entryId'] : []),
     ],
@@ -543,8 +545,15 @@ export function decodeQueueSweepItem(
   const retryRequestedAt = data.retryRequestedAt === undefined
     ? null
     : timestamp(data.retryRequestedAt, `${path}.retryRequestedAt`);
+  const bookId = data.bookId === undefined
+    ? undefined
+    : boundedString(data.bookId, `${path}.bookId`, 500);
+  if (bookId === '.' || bookId === '..' || bookId?.includes('/')) {
+    fail(`${path}.bookId`, 'one Firestore document id');
+  }
   const shared: Omit<QueueBase, 'status'> = {
     id,
+    ...(bookId === undefined ? {} : { bookId }),
     bookTitle: boundedString(data.bookTitle, `${path}.bookTitle`, 500),
     start: isoTimestamp(data.start, `${path}.start`),
     stop: isoTimestamp(data.stop, `${path}.stop`),

@@ -31,6 +31,7 @@ import { auth } from './auth.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { isFinished } from '../utils/finished.ts';
+import { togglQueueId } from '../utils/toggl.ts';
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { Book } from '../interfaces/book.ts';
@@ -683,8 +684,12 @@ class Database {
       activeTimer: null,
     });
     if (entry !== null) {
-      batch.set(doc(collection(db, 'users', userId, 'togglQueue')), {
+      // The stable id lets rules prove this is the one queue row coupled to
+      // this timer clear and prevents a repeated stop minting another row.
+      const queueId = togglQueueId(bookId, entry.start);
+      batch.set(doc(db, 'users', userId, 'togglQueue', queueId), {
         ...entry,
+        bookId,
         status: 'pending',
         createdAt: Timestamp.now(),
       });
