@@ -119,14 +119,18 @@ service cloud.firestore {
     // error and synced states. A client retry can only set pending plus a new
     // server timestamp, only after the same stale windows the client sweep
     // uses, and never after the fifth claim. The timestamp makes a retry of
-    // an unchanged pending status emit a production Firestore event. The cap
-    // bounds retries for one item; project-level abuse controls still bound
-    // how many new items an account may create.
+    // an unchanged pending status emit a production Firestore event. The
+    // server-owned per-user quota bounds all claim attempts to ten per hour;
+    // terminal rows expire through the server-owned TTL field.
     match /users/{userId}/togglQueue/{queueId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
+                    && togglConfigured(userId)
+                    && togglQueueQuotaAvailable(userId)
                     && validInitialTogglQueueItem();
       allow update: if request.auth != null && userId == request.auth.uid
+                    && togglConfigured(userId)
+                    && togglQueueQuotaAvailable(userId)
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasOnly(['status', 'retryRequestedAt'])
                     && request.resource.data.diff(resource.data).affectedKeys()
@@ -158,7 +162,7 @@ service cloud.firestore {
              && item.keys().hasOnly([
                   'type', 'bookTitle', 'start', 'stop', 'entryId',
                   'status', 'createdAt', 'attempts', 'claimedAt', 'error',
-                  'retryRequestedAt'
+                  'expiresAt', 'retryRequestedAt'
                 ])
              && ((!item.keys().hasAny(['attempts', 'claimedAt', 'error']))
                   || (item.attempts is int
@@ -203,6 +207,34 @@ service cloud.firestore {
                  && resource.data.claimedAt is timestamp
                  && resource.data.claimedAt
                     < request.time - duration.value(21600, 's'));
+    }
+
+    function togglConfigured(userId) {
+      let path = /databases/$(database)/documents/users/$(userId);
+      let toggl = get(path).data.get('toggl', null);
+      return exists(path)
+             && toggl is map
+             && toggl.keys().hasAll(['apiToken', 'workspaceId', 'projectId'])
+             && toggl.keys().hasOnly(['apiToken', 'workspaceId', 'projectId'])
+             && toggl.apiToken is string
+             && toggl.apiToken.size() > 0
+             && toggl.workspaceId is int
+             && toggl.workspaceId > 0
+             && toggl.projectId is int
+             && toggl.projectId > 0;
+    }
+
+    function togglQueueQuotaAvailable(userId) {
+      let path = /databases/$(database)/documents/users/$(userId)/functionQuotas/togglQueue;
+      return !exists(path)
+             || (get(path).data.keys().hasAll(['windowStartedAt', 'count'])
+                 && get(path).data.keys().hasOnly(['windowStartedAt', 'count'])
+                 && get(path).data.windowStartedAt is timestamp
+                 && get(path).data.count is int
+                 && get(path).data.count >= 0
+                 && (get(path).data.windowStartedAt
+                       <= request.time - duration.value(3600, 's')
+                     || get(path).data.count < 10));
     }
 
     // Opt-in public profile pages: /profiles/<username> renders this doc.

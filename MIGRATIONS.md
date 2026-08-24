@@ -51,10 +51,8 @@ node db-audit.ts --prod > audit-pre.txt
 ### 2. Emulator rehearsal, with real triggers
 
 ```sh
-npm --prefix functions run build
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  npm exec --yes --package firebase-tools@15.24.0 -- \
-  firebase emulators:start --only firestore,functions
+  npm --prefix functions run serve
 # in another shell:
 node db-snapshot.ts --prod                      # fresh dump (or reuse a recent one)
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
@@ -69,6 +67,8 @@ diff audit-pre.txt audit-emulator-post.txt      # exactly the intended lines, no
 The functions emulator runs the real compiled triggers (gen1 Firestore
 triggers work in the emulator; the eur3 gen1 restriction is deploy-time
 only), so trigger–migration interaction is rehearsed for real, not assumed.
+The `serve` command stages the checked-in dummy `.secret.emulator`; never put
+real credentials in that fixture or bypass `serve` with a raw Firebase command.
 Toggl HTTP calls are replaced with deterministic responses whenever
 `FUNCTIONS_EMULATOR=true`, so production tokens restored in a snapshot never
 leave the machine. Queue and timer documents still follow their real server

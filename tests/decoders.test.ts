@@ -199,10 +199,12 @@ const queueData = (overrides: Record<string, unknown> = {}) => ({
 });
 
 test('queue decoder accepts changed retries and terminal uncertain creates', () => {
+  const expiresAt = Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000);
   const retried = decodeQueueSweepItem('retry', queueData({
     retryRequestedAt: updatedAt,
     attempts: 1,
     claimedAt: createdAt,
+    expiresAt,
     error: 'transient',
   }), 'users/owner/togglQueue/retry');
   assert.equal(retried.retryRequestedAt, updatedAt);
@@ -214,6 +216,16 @@ test('queue decoder accepts changed retries and terminal uncertain creates', () 
     error: 'POST outcome unknown',
   }), 'users/owner/togglQueue/uncertain');
   assert.equal(uncertain.status, 'outcome-unknown');
+  assert.throws(
+    () => decodeQueueSweepItem('bad-expiry', queueData({
+      retryRequestedAt: updatedAt,
+      attempts: 1,
+      claimedAt: createdAt,
+      expiresAt: 'later',
+      error: 'transient',
+    }), 'users/owner/togglQueue/bad-expiry'),
+    /expiresAt.*Firestore Timestamp/,
+  );
 });
 
 test('queue decoder rejects outcome-unknown stop operations', () => {

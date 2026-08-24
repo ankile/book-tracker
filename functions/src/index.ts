@@ -40,7 +40,7 @@ exports.createUserDocument = functions
     await db.collection("users").doc(user.uid).set({
       email: user.email,
       uid: user.uid,
-    });
+    }, {merge: true});
     return null;
   });
 

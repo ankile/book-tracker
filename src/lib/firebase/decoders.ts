@@ -520,8 +520,9 @@ export function decodeQueueSweepItem(
   path: string,
 ): QueueSweepItem {
   const data = record(value, path);
-  const type = string(data.type, `${path}.type`);
-  const status = string(data.status, `${path}.status`);
+  const type = data.type;
+  if (type !== 'create' && type !== 'stop') fail(`${path}.type`, 'create or stop');
+  const status = data.status;
   if (status !== 'pending' && status !== 'processing' && status !== 'error' && status !== 'outcome-unknown') {
     fail(`${path}.status`, 'pending, processing, error, or outcome-unknown');
   }
@@ -529,7 +530,7 @@ export function decodeQueueSweepItem(
     data,
     [
       'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt',
-      'attempts', 'claimedAt', 'retryRequestedAt', 'error',
+      'attempts', 'claimedAt', 'expiresAt', 'retryRequestedAt', 'error',
       ...(type === 'stop' ? ['entryId'] : []),
     ],
     path,
@@ -537,16 +538,16 @@ export function decodeQueueSweepItem(
   const attempts = data.attempts === undefined ? 0 : integer(data.attempts, `${path}.attempts`);
   if (attempts < 0) fail(`${path}.attempts`, 'a non-negative integer');
   const claimedAt = data.claimedAt === undefined ? null : timestamp(data.claimedAt, `${path}.claimedAt`);
+  if (data.expiresAt !== undefined) timestamp(data.expiresAt, `${path}.expiresAt`);
   const error = data.error === undefined ? null : boundedString(data.error, `${path}.error`, 1000);
   const retryRequestedAt = data.retryRequestedAt === undefined
     ? null
     : timestamp(data.retryRequestedAt, `${path}.retryRequestedAt`);
-  const shared: QueueBase = {
+  const shared: Omit<QueueBase, 'status'> = {
     id,
     bookTitle: boundedString(data.bookTitle, `${path}.bookTitle`, 500),
     start: isoTimestamp(data.start, `${path}.start`),
     stop: isoTimestamp(data.stop, `${path}.stop`),
-    status,
     createdAt: timestamp(data.createdAt, `${path}.createdAt`),
     attempts,
     claimedAt,
@@ -576,15 +577,10 @@ export function decodeQueueSweepItem(
     }
   }
   if (type === 'create') {
-    if (data.entryId !== undefined) fail(`${path}.entryId`, 'absent for a create operation');
-    if (status === 'outcome-unknown') return { ...shared, type, status };
     return { ...shared, type, status };
   }
   if (status === 'outcome-unknown') return fail(path, 'outcome-unknown only for a create operation');
-  if (type === 'stop') {
-    const entryId = integer(data.entryId, `${path}.entryId`);
-    if (entryId <= 0) fail(`${path}.entryId`, 'a positive integer');
-    return { ...shared, type, entryId, status };
-  }
-  return fail(`${path}.type`, 'create or stop');
+  const entryId = integer(data.entryId, `${path}.entryId`);
+  if (entryId <= 0) fail(`${path}.entryId`, 'a positive integer');
+  return { ...shared, type, entryId, status };
 }

@@ -367,6 +367,7 @@ interface QueueLifecycle {
   createdAt: Timestamp;
   attempts: number;
   claimedAt?: Timestamp;
+  expiresAt?: Timestamp;
   retryRequestedAt?: Timestamp;
   error?: string;
 }
@@ -399,7 +400,7 @@ export function decodeTogglQueueDocument(
     decoded,
     [
       "type", "bookTitle", "start", "stop", "status", "createdAt",
-      "attempts", "claimedAt", "retryRequestedAt", "error",
+      "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
     "Toggl queue item",
@@ -427,6 +428,8 @@ export function decodeTogglQueueDocument(
     nonNegativeInteger(decoded.attempts, "queue attempts", fail);
   const claimedAt = decoded.claimedAt === undefined ? undefined :
     firestoreTimestamp(decoded.claimedAt, "queue claim time", fail);
+  const expiresAt = decoded.expiresAt === undefined ? undefined :
+    firestoreTimestamp(decoded.expiresAt, "queue expiry time", fail);
   const retryRequestedAt = decoded.retryRequestedAt === undefined ? undefined :
     firestoreTimestamp(
       decoded.retryRequestedAt,
@@ -453,6 +456,7 @@ export function decodeTogglQueueDocument(
       createdAt,
       attempts,
       claimedAt,
+      expiresAt,
       retryRequestedAt,
       error,
     };
@@ -465,14 +469,16 @@ export function decodeTogglQueueDocument(
     if (retryRequestedAt !== undefined) {
       fail("A processing queue item cannot have a retry request time.");
     }
-    return {...payload, status, createdAt, attempts, claimedAt};
+    return {...payload, status, createdAt, attempts, claimedAt, expiresAt};
   }
   if (status === "error") {
     if (error === undefined) fail("An error queue item must have an error.");
     if (retryRequestedAt !== undefined) {
       fail("An error queue item cannot have a retry request time.");
     }
-    return {...payload, status, createdAt, attempts, claimedAt, error};
+    return {
+      ...payload, status, createdAt, attempts, claimedAt, expiresAt, error,
+    };
   }
   if (status === "outcome-unknown") {
     if (payload.type !== "create") {
@@ -484,7 +490,9 @@ export function decodeTogglQueueDocument(
     if (retryRequestedAt !== undefined) {
       fail("An outcome-unknown queue item cannot have a retry request time.");
     }
-    return {...payload, status, createdAt, attempts, claimedAt, error};
+    return {
+      ...payload, status, createdAt, attempts, claimedAt, expiresAt, error,
+    };
   }
   const entryId = payload.type === "stop" ? payload.entryId :
     positiveInteger(decoded.entryId, "synced queue entry id", fail);
@@ -498,6 +506,7 @@ export function decodeTogglQueueDocument(
     createdAt,
     attempts,
     claimedAt,
+    expiresAt,
     entryId,
   };
 }

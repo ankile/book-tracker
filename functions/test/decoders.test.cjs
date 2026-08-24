@@ -1,11 +1,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {Timestamp} = require("firebase-admin/firestore");
+const {getFirestore, Timestamp} = require("firebase-admin/firestore");
 
 process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
 
 const decoders = require("../lib/decoders");
 const deployed = require("../lib");
+const db = getFirestore();
 
 const authContext = {auth: {uid: "owner", token: {}}};
 
@@ -169,6 +170,7 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     ...create,
     attempts: 0,
     claimedAt: undefined,
+    expiresAt: undefined,
     retryRequestedAt: undefined,
     error: undefined,
   });
@@ -184,6 +186,13 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     attempts: 1,
     claimedAt,
   }).status, "processing");
+  assert.equal(decoders.decodeTogglQueueDocument({
+    ...create,
+    status: "processing",
+    attempts: 1,
+    claimedAt,
+    expiresAt: claimedAt,
+  }).expiresAt, claimedAt);
   assert.equal(decoders.decodeTogglQueueDocument({
     ...create,
     status: "error",
@@ -238,6 +247,16 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
       claimedAt,
     }),
     /attempts must be a finite number/,
+  );
+  assert.throws(
+    () => decoders.decodeTogglQueueDocument({
+      ...create,
+      status: "processing",
+      attempts: 1,
+      claimedAt,
+      expiresAt: "later",
+    }),
+    /expiry time must be a Firestore timestamp/,
   );
   assert.throws(
     () => decoders.decodeTogglQueueDocument({
@@ -316,12 +335,39 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     throw new Error("fetch must not run");
   });
   const updates = [];
-  const ref = {update: async (value) => updates.push(value)};
+  const quotaRef = {};
+  let quota = {windowStartedAt: Timestamp.now(), count: 9};
+  const item = {
+    type: "create",
+    bookTitle: "Malformed Clock",
+    start: "2026-99-99T99:99:99Z",
+    stop: "2026-08-24T12:20:00Z",
+    status: "pending",
+    createdAt: Timestamp.now(),
+  };
+  const ref = {};
+  t.mock.method(db, "doc", (path) => {
+    assert.equal(path, "users/owner/functionQuotas/togglQueue");
+    return quotaRef;
+  });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (target) => target === ref ?
+      {exists: true, data: () => item} :
+      {exists: true, data: () => quota},
+    update: (target, value) => {
+      if (target === ref) updates.push(value);
+      else quota = {...quota, ...value};
+    },
+    set: (target, value) => {
+      assert.equal(target, quotaRef);
+      quota = value;
+    },
+  }));
   const event = {
     data: {
       after: {
         exists: true,
-        data: () => ({status: "pending", type: "create"}),
+        data: () => item,
         ref,
       },
     },
@@ -330,16 +376,23 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
 
   await assert.rejects(
     deployed.toggl.syncqueue.run(event),
-    /queue book title must be a non-empty string/,
+    /queue start must be an ISO-8601 timestamp/,
   );
   assert.equal(fetchCalls, 0);
+  assert.equal(quota.count, 10);
   assert.deepEqual(updates, [{
     status: "error",
     attempts: 5,
     claimedAt: updates[0].claimedAt,
-    error: "Malformed queue item: queue book title must be a non-empty string.",
+    expiresAt: updates[0].expiresAt,
+    error: "Malformed queue item: queue start must be an ISO-8601 timestamp.",
     retryRequestedAt: updates[0].retryRequestedAt,
   }]);
   assert.ok(updates[0].claimedAt instanceof Timestamp);
+  assert.ok(updates[0].expiresAt instanceof Timestamp);
+  assert.equal(
+    updates[0].expiresAt.toMillis() - updates[0].claimedAt.toMillis(),
+    90 * 24 * 60 * 60 * 1000,
+  );
   assert.ok(updates[0].retryRequestedAt);
 });

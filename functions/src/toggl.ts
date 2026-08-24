@@ -39,6 +39,9 @@ const EMULATOR_ENTRY_ID = 900003;
 const EMULATOR_STOP_DURATION_SECONDS = 60;
 
 const MAX_QUEUE_ATTEMPTS = 5;
+const TOGGL_QUEUE_LIMIT = 10;
+const TOGGL_QUEUE_WINDOW_MS = 60 * 60 * 1000;
+const TOGGL_QUEUE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const START_CLAIM_STALE_MS = 5 * 60 * 1000;
 
 const invalidArgument = (message: string): never => {
@@ -47,6 +50,31 @@ const invalidArgument = (message: string): never => {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function queueExpiry(now: Timestamp): Timestamp {
+  return Timestamp.fromMillis(now.toMillis() + TOGGL_QUEUE_RETENTION_MS);
+}
+
+function decodeQueueQuota(value: unknown): {
+  windowStartedAt: Timestamp;
+  count: number;
+} {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Toggl queue quota must be an object.");
+  }
+  const data = value as Record<string, unknown>;
+  const keys = Object.keys(data);
+  if (keys.length !== 2 || !keys.includes("windowStartedAt") ||
+      !keys.includes("count")) {
+    throw new TypeError("Toggl queue quota has invalid fields.");
+  }
+  if (!(data.windowStartedAt instanceof Timestamp) ||
+      typeof data.count !== "number" ||
+      !Number.isSafeInteger(data.count) || data.count < 0) {
+    throw new TypeError("Toggl queue quota has invalid values.");
+  }
+  return {windowStartedAt: data.windowStartedAt, count: data.count};
 }
 
 class OutcomeUnknownError extends Error {
@@ -332,10 +360,15 @@ exports.start = functions
       throw error;
     }
     if (!resp.ok) {
-      await transitionStartClaim(bookRef, operationId, null);
-      throw new Error(
-        `Toggl start failed with status ${resp.status}.`,
-      );
+      const error = `Toggl start failed with status ${resp.status}.`;
+      await transitionStartClaim(bookRef, operationId, resp.status >= 500 ? {
+        state: "outcome-unknown",
+        operationId,
+        start: requestedStart,
+        claimedAt,
+        error,
+      } : null);
+      throw new Error(error);
     }
 
     let entry: {id: number; start: string};
@@ -516,9 +549,11 @@ async function syncQueueItem(
       );
     }
     if (!postResp.ok) {
-      throw new Error(
-        `Toggl create failed with status ${postResp.status}.`,
-      );
+      const message = `Toggl create failed with status ${postResp.status}.`;
+      if (postResp.status >= 500) {
+        throw new OutcomeUnknownError(message);
+      }
+      throw new Error(message);
     }
     try {
       const entryData: unknown = await postResp.json();
@@ -560,8 +595,11 @@ async function syncQueueItem(
 // even a stale pending retry emit a production Firestore event. The claim
 // transaction deduplicates concurrent deliveries. Create POSTs enter a
 // terminal outcome-unknown state before the remote call, which also covers
-// crashes after Toggl accepts the request. timeoutSeconds leaves headroom for
-// the 429 backoff; maxInstances limits reconnect bursts.
+// crashes after Toggl accepts the request. Every rules-permitted invocation,
+// including malformed data, consumes the transactional per-user quota before
+// remote work; server-owned expiry bounds terminal-row retention.
+// timeoutSeconds leaves headroom for the 429 backoff; maxInstances limits
+// reconnect bursts.
 exports.syncqueue = onDocumentWritten(
   {
     document: "users/{uid}/togglQueue/{queueId}",
@@ -575,49 +613,90 @@ exports.syncqueue = onDocumentWritten(
       return;
     }
 
-    let pendingItem: TogglQueueDocument;
-    try {
-      pendingItem = decodeTogglQueueDocument(after.data());
-    } catch (error) {
-      const message = `Malformed queue item: ${errorMessage(error)}`
-        .slice(0, 1000);
-      await after.ref.update({
-        status: "error",
-        attempts: MAX_QUEUE_ATTEMPTS,
-        claimedAt: Timestamp.now(),
-        error: message,
-        retryRequestedAt: FieldValue.delete(),
-      });
-      throw error;
-    }
-    if (pendingItem.status !== "pending") return;
-
-    const claimedItem = await db.runTransaction(async (tx) => {
+    const quotaRef = db.doc(
+      `users/${event.params.uid}/functionQuotas/togglQueue`,
+    );
+    const claim = await db.runTransaction<
+      | {status: "claimed"; item: TogglQueueDocument}
+      | {status: "malformed"; error: string}
+      | null
+    >(async (tx) => {
       const snap = await tx.get(after.ref);
       if (!snap.exists) return null;
-      const current = decodeTogglQueueDocument(snap.data());
+      const data = snap.data();
+      if (!data || data.status !== "pending") return null;
+      const now = Timestamp.now();
+      const expiresAt = queueExpiry(now);
+      const quotaSnap = await tx.get(quotaRef);
+      const quota = quotaSnap.exists ? decodeQueueQuota(quotaSnap.data()) : null;
+      if (quota !== null &&
+          quota.windowStartedAt.toMillis() >
+            now.toMillis() - TOGGL_QUEUE_WINDOW_MS &&
+          quota.count >= TOGGL_QUEUE_LIMIT) {
+        tx.update(after.ref, {
+          status: "error",
+          attempts: MAX_QUEUE_ATTEMPTS,
+          claimedAt: now,
+          expiresAt,
+          error: "Toggl queue hourly limit reached.",
+          retryRequestedAt: FieldValue.delete(),
+        });
+        return null;
+      }
+
+      let current: TogglQueueDocument;
+      try {
+        current = decodeTogglQueueDocument(data);
+      } catch (error) {
+        const raw = errorMessage(error);
+        if (quota === null || quota.windowStartedAt.toMillis() <=
+            now.toMillis() - TOGGL_QUEUE_WINDOW_MS) {
+          tx.set(quotaRef, {windowStartedAt: now, count: 1});
+        } else {
+          tx.update(quotaRef, {count: quota.count + 1});
+        }
+        tx.update(after.ref, {
+          status: "error",
+          attempts: MAX_QUEUE_ATTEMPTS,
+          claimedAt: now,
+          expiresAt,
+          error: `Malformed queue item: ${raw}`.slice(0, 1000),
+          retryRequestedAt: FieldValue.delete(),
+        });
+        return {status: "malformed", error: raw};
+      }
       if (current.status !== "pending") return null;
       if (current.attempts >= MAX_QUEUE_ATTEMPTS) {
         tx.update(after.ref, {
           status: "error",
-          claimedAt: current.claimedAt ?? Timestamp.now(),
+          claimedAt: current.claimedAt ?? now,
+          expiresAt,
           error: "Queue retry limit reached.",
           retryRequestedAt: FieldValue.delete(),
         });
         return null;
       }
+      if (quota === null || quota.windowStartedAt.toMillis() <=
+          now.toMillis() - TOGGL_QUEUE_WINDOW_MS) {
+        tx.set(quotaRef, {windowStartedAt: now, count: 1});
+      } else {
+        tx.update(quotaRef, {count: quota.count + 1});
+      }
       // claimedAt lets the client sweep distinguish a live invocation from
       // a dead one; attempts caps how often a poison item is retried.
       tx.update(after.ref, {
         status: "processing",
-        claimedAt: Timestamp.now(),
+        claimedAt: now,
+        expiresAt,
         attempts: current.attempts + 1,
         error: FieldValue.delete(),
         retryRequestedAt: FieldValue.delete(),
       });
-      return current;
+      return {status: "claimed", item: current};
     });
-    if (claimedItem === null) return;
+    if (claim === null) return;
+    if (claim.status === "malformed") throw new Error(claim.error);
+    const claimedItem = claim.item;
 
     let entryId: number;
     try {
@@ -660,4 +739,5 @@ exports.syncqueue = onDocumentWritten(
       error: FieldValue.delete(),
       retryRequestedAt: FieldValue.delete(),
     });
+    await after.ref.delete();
   });

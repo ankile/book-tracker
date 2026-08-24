@@ -3,10 +3,11 @@
   "scripts": {
     "test": "npm run lint && npm run build && node --test test/*.test.cjs",
     "lint": "eslint \"src/**/*\"",
-    "build": "tsc",
-    "serve": "npm run build && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only auth,firestore,functions",
-    "shell": "npm run build && npm exec --yes --package firebase-tools@15.24.0 -- firebase functions:shell",
-    "start": "npm run shell",
+    "clean": "node -e \"require('node:fs').rmSync('lib', {recursive: true, force: true})\"",
+    "build": "npm run clean && tsc",
+    "serve": "npm run build && node lib/scripts/stage-emulator-secrets.js && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only auth,firestore,functions",
+    "shell": "npm run serve",
+    "start": "npm run serve",
     "deploy": "npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions",
     "logs": "npm exec --yes --package firebase-tools@15.24.0 -- firebase functions:log"
   },

@@ -235,6 +235,16 @@ use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
 production tokens are never sent to Toggl, and start, stop, token, and queue
 flows still exercise their real Firestore state transitions. The metered Google
 Books proxy also returns a local miss instead of consuming its production key.
+Queued Toggl work is claimed under a server-owned ten-per-hour user quota.
+Successful queue rows are deleted, while terminal rows receive a 90-day TTL;
+malformed events consume quota before they are rejected.
+Before Firebase starts, `serve` stages the checked-in dummy
+`functions/.secret.emulator` as the ignored `.secret.local`; Firebase resolves
+bound secrets before handler guards run, so this prevents an emulator startup
+from consulting Secret Manager. Never put credentials in `.secret.emulator`.
+If a different `.secret.local` already exists, `serve` fails without changing
+it; move that file aside before starting the emulators. Do not bypass `serve`
+with a raw `firebase emulators:start` command.
 
 ### Run the complete validation suite
 

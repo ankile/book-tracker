@@ -39,32 +39,55 @@ function queueItem(overrides = {}) {
   };
 }
 
-function installQueueStore(t, item) {
+function installQueueStore(t, item, {quota} = {}) {
   const queueUpdates = [];
   const transactionUpdates = [];
+  const quotaWrites = [];
   const issues = [];
+  let queueDeleted = false;
+  let configReads = 0;
+  let quotaValue = quota;
   const queueRef = {
     update: async (patch) => {
       queueUpdates.push(patch);
     },
+    delete: async () => {
+      queueDeleted = true;
+    },
   };
   const userRef = {
-    get: async () => snapshot({
-      toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
-    }),
+    get: async () => {
+      configReads += 1;
+      return snapshot({
+        toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
+      });
+    },
   };
+  const quotaRef = {};
   t.mock.method(db, "doc", (path) => {
-    assert.equal(path, "users/owner");
-    return userRef;
+    if (path === "users/owner") return userRef;
+    assert.equal(path, "users/owner/functionQuotas/togglQueue");
+    return quotaRef;
   });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (ref) => {
-      assert.equal(ref, queueRef);
-      return snapshot(item);
+      if (ref === queueRef) return snapshot(item);
+      assert.equal(ref, quotaRef);
+      return snapshot(quotaValue, quotaValue !== undefined);
     },
     update: (ref, patch) => {
-      assert.equal(ref, queueRef);
-      transactionUpdates.push(patch);
+      if (ref === queueRef) {
+        transactionUpdates.push(patch);
+      } else {
+        assert.equal(ref, quotaRef);
+        quotaValue = {...quotaValue, ...patch};
+        quotaWrites.push({type: "update", value: patch});
+      }
+    },
+    set: (ref, value) => {
+      assert.equal(ref, quotaRef);
+      quotaValue = value;
+      quotaWrites.push({type: "set", value});
     },
   }));
   t.mock.method(db, "collection", (path) => {
@@ -84,6 +107,16 @@ function installQueueStore(t, item) {
     },
     issues,
     queueRef,
+    get configReads() {
+      return configReads;
+    },
+    get queueDeleted() {
+      return queueDeleted;
+    },
+    get quota() {
+      return quotaValue;
+    },
+    quotaWrites,
     queueUpdates,
     transactionUpdates,
   };
@@ -106,6 +139,8 @@ test("queued creates pass through outcome-unknown before synced", async (t) => {
     ["outcome-unknown", "synced"],
   );
   assert.equal(store.queueUpdates[1].entryId, 81);
+  assert.equal(store.queueDeleted, true);
+  assert.equal(store.quota.count, 1);
 });
 
 test("the Functions emulator syncs a queued create without outbound fetch", async (t) => {
@@ -119,6 +154,7 @@ test("the Functions emulator syncs a queued create without outbound fetch", asyn
     ["outcome-unknown", "synced"],
   );
   assert.equal(store.queueUpdates.at(-1).entryId, 900003);
+  assert.equal(store.queueDeleted, true);
 });
 
 test("the Functions emulator syncs a queued stop without outbound fetch", async (t) => {
@@ -129,6 +165,7 @@ test("the Functions emulator syncs a queued stop without outbound fetch", async 
 
   assert.equal(store.queueUpdates.at(-1).status, "synced");
   assert.equal(store.queueUpdates.at(-1).entryId, 52);
+  assert.equal(store.queueDeleted, true);
 });
 
 test("a successful create with an invalid response stays outcome-unknown", async (t) => {
@@ -150,6 +187,74 @@ test("a successful create with an invalid response stays outcome-unknown", async
     ["outcome-unknown", "outcome-unknown"],
   );
   assert.equal(store.queueUpdates.some((patch) => patch.status === "error"), false);
+});
+
+test("a queued create 5xx stays outcome-unknown", async (t) => {
+  const store = installQueueStore(t, queueItem());
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () =>
+    (fetchCalls += 1,
+    new Response("gateway failed after forwarding", {status: 503})),
+  );
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /create failed with status 503/,
+  );
+
+  assert.deepEqual(
+    store.queueUpdates.map((patch) => patch.status),
+    ["outcome-unknown", "outcome-unknown"],
+  );
+  assert.equal(fetchCalls, 1);
+  assert.equal(store.queueUpdates.some((patch) => patch.status === "error"), false);
+});
+
+test("a queued create transport failure stays outcome-unknown", async (t) => {
+  const store = installQueueStore(t, queueItem());
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("socket closed");
+  });
+
+  await assert.rejects(deployed.toggl.syncqueue.run(store.event), /socket closed/);
+  assert.deepEqual(
+    store.queueUpdates.map((patch) => patch.status),
+    ["outcome-unknown", "outcome-unknown"],
+  );
+});
+
+test("a queued create definite 4xx becomes retryable", async (t) => {
+  const store = installQueueStore(t, queueItem());
+  t.mock.method(global, "fetch", async () =>
+    new Response("rejected", {status: 422}),
+  );
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /create failed with status 422/,
+  );
+  assert.deepEqual(
+    store.queueUpdates.map((patch) => patch.status),
+    ["outcome-unknown", "error"],
+  );
+});
+
+test("an outcome-unknown queue event never calls Toggl", async (t) => {
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+  await deployed.toggl.syncqueue.run({
+    data: {
+      after: {
+        exists: true,
+        data: () => queueItem({status: "outcome-unknown"}),
+      },
+    },
+    params: {uid: "owner", queueId: "queue"},
+  });
+  assert.equal(fetchCalls, 0);
 });
 
 test("a create stays outcome-unknown when the synced write fails", async (t) => {
@@ -212,6 +317,84 @@ test("the fifth claimed queue item becomes terminal without fetch", async (t) =>
   assert.equal(store.transactionUpdates[0].status, "error");
   assert.match(store.transactionUpdates[0].error, /retry limit/);
   assert.equal(store.queueUpdates.length, 0);
+});
+
+test("queue quota increments, resets, and blocks remote work", async (t) => {
+  const active = installQueueStore(t, queueItem(), {
+    quota: {windowStartedAt: Timestamp.now(), count: 9},
+  });
+  t.mock.method(global, "fetch", async () =>
+    new Response(JSON.stringify({id: 83}), {status: 200}),
+  );
+  await deployed.toggl.syncqueue.run(active.event);
+  assert.equal(active.quota.count, 10);
+  assert.equal(active.quotaWrites[0].type, "update");
+});
+
+test("an expired queue quota resets before remote work", async (t) => {
+  const expired = installQueueStore(t, queueItem(), {
+    quota: {
+      windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000),
+      count: 10,
+    },
+  });
+  t.mock.method(global, "fetch", async () =>
+    new Response(JSON.stringify({id: 84}), {status: 200}),
+  );
+  await deployed.toggl.syncqueue.run(expired.event);
+  assert.equal(expired.quota.count, 1);
+  assert.equal(expired.quotaWrites[0].type, "set");
+});
+
+test("an exhausted queue quota becomes terminal without config or fetch", async (t) => {
+  const store = installQueueStore(t, queueItem(), {
+    quota: {windowStartedAt: Timestamp.now(), count: 10},
+  });
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+
+  await deployed.toggl.syncqueue.run(store.event);
+  assert.equal(fetchCalls, 0);
+  assert.equal(store.configReads, 0);
+  assert.equal(store.transactionUpdates[0].status, "error");
+  assert.equal(store.transactionUpdates[0].attempts, 5);
+  assert.match(store.transactionUpdates[0].error, /hourly limit/);
+  assert.ok(store.transactionUpdates[0].expiresAt instanceof Timestamp);
+});
+
+test("a malformed queue quota fails closed without fetch", async (t) => {
+  const store = installQueueStore(t, queueItem(), {
+    quota: {windowStartedAt: Timestamp.now(), count: "ten"},
+  });
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /quota has invalid values/,
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal(store.configReads, 0);
+});
+
+test("a failed terminal cleanup leaves a durable synced queue item", async (t) => {
+  const store = installQueueStore(t, queueItem());
+  store.queueRef.delete = async () => {
+    throw new Error("delete failed");
+  };
+  t.mock.method(global, "fetch", async () =>
+    new Response(JSON.stringify({id: 85}), {status: 200}),
+  );
+
+  await assert.rejects(deployed.toggl.syncqueue.run(store.event), /delete failed/);
+  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.ok(store.transactionUpdates[0].expiresAt instanceof Timestamp);
 });
 
 function installBooksStore(t, books) {
@@ -371,20 +554,44 @@ test("a stale start claim becomes terminal without another POST", async (t) => {
 test("an explicit start rejection clears its claim", async (t) => {
   const store = installBookStore(t, {title: "The Book", activeTimer: null});
   t.mock.method(global, "fetch", async () =>
-    new Response("rejected", {status: 503}),
+    new Response("rejected", {status: 400}),
   );
+
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "book"}, authContext),
+    /start failed with status 400/,
+  );
+
+  assert.equal(store.book.activeTimer, null);
+});
+
+test("a start 5xx becomes outcome-unknown", async (t) => {
+  const store = installBookStore(t, {title: "The Book", activeTimer: null});
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    return new Response("gateway failed after forwarding", {status: 503});
+  });
 
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
     /start failed with status 503/,
   );
 
-  assert.equal(store.book.activeTimer, null);
+  assert.equal(store.book.activeTimer.state, "outcome-unknown");
+  assert.match(store.book.activeTimer.error, /status 503/);
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "book"}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(fetchCalls, 1);
 });
 
 test("an ambiguous start network failure becomes outcome-unknown", async (t) => {
   const store = installBookStore(t, {title: "The Book", activeTimer: null});
+  let fetchCalls = 0;
   t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
     throw new Error("socket closed");
   });
 
@@ -395,6 +602,31 @@ test("an ambiguous start network failure becomes outcome-unknown", async (t) => 
 
   assert.equal(store.book.activeTimer.state, "outcome-unknown");
   assert.match(store.book.activeTimer.error, /socket closed/);
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "book"}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(fetchCalls, 1);
+});
+
+test("an invalid start response becomes outcome-unknown and blocks replay", async (t) => {
+  const store = installBookStore(t, {title: "The Book", activeTimer: null});
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify({created: true}), {status: 200});
+  });
+
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "book"}, authContext),
+    /entry id/,
+  );
+  assert.equal(store.book.activeTimer.state, "outcome-unknown");
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "book"}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(fetchCalls, 1);
 });
 
 test("stop decodes activeTimer without requiring a title", async (t) => {

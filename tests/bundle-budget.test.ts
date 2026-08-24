@@ -41,9 +41,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Firestore/API runtime decoders and explicit uncertain Toggl lifecycle
   // UI add 5.3 KiB compressed. These checks are executable validation,
   // not erased type annotations, so the transfer cost is intentional.
+  // Total raised 298 -> 299 KiB for runtime validation of the server-owned
+  // Toggl queue expiry field. The check adds under 0.1 KiB; the one-byte
+  // headroom at 298 KiB could not accommodate a new persisted field safely.
   assert.ok(
-    totalBytes <= 298 * 1024,
-    `Expected at most 298 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 299 * 1024,
+    `Expected at most 299 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

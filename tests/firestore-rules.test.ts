@@ -118,6 +118,21 @@ const queueItem = (overrides = {}) => ({
   ...overrides,
 });
 
+const seedToggl = async (
+  uid: string,
+  quota?: { windowStartedAt: Timestamp; count: number },
+) => environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+  const db = context.firestore();
+  await setDoc(doc(db, 'users', uid), {
+    uid,
+    email: `${uid}@example.test`,
+    toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+  });
+  if (quota !== undefined) {
+    await setDoc(doc(db, 'users', uid, 'functionQuotas', 'togglQueue'), quota);
+  }
+});
+
 const issue = (uid: string | null, event: string) => ({
   level: 'error',
   event,
@@ -148,6 +163,7 @@ test('authenticated clients can report decode failures without opening anonymous
 });
 
 test('owners can create and read only exact pending Toggl queue payloads', async () => {
+  await seedToggl('queue-owner');
   const owner = environment.authenticatedContext('queue-owner').firestore();
   const createRef = doc(owner, 'users', 'queue-owner', 'togglQueue', 'create');
   const stopRef = doc(owner, 'users', 'queue-owner', 'togglQueue', 'stop');
@@ -164,6 +180,7 @@ test('owners can create and read only exact pending Toggl queue payloads', async
 });
 
 test('Toggl queue creates reject malformed payloads and lifecycle fields', async () => {
+  await seedToggl('queue-shape');
   const db = environment.authenticatedContext('queue-shape').firestore();
   const queue = collection(db, 'users', 'queue-shape', 'togglQueue');
   const cases = [
@@ -178,6 +195,7 @@ test('Toggl queue creates reject malformed payloads and lifecycle fields', async
     queueItem({attempts: 0}),
     queueItem({claimedAt: serverTimestamp()}),
     queueItem({retryRequestedAt: serverTimestamp()}),
+    queueItem({expiresAt: serverTimestamp()}),
     queueItem({unexpected: true}),
     queueItem({createdAt: 'today'}),
   ];
@@ -191,12 +209,14 @@ test('owners can retry only stale or failed queue states below the cap', async (
   const oldClaim = Timestamp.fromMillis(now - 7 * 60 * 60 * 1000);
   const freshClaim = Timestamp.fromMillis(now - 60 * 1000);
   const oldCreate = Timestamp.fromMillis(now - 20 * 60 * 1000);
+  const expiresAt = Timestamp.fromMillis(now + 90 * 24 * 60 * 60 * 1000);
   const docs = {
     error: queueItem({
       status: 'error',
       createdAt: oldCreate,
       attempts: 1,
       claimedAt: oldClaim,
+      expiresAt,
       error: 'network failed',
     }),
     staleProcessing: queueItem({
@@ -235,6 +255,11 @@ test('owners can retry only stale or failed queue states below the cap', async (
     }),
   };
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', 'queue-retry'), {
+      uid: 'queue-retry',
+      email: 'queue-retry@example.test',
+      toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+    });
     for (const [id, item] of Object.entries(docs)) {
       await setDoc(
         doc(context.firestore(), 'users', 'queue-retry', 'togglQueue', id),
@@ -261,7 +286,13 @@ test('owners can retry only stale or failed queue states below the cap', async (
 
 test('queue retries cannot change payload or server lifecycle fields', async () => {
   const oldClaim = Timestamp.fromMillis(Date.now() - 7 * 60 * 60 * 1000);
+  const expiresAt = Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000);
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', 'queue-immutable'), {
+      uid: 'queue-immutable',
+      email: 'queue-immutable@example.test',
+      toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+    });
     await setDoc(
       doc(context.firestore(), 'users', 'queue-immutable', 'togglQueue', 'error'),
       queueItem({
@@ -269,6 +300,7 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
         createdAt: oldClaim,
         attempts: 1,
         claimedAt: oldClaim,
+        expiresAt,
         error: 'network failed',
       }),
     );
@@ -290,6 +322,43 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     retryRequestedAt: serverTimestamp(),
   }));
   await assertFails(updateDoc(ref, {status: 'pending'}));
+  await assertFails(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+    expiresAt: Timestamp.fromMillis(expiresAt.toMillis() + 1),
+  }));
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', 'queue-immutable', 'functionQuotas', 'togglQueue'),
+      {windowStartedAt: Timestamp.now(), count: 10},
+    );
+  });
+  await assertFails(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+  }));
+});
+
+test('Toggl queue writes require configuration and an available server quota', async () => {
+  const uid = 'queue-quota';
+  const db = environment.authenticatedContext(uid).firestore();
+  const queue = collection(db, 'users', uid, 'togglQueue');
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), {
+      uid,
+      email: `${uid}@example.test`,
+    });
+  });
+  await assertFails(setDoc(doc(queue, 'unconfigured'), queueItem()));
+
+  await seedToggl(uid, { windowStartedAt: Timestamp.now(), count: 10 });
+  await assertFails(setDoc(doc(queue, 'exhausted'), queueItem()));
+
+  await seedToggl(uid, {
+    windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000),
+    count: 10,
+  });
+  await assertSucceeds(setDoc(doc(queue, 'expired-window'), queueItem()));
 });
 
 test('book owners cannot forge or erase server-owned Toggl start claims', async () => {
@@ -366,9 +435,11 @@ test('book owners can clear server timers only in explicit terminal paths', asyn
 test('function quota documents are inaccessible to their owner', async () => {
   const uid = 'quota-owner';
   const db = environment.authenticatedContext(uid).firestore();
-  const ref = doc(db, 'users', uid, 'functionQuotas', 'booksApi');
-  await assertFails(getDoc(ref));
-  await assertFails(setDoc(ref, {windowStartedAt: Timestamp.now(), calls: 1}));
+  for (const quotaName of ['booksApi', 'togglQueue']) {
+    const ref = doc(db, 'users', uid, 'functionQuotas', quotaName);
+    await assertFails(getDoc(ref));
+    await assertFails(setDoc(ref, {windowStartedAt: Timestamp.now(), count: 1}));
+  }
 });
 
 test('author retirement rules prevent deletes, rewrites, and merge cycles', async () => {
@@ -410,13 +481,17 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
   const db = environment.authenticatedContext(uid).firestore();
   const bookRef = doc(db, 'users', uid, 'books', 'book');
   const seedRemoteTimer = async () => environment.withSecurityRulesDisabled(
-    async (context: RulesTestContext) => setDoc(
-      doc(context.firestore(), 'users', uid, 'books', 'book'),
-      {
+    async (context: RulesTestContext) => {
+      await setDoc(doc(context.firestore(), 'users', uid), {
+        uid,
+        email: `${uid}@example.test`,
+        toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+      });
+      await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
         title: 'Book',
         activeTimer: {entryId: 42, start: '2026-08-24T12:00:00.000Z'},
-      },
-    ),
+      });
+    },
   );
   await seedRemoteTimer();
 
@@ -438,5 +513,34 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
     bookTitle: 'x'.repeat(501),
   }));
   await assertFails(invalid.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), {
+      uid,
+      email: `${uid}@example.test`,
+    });
+    await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+      title: 'Book',
+      activeTimer: {entryId: 42, start: '2026-08-24T12:00:00.000Z'},
+    });
+  });
+  const unconfigured = writeBatch(db);
+  unconfigured.update(bookRef, {activeTimer: null});
+  unconfigured.set(doc(db, 'users', uid, 'togglQueue', 'unconfigured'), queueItem({
+    type: 'stop',
+    entryId: 42,
+  }));
+  await assertFails(unconfigured.commit());
+  assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
+
+  await seedToggl(uid, {windowStartedAt: Timestamp.now(), count: 10});
+  const exhausted = writeBatch(db);
+  exhausted.update(bookRef, {activeTimer: null});
+  exhausted.set(doc(db, 'users', uid, 'togglQueue', 'exhausted'), queueItem({
+    type: 'stop',
+    entryId: 42,
+  }));
+  await assertFails(exhausted.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer.entryId, 42);
 });
