@@ -5,9 +5,11 @@
   import { formatTime } from '$lib/utils/format.js';
   import { joinPersonName } from '$lib/utils/authors.js';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
+  import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
+  import BrandIcon from '$lib/components/BrandIcon.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
-  import { linkHref, linkDisplay, linkIcon } from '$lib/utils/links.js';
+  import { linkHref, linkDisplay, linkIcon, linkBrandIcon, linkTypeName } from '$lib/utils/links.js';
   import Icon from 'svelte-awesome';
 
   const username = $derived(page.params.username);
@@ -67,19 +69,52 @@
       display: flex;
       justify-content: center;
       flex-wrap: wrap;
-      gap: 0.5rem 1.5rem;
-      margin-top: 1rem;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
 
       .handle {
         display: inline-flex;
         align-items: center;
-        gap: 0.4rem;
-        color: #0d6efd;
+        gap: 0.65rem;
+        min-width: 0;
+        padding: 0.65rem 0.85rem;
+        color: #333;
+        text-align: left;
         text-decoration: none;
-        overflow-wrap: anywhere;
+        background: #f7f7f7;
+        border: 1px solid #e5e5e5;
+        border-radius: 8px;
+        transition: background 0.15s, border-color 0.15s, transform 0.15s;
 
         &:hover {
-          text-decoration: underline;
+          color: #111;
+          background: #fff;
+          border-color: #bbb;
+          transform: translateY(-1px);
+        }
+
+        .handle-copy {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          line-height: 1.15;
+        }
+
+        .handle-service {
+          font-size: 0.72rem;
+          font-weight: 700;
+          color: #666;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        .handle-value {
+          max-width: 230px;
+          margin-top: 0.15rem;
+          overflow: hidden;
+          font-size: 0.9rem;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
       }
     }
@@ -179,30 +214,46 @@
   <div class="profile-container">
     <div class="profile-header">
       <h1>{joinPersonName(profile) || profile.username}</h1>
-      <p class="subtitle">@{profile.username} — reading stats</p>
+      <p class="subtitle">@{profile.username} · reading stats</p>
       {#if profile.links?.length > 0}
         <div class="handles">
           {#each profile.links as link}
             <a class="handle" href={linkHref(link)} target="_blank" rel="noopener noreferrer nofollow">
-              <Icon data={linkIcon(link)} />
-              <span>{linkDisplay(link)}</span>
+              {#if linkBrandIcon(link)}
+                <BrandIcon icon={linkBrandIcon(link)} />
+              {:else}
+                <Icon data={linkIcon(link)} />
+              {/if}
+              <span class="handle-copy">
+                <span class="handle-service">{linkTypeName(link)}</span>
+                <span class="handle-value">{linkDisplay(link)}</span>
+              </span>
             </a>
           {/each}
         </div>
       {/if}
       {#if !profile.public}
-        <p class="private-note">Private — only you can see this page.</p>
+        <p class="private-note">Private. Only you can see this page.</p>
       {/if}
     </div>
 
     <StatGrid>
       <StatCard label="Books Read" value={profile.stats.finishedBooks} subtext="Completed books" />
       <StatCard label="Currently Reading" value={profile.stats.readingBooks} subtext="In progress" />
+      <StatCard label="Authors" value={profile.stats.authors ?? '…'} subtext="Across their library" />
       <StatCard label="Total Time Read" value={`${profile.stats.totalTimeReadHours} hrs`} subtext={`${profile.stats.totalPagesRead.toLocaleString()} pages read`} />
       <StatCard label="Books Per Year" value={profile.stats.booksPerYear} subtext="Average rate" />
       <StatCard label="Avg. Time Per Book" value={formatTime(profile.stats.avgTimePerBook)} subtext="For finished books" />
       <StatCard label="Total Books" value={profile.stats.totalBooks} subtext="In their library" />
     </StatGrid>
+
+    {#if profile.days?.length > 0}
+      <ReadingHeatmap days={profile.days} />
+    {/if}
+
+    {#if profile.records}
+      <SuperlativesRow published={profile.records} />
+    {/if}
 
     {#if profile.years.length > 0}
       <div class="books-by-year">
@@ -230,10 +281,6 @@
           </table>
         </div>
       </div>
-    {/if}
-
-    {#if profile.days?.length > 0}
-      <ReadingHeatmap days={profile.days} />
     {/if}
   </div>
 {/if}

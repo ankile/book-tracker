@@ -4,7 +4,7 @@ import test from "node:test";
 import { linkHref, linkDisplay, linkTypeName } from "../src/lib/utils/links.js";
 
 test("bare handles get the platform prefix, @ stripped", () => {
-  assert.equal(linkHref({ type: "twitter", value: "@ankile" }), "https://twitter.com/ankile");
+  assert.equal(linkHref({ type: "twitter", value: "@ankile" }), "https://x.com/ankile");
   assert.equal(linkHref({ type: "github", value: "ankile" }), "https://github.com/ankile");
   assert.equal(linkHref({ type: "strava", value: "12345" }), "https://www.strava.com/athletes/12345");
 });

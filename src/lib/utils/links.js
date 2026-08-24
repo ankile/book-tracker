@@ -6,15 +6,18 @@ import {
   twitter, github, linkedin, instagram,
   graduationCap, book, bicycle, globe, link as chainLink,
 } from 'svelte-awesome/icons';
+import {
+  siX, siGithub, siInstagram, siGooglescholar, siGoodreads, siStrava,
+} from 'simple-icons';
 
 export const LINK_TYPES = [
-  { type: 'twitter', name: 'Twitter', prefix: 'https://twitter.com/', icon: twitter },
-  { type: 'github', name: 'GitHub', prefix: 'https://github.com/', icon: github },
+  { type: 'twitter', name: 'X', prefix: 'https://x.com/', icon: twitter, brandIcon: siX },
+  { type: 'github', name: 'GitHub', prefix: 'https://github.com/', icon: github, brandIcon: siGithub },
   { type: 'linkedin', name: 'LinkedIn', prefix: 'https://www.linkedin.com/in/', icon: linkedin },
-  { type: 'instagram', name: 'Instagram', prefix: 'https://www.instagram.com/', icon: instagram },
-  { type: 'scholar', name: 'Google Scholar', prefix: 'https://scholar.google.com/citations?user=', icon: graduationCap },
-  { type: 'goodreads', name: 'Goodreads', prefix: 'https://www.goodreads.com/', icon: book },
-  { type: 'strava', name: 'Strava', prefix: 'https://www.strava.com/athletes/', icon: bicycle },
+  { type: 'instagram', name: 'Instagram', prefix: 'https://www.instagram.com/', icon: instagram, brandIcon: siInstagram },
+  { type: 'scholar', name: 'Google Scholar', prefix: 'https://scholar.google.com/citations?user=', icon: graduationCap, brandIcon: siGooglescholar },
+  { type: 'goodreads', name: 'Goodreads', prefix: 'https://www.goodreads.com/', icon: book, brandIcon: siGoodreads },
+  { type: 'strava', name: 'Strava', prefix: 'https://www.strava.com/athletes/', icon: bicycle, brandIcon: siStrava },
   { type: 'homepage', name: 'Personal homepage', prefix: 'https://', icon: globe },
   { type: 'other', name: 'Other', prefix: 'https://', icon: chainLink },
 ];
@@ -26,6 +29,10 @@ const byType = (type) => LINK_TYPES.find((t) => t.type === type);
 
 export function linkIcon(link) {
   return (byType(link.type) ?? byType('other')).icon;
+}
+
+export function linkBrandIcon(link) {
+  return byType(link.type)?.brandIcon ?? null;
 }
 
 export function linkTypeName(link) {

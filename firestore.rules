@@ -75,9 +75,9 @@ service cloud.firestore {
     function validProfile() {
       let profile = request.resource.data;
       let statKeys = ['totalBooks', 'finishedBooks', 'readingBooks', 'totalTimeReadHours',
-                      'totalPagesRead', 'booksPerYear', 'avgTimePerBook'];
-      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'years', 'days', 'updatedAt'])
-             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'years', 'days', 'updatedAt'])
+                      'totalPagesRead', 'booksPerYear', 'avgTimePerBook', 'authors'];
+      return profile.keys().hasAll(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'records', 'years', 'days', 'updatedAt'])
+             && profile.keys().hasOnly(['uid', 'public', 'givenName', 'familyName', 'links', 'stats', 'records', 'years', 'days', 'updatedAt'])
              && profile.uid == request.auth.uid
              && profile.public is bool
              && profile.givenName is string
@@ -101,6 +101,8 @@ service cloud.firestore {
              && profile.stats.totalPagesRead is number
              && profile.stats.booksPerYear is number
              && profile.stats.avgTimePerBook is number
+             && profile.stats.authors is number
+             && validProfileRecords(profile.records)
              // One row per year with finished books; 200 outlives everyone.
              && profile.years is list
              && profile.years.size() <= 200
@@ -110,6 +112,49 @@ service cloud.firestore {
              && profile.days is list
              && profile.days.size() <= 4000
              && profile.updatedAt is timestamp;
+    }
+
+    function validProfileRecords(records) {
+      return records == null
+             || (records is map
+                 && records.keys().hasAll(['momentum', 'superlatives'])
+                 && records.keys().hasOnly(['momentum', 'superlatives'])
+                 && validProfileMomentum(records.momentum)
+                 && validProfileSuperlatives(records.superlatives));
+    }
+
+    function validProfileMomentum(momentum) {
+      return momentum == null
+             || (momentum is map
+                 && momentum.keys().hasAll(['recentPagesPerDay', 'lifetimePagesPerDay', 'ratio'])
+                 && momentum.keys().hasOnly(['recentPagesPerDay', 'lifetimePagesPerDay', 'ratio'])
+                 && momentum.recentPagesPerDay is number
+                 && momentum.lifetimePagesPerDay is number
+                 && (momentum.ratio == null || momentum.ratio is number));
+    }
+
+    function validProfileSuperlatives(records) {
+      return records is map
+             && records.keys().hasAll(['biggestDay', 'longestSession', 'medianSessionMinutes', 'fastestFinish'])
+             && records.keys().hasOnly(['biggestDay', 'longestSession', 'medianSessionMinutes', 'fastestFinish'])
+             && (records.biggestDay == null
+                 || (records.biggestDay is map
+                     && records.biggestDay.keys().hasAll(['day', 'pages'])
+                     && records.biggestDay.keys().hasOnly(['day', 'pages'])
+                     && records.biggestDay.day is string
+                     && records.biggestDay.pages is number))
+             && (records.longestSession == null
+                 || (records.longestSession is map
+                     && records.longestSession.keys().hasAll(['minutes'])
+                     && records.longestSession.keys().hasOnly(['minutes'])
+                     && records.longestSession.minutes is number))
+             && records.medianSessionMinutes is number
+             && (records.fastestFinish == null
+                 || (records.fastestFinish is map
+                     && records.fastestFinish.keys().hasAll(['days', 'pageCount'])
+                     && records.fastestFinish.keys().hasOnly(['days', 'pageCount'])
+                     && records.fastestFinish.days is number
+                     && records.fastestFinish.pageCount is number));
     }
 
     // Durable issue log read by the admin overview (Admin SDK only — no

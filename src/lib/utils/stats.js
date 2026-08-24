@@ -193,8 +193,9 @@ export const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
 // the equality check below.
 export const PROFILE_MAX_DAYS = 4000;
 
-export function buildProfilePayload(allBooks, sessionDays = [], finishedAtByBookId) {
+export function buildProfilePayload(allBooks, sessionDays = [], finishedAtByBookId, records = null) {
   const stats = computeStats(allBooks, finishedAtByBookId);
+  const authors = new Set(allBooks.flatMap((book) => book.authorIds ?? [])).size;
   return {
     days: sessionDays.slice(-PROFILE_MAX_DAYS),
     stats: {
@@ -205,7 +206,9 @@ export function buildProfilePayload(allBooks, sessionDays = [], finishedAtByBook
       totalPagesRead: stats.totalPagesRead,
       booksPerYear: Number(stats.booksPerYear),
       avgTimePerBook: stats.avgTimePerBook,
+      authors,
     },
+    records,
     years: computeBooksByYear(allBooks, finishedAtByBookId).map(({ year, count, totalTimeRead, totalPages }) => ({
       year: Number(year),
       count,
@@ -224,6 +227,7 @@ export function profilePayloadEqual(published, payload) {
   if (!published || !Array.isArray(published.years) || !Array.isArray(published.days)) return false;
   const statKeys = Object.keys(payload.stats);
   return statKeys.every((key) => published.stats?.[key] === payload.stats[key])
+    && JSON.stringify(published.records ?? null) === JSON.stringify(payload.records)
     && published.years.length === payload.years.length
     && payload.years.every((year, i) =>
       ['year', 'count', 'hours', 'pages'].every((key) => published.years[i]?.[key] === year[key]))

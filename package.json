@@ -33,7 +33,8 @@
   },
   "dependencies": {
     "bootstrap": "5.3.8",
-    "firebase": "^12.16.0"
+    "firebase": "^12.16.0",
+    "simple-icons": "^16.28.0"
   },
   "overrides": {
     "cookie": "0.7.2",

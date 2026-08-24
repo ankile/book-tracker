@@ -111,7 +111,8 @@ test("payload is stable across recomputes even with a minutes-old finish date", 
 
 test("payload carries only aggregate numbers — no titles, no book objects", () => {
   const payload = buildProfilePayload(books);
-  assert.deepEqual(Object.keys(payload).sort(), ["days", "stats", "years"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["days", "records", "stats", "years"]);
+  assert.equal(payload.records, null);
   for (const value of Object.values(payload.stats)) {
     assert.equal(typeof value, "number");
   }
@@ -136,6 +137,26 @@ test("published doc equals its own payload (sync must settle)", () => {
   // Round-trip through JSON the way Firestore round-trips plain values.
   const published = JSON.parse(JSON.stringify(payload));
   assert.equal(profilePayloadEqual(published, payload), true);
+});
+
+test("payload publishes title-free record aggregates", () => {
+  const records = {
+    momentum: { ratio: 1.2, recentPagesPerDay: 8, lifetimePagesPerDay: 6.7 },
+    superlatives: {
+      biggestDay: { day: "2026-08-20", pages: 120 },
+      longestSession: { minutes: 95 },
+      medianSessionMinutes: 24,
+      fastestFinish: { days: 3, pageCount: 320 },
+    },
+  };
+  const payload = buildProfilePayload(books, [], undefined, records);
+  assert.deepEqual(payload.records, records);
+  assert.equal(JSON.stringify(payload.records).includes("title"), false);
+  assert.equal(payload.stats.authors, 0);
+
+  const stale = JSON.parse(JSON.stringify(payload));
+  stale.records.superlatives.medianSessionMinutes += 1;
+  assert.equal(profilePayloadEqual(stale, payload), false);
 });
 
 test("a changed stat or year row marks the published doc dirty", () => {

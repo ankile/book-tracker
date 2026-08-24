@@ -7,10 +7,10 @@
 
   // timelines is the page-level buildBookTimelines result, computed once
   // and shared across sections.
-  let { sessions = [], books = [], timelines = new Map() } = $props();
+  let { sessions = [], books = [], timelines = new Map(), published = null } = $props();
 
-  const momentum = $derived(computeMomentum(sessions, new Date()));
-  const superlatives = $derived(computeSuperlatives(sessions, books, timelines));
+  const momentum = $derived(published ? published.momentum : computeMomentum(sessions, new Date()));
+  const superlatives = $derived(published ? published.superlatives : computeSuperlatives(sessions, books, timelines));
 
   const formatDay = (dayKey) => {
     const [year, month, day] = dayKey.split('-').map(Number);
@@ -92,7 +92,7 @@
         <div class="tile-label">Longest Sitting</div>
         <div class="tile-value">{formatTime(superlatives.longestSession.minutes)}</div>
         <div class="tile-subtext">
-          {superlatives.longestSession.title ?? 'Unknown book'}
+          {superlatives.longestSession.title ?? 'Single reading session'}
         </div>
       </div>
     {/if}
@@ -111,7 +111,7 @@
           {superlatives.fastestFinish.days === 1 ? 'day' : 'days'}
         </div>
         <div class="tile-subtext">
-          {superlatives.fastestFinish.title} ({superlatives.fastestFinish.pageCount} pages)
+          {superlatives.fastestFinish.title ?? 'Finished book'} ({superlatives.fastestFinish.pageCount} pages)
         </div>
       </div>
     {/if}

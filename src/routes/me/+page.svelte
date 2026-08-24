@@ -23,7 +23,13 @@
     profilePayloadEqual,
     USERNAME_PATTERN,
   } from '$lib/utils/stats.js';
-  import { buildBookTimelines, finishedAtByBook, monthlyAggregates } from '$lib/utils/sessions.js';
+  import {
+    buildBookTimelines,
+    computeMomentum,
+    computeSuperlatives,
+    finishedAtByBook,
+    monthlyAggregates,
+  } from '$lib/utils/sessions.js';
   import { LINK_TYPES, MAX_PROFILE_LINKS, linkIcon, linkTypeName } from '$lib/utils/links.js';
   import Icon from 'svelte-awesome';
 
@@ -83,6 +89,27 @@
   const timelines = $derived(buildBookTimelines(allSessions ?? []));
   const finishedAt = $derived(finishedAtByBook(allBooks ?? [], timelines));
   const months = $derived(monthlyAggregates(allSessions ?? []));
+  const profileRecords = $derived.by(() => {
+    const momentum = computeMomentum(allSessions ?? [], new Date());
+    const superlatives = computeSuperlatives(allSessions ?? [], allBooks ?? [], timelines);
+    if (!superlatives) return null;
+    return {
+      momentum,
+      superlatives: {
+        biggestDay: superlatives.biggestDay,
+        longestSession: superlatives.longestSession
+          ? { minutes: superlatives.longestSession.minutes }
+          : null,
+        medianSessionMinutes: superlatives.medianSessionMinutes,
+        fastestFinish: superlatives.fastestFinish
+          ? {
+              days: superlatives.fastestFinish.days,
+              pageCount: superlatives.fastestFinish.pageCount,
+            }
+          : null,
+      },
+    };
+  });
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -191,19 +218,19 @@
         // explicit visibility checkbox below.
         await Database.createProfile({
           userId: $user.uid, username: chosenSlug, ...names, links: [],
-          isPublic: false, ...buildProfilePayload(allBooks, sessionDays, finishedAt),
+          isPublic: false, ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: $user.uid, username: chosenSlug, ...names,
           links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays, finishedAt),
+          ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
         });
       } else {
         await Database.renameProfile({
           userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays, finishedAt),
+          ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
         });
       }
       profileGivenName = chosenGiven;
@@ -239,7 +266,7 @@
       familyName: myProfile.familyName ?? '',
       links: myProfile.links ?? [],
       isPublic: myProfile.public,
-      ...buildProfilePayload(allBooks, sessionDays, finishedAt),
+      ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
       ...overrides,
     });
   }
@@ -285,7 +312,7 @@
   // as clean and the effect settles instead of looping.
   $effect(() => {
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined) return;
-    const payload = buildProfilePayload(allBooks, sessionDays, finishedAt);
+    const payload = buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords);
     if (profilePayloadEqual(myProfile, payload)) return;
     persistProfile();
   });
@@ -841,6 +868,7 @@
         subtext={stats.firstBookAddedAt ? `First added ${formatMonthYear(stats.firstBookAddedAt)}` : 'In your library'} />
     </StatGrid>
 
+    <ReadingHeatmap days={sessionDays} />
     <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
     <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} {months} />
     <ClockSection sessions={allSessions ?? []} />
@@ -899,7 +927,5 @@
         </div>
       </div>
     {/if}
-
-    <ReadingHeatmap days={sessionDays} />
   </div>
 {/if}
