@@ -6,11 +6,11 @@ import {
   graduationCap, book, bicycle, globe, link as chainLink,
 } from 'svelte-awesome/icons';
 import {
-  siX, siGithub, siInstagram, siGooglescholar, siGoodreads, siStrava,
+  siGithub, siInstagram, siGooglescholar, siGoodreads, siStrava,
 } from 'simple-icons';
 
 export const LINK_TYPES = [
-  { type: 'twitter', name: 'X', prefix: 'https://x.com/', icon: twitter, brandIcon: siX },
+  { type: 'twitter', name: 'Twitter', prefix: 'https://twitter.com/', icon: twitter },
   { type: 'github', name: 'GitHub', prefix: 'https://github.com/', icon: github, brandIcon: siGithub },
   { type: 'linkedin', name: 'LinkedIn', prefix: 'https://www.linkedin.com/in/', icon: linkedin },
   { type: 'instagram', name: 'Instagram', prefix: 'https://www.instagram.com/', icon: instagram, brandIcon: siInstagram },
