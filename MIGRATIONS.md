@@ -56,8 +56,8 @@ PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
   npm exec --yes --package firebase-tools@15.24.0 -- \
   firebase emulators:start --only firestore,functions
 # in another shell:
-export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 node db-snapshot.ts --prod                      # fresh dump (or reuse a recent one)
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 node db-restore.ts snapshots/<file>.json --apply
 node migrate-<name>.ts                          # dry-run: review every line
 node migrate-<name>.ts --apply                  # triggers fire for real here
