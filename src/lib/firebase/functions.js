@@ -7,3 +7,4 @@ export const togglSaveToken = httpsCallable(fns, 'toggl-savetoken');
 export const togglStart = httpsCallable(fns, 'toggl-start');
 export const togglStop = httpsCallable(fns, 'toggl-stop');
 export const adminOverview = httpsCallable(fns, 'admin-overview');
+export const lookupIsbn = httpsCallable(fns, 'booksapi-lookupisbn');

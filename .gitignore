@@ -146,3 +146,4 @@ serviceAccountKey.json
 /audit-*.txt
 /enrich-*.txt
 /ol-cache.json
+/gb-cache.json

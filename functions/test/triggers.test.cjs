@@ -15,7 +15,7 @@ test("preserves the deployed function export names", () => {
     "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.admin), ["overview"]);
-  assert.deepEqual(Object.keys(functions.booksapi), ["searchisbn"]);
+  assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "savetoken",
     "start",
@@ -32,7 +32,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.admin.overview,
     functions.createUserDocument,
     functions.deleteUserDocument,
-    functions.booksapi.searchisbn,
+    functions.booksapi.lookupisbn,
     functions.toggl.savetoken,
     functions.toggl.start,
     functions.toggl.stop,
@@ -90,12 +90,19 @@ test("preserves the Firestore and Authentication event contracts", () => {
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
   assert.deepEqual(
-    functions.booksapi.searchisbn.__endpoint.secretEnvironmentVariables,
+    functions.booksapi.lookupisbn.__endpoint.secretEnvironmentVariables,
     [{key: "FUNCTIONS_CONFIG_EXPORT"}],
   );
-  assert.deepEqual(
-    functions.booksapi.searchisbn.__endpoint.httpsTrigger.invoker,
-    ["public"],
+  // The ISBN lookup proxies a metered API key, so it must stay a callable
+  // (authenticated) and must never regain the public invoker its
+  // predecessor `searchisbn` had.
+  assert.notEqual(
+    functions.booksapi.lookupisbn.__endpoint.callableTrigger,
+    undefined,
+  );
+  assert.equal(
+    functions.booksapi.lookupisbn.__endpoint.httpsTrigger,
+    undefined,
   );
   for (const togglFunction of Object.values(functions.toggl)) {
     assert.equal(

@@ -7,6 +7,8 @@
   import { resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.js";
   import { normalizeIsbn } from "../utils/isbn.js";
   import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.js";
+  import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.js";
+  import { lookupIsbn } from "../firebase/functions.js";
 
   let { open, userId, book = null, onclose } = $props();
 
@@ -155,50 +157,77 @@
     lookupError = "";
 
     try {
-      const response = await fetch(
-        `https://openlibrary.org/api/books?bibkeys=ISBN:${normalized}&format=json&jscmd=data`
-      );
+      // Two sources, same split as the backfill migrations: Open Library
+      // is primary (richer subject lists, stable cover URLs) and Google
+      // Books fills what it left empty — above all fiction/non-fiction,
+      // which its BISAC categories answer and OL's subjects often don't.
+      const openLibrary = await fetchOpenLibrary(normalized);
+      const google = await fetchGoogleBooks(normalized);
 
-      if (!response.ok) {
-        throw new Error("Network error");
-      }
-
-      const data = await response.json();
-      const bookData = data[`ISBN:${normalized}`];
-
-      if (!bookData) {
+      if (openLibrary === null && google === null) {
         lookupError = "No book found for this ISBN";
         return;
       }
 
-      // Auto-fill fields (always overwrite when looking up)
-      const parsed = parseOpenLibraryBook(bookData);
+      // Auto-fill fields (always overwrite when looking up). Whichever
+      // source answered wins for the plain fields; OL first when both did.
+      const primary = openLibrary ?? google;
 
-      if (parsed.title) {
-        title = parsed.title;
+      if (primary.title) {
+        title = primary.title;
       }
 
-      if (parsed.authorNames.length > 0) {
-        authorChips = parsed.authorNames.map((name) => resolveChip(name, authorList));
+      if (primary.authorNames.length > 0) {
+        authorChips = primary.authorNames.map((name) => resolveChip(name, authorList));
       }
 
-      if (parsed.pageCount) {
-        pageCount = parsed.pageCount;
+      if (primary.pageCount) {
+        pageCount = primary.pageCount;
+      } else if (google?.pageCount) {
+        pageCount = google.pageCount;
       }
 
-      metadata = {
-        coverUrl: parsed.coverUrl,
-        publisher: parsed.publisher,
-        publishedDate: parsed.publishedDate,
-        subjects: parsed.subjects,
-        fiction: parsed.fiction,
+      const fromPrimary = {
+        coverUrl: primary.coverUrl,
+        publisher: primary.publisher,
+        publishedDate: primary.publishedDate,
+        subjects: primary.subjects,
+        fiction: primary.fiction,
       };
+      metadata = { ...fromPrimary, ...(google === null ? {} : mergeMetadata(fromPrimary, google)) };
 
     } catch (error) {
       lookupError = "Failed to look up ISBN. Please try again.";
       console.error("ISBN lookup error:", error);
     } finally {
       isLookingUp = false;
+    }
+  }
+
+  async function fetchOpenLibrary(isbn13) {
+    const response = await fetch(
+      `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn13}&format=json&jscmd=data`
+    );
+
+    if (!response.ok) {
+      throw new Error("Network error");
+    }
+
+    const data = await response.json();
+    const record = data[`ISBN:${isbn13}`];
+    return record === undefined ? null : parseOpenLibraryBook(record);
+  }
+
+  // Google Books runs through a callable (it proxies a metered API key).
+  // A failure here must not discard the Open Library result the user is
+  // waiting on, so it degrades to "no second source" rather than throwing.
+  async function fetchGoogleBooks(isbn13) {
+    try {
+      const { data } = await lookupIsbn({ isbn: isbn13 });
+      return data.volume === null ? null : parseGoogleVolume(data.volume);
+    } catch (error) {
+      console.error("Google Books lookup failed", error);
+      return null;
     }
   }
 </script>
