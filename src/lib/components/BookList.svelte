@@ -248,6 +248,36 @@
     font-style: italic;
   }
 
+  .book-identity {
+    display: flex;
+    align-items: flex-start;
+    gap: 1em;
+  }
+
+  .identity-text {
+    min-width: 0;
+  }
+
+  .cover {
+    flex: 0 0 auto;
+    width: 56px;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: 3px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  .cover-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e9e6e1;
+    color: #b3aca3;
+    font-size: 1.6em;
+    font-weight: 600;
+    user-select: none;
+  }
+
   .text-right {
     text-align: end;
   }
@@ -417,6 +447,18 @@
       padding: 1em;
     }
 
+    .book-identity {
+      gap: 0.75em;
+    }
+
+    .cover {
+      width: 44px;
+    }
+
+    .cover-placeholder {
+      font-size: 1.2em;
+    }
+
     .text-right {
       margin: -0.2em;
     }
@@ -484,18 +526,30 @@
     <div class="book-row">
       <div class="row">
         <div class="col">
-          <span class="label">Book Title</span>
-          <button
-            type="button"
-            class="action-button edit-book-button"
-            aria-label={`Edit ${book.title}`}
-            onclick={() => setModalBook(book, 'editBook')}>
-            <Icon data={edit} scale="0.8" style="color: #666;" />
-          </button>
-          <br />
-          <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
-          <br />
-          <span class="title">{book.title}</span>
+          <div class="book-identity">
+            <!-- Covers are hot-linked from Open Library (see migrate-enrich-books.js).
+                 The placeholder keeps the column width uniform for the books
+                 without one, so the list's left edge never goes ragged. -->
+            {#if book.coverUrl}
+              <img class="cover" src={book.coverUrl} alt="" loading="lazy" />
+            {:else}
+              <div class="cover cover-placeholder" aria-hidden="true">{book.title.slice(0, 1)}</div>
+            {/if}
+            <div class="identity-text">
+              <span class="label">Book Title</span>
+              <button
+                type="button"
+                class="action-button edit-book-button"
+                aria-label={`Edit ${book.title}`}
+                onclick={() => setModalBook(book, 'editBook')}>
+                <Icon data={edit} scale="0.8" style="color: #666;" />
+              </button>
+              <br />
+              <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
+              <br />
+              <span class="title">{book.title}</span>
+            </div>
+          </div>
         </div>
         <div class="col-md-6">
           <div class="row">
