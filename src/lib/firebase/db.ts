@@ -31,7 +31,12 @@ import { auth } from './auth.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { isFinished } from '../utils/finished.ts';
-import { togglQueueId } from '../utils/toggl.ts';
+import {
+  isTogglSweepTransactionCandidate,
+  readTogglReportedIds,
+  togglQueueId,
+  writeTogglReportedIds,
+} from '../utils/toggl.ts';
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { Book } from '../interfaces/book.ts';
@@ -42,9 +47,10 @@ import {
   decodeAuthor,
   decodeBook,
   decodeBookUpdate,
+  decodeLiveQueueSweepItem,
   decodeProfile,
   decodeReadingSession,
-  decodeQueueSweepItem,
+  decodeQueueSweepBatch,
   decodeUser,
   type NewQueueOperation,
   type UserDocument,
@@ -737,10 +743,17 @@ class Database {
     // 'processing' only counts past the same six-hour window the requeue
     // uses. Counted before the requeue transactions so a transaction
     // failure can't swallow the report.
-    const decodedItems = items.docs.map((item) => ({
-      ref: item.ref,
-      item: decodeQueueSweepItem(item.id, item.data(), item.ref.path),
-    }));
+    const queueDocs = new Map(items.docs.map((item) => [item.id, item]));
+    const decoded = decodeQueueSweepBatch(items.docs.map((item) => ({
+      id: item.id,
+      value: item.data(),
+      path: item.ref.path,
+    })));
+    const decodedItems = decoded.items.map((item) => {
+      const snapshot = queueDocs.get(item.id);
+      if (!snapshot) throw new Error(`Missing Toggl queue snapshot ${item.id}`);
+      return {ref: snapshot.ref, item};
+    });
     const uncertain = decodedItems.filter(({ item }) => item.status === 'outcome-unknown');
     const stuck = decodedItems.filter(({ item }) => {
       const { status, attempts, claimedAt } = item;
@@ -752,13 +765,18 @@ class Database {
       return status === 'error';
     });
     const reportedKey = `togglStuckReported:${userId}`;
-    const reportedValue: unknown = JSON.parse(localStorage.getItem(reportedKey) ?? '[]');
-    if (!Array.isArray(reportedValue) || !reportedValue.every((id) => typeof id === 'string')) {
-      throw new Error('togglStuckReported must be a string array');
-    }
-    const reported = new Set(reportedValue);
+    const reported = new Set(readTogglReportedIds(localStorage, reportedKey));
+    const freshInvalid = decoded.invalidIds.filter((id) => !reported.has(id));
     const freshUncertain = uncertain.filter(({ item }) => !reported.has(item.id));
     const fresh = stuck.filter(({ item }) => !reported.has(item.id));
+    if (freshInvalid.length > 0) {
+      addError(`${freshInvalid.length} Toggl ${freshInvalid.length === 1 ? 'entry has' : 'entries have'} invalid stored data and was skipped.`);
+      logIssue({
+        level: 'error',
+        event: 'firestore.decode_failed',
+        message: `${freshInvalid.length} invalid Toggl queue ${freshInvalid.length === 1 ? 'entry' : 'entries'} skipped`,
+      });
+    }
     if (freshUncertain.length > 0) {
       addError(`${freshUncertain.length} Toggl ${freshUncertain.length === 1 ? 'entry has' : 'entries have'} an unknown outcome. Check Toggl before adding again.`);
       logIssue({
@@ -775,17 +793,22 @@ class Database {
         message: `${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync`,
       });
     }
-    localStorage.setItem(reportedKey, JSON.stringify(
-      [...stuck, ...uncertain].map(({ item }) => item.id),
-    ));
+    writeTogglReportedIds(
+      localStorage,
+      reportedKey,
+      [...decoded.invalidIds, ...stuck.map(({ item }) => item.id), ...uncertain.map(({ item }) => item.id)],
+    );
 
-    await Promise.all(decodedItems.map(({ ref }) => runTransaction(db, async (tx) => {
+    const retryable = decodedItems.filter(({ item }) =>
+      isTogglSweepTransactionCandidate(item)
+    );
+    await Promise.all(retryable.map(({ ref }) => runTransaction(db, async (tx) => {
       const snap = await tx.get(ref);
       if (!snap.exists()) return;
-      const item = decodeQueueSweepItem(snap.id, snap.data(), snap.ref.path);
+      const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
+      if (item === null) return;
+      if (!isTogglSweepTransactionCandidate(item)) return;
       const { status, attempts, claimedAt, createdAt } = item;
-      if (status === 'outcome-unknown') return;
-      if (attempts >= 5) return;
       const retry =
         status === 'error' ||
         (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||

@@ -34,6 +34,13 @@ import { isFinished } from '../utils/finished.ts';
 
 type Data = Record<string, unknown>;
 
+export class DataDecodeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DataDecodeError';
+  }
+}
+
 export interface UserDocument {
   uid: string;
   email: string;
@@ -83,7 +90,7 @@ export type NewQueueOperation =
   | Pick<StopQueueItem, 'type' | 'bookTitle' | 'start' | 'stop' | 'entryId'>;
 
 function fail(context: string, expected: string): never {
-  throw new Error(`${context}: expected ${expected}`);
+  throw new DataDecodeError(`${context}: expected ${expected}`);
 }
 
 function record(value: unknown, context: string): Data {
@@ -541,7 +548,11 @@ export function decodeQueueSweepItem(
   if (attempts < 0) fail(`${path}.attempts`, 'a non-negative integer');
   const claimedAt = data.claimedAt === undefined ? null : timestamp(data.claimedAt, `${path}.claimedAt`);
   if (data.expiresAt !== undefined) timestamp(data.expiresAt, `${path}.expiresAt`);
-  const error = data.error === undefined ? null : boundedString(data.error, `${path}.error`, 1000);
+  // Older Functions builds stored unsliced response bodies. They are
+  // immutable to the client and disappear on the next successful claim.
+  const error = data.error === undefined
+    ? null
+    : string(data.error, `${path}.error`).slice(0, 1000);
   const retryRequestedAt = data.retryRequestedAt === undefined
     ? null
     : timestamp(data.retryRequestedAt, `${path}.retryRequestedAt`);
@@ -572,15 +583,15 @@ export function decodeQueueSweepItem(
     if (attempts > 0 && claimedAt === null) {
       fail(path, 'a retried pending queue item with claim metadata');
     }
-    if (attempts > 0 && retryRequestedAt === null) {
-      fail(path, 'a retried pending queue item with retryRequestedAt');
-    }
+    // Legacy clients requeued by changing only status, so pending rows with
+    // claim metadata may legitimately predate retryRequestedAt.
   } else {
     if (attempts === 0 || claimedAt === null) {
       fail(path, `${status} with claim metadata`);
     }
     if (retryRequestedAt !== null) fail(path, `${status} without retryRequestedAt`);
-    if (status === 'processing' && error !== null) fail(path, 'processing without an error');
+    // Old claims did not delete a prior error. A stale processing row can
+    // therefore retain one until this sweep requeues it.
     if ((status === 'error' || status === 'outcome-unknown') && error === null) {
       fail(path, `${status} with an error`);
     }
@@ -592,4 +603,39 @@ export function decodeQueueSweepItem(
   const entryId = integer(data.entryId, `${path}.entryId`);
   if (entryId <= 0) fail(`${path}.entryId`, 'a positive integer');
   return { ...shared, type, entryId, status };
+}
+
+export interface QueueSweepCandidate {
+  id: string;
+  value: unknown;
+  path: string;
+}
+
+export function decodeQueueSweepBatch(candidates: readonly QueueSweepCandidate[]): {
+  items: QueueSweepItem[];
+  invalidIds: string[];
+} {
+  const items: QueueSweepItem[] = [];
+  const invalidIds: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      items.push(decodeQueueSweepItem(candidate.id, candidate.value, candidate.path));
+    } catch (error) {
+      if (!(error instanceof DataDecodeError)) throw error;
+      invalidIds.push(candidate.id);
+    }
+  }
+  return { items, invalidIds };
+}
+
+export function decodeLiveQueueSweepItem(
+  id: string,
+  value: unknown,
+  path: string,
+): QueueSweepItem | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const status = (value as Data).status;
+  if (status !== 'pending' && status !== 'processing' &&
+      status !== 'error' && status !== 'outcome-unknown') return null;
+  return decodeQueueSweepBatch([{ id, value, path }]).items[0] ?? null;
 }

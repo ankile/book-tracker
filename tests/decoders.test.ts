@@ -8,7 +8,9 @@ import {
   decodeAuthor,
   decodeBook,
   decodeBookUpdate,
+  decodeLiveQueueSweepItem,
   decodeProfile,
+  decodeQueueSweepBatch,
   decodeQueueSweepItem,
   decodeUser,
 } from '../src/lib/firebase/decoders.ts';
@@ -226,6 +228,69 @@ test('queue decoder accepts changed retries and terminal uncertain creates', () 
     }), 'users/owner/togglQueue/bad-expiry'),
     /expiresAt.*Firestore Timestamp/,
   );
+});
+
+test('queue decoder accepts pre-migration retry metadata and oversized errors', () => {
+  const legacyPending = decodeQueueSweepItem('legacy-pending', queueData({
+    attempts: 1,
+    claimedAt: createdAt,
+    error: 'legacy failure',
+  }), 'users/owner/togglQueue/legacy-pending');
+  assert.equal(legacyPending.retryRequestedAt, null);
+
+  const oversized = 'x'.repeat(2_000);
+  const legacyError = decodeQueueSweepItem('legacy-error', queueData({
+    status: 'error',
+    attempts: 1,
+    claimedAt: createdAt,
+    error: oversized,
+  }), 'users/owner/togglQueue/legacy-error');
+  assert.equal(legacyError.error, oversized.slice(0, 1000));
+
+  const staleProcessing = decodeQueueSweepItem('legacy-processing', queueData({
+    status: 'processing',
+    attempts: 1,
+    claimedAt: createdAt,
+    error: 'retained by an old claim',
+  }), 'users/owner/togglQueue/legacy-processing');
+  assert.equal(staleProcessing.status, 'processing');
+});
+
+test('queue batch decoding isolates a malformed row from repairable rows', () => {
+  const decoded = decodeQueueSweepBatch([
+    {id: 'healthy', value: queueData(), path: 'users/owner/togglQueue/healthy'},
+    {
+      id: 'malformed',
+      value: queueData({type: 'invalid'}),
+      path: 'users/owner/togglQueue/malformed',
+    },
+    {
+      id: 'legacy',
+      value: queueData({attempts: 1, claimedAt: createdAt}),
+      path: 'users/owner/togglQueue/legacy',
+    },
+  ]);
+  assert.deepEqual(decoded.items.map((item) => item.id), ['healthy', 'legacy']);
+  assert.deepEqual(decoded.invalidIds, ['malformed']);
+});
+
+test('live queue decoding skips terminal races and fresh corruption', () => {
+  assert.equal(decodeLiveQueueSweepItem('synced', queueData({
+    status: 'synced',
+    attempts: 1,
+    claimedAt: createdAt,
+    entryId: 42,
+  }), 'users/owner/togglQueue/synced'), null);
+  assert.equal(decodeLiveQueueSweepItem(
+    'malformed',
+    queueData({type: 'invalid'}),
+    'users/owner/togglQueue/malformed',
+  ), null);
+  assert.equal(decodeLiveQueueSweepItem(
+    'healthy',
+    queueData(),
+    'users/owner/togglQueue/healthy',
+  )?.id, 'healthy');
 });
 
 test('queue decoder accepts correlated book ids and rejects invalid document ids', () => {

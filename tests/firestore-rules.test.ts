@@ -305,7 +305,17 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
         attempts: 1,
         claimedAt: oldClaim,
         expiresAt,
-        error: 'network failed',
+        error: 'x'.repeat(2_000),
+      }),
+    );
+    await setDoc(
+      doc(context.firestore(), 'users', 'queue-immutable', 'togglQueue', 'legacy-pending'),
+      queueItem({
+        status: 'pending',
+        createdAt: oldClaim,
+        attempts: 1,
+        claimedAt: oldClaim,
+        error: 'legacy failure',
       }),
     );
   });
@@ -320,6 +330,16 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     status: 'pending',
     retryRequestedAt: serverTimestamp(),
     bookTitle: 'Other',
+  }));
+  await assertFails(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+    error: 'changed',
+  }));
+  await assertFails(updateDoc(ref, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+    error: deleteField(),
   }));
   await assertFails(updateDoc(ref, {
     status: 'pending',
@@ -356,6 +376,21 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     status: 'pending',
     retryRequestedAt: serverTimestamp(),
   }));
+  const repaired = (await getDoc(ref)).data();
+  assert.equal(repaired?.error, 'x'.repeat(2_000));
+  assert.equal(repaired?.attempts, 1);
+  assert.ok(repaired?.retryRequestedAt instanceof Timestamp);
+  const legacyPendingRef = doc(
+    db, 'users', 'queue-immutable', 'togglQueue', 'legacy-pending',
+  );
+  await assertSucceeds(updateDoc(legacyPendingRef, {
+    status: 'pending',
+    retryRequestedAt: serverTimestamp(),
+  }));
+  const legacyPending = (await getDoc(legacyPendingRef)).data();
+  assert.equal(legacyPending?.attempts, 1);
+  assert.equal(legacyPending?.error, 'legacy failure');
+  assert.ok(legacyPending?.retryRequestedAt instanceof Timestamp);
 });
 
 test('ordinary Toggl queue creates require configuration and an available server quota', async () => {

@@ -172,7 +172,8 @@ service cloud.firestore {
                       && item.claimedAt is timestamp
                       && (!item.keys().hasAny(['error'])
                           || (item.error is string
-                              && item.error.size() <= 1000))));
+                              && (item.error.size() <= 1000
+                                  || item.error == resource.data.error)))));
     }
 
     function validTogglQueuePayload(item) {

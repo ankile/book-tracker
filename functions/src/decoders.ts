@@ -444,8 +444,14 @@ export function decodeTogglQueueDocument(
       "queue retry request time",
       fail,
     );
-  const error = decoded.error === undefined ? undefined :
-    string(decoded.error, "queue error", fail, 1000);
+  // Historical rows may hold unsliced Toggl response bodies. The claim
+  // transaction deletes them before remote work; all new writes are capped.
+  const error = decoded.error === undefined ? undefined : (() => {
+    if (typeof decoded.error !== "string") {
+      fail("Queue error must be a string.");
+    }
+    return decoded.error;
+  })();
 
   if (status === "pending") {
     if (attempts === 0 && (decoded.attempts !== undefined ||
@@ -455,9 +461,7 @@ export function decodeTogglQueueDocument(
     if (attempts > 0 && claimedAt === undefined) {
       fail("A retried pending queue item must have claim metadata.");
     }
-    if (attempts > 0 && retryRequestedAt === undefined) {
-      fail("A retried pending queue item must have a retry request time.");
-    }
+    // Pre-migration clients retried by changing status alone.
     return {
       ...payload,
       status,

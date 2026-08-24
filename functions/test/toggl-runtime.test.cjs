@@ -170,6 +170,23 @@ test("the Functions emulator still syncs a legacy queue row without bookId", asy
   assert.equal(store.queueDeleted, true);
 });
 
+test("the handler repairs legacy pending retry metadata and oversized errors", async (t) => {
+  enableFunctionsEmulator(t);
+  const store = installQueueStore(t, queueItem({
+    attempts: 1,
+    claimedAt: Timestamp.now(),
+    error: "x".repeat(2000),
+  }));
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.equal(store.transactionUpdates[0].status, "processing");
+  assert.equal(store.transactionUpdates[0].attempts, 2);
+  assert.ok(Object.hasOwn(store.transactionUpdates[0], "error"));
+  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.equal(store.queueDeleted, true);
+});
+
 test("the Functions emulator syncs a queued stop without outbound fetch", async (t) => {
   enableFunctionsEmulator(t);
   const store = installQueueStore(t, queueItem({type: "stop", entryId: 52}));

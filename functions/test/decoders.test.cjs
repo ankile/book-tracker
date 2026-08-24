@@ -239,14 +239,19 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     ...create,
     retryRequestedAt: claimedAt,
   }).retryRequestedAt, claimedAt);
-  assert.throws(
-    () => decoders.decodeTogglQueueDocument({
-      ...create,
-      attempts: 1,
-      claimedAt,
-    }),
-    /retry request time/,
-  );
+  assert.equal(decoders.decodeTogglQueueDocument({
+    ...create,
+    attempts: 1,
+    claimedAt,
+  }).retryRequestedAt, undefined);
+  const oversizedError = "x".repeat(2000);
+  assert.equal(decoders.decodeTogglQueueDocument({
+    ...create,
+    status: "error",
+    attempts: 1,
+    claimedAt,
+    error: oversizedError,
+  }).error, oversizedError);
   assert.throws(
     () => decoders.decodeTogglQueueDocument({
       ...create,
