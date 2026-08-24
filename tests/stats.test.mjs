@@ -79,16 +79,34 @@ test("computeBooksByYear reattributes by session-derived finish dates", () => {
 
 test("sessions aggregate per day with the 3 AM boundary, ascending", () => {
   const days = aggregateSessionsByDay([
-    { createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
-    { createdAt: ts("2026-08-20T22:00:00"), pagesRead: 5, timeRead: 10 },
+    { type: "reading", createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
+    { type: "reading", createdAt: ts("2026-08-20T22:00:00"), pagesRead: 5, timeRead: 10 },
     // 1 AM local time counts as the evening of the 20th, not the 21st.
-    { createdAt: ts("2026-08-21T01:00:00"), pagesRead: 3, timeRead: 6 },
-    { createdAt: ts("2026-08-05T12:00:00"), pagesRead: 7, timeRead: 14 },
+    { type: "reading", createdAt: ts("2026-08-21T01:00:00"), pagesRead: 3, timeRead: 6 },
+    { type: "reading", createdAt: ts("2026-08-05T12:00:00"), pagesRead: 7, timeRead: 14 },
+    // Page-only corrections ride the same listener but must never inflate
+    // the heatmap or the published day totals.
+    { type: "update", createdAt: ts("2026-08-20T15:00:00"), pagesRead: 50 },
   ]);
   assert.deepEqual(days, [
     { day: "2026-08-05", pagesRead: 7, timeRead: 14, sessions: 1 },
     { day: "2026-08-20", pagesRead: 18, timeRead: 36, sessions: 3 },
   ]);
+});
+
+test("payload is stable across recomputes even with a minutes-old finish date", () => {
+  // booksPerYear anchors on "now"; if it moved between recomputes the
+  // profile-sync effect would rewrite the doc on every listener echo.
+  const justFinished = [
+    { id: "b0", finished: true, timeRead: 300, pagesRead: 320, pageCount: 320, createdAt: ts("2026-08-23T10:00:00") },
+  ];
+  const finishedAt = new Map([["b0", new Date(Date.now() - 5 * 60 * 1000)]]);
+  const first = buildProfilePayload(justFinished, [], finishedAt);
+  const second = buildProfilePayload(justFinished, [], finishedAt);
+  assert.equal(profilePayloadEqual(JSON.parse(JSON.stringify(first)), second), true);
+  // And the floored denominator keeps the rate sane rather than in the
+  // thousands for a brand-new library.
+  assert.ok(first.stats.booksPerYear <= 12);
 });
 
 test("payload carries only aggregate numbers — no titles, no book objects", () => {
@@ -133,7 +151,7 @@ test("a changed stat or year row marks the published doc dirty", () => {
 
 test("a changed day aggregate marks the published doc dirty", () => {
   const days = aggregateSessionsByDay([
-    { createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
+    { type: "reading", createdAt: ts("2026-08-20T14:00:00"), pagesRead: 10, timeRead: 20 },
   ]);
   const payload = buildProfilePayload(books, days);
   const published = JSON.parse(JSON.stringify(payload));

@@ -200,7 +200,10 @@
     const targetDate = new Date(day.date);
     targetDate.setDate(targetDate.getDate() + offset);
     const targetDayKey = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
-    const target = document.querySelector(`[data-day-key="${targetDayKey}"]`);
+    // Scoped to the current grid: the all-time view's whole-week padding
+    // duplicates boundary days across adjacent year grids, and a document-
+    // wide query would teleport focus to the first (newest) match.
+    const target = event.currentTarget.closest('.heatmap').querySelector(`[data-day-key="${targetDayKey}"]`);
 
     if (target instanceof HTMLButtonElement) {
       focusedDayKey = targetDayKey;
@@ -406,6 +409,11 @@
     border: 0;
     width: 100%;
     aspect-ratio: 1 / 1;
+    /* Without these, aspect-ratio transfers the row's label-driven height
+       back as a min-content width floor on every column, and the grid
+       overflows the card instead of shrinking to fit. */
+    min-width: 0;
+    min-height: 0;
     padding: 0;
     border-radius: 2px;
     cursor: pointer;
@@ -421,6 +429,11 @@
     font-size: 0.75rem;
     color: #666;
     white-space: nowrap;
+    /* Without this the label's min-content width becomes its 1fr track's
+       floor, widening labeled week columns and un-squaring every cell.
+       min-width: 0 lets the text overflow the track instead (row 1 is
+       otherwise empty, so the overflow is harmless). */
+    min-width: 0;
   }
 
   .day-label {
@@ -428,6 +441,9 @@
     align-self: center;
     padding-right: 5px;
     font-size: 0.75rem;
+    /* line-height 1 keeps the label shorter than any plausible cell, so
+       labeled rows never grow taller than the rest. */
+    line-height: 1;
     color: #666;
   }
 

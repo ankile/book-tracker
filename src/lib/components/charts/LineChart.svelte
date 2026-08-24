@@ -247,7 +247,9 @@
         style="left: {xPercent(lastPoint.index)}%; top: {yPercent(lastPoint.value)}%">
       </div>
     {/if}
-    {#if activeIndex !== null}
+    <!-- points[activeIndex] check: a snapshot can shrink the series while
+         the pointer or focus still holds a now-out-of-range index. -->
+    {#if activeIndex !== null && points[activeIndex]}
       <div class="crosshair" style="left: {xPercent(activeIndex)}%"></div>
       {#if points[activeIndex].value !== null}
         <div
@@ -272,7 +274,7 @@
   </table>
 </div>
 
-{#if activeIndex !== null}
+{#if activeIndex !== null && points[activeIndex]}
   <div style="position: fixed; left: {tooltipX}px; top: {tooltipY}px; background: rgba(0, 0, 0, 0.9); color: white; padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.75rem; white-space: pre-line; pointer-events: none; z-index: 9999; transform: translate(-50%, calc(-100% - 10px)); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">
     {points[activeIndex].tooltip}
   </div>

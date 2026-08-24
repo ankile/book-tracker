@@ -1,11 +1,10 @@
 <script>
   // Monthly cadence: pages read per calendar month over the whole history.
+  // months is the page-level monthlyAggregates result, shared with the
+  // speed section.
   import BarChart from './charts/BarChart.svelte';
-  import { monthlyAggregates } from '$lib/utils/sessions.js';
 
-  let { sessions = [] } = $props();
-
-  const months = $derived(monthlyAggregates(sessions));
+  let { months = [] } = $props();
 
   const data = $derived(
     months.map((m) => ({

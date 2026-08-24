@@ -157,7 +157,12 @@
 </style>
 
 <div class="chart">
-  <div class="plot" style="height: {plotHeight}px" role="img" aria-label={ariaLabel}>
+  <!-- role="group", not "img": an img subtree is presentational, which
+       would hide the per-bar labels while leaving the buttons focusable.
+       The bars themselves are out of the tab order (mouse/touch tooltips
+       only) — the sr-only table below is the non-pointer channel, and ~99
+       bar tab stops on the page would bury every real control. -->
+  <div class="plot" style="height: {plotHeight}px" role="group" aria-label={ariaLabel}>
     {#each ticks as tick}
       <div class="gridline" style="bottom: {(tick / niceMax) * 100}%">
         <span class="tick">{formatTick(tick)}</span>
@@ -168,6 +173,7 @@
         <button
           type="button"
           class="bar-slot"
+          tabindex="-1"
           aria-label={bar.tooltip.replaceAll('\n', ', ')}
           onmouseenter={(e) => show(e, bar)}
           onmouseleave={hide}

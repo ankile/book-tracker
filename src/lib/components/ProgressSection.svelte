@@ -2,21 +2,21 @@
   // In-progress books: projected finish dates for the active ones, the
   // dusty shelf for the stalled ones, and the finish-habit summary line.
   import {
-    buildBookTimelines,
     projectedFinishes,
     dustyShelf,
     daysToFinishSummary,
     completionRate,
   } from '$lib/utils/sessions.js';
 
-  let { sessions = [], books = [] } = $props();
+  // timelines is the page-level buildBookTimelines result, computed once
+  // and shared across sections.
+  let { sessions = [], books = [], timelines = new Map() } = $props();
 
   const now = $derived.by(() => {
     // Recomputed whenever the listeners tick; good enough for day math.
     void sessions;
     return new Date();
   });
-  const timelines = $derived(buildBookTimelines(sessions));
   const projections = $derived(projectedFinishes(books, timelines, sessions, now));
   const active = $derived(projections.filter((p) => p.projectedDate !== null).slice(0, 8));
   const dusty = $derived(dustyShelf(books, timelines, now).filter((b) => (b.daysSince ?? 0) > 60).slice(0, 5));

@@ -3,15 +3,12 @@
   // average, plus the fastest and slowest finished books by their own
   // aggregate pace.
   import LineChart from './charts/LineChart.svelte';
-  import {
-    monthlyAggregates,
-    lifetimePagesPerHour,
-    BOOK_SPEED_MIN_MINUTES,
-  } from '$lib/utils/sessions.js';
+  import { lifetimePagesPerHour, BOOK_SPEED_MIN_MINUTES } from '$lib/utils/sessions.js';
 
-  let { sessions = [], books = [] } = $props();
+  // months is the page-level monthlyAggregates result, computed once and
+  // shared with the cadence section.
+  let { sessions = [], books = [], months = [] } = $props();
 
-  const months = $derived(monthlyAggregates(sessions));
   const lifetime = $derived(lifetimePagesPerHour(sessions));
 
   const points = $derived(

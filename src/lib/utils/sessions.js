@@ -28,6 +28,9 @@ export function qualifiesForSpeed(session) {
   if (!isReading(session)) return false;
   const minutes = session.timeRead || 0;
   if (minutes < SPEED_MIN_SESSION_MINUTES) return false;
+  // Negative pagesRead is a backwards page correction, not a pace; letting
+  // it through can drag a month's aggregate speed negative.
+  if ((session.pagesRead || 0) < 0) return false;
   return (session.pagesRead || 0) / (minutes / 60) <= SPEED_MAX_PAGES_PER_HOUR;
 }
 
@@ -262,7 +265,9 @@ export function computeMomentum(sessions, now) {
     .reduce((sum, s) => sum + (s.pagesRead || 0), 0);
 
   const lifetimePagesPerDay = lifetimePages / lifetimeDays;
-  const recentPagesPerDay = recentPages / 30;
+  // With under 30 days of history the window is the whole history — a
+  // fixed 30 denominator would report a hard-reading new user as slowing.
+  const recentPagesPerDay = recentPages / Math.min(30, lifetimeDays);
   return {
     recentPagesPerDay,
     lifetimePagesPerDay,
@@ -400,16 +405,19 @@ export function projectedFinishes(allBooks, timelines, sessions, now) {
 
 // Authors ranked by total hours across their books (book aggregates, so
 // page-only updates and unfinished progress count). A multi-author book
-// credits each listed author fully.
+// credits each listed author fully. Ids without an author doc are skipped
+// — before the authors listener resolves, every id is unresolved, and
+// rendering raw doc ids is worse than a briefly empty table.
 export function authorLeaderboard(allBooks, authors) {
   const nameById = new Map(authors.map((author) => [author.id, author.name]));
   const rows = new Map();
 
   allBooks.forEach((book) => {
     (book.authorIds ?? []).forEach((authorId) => {
+      if (!nameById.has(authorId)) return;
       if (!rows.has(authorId)) {
         rows.set(authorId, {
-          name: nameById.get(authorId) ?? authorId,
+          name: nameById.get(authorId),
           books: 0,
           finishedBooks: 0,
           pages: 0,

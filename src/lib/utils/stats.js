@@ -22,12 +22,23 @@ export function computeStats(allBooks, finishedAtByBookId) {
     .filter(Boolean)
     .sort((a, b) => a - b);
 
-  // Calculate books per year (from first book created date)
+  // Calculate books per year (from first finish date). Quantized to whole
+  // days and floored at a month: this value is published to the profile
+  // doc and compared by profilePayloadEqual, so it must be identical
+  // across recomputes within a day — a continuously moving "now" would
+  // make every listener echo look dirty and loop the profile sync. The
+  // floor keeps a brand-new library from reporting thousands of books
+  // per year off a minutes-old denominator.
   let booksPerYear = 0;
   if (finishedDates.length > 0) {
     const firstBook = finishedDates[0];
-    const yearsSinceFirst = (new Date() - firstBook) / (1000 * 60 * 60 * 24 * 365);
-    booksPerYear = yearsSinceFirst > 0 ? (finishedBooks.length / yearsSinceFirst).toFixed(1) : 0;
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yearsSinceFirst = Math.max(
+      (today - firstBook) / (1000 * 60 * 60 * 24 * 365),
+      1 / 12
+    );
+    booksPerYear = (finishedBooks.length / yearsSinceFirst).toFixed(1);
   }
 
   // Average time per finished book
@@ -142,10 +153,14 @@ export const shiftedDay = (date) => {
 // Collapse reading sessions into one entry per active day, ascending by
 // day. This is both the heatmap's input and the `days` list published to
 // the profile doc — per-day totals only, nothing per-session or per-book.
+// Filters to type 'reading' itself: the sessions listener also carries
+// page-only 'update' corrections (for finish dates), and those must never
+// inflate the heatmap or the published day totals.
 export function aggregateSessionsByDay(sessions) {
   const dayMap = new Map();
 
   sessions.forEach((session) => {
+    if (session.type !== 'reading') return;
     const timestamp = session.createdAt?.toDate?.();
     if (!timestamp) return;
 

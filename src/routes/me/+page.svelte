@@ -21,7 +21,7 @@
     profilePayloadEqual,
     USERNAME_PATTERN,
   } from '$lib/utils/stats.js';
-  import { buildBookTimelines, finishedAtByBook } from '$lib/utils/sessions.js';
+  import { buildBookTimelines, finishedAtByBook, monthlyAggregates } from '$lib/utils/sessions.js';
   import { LINK_TYPES, MAX_PROFILE_LINKS, linkIcon, linkTypeName } from '$lib/utils/links.js';
   import Icon from 'svelte-awesome';
 
@@ -68,17 +68,19 @@
       };
     }
   });
-  // Day aggregation (heatmap + published profile) stays reading-only,
-  // exactly as before the query was widened to include 'update' docs.
-  const readingSessions = $derived((allSessions ?? []).filter((s) => s.type === 'reading'));
-  const sessionDays = $derived(aggregateSessionsByDay(readingSessions));
+  // aggregateSessionsByDay filters to reading-only itself, so the heatmap
+  // and published day totals ignore the page-only 'update' docs the
+  // widened listener now carries.
+  const sessionDays = $derived(aggregateSessionsByDay(allSessions ?? []));
 
   // Session-derived finish dates (a book finishes at its last update of
   // any type): feed the per-year table, the card ranges, and the published
   // payload, so a book read across a year boundary counts in the year it
-  // was actually finished.
+  // was actually finished. timelines and months are computed once here and
+  // passed to the sections — each is a full pass over ~3.5k session docs.
   const timelines = $derived(buildBookTimelines(allSessions ?? []));
   const finishedAt = $derived(finishedAtByBook(allBooks ?? [], timelines));
+  const months = $derived(monthlyAggregates(allSessions ?? []));
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -939,11 +941,11 @@
       </div>
     </div>
 
-    <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} />
-    <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} />
+    <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
+    <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} {months} />
     <ClockSection sessions={allSessions ?? []} />
-    <CadenceSection sessions={allSessions ?? []} />
-    <ProgressSection sessions={allSessions ?? []} books={allBooks ?? []} />
+    <CadenceSection {months} />
+    <ProgressSection sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
     <AuthorLeaderboardSection books={allBooks ?? []} authors={authorList ?? []} />
 
     {#if booksByYear.length > 0}

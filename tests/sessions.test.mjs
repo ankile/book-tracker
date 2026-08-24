@@ -49,6 +49,8 @@ test("qualifiesForSpeed guards short sessions, absurd paces, and update docs", (
   assert.equal(qualifiesForSpeed(reading("x", "2026-01-01T12:00:00", 10, 30)), true);
   assert.equal(qualifiesForSpeed(reading("x", "2026-01-01T12:00:00", 10, 3)), false);
   assert.equal(qualifiesForSpeed(reading("x", "2026-01-01T12:00:00", 500, 60)), false);
+  // A backwards page correction is not a pace.
+  assert.equal(qualifiesForSpeed(reading("x", "2026-01-01T12:00:00", -20, 60)), false);
   assert.equal(qualifiesForSpeed(update("x", "2026-01-01T12:00:00", 10)), false);
 });
 
@@ -113,6 +115,16 @@ test("minutesByWeekday is Monday-first and 3 AM-shifted", () => {
   assert.equal(weekdays[0].label, "Mon");
   assert.equal(weekdays[0].minutes, 105);
   assert.equal(weekdays[1].minutes, 0);
+});
+
+test("computeMomentum normalizes the window to short histories", () => {
+  // 10 days of history, steady 100 pages/day: recent and lifetime rates
+  // must agree (~1.0×) — a fixed /30 denominator would report 0.33×.
+  const steady = Array.from({ length: 10 }, (_, i) =>
+    reading("a", `2026-03-${String(i + 1).padStart(2, "0")}T12:00:00`, 100, 60)
+  );
+  const momentum = computeMomentum(steady, new Date("2026-03-10T18:00:00"));
+  assert.ok(Math.abs(momentum.ratio - 1) < 0.01);
 });
 
 test("computeMomentum compares the last 30 days to the lifetime rate", () => {

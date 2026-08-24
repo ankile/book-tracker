@@ -2,12 +2,13 @@
   // Small record tiles: momentum vs lifetime pace, biggest day, longest
   // sitting, median session, fastest finish. Pure derivations from the
   // page's live listeners.
-  import { computeMomentum, computeSuperlatives, buildBookTimelines } from '$lib/utils/sessions.js';
+  import { computeMomentum, computeSuperlatives } from '$lib/utils/sessions.js';
   import { formatTime } from '$lib/utils/format.js';
 
-  let { sessions = [], books = [] } = $props();
+  // timelines is the page-level buildBookTimelines result, computed once
+  // and shared across sections.
+  let { sessions = [], books = [], timelines = new Map() } = $props();
 
-  const timelines = $derived(buildBookTimelines(sessions));
   const momentum = $derived(computeMomentum(sessions, new Date()));
   const superlatives = $derived(computeSuperlatives(sessions, books, timelines));
 
