@@ -1,11 +1,13 @@
-<script>
-  import { user } from '$lib/firebase/auth.js';
-  import { Database } from '$lib/firebase/db.js';
+<script lang="ts">
+  import { user } from '$lib/firebase/auth.ts';
+  import { Database } from '$lib/firebase/db.ts';
   import ModalCard from '$lib/components/ModalCard.svelte';
   import Input from '$lib/components/Input.svelte';
-  import { AUTHOR_KINDS, splitPersonName, joinPersonName } from '$lib/utils/authors.js';
+  import { AUTHOR_KINDS, canonicalAuthorIds, selectableAuthors, splitPersonName, joinPersonName } from '$lib/utils/authors.ts';
+  import type { Author, AuthorKind } from '$lib/interfaces/author.ts';
+  import type { Book } from '$lib/interfaces/book.ts';
 
-  let authorList = $state(undefined);
+  let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);
@@ -14,23 +16,24 @@
     }
   });
 
-  let allBooks = $state([]);
+  let allBooks = $state<Book[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
-      const unsubscribe = booksStore.subscribe((data) => (allBooks = data ?? []));
+      const unsubscribe = booksStore.subscribe((data) => (allBooks = data));
       return unsubscribe;
     }
   });
 
   // Persons sort by their explicit family name — the point of storing it.
-  const sortKey = (a) => (a.kind === 'person' && a.familyName ? `${a.familyName} ${a.name}` : a.name).toLowerCase();
-  const authors = $derived((authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
+  const sortKey = (a: Author) => (a.kind === 'person' && a.familyName ? `${a.familyName} ${a.name}` : a.name).toLowerCase();
+  const authors = $derived(selectableAuthors(authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
+  const authorMap = $derived(new Map((authorList ?? []).map((author) => [author.id, author])));
 
   // Books still carrying legacy fields reference authors through their
   // embedded {id, name} entries; those references count too — delete
   // safety and merge completeness depend on stragglers counting.
-  function effectiveIds(book) {
+  function effectiveIds(book: Book): string[] {
     if (book.author !== undefined || book.authors !== undefined) {
       return (book.authors ?? []).map((a) => a.id);
     }
@@ -38,21 +41,21 @@
   }
 
   const bookCounts = $derived.by(() => {
-    const counts = new Map();
-    for (const book of allBooks) {
-      for (const id of effectiveIds(book)) {
+    const counts = new Map<string, number>();
+    for (const book of allBooks ?? []) {
+      for (const id of canonicalAuthorIds(effectiveIds(book), authorMap)) {
         counts.set(id, (counts.get(id) ?? 0) + 1);
       }
     }
     return counts;
   });
 
-  let editAuthor = $state(null);
+  let editAuthor = $state<Author | null>(null);
   let editName = $state('');
-  let editKind = $state('person');
+  let editKind = $state<AuthorKind>('person');
   let editGivenName = $state('');
   let editFamilyName = $state('');
-  function openEdit(author) {
+  function openEdit(author: Author) {
     editAuthor = author;
     editName = author.name;
     // Docs written before the kind/parts migrations lack the fields; the
@@ -64,8 +67,12 @@
     editFamilyName = parts.familyName;
   }
   function saveEdit() {
+    const currentUser = $user;
+    if (currentUser === null || currentUser === undefined || editAuthor === null) {
+      throw new Error('An authenticated user and selected author are required.');
+    }
     Database.updateAuthor({
-      userId: $user.uid,
+      userId: currentUser.uid,
       authorId: editAuthor.id,
       // name is the write value for non-person kinds and the error-banner
       // label either way.
@@ -77,36 +84,47 @@
     editAuthor = null;
   }
 
-  let mergeSource = $state(null);
+  let mergeSource = $state<Author | null>(null);
   let mergeTargetId = $state('');
-  function openMerge(author) {
+  function openMerge(author: Author) {
     mergeSource = author;
     mergeTargetId = '';
   }
   function doMerge() {
+    const currentUser = $user;
+    if (currentUser === null || currentUser === undefined || mergeSource === null) {
+      throw new Error('An authenticated user and merge source are required.');
+    }
+    if (allBooks === undefined) throw new Error('Books must finish loading before authors can be merged.');
     const target = authors.find((a) => a.id === mergeTargetId);
+    if (target === undefined) throw new Error('A merge target is required.');
+    const source = mergeSource;
     const books = allBooks
-      .filter((book) => effectiveIds(book).includes(mergeSource.id))
-      .map((book) => ({ id: book.id, authorIds: effectiveIds(book) }));
+      .map((book) => ({
+        id: book.id,
+        authorIds: canonicalAuthorIds(effectiveIds(book), authorMap),
+      }))
+      .filter((book) => book.authorIds.includes(source.id));
     const confirmed = confirm(
-      `Merge "${mergeSource.name}" into "${target.name}"? ${books.length} book(s) will be updated and "${mergeSource.name}" deleted.`
+      `Merge "${source.name}" into "${target.name}"? ${books.length} book(s) will resolve to "${target.name}" and "${source.name}" will be hidden.`
     );
     if (!confirmed) return;
     Database.mergeAuthors({
-      userId: $user.uid,
-      sourceId: mergeSource.id,
+      userId: currentUser.uid,
+      sourceId: source.id,
       targetId: target.id,
-      sourceName: mergeSource.name,
+      sourceName: source.name,
       targetName: target.name,
-      books,
     });
     mergeSource = null;
   }
 
-  function deleteAuthor(author) {
+  function deleteAuthor(author: Author) {
+    const currentUser = $user;
+    if (currentUser === null || currentUser === undefined) throw new Error('An authenticated user is required.');
     const confirmed = confirm(`Delete author "${author.name}"? No books reference them.`);
     if (confirmed) {
-      Database.deleteAuthor({ userId: $user.uid, authorId: author.id, name: author.name });
+      Database.deleteAuthor({ userId: currentUser.uid, authorId: author.id, name: author.name });
     }
   }
 </script>
@@ -223,10 +241,10 @@
               <td class="count">{count}</td>
               <td class="actions-cell">
                 <button type="button" class="row-action" onclick={() => openEdit(author)}>Edit</button>
-                {#if authors.length > 1}
+                {#if allBooks !== undefined && authors.length > 1}
                   <button type="button" class="row-action" onclick={() => openMerge(author)}>Merge</button>
                 {/if}
-                {#if count === 0}
+                {#if allBooks !== undefined && count === 0}
                   <button type="button" class="row-action danger" onclick={() => deleteAuthor(author)}>Delete</button>
                 {/if}
               </td>

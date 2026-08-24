@@ -1,7 +1,13 @@
-<script>
+<script lang="ts">
   import { page } from '$app/stores';
+  import type { Snippet } from 'svelte';
 
-  let { to = "", children } = $props();
+  interface Props {
+    to?: string;
+    children: Snippet;
+  }
+
+  let { to = "", children }: Props = $props();
 
   const isActive = $derived(
     to === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(to)
@@ -41,5 +47,5 @@
   class="nav-link"
   class:active={isActive}
   aria-current={isActive ? 'page' : undefined}>
-  {@render children?.()}
+  {@render children()}
 </a>

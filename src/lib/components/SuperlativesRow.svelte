@@ -1,18 +1,29 @@
-<script>
+<script lang="ts">
   // Small record tiles: momentum vs lifetime pace, biggest day, longest
   // sitting, median session, fastest finish. Pure derivations from the
   // page's live listeners.
-  import { computeMomentum, computeSuperlatives } from '$lib/utils/sessions.js';
-  import { formatTime } from '$lib/utils/format.js';
+  import { computeMomentum, computeSuperlatives } from '$lib/utils/sessions.ts';
+  import { formatTime } from '$lib/utils/format.ts';
+  import type { SuperlativeBookView } from '$lib/utils/sessions.ts';
+  import type { BookTimeline } from '$lib/interfaces/analytics.ts';
+  import type { ProfileRecords } from '$lib/interfaces/profile.ts';
+  import type { BookUpdateView } from '$lib/interfaces/reading.ts';
 
   // timelines is the page-level buildBookTimelines result, computed once
   // and shared across sections.
-  let { sessions = [], books = [], timelines = new Map(), published = null } = $props();
+  let {
+    sessions = [], books = [], timelines = new Map(), published = null,
+  }: {
+    sessions?: BookUpdateView[];
+    books?: SuperlativeBookView[];
+    timelines?: Map<string, BookTimeline>;
+    published?: ProfileRecords | null;
+  } = $props();
 
   const momentum = $derived(published ? published.momentum : computeMomentum(sessions, new Date()));
   const superlatives = $derived(published ? published.superlatives : computeSuperlatives(sessions, books, timelines));
 
-  const formatDay = (dayKey) => {
+  const formatDay = (dayKey: string) => {
     const [year, month, day] = dayKey.split('-').map(Number);
     return new Date(year, month - 1, day).toLocaleDateString('en-US', {
       month: 'short',
@@ -20,6 +31,10 @@
       year: 'numeric',
     });
   };
+
+  const recordTitle = (record: object, fallback: string) => (
+    'title' in record && typeof record.title === 'string' ? record.title : fallback
+  );
 </script>
 
 <style>
@@ -92,7 +107,7 @@
         <div class="tile-label">Longest Sitting</div>
         <div class="tile-value">{formatTime(superlatives.longestSession.minutes)}</div>
         <div class="tile-subtext">
-          {superlatives.longestSession.title ?? 'Single reading session'}
+          {recordTitle(superlatives.longestSession, 'Single reading session')}
         </div>
       </div>
     {/if}
@@ -111,7 +126,7 @@
           {superlatives.fastestFinish.days === 1 ? 'day' : 'days'}
         </div>
         <div class="tile-subtext">
-          {superlatives.fastestFinish.title ?? 'Finished book'} ({superlatives.fastestFinish.pageCount} pages)
+          {recordTitle(superlatives.fastestFinish, 'Finished book')} ({superlatives.fastestFinish.pageCount} pages)
         </div>
       </div>
     {/if}

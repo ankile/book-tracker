@@ -1,40 +1,58 @@
 import * as functions from "firebase-functions/v1";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
-import {getFirestore, Timestamp} from "firebase-admin/firestore";
+import {
+  DocumentReference,
+  FieldValue,
+  getFirestore,
+  Timestamp,
+} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
+import {randomUUID} from "node:crypto";
 import {setTimeout as delay} from "node:timers/promises";
 import {logIssue} from "./logging";
+import {
+  ActiveTimer,
+  decodeActiveTimerFromBook,
+  decodeBookCallableRequest,
+  decodeBookForTimer,
+  decodeCreatedTogglEntryId,
+  decodeSaveTokenRequest,
+  decodeStartedTogglEntry,
+  decodeStoppedTogglDuration,
+  decodeTogglConfig,
+  decodeTogglProjects,
+  decodeTogglQueueDocument,
+  TogglConfig,
+  TogglQueueDocument,
+  TogglQueuePayload,
+} from "./decoders";
 
 const db = getFirestore();
 
 const TOGGL_BASE = "https://api.track.toggl.com/api/v9";
 const PROJECT_NAME = "Reading";
 
-interface TogglConfig {
-  apiToken: string;
-  workspaceId: number;
-  projectId: number;
+const MAX_QUEUE_ATTEMPTS = 5;
+const START_CLAIM_STALE_MS = 5 * 60 * 1000;
+
+const invalidArgument = (message: string): never => {
+  throw new functions.https.HttpsError("invalid-argument", message);
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-interface TogglProject {
-  id: number;
-  workspace_id: number;
-  name: string;
+class OutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OutcomeUnknownError";
+  }
 }
 
-interface TogglTimeEntry {
-  id: number;
-  start: string;
-  duration: number;
-}
-
-interface TogglQueueItem {
-  type: "create" | "stop";
-  bookTitle: string;
-  start: string;
-  stop: string;
-  entryId?: number; // required for "stop" items
-}
+type StartClaimResult =
+  | {status: "claimed"; title: string}
+  | {status: "recovered-unknown"};
 
 async function togglFetch(
   token: string,
@@ -89,21 +107,26 @@ function requireUid(context: functions.https.CallableContext): string {
 
 async function getTogglConfig(uid: string): Promise<TogglConfig> {
   const userSnap = await db.doc(`users/${uid}`).get();
-  const toggl = userSnap.data()?.toggl as TogglConfig | undefined;
+  const toggl = userSnap.data()?.toggl;
   if (!toggl) {
     throw new functions.https.HttpsError(
       "failed-precondition",
       "Add your Toggl API token on the Me page first.",
     );
   }
-  return toggl;
+  return decodeTogglConfig(toggl, (message) => {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      `Stored Toggl configuration is invalid: ${message}`,
+    );
+  });
 }
 
 exports.savetoken = functions
   .region("europe-west1")
-  .https.onCall(async (data: {token: string}, context) => {
+  .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
-    const {token} = data;
+    const {token} = decodeSaveTokenRequest(data, invalidArgument);
 
     const meResp = await togglFetch(token, "GET", "/me");
     if (!meResp.ok) {
@@ -119,7 +142,8 @@ exports.savetoken = functions
         `Toggl project lookup failed with status ${projectsResp.status}`,
       );
     }
-    const projects = await projectsResp.json() as TogglProject[];
+    const projectsData: unknown = await projectsResp.json();
+    const projects = decodeTogglProjects(projectsData);
     const project = projects.find((p) => p.name === PROJECT_NAME);
     if (!project) {
       throw new functions.https.HttpsError(
@@ -131,73 +155,191 @@ exports.savetoken = functions
     await db.doc(`users/${uid}`).set({
       toggl: {
         apiToken: token,
-        workspaceId: project.workspace_id,
+        workspaceId: project.workspaceId,
         projectId: project.id,
       },
     }, {merge: true});
 
-    return {workspaceId: project.workspace_id, projectId: project.id};
+    return {workspaceId: project.workspaceId, projectId: project.id};
   });
 
 exports.start = functions
   .region("europe-west1")
-  .https.onCall(async (data: {bookId: string}, context) => {
+  .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
+    const {bookId} = decodeBookCallableRequest(data, invalidArgument);
     const toggl = await getTogglConfig(uid);
 
-    const bookRef = db.doc(`users/${uid}/books/${data.bookId}`);
-    const bookSnap = await bookRef.get();
-    if (!bookSnap.exists) {
-      throw new functions.https.HttpsError("not-found", "Book not found.");
-    }
-    const book = bookSnap.data() as {title: string; activeTimer?: object};
-    if (book.activeTimer) {
+    const bookRef = db.doc(`users/${uid}/books/${bookId}`);
+    const booksRef = db.collection(`users/${uid}/books`);
+    const operationId = randomUUID();
+    const requestedStart = new Date().toISOString();
+    const claimedAt = Timestamp.now();
+    const claim = await db.runTransaction<StartClaimResult>(async (tx) => {
+      // Read the whole user's book set before writing the claim. Every start
+      // transaction therefore locks every existing target book, including
+      // calls racing on different books/devices. The library is small and a
+      // timer start is rare, so the read cost buys one authoritative
+      // user-wide timer invariant without a second lifecycle document.
+      const booksSnap = await tx.get(booksRef);
+      const bookSnap = booksSnap.docs.find((snap) => snap.id === bookId);
+      if (!bookSnap) {
+        throw new functions.https.HttpsError("not-found", "Book not found.");
+      }
+      const book = decodeBookForTimer(bookSnap.data());
+      const activeBooks = booksSnap.docs.flatMap((snap) => {
+        const activeTimer = decodeActiveTimerFromBook(snap.data());
+        return activeTimer === null ? [] : [{snap, activeTimer}];
+      });
+      const staleStarts = activeBooks.filter(({activeTimer}) =>
+        "state" in activeTimer && activeTimer.state === "starting" &&
+        activeTimer.claimedAt.toMillis() < Date.now() - START_CLAIM_STALE_MS,
+      );
+      if (staleStarts.length > 0) {
+        for (const {snap, activeTimer} of staleStarts) {
+          if (!("state" in activeTimer) || activeTimer.state !== "starting") {
+            throw new Error("Stale-start filter returned a non-starting timer.");
+          }
+          tx.update(snap.ref, {
+            activeTimer: {
+              ...activeTimer,
+              state: "outcome-unknown",
+              error: "The Toggl start invocation ended before it confirmed " +
+                "the remote timer. Check Toggl before clearing this state.",
+            },
+          });
+        }
+        return {status: "recovered-unknown"};
+      }
+      if (activeBooks.length > 0) {
+        const requestedTimer = book.activeTimer;
+        const message = requestedTimer && "state" in requestedTimer ?
+          requestedTimer.state === "starting" ?
+            "A Toggl timer start is already in progress for this book." :
+            "The previous Toggl timer start has an unknown outcome. " +
+              "Check Toggl before clearing it." :
+          requestedTimer ?
+            "A timer is already running for this book." :
+            "A timer is already running for another book.";
+        throw new functions.https.HttpsError("failed-precondition", message);
+      }
+      tx.update(bookRef, {
+        activeTimer: {
+          state: "starting",
+          operationId,
+          start: requestedStart,
+          claimedAt,
+        },
+      });
+      return {status: "claimed", title: book.title};
+    });
+    if (claim.status === "recovered-unknown") {
       throw new functions.https.HttpsError(
         "failed-precondition",
-        "A timer is already running for this book.",
+        "The previous Toggl timer start has an unknown outcome. " +
+          "Check Toggl before clearing it.",
       );
     }
 
-    const resp = await togglFetch(
-      toggl.apiToken,
-      "POST",
-      `/workspaces/${toggl.workspaceId}/time_entries`,
-      {
-        created_with: "book-tracker",
-        description: book.title,
-        project_id: toggl.projectId,
-        workspace_id: toggl.workspaceId,
-        start: new Date().toISOString(),
-        duration: -1,
-      },
-    );
+    let resp: Response;
+    try {
+      resp = await togglFetch(
+        toggl.apiToken,
+        "POST",
+        `/workspaces/${toggl.workspaceId}/time_entries`,
+        {
+          created_with: "book-tracker",
+          description: claim.title,
+          project_id: toggl.projectId,
+          workspace_id: toggl.workspaceId,
+          start: requestedStart,
+          duration: -1,
+        },
+      );
+    } catch (error) {
+      await transitionStartClaim(bookRef, operationId, {
+        state: "outcome-unknown",
+        operationId,
+        start: requestedStart,
+        claimedAt,
+        error: `Toggl start outcome unknown: ${errorMessage(error)}`
+          .slice(0, 1000),
+      });
+      throw error;
+    }
     if (!resp.ok) {
+      await transitionStartClaim(bookRef, operationId, null);
       throw new Error(
-        `Toggl start failed with status ${resp.status}: ${await resp.text()}`,
+        `Toggl start failed with status ${resp.status}.`,
       );
     }
-    const entry = await resp.json() as TogglTimeEntry;
 
-    await bookRef.update({
-      activeTimer: {entryId: entry.id, start: entry.start},
+    let entry: {id: number; start: string};
+    try {
+      const entryData: unknown = await resp.json();
+      entry = decodeStartedTogglEntry(entryData);
+    } catch (error) {
+      await transitionStartClaim(bookRef, operationId, {
+        state: "outcome-unknown",
+        operationId,
+        start: requestedStart,
+        claimedAt,
+        error: `Toggl created a timer but its response was invalid: ${
+          errorMessage(error)}`.slice(0, 1000),
+      });
+      throw error;
+    }
+
+    const finalized = await transitionStartClaim(bookRef, operationId, {
+      entryId: entry.id,
+      start: entry.start,
     });
+    if (!finalized) {
+      throw new Error("The Toggl timer started, but its local claim changed.");
+    }
 
     return {entryId: entry.id, start: entry.start};
   });
 
+async function transitionStartClaim(
+  bookRef: DocumentReference,
+  operationId: string,
+  replacement: ActiveTimer | null,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(bookRef);
+    if (!snap.exists) return false;
+    const current = decodeActiveTimerFromBook(snap.data());
+    if (!current || !("state" in current) ||
+        current.state !== "starting" || current.operationId !== operationId) {
+      return false;
+    }
+    tx.update(bookRef, {activeTimer: replacement});
+    return true;
+  });
+}
+
 exports.stop = functions
   .region("europe-west1")
-  .https.onCall(async (data: {bookId: string}, context) => {
+  .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
+    const {bookId} = decodeBookCallableRequest(data, invalidArgument);
 
-    const bookRef = db.doc(`users/${uid}/books/${data.bookId}`);
+    const bookRef = db.doc(`users/${uid}/books/${bookId}`);
     const bookSnap = await bookRef.get();
-    const activeTimer = bookSnap.data()?.activeTimer as
-      {entryId: number; start: string} | undefined;
-    if (!activeTimer) {
+    if (!bookSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Book not found.");
+    }
+    const activeTimer = decodeActiveTimerFromBook(bookSnap.data());
+    if (!activeTimer || !("entryId" in activeTimer)) {
+      const message = activeTimer && "state" in activeTimer ?
+        activeTimer.state === "starting" ?
+          "The Toggl timer is still starting." :
+          "The Toggl timer start has an unknown outcome. Check Toggl first." :
+        "No Toggl-backed timer is running for this book.";
       throw new functions.https.HttpsError(
         "failed-precondition",
-        "No timer running for this book.",
+        message,
       );
     }
 
@@ -211,8 +353,8 @@ exports.stop = functions
 
     let seconds: number;
     if (stopResp.ok) {
-      const entry = await stopResp.json() as TogglTimeEntry;
-      seconds = entry.duration;
+      const entryData: unknown = await stopResp.json();
+      seconds = decodeStoppedTogglDuration(entryData);
     } else if (stopResp.status === 404) {
       // Entry was deleted in Toggl; clear the timer so the app recovers.
       await bookRef.update({activeTimer: null});
@@ -233,8 +375,8 @@ exports.stop = functions
           `Toggl entry fetch failed with status ${entryResp.status}`,
         );
       }
-      const entry = await entryResp.json() as TogglTimeEntry;
-      seconds = entry.duration;
+      const entryData: unknown = await entryResp.json();
+      seconds = decodeStoppedTogglDuration(entryData);
     } else {
       throw new Error(
         `Toggl stop failed with status ${stopResp.status}: ` +
@@ -253,14 +395,11 @@ exports.stop = functions
 // request path and must be a number).
 async function syncQueueItem(
   uid: string,
-  item: TogglQueueItem,
+  item: TogglQueuePayload,
+  queueRef: DocumentReference,
 ): Promise<number> {
   const toggl = await getTogglConfig(uid);
 
-  if (typeof item.bookTitle !== "string" || typeof item.start !== "string" ||
-      typeof item.stop !== "string") {
-    throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
-  }
   let duration = secs(item.stop) - secs(item.start);
   if (item.type === "stop") {
     // A 'stop' item mixes clocks: start is Toggl's server timestamp, stop
@@ -290,24 +429,44 @@ async function syncQueueItem(
   if (item.type === "create") {
     // Timer ran fully offline: create a completed entry covering the
     // historical interval. Toggl requires duration on create.
-    const postResp = await togglFetch(
-      toggl.apiToken,
-      "POST",
-      `/workspaces/${toggl.workspaceId}/time_entries`,
-      body,
-    );
-    if (!postResp.ok) {
-      throw new Error(
-        `Toggl create failed with status ${postResp.status}: ` +
-          `${await postResp.text()}`,
+    // Persist a terminal state before POST. If the process dies after Toggl
+    // accepts the request, the client must not replay it and create a second
+    // entry. A verified non-2xx response moves back to retryable error; a
+    // network failure or invalid 2xx response remains outcome-unknown.
+    await queueRef.update({
+      status: "outcome-unknown",
+      error: "Toggl create started but its remote outcome is not confirmed.",
+      retryRequestedAt: FieldValue.delete(),
+    });
+    let postResp: Response;
+    try {
+      postResp = await togglFetch(
+        toggl.apiToken,
+        "POST",
+        `/workspaces/${toggl.workspaceId}/time_entries`,
+        body,
+      );
+    } catch (error) {
+      throw new OutcomeUnknownError(
+        `Toggl create outcome unknown: ${errorMessage(error)}`,
       );
     }
-    return ((await postResp.json()) as TogglTimeEntry).id;
+    if (!postResp.ok) {
+      throw new Error(
+        `Toggl create failed with status ${postResp.status}.`,
+      );
+    }
+    try {
+      const entryData: unknown = await postResp.json();
+      return decodeCreatedTogglEntryId(entryData);
+    } catch (error) {
+      throw new OutcomeUnknownError(
+        `Toggl created an entry but its response was invalid: ${
+          errorMessage(error)}`,
+      );
+    }
   }
 
-  if (item.type !== "stop" || typeof item.entryId !== "number") {
-    throw new Error(`malformed queue item: ${JSON.stringify(item)}`);
-  }
   // Entry started online but was stopped offline. PUT the recorded stop
   // time rather than PATCH /stop, which would stamp reconnect time. The PUT
   // body shares the create schema (start/duration required), so the client
@@ -333,12 +492,12 @@ async function syncQueueItem(
 // persistence flushes the queue doc when connectivity returns, which fires
 // this trigger — the write itself is the reconnect signal. onDocumentWritten
 // (not onDocumentCreated) so a failed item can be re-run by setting status
-// back to 'pending', which the client's retryStalledTogglSync sweep does on
-// app load (the rules only permit the owner that exact status flip); the
-// transactional claim below makes at-least-once event delivery safe against
-// duplicate Toggl entries. timeoutSeconds leaves headroom for the 429
-// backoff in togglFetch; maxInstances keeps a reconnect burst from fanning
-// out unboundedly against Toggl's per-token rate limit.
+// back to 'pending' with a new retryRequestedAt. The changed timestamp makes
+// even a stale pending retry emit a production Firestore event. The claim
+// transaction deduplicates concurrent deliveries. Create POSTs enter a
+// terminal outcome-unknown state before the remote call, which also covers
+// crashes after Toggl accepts the request. timeoutSeconds leaves headroom for
+// the 429 backoff; maxInstances limits reconnect bursts.
 exports.syncqueue = onDocumentWritten(
   {
     document: "users/{uid}/togglQueue/{queueId}",
@@ -352,31 +511,67 @@ exports.syncqueue = onDocumentWritten(
       return;
     }
 
-    const claimed = await db.runTransaction(async (tx) => {
+    let pendingItem: TogglQueueDocument;
+    try {
+      pendingItem = decodeTogglQueueDocument(after.data());
+    } catch (error) {
+      const message = `Malformed queue item: ${errorMessage(error)}`
+        .slice(0, 1000);
+      await after.ref.update({
+        status: "error",
+        attempts: MAX_QUEUE_ATTEMPTS,
+        claimedAt: Timestamp.now(),
+        error: message,
+        retryRequestedAt: FieldValue.delete(),
+      });
+      throw error;
+    }
+    if (pendingItem.status !== "pending") return;
+
+    const claimedItem = await db.runTransaction(async (tx) => {
       const snap = await tx.get(after.ref);
-      if (snap.data()?.status !== "pending") return false;
+      if (!snap.exists) return null;
+      const current = decodeTogglQueueDocument(snap.data());
+      if (current.status !== "pending") return null;
+      if (current.attempts >= MAX_QUEUE_ATTEMPTS) {
+        tx.update(after.ref, {
+          status: "error",
+          claimedAt: current.claimedAt ?? Timestamp.now(),
+          error: "Queue retry limit reached.",
+          retryRequestedAt: FieldValue.delete(),
+        });
+        return null;
+      }
       // claimedAt lets the client sweep distinguish a live invocation from
       // a dead one; attempts caps how often a poison item is retried.
       tx.update(after.ref, {
         status: "processing",
         claimedAt: Timestamp.now(),
-        attempts: (snap.data()?.attempts ?? 0) + 1,
+        attempts: current.attempts + 1,
+        error: FieldValue.delete(),
+        retryRequestedAt: FieldValue.delete(),
       });
-      return true;
+      return current;
     });
-    if (!claimed) return;
+    if (claimedItem === null) return;
 
-    const item = after.data() as TogglQueueItem;
     let entryId: number;
     try {
-      entryId = await syncQueueItem(event.params.uid, item);
+      entryId = await syncQueueItem(
+        event.params.uid,
+        claimedItem,
+        after.ref,
+      );
     } catch (error) {
       // Persist the failure so it is visible in the queue doc (and can be
       // retried by flipping status back to 'pending') instead of leaving
       // the item claimed forever, then rethrow so the error is logged.
+      const raw = errorMessage(error);
       await after.ref.update({
-        status: "error",
-        error: (error as Error).message,
+        status: error instanceof OutcomeUnknownError ?
+          "outcome-unknown" : "error",
+        error: raw.slice(0, 1000),
+        retryRequestedAt: FieldValue.delete(),
       });
       // Also record it durably where the admin overview looks: a sync that
       // exhausts its retries otherwise only surfaces if the user notices.
@@ -385,8 +580,7 @@ exports.syncqueue = onDocumentWritten(
       // description field it was sent — so it is stripped before landing in
       // a log the operator reads. The untouched message still goes to the
       // queue doc, which only its owner can read, and to the function log.
-      const title = typeof item.bookTitle === "string" ? item.bookTitle : "";
-      const raw = (error as Error).message;
+      const title = claimedItem.bookTitle;
       await logIssue({
         level: "error",
         event: "toggl.sync_failed",
@@ -396,5 +590,10 @@ exports.syncqueue = onDocumentWritten(
       });
       throw error;
     }
-    await after.ref.update({status: "synced", entryId});
+    await after.ref.update({
+      status: "synced",
+      entryId,
+      error: FieldValue.delete(),
+      retryRequestedAt: FieldValue.delete(),
+    });
   });

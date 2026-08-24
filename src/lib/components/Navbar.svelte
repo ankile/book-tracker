@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import NavLink from "./NavLink.svelte";
 </script>
 

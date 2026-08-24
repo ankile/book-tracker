@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   const title = 'Book Tracker';
 </script>
 

@@ -1,4 +1,17 @@
-<script>
+<script lang="ts">
+  interface BarDatum {
+    label: string;
+    value: number;
+    tooltip: string;
+  }
+
+  interface Props {
+    data?: BarDatum[];
+    plotHeight?: number;
+    formatTick?: (value: number) => string;
+    ariaLabel: string;
+  }
+
   // Single-series column chart. Hand-rolled (no chart library — bundle
   // budget) from positioned divs: each column is a full-height button so
   // the hit target is the whole band, not the painted bar, and keyboard
@@ -11,7 +24,7 @@
     plotHeight = 140,
     formatTick = (value) => value.toLocaleString(),
     ariaLabel,
-  } = $props();
+  }: Props = $props();
 
   let tooltipVisible = $state(false);
   let tooltipContent = $state('');
@@ -24,7 +37,7 @@
     const max = Math.max(...data.map((d) => d.value), 0);
     if (max === 0) return 1;
     const magnitude = 10 ** Math.floor(Math.log10(max));
-    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((s) => s * magnitude >= max);
+    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((s) => s * magnitude >= max) ?? 10;
     return step * magnitude;
   });
   const ticks = $derived([0.5, 1].map((f) => f * niceMax));
@@ -36,7 +49,7 @@
     return best;
   });
 
-  function show(event, bar) {
+  function show(event: Event & { currentTarget: HTMLButtonElement }, bar: BarDatum) {
     tooltipContent = bar.tooltip;
     const bounds = event.currentTarget.getBoundingClientRect();
     tooltipX = bounds.left + bounds.width / 2;

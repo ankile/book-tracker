@@ -1,16 +1,16 @@
-<script>
-  import { adminOverview } from '$lib/firebase/functions.js';
-  import { addError } from '$lib/stores/errors.js';
+<script lang="ts">
+  import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
+  import { addError } from '$lib/stores/errors.ts';
 
-  let overview = $state(null);
+  let overview = $state<AdminOverview | null>(null);
   let failed = $state(false);
 
   $effect(() => {
-    adminOverview()
+    adminOverview({})
       .then((result) => (overview = result.data))
-      .catch((error) => {
+      .catch((error: unknown) => {
         failed = true;
-        addError(`Couldn't load the admin overview (${error.code ?? error.message}).`);
+        addError(`Couldn't load the admin overview (${error instanceof Error ? error.message : String(error)}).`);
       });
   });
 
@@ -26,12 +26,12 @@
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
-  function utc(ms) {
+  function utc(ms: number | null) {
     if (ms == null) return '—';
     return new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   }
 
-  function utcDay(ms) {
+  function utcDay(ms: number | null) {
     if (ms == null) return '—';
     return new Date(ms).toISOString().slice(0, 10);
   }

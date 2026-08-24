@@ -1,23 +1,29 @@
-<script>
+<script lang="ts">
   import ModalCard from "$lib/components/ModalCard.svelte";
   import Input from "$lib/components/Input.svelte";
   import AuthorInput from "$lib/components/AuthorInput.svelte";
 
-  import { Database } from "../firebase/db";
-  import { resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.js";
-  import { normalizeIsbn } from "../utils/isbn.js";
-  import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.js";
-  import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.js";
-  import { nbSearchUrl, nbModsUrl, parseNbItem, extractModsGenres } from "../utils/nasjonalbiblioteket.js";
-  import { lookupIsbn } from "../firebase/functions.js";
+  import { Database } from "../firebase/db.ts";
+  import { canonicalAuthorIds, resolveChip, splitAuthors, AUTHOR_KINDS } from "../utils/authors.ts";
+  import { normalizeIsbn } from "../utils/isbn.ts";
+  import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.ts";
+  import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.ts";
+  import { nbSearchUrl, nbModsUrl, parseNbItem, extractModsGenres } from "../utils/nasjonalbiblioteket.ts";
+  import { lookupIsbn } from "../firebase/functions.ts";
+  import type { Author, AuthorChip } from "../interfaces/author.ts";
+  import type { Book } from "../interfaces/book.ts";
+  import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
+  import { validateBookPages, validateBookTitle } from "../utils/validation.ts";
 
-  let { open, userId, book = null, onclose } = $props();
+  let {
+    open, userId, book = null, onclose,
+  }: { open: boolean; userId: string; book?: Book | null; onclose: () => void } = $props();
 
-  let authorChips = $state([]);
+  let authorChips = $state<AuthorChip[]>([]);
   // Existing authors for autocomplete and chip seeding; the listener only
   // lives while the modal is open. undefined from the store means still
   // loading (near-instant from the persistent cache, even offline).
-  let authorList = $state([]);
+  let authorList = $state<Author[]>([]);
   let authorsLoaded = $state(false);
   $effect(() => {
     if (!open || !userId) return;
@@ -34,12 +40,12 @@
     };
   });
   let title = $state("");
-  let pageCount = $state();
-  let currentPage = $state(1);
+  let pageCount = $state<number | null | undefined>(undefined);
+  let currentPage = $state<number | null | undefined>(1);
   let isbn = $state("");
-  // ISBN-derived metadata (bookMetadata.js shape). Seeded from the book in
+  // ISBN-derived metadata (bookMetadata.ts shape). Seeded from the book in
   // edit mode so saving without a fresh lookup preserves what's stored.
-  let metadata = $state({ ...EMPTY_METADATA });
+  let metadata = $state<BookMetadata>({ ...EMPTY_METADATA });
 
   let isEditMode = $derived(!!book);
   let isLookingUp = $state(false);
@@ -63,7 +69,7 @@
   // needs the author docs, and the seed must run exactly once per opened
   // book so a later authors snapshot can't wipe in-progress edits.
   // Plain variable, not $state — bookkeeping the effect must not track.
-  let seededBookId;
+  let seededBookId: string | null | undefined;
   $effect(() => {
     if (!open) {
       seededBookId = undefined;
@@ -80,26 +86,46 @@
   // Legacy-wins, mirroring the read rule: legacy fields on a book mean an
   // old client wrote last and any authorIds beside them are stale. Saving
   // such a book converts it to the id-only shape — self-healing.
-  function seedChips(book) {
+  function seedChips(book: Book): AuthorChip[] {
     if (book.author !== undefined || book.authors !== undefined) {
       if (Array.isArray(book.authors) && book.authors.length > 0) {
-        return book.authors.map((a) => ({ id: a.id, name: a.name }));
+        const authorMap = new Map(authorList.map((author) => [author.id, author]));
+        return canonicalAuthorIds(book.authors.map((author) => author.id), authorMap).map((id) => {
+          const author = authorMap.get(id);
+          if (author === undefined) throw new Error(`Missing author document: ${id}`);
+          return { id: author.id, name: author.name };
+        });
       }
       return splitAuthors(book.author ?? "").map((name) => resolveChip(name, authorList));
     }
-    return book.authorIds.map((id) => {
-      const author = authorList.find((a) => a.id === id);
+    const authorMap = new Map(authorList.map((author) => [author.id, author]));
+    return canonicalAuthorIds(book.authorIds, authorMap).map((id) => {
+      const author = authorMap.get(id);
+      if (author === undefined) throw new Error(`Missing author document: ${id}`);
       return { id: author.id, name: author.name };
     });
   }
 
+  function requiredBookPages(): { pageCount: number; currentPage: number } {
+    const result = validateBookPages({ pageCount, currentPage });
+    if (!result.valid) throw new Error(result.message);
+    return result;
+  }
+
+  function requiredTitle(): string {
+    const result = validateBookTitle(title);
+    if (!result.valid) throw new Error(result.message);
+    return result.title;
+  }
+
   function addBook() {
+    const pages = requiredBookPages();
     Database.addBook({
       userId,
       authorChips,
-      title,
-      pageCount,
-      currentPage,
+      title: requiredTitle(),
+      pageCount: pages.pageCount,
+      currentPage: pages.currentPage,
       isbn,
       metadata: $state.snapshot(metadata),
     });
@@ -107,12 +133,15 @@
   }
 
   function updateBook() {
+    if (book === null) throw new Error('Cannot update a book before it is loaded.');
+    const pages = validateBookPages({ pageCount, currentPage: book.currentPage });
+    if (!pages.valid) throw new Error(pages.message);
     Database.updateBook({
       userId,
       bookId: book.id,
       authorChips,
-      title,
-      pageCount,
+      title: requiredTitle(),
+      pageCount: pages.pageCount,
       currentPage: book.currentPage,
       isbn,
       metadata: $state.snapshot(metadata),
@@ -121,6 +150,7 @@
   }
 
   function handleSubmit() {
+    if (!authorsLoaded) throw new Error('Authors must finish loading before this book can be saved.');
     if (isEditMode) {
       updateBook();
     } else {
@@ -129,6 +159,7 @@
   }
 
   function handleDelete() {
+    if (book === null) throw new Error('Cannot delete a book before it is loaded.');
     const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
     if (confirmed) {
       // Not awaited: offline, the promise only resolves after reconnect,
@@ -174,6 +205,7 @@
       // Auto-fill fields (always overwrite when looking up). Whichever
       // source answered wins for the plain fields, in source order.
       const primary = openLibrary ?? google ?? nb;
+      if (primary === null) throw new Error('Metadata source selection failed.');
 
       if (primary.title) {
         title = primary.title;
@@ -206,7 +238,7 @@
     }
   }
 
-  async function fetchOpenLibrary(isbn13) {
+  async function fetchOpenLibrary(isbn13: string): Promise<BookLookupResult | null> {
     const response = await fetch(
       `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn13}&format=json&jscmd=data`
     );
@@ -215,7 +247,7 @@
       throw new Error("Network error");
     }
 
-    const data = await response.json();
+    const data = requireRecord(await response.json(), 'Open Library response');
     const record = data[`ISBN:${isbn13}`];
     return record === undefined ? null : parseOpenLibraryBook(record);
   }
@@ -225,18 +257,31 @@
   // for Norwegian books — live in the separate MODS record. Cover scans
   // are skipped here: they are restricted for in-copyright books, and the
   // modal has no way to verify one before showing it.
-  async function fetchNasjonalbiblioteket(isbn13) {
+  async function fetchNasjonalbiblioteket(isbn13: string): Promise<BookLookupResult | null> {
     try {
       const response = await fetch(nbSearchUrl(isbn13));
       if (!response.ok) throw new Error(`Nasjonalbiblioteket ${response.status}`);
-      const item = (await response.json())._embedded?.items?.[0];
+      const body = requireRecord(await response.json(), 'Nasjonalbiblioteket response');
+      const embedded = optionalRecord(body._embedded);
+      const items = embedded?.items;
+      const item = Array.isArray(items) ? items[0] : undefined;
       if (item === undefined) return null;
 
-      const mods = await fetch(nbModsUrl(item.id));
+      const itemData = requireRecord(item, 'Nasjonalbiblioteket item');
+      if (typeof itemData.id !== 'string') throw new Error('Nasjonalbiblioteket item id must be a string.');
+      const mods = await fetch(nbModsUrl(itemData.id));
       if (!mods.ok) throw new Error(`Nasjonalbiblioteket MODS ${mods.status}`);
       const parsed = parseNbItem(item, extractModsGenres(await mods.text()));
-      delete parsed.urn;
-      return parsed;
+      return {
+        title: parsed.title,
+        authorNames: parsed.authorNames,
+        pageCount: parsed.pageCount,
+        coverUrl: parsed.coverUrl,
+        publisher: parsed.publisher,
+        publishedDate: parsed.publishedDate,
+        subjects: parsed.subjects,
+        fiction: parsed.fiction,
+      };
     } catch (error) {
       console.error("Nasjonalbiblioteket lookup failed", error);
       return null;
@@ -246,7 +291,7 @@
   // Google Books runs through a callable (it proxies a metered API key).
   // A failure here must not discard the Open Library result the user is
   // waiting on, so it degrades to "no second source" rather than throwing.
-  async function fetchGoogleBooks(isbn13) {
+  async function fetchGoogleBooks(isbn13: string): Promise<BookLookupResult | null> {
     try {
       const { data } = await lookupIsbn({ isbn: isbn13 });
       return data.volume === null ? null : parseGoogleVolume(data.volume);
@@ -254,6 +299,20 @@
       console.error("Google Books lookup failed", error);
       return null;
     }
+  }
+
+  type Data = Record<string, unknown>;
+
+  function requireRecord(value: unknown, context: string): Data {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new TypeError(`${context} must be an object.`);
+    }
+    return value as Data;
+  }
+
+  function optionalRecord(value: unknown): Data | undefined {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    return value as Data;
   }
 </script>
 
@@ -363,6 +422,7 @@
   onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
+  primaryDisabled={!authorsLoaded}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
     <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />

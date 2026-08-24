@@ -1,13 +1,14 @@
-<script>
+<script lang="ts">
   import 'bootstrap/dist/css/bootstrap.min.css';
   import { page } from '$app/state';
-  import { user } from '$lib/firebase/auth.js';
+  import { user } from '$lib/firebase/auth.ts';
   import Navbar from '$lib/components/Navbar.svelte';
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import type { Snippet } from 'svelte';
 
-  let { children } = $props();
+  let { children }: { children: Snippet } = $props();
 
   // /profiles/<username> is the shareable public page: no auth gate and no
   // launch screen (the page doesn't need the session, so there is nothing
@@ -24,15 +25,15 @@
     if (!userId || publicRoute) return;
 
     let cancelled = false;
-    let stopPrefetch;
+    let stopPrefetch: (() => void) | undefined;
     const start = async () => {
-      const { startAppPrefetch } = await import('$lib/app-prefetch.js');
+      const { startAppPrefetch } = await import('$lib/app-prefetch.ts');
       if (cancelled) return;
       stopPrefetch = startAppPrefetch(userId);
     };
 
-    let cancelStart;
-    if ('requestIdleCallback' in window) {
+    let cancelStart: () => void;
+    if (typeof window.requestIdleCallback === 'function') {
       const idleId = window.requestIdleCallback(start, { timeout: 1500 });
       cancelStart = () => window.cancelIdleCallback(idleId);
     } else {

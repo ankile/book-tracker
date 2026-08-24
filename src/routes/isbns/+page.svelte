@@ -1,11 +1,13 @@
-<script>
-  import { user } from '$lib/firebase/auth.js';
-  import { Database } from '$lib/firebase/db.js';
+<script lang="ts">
+  import { user } from '$lib/firebase/auth.ts';
+  import { Database } from '$lib/firebase/db.ts';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
-  import { bookAuthors, formatAuthors } from '$lib/utils/authors.js';
-  import { groupByStatus } from '$lib/utils/metadataHealth.js';
+  import { bookAuthors, formatAuthors } from '$lib/utils/authors.ts';
+  import { groupByStatus } from '$lib/utils/metadataHealth.ts';
+  import type { Author } from '$lib/interfaces/author.ts';
+  import type { Book } from '$lib/interfaces/book.ts';
 
-  let allBooks = $state(undefined);
+  let allBooks = $state<Book[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
@@ -14,7 +16,7 @@
     }
   });
 
-  let authorList = $state(undefined);
+  let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);
@@ -31,9 +33,9 @@
   // field, Look up button (Open Library + Google Books) and save path are
   // exactly what fixing one of these books needs, so nothing is duplicated
   // here. The live snapshot drops the row as soon as the write applies.
-  let editBook = $state(null);
+  let editBook = $state<Book | null>(null);
 
-  function authorNames(book) {
+  function authorNames(book: Book): string {
     const resolved = bookAuthors(book, authorMap);
     return resolved === null ? '' : formatAuthors(resolved);
   }

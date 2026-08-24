@@ -1,48 +1,51 @@
-<script>
+<script lang="ts">
   import Input from "$lib/components/Input.svelte";
   import ModalCard from "$lib/components/ModalCard.svelte";
+  import { validateReading } from "$lib/utils/validation.ts";
+  import type { Book } from "$lib/interfaces/book.ts";
+  import type { ReadingSession } from "$lib/interfaces/reading.ts";
 
   let {
     session,
     book,
     onupdateSession,
     oncloseModal
+  }: {
+    session: ReadingSession;
+    book: Book;
+    onupdateSession: (data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }) => void;
+    oncloseModal: () => void;
   } = $props();
 
   // The modal is created fresh each time it opens, so capturing the
   // initial values here is intentional; syncing via $effect instead would
   // clobber in-progress input whenever a Firestore snapshot re-emits.
   // svelte-ignore state_referenced_locally
-  let inputTime = $state(session.timeRead);
+  let inputTime = $state<number | null>(session.timeRead);
   // svelte-ignore state_referenced_locally
-  let inputToPage = $state(session.toPage);
+  let inputToPage = $state<number | null>(session.toPage);
 
   function updateSession() {
-    if (inputTime <= 0) {
-      alert("Time read must be greater than 0");
+    const result = validateReading({
+      inputTime,
+      inputPages: inputToPage,
+      previousPage: session.fromPage,
+      pageCount: book.pageCount,
+    });
+    if (!result.valid) {
+      alert(result.message);
       return;
     }
-
-    if (inputToPage < 0) {
-      alert("Page numbers must be positive");
-      return;
-    }
-
-    if (inputToPage <= session.fromPage) {
+    if (result.pages === session.fromPage) {
       alert(`End page must be greater than start page (${session.fromPage})`);
-      return;
-    }
-
-    if (book && inputToPage > book.pageCount) {
-      alert(`Page number cannot exceed book's total pages (${book.pageCount})`);
       return;
     }
 
     onupdateSession({
       sessionId: session.id,
-      timeRead: inputTime,
+      timeRead: result.time,
       fromPage: session.fromPage, // Keep the original fromPage
-      toPage: inputToPage,
+      toPage: result.pages,
     });
     oncloseModal();
   }

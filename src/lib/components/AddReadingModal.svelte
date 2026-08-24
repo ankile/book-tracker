@@ -1,8 +1,8 @@
 <script lang="ts">
   import Input from "$lib/components/Input.svelte";
   import ModalCard from "$lib/components/ModalCard.svelte";
-  import { validateReading } from "../utils/validation";
-  import type { Book } from "../interfaces/book";
+  import { validateReading } from "../utils/validation.ts";
+  import type { Book } from "../interfaces/book.ts";
 
   let {
     book,
@@ -19,8 +19,8 @@
   // The modal is created fresh each time it opens, so capturing the
   // initial value here is intentional.
   // svelte-ignore state_referenced_locally
-  let inputTime = $state<number>(initialTime);
-  let inputPages = $state<number>(undefined);
+  let inputTime = $state<number | null | undefined>(initialTime);
+  let inputPages = $state<number | null | undefined>(undefined);
 
   // Projected end page from this book's historical pace (pages per minute)
   // and the minutes entered. Shown only as a placeholder until the user
@@ -28,35 +28,36 @@
   // ± buttons (which materialize it into the field).
   const guessedPage = $derived.by(() => {
     if (!book.pagesRead || !book.timeRead) return undefined;
-    if (!Number.isFinite(inputTime) || inputTime <= 0) return undefined;
+    if (typeof inputTime !== 'number' || !Number.isFinite(inputTime) || inputTime <= 0) return undefined;
     const projected = book.currentPage + Math.round(inputTime * (book.pagesRead / book.timeRead));
     return Math.min(projected, book.pageCount);
   });
 
-  const fieldEmpty = $derived(inputPages === undefined || inputPages === null || (inputPages as unknown) === "");
+  const fieldEmpty = $derived(inputPages === undefined || inputPages === null);
   const effectivePages = $derived(fieldEmpty ? guessedPage : inputPages);
 
   function adjustPage(delta: number) {
     const base = fieldEmpty ? guessedPage : inputPages;
+    if (typeof base !== 'number') return;
     inputPages = Math.max(0, Math.min(book.pageCount, base + delta));
   }
 
   function addReading() {
-    const { valid, message } = validateReading({
+    const result = validateReading({
       inputTime,
       inputPages: effectivePages,
       previousPage: book.currentPage,
       pageCount: book.pageCount,
     });
 
-    if (!valid) {
-      alert(message);
+    if (!result.valid) {
+      alert(result.message);
       return;
     }
     onaddReading({
       id: book.id,
-      timeRead: inputTime,
-      currentPage: effectivePages,
+      timeRead: result.time,
+      currentPage: result.pages,
       previousPage: book.currentPage,
     });
     oncloseModal();

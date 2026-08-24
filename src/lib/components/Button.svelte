@@ -1,10 +1,22 @@
-<script>
+<script lang="ts">
+  import type { Snippet } from "svelte";
+  import type { HTMLButtonAttributes } from "svelte/elements";
+
+  interface Props {
+    primary?: boolean;
+    disabled?: boolean;
+    type?: NonNullable<HTMLButtonAttributes["type"]>;
+    onclick?: HTMLButtonAttributes["onclick"];
+    children: Snippet;
+  }
+
   let {
     primary = false,
+    disabled = false,
     type = "button",
     onclick = undefined,
     children
-  } = $props();
+  }: Props = $props();
 </script>
 
 <style lang="scss">
@@ -44,7 +56,7 @@
 </style>
 
 <div class="btn-container">
-  <button class="hover" class:primary {type} {onclick}>
+  <button class="hover" class:primary {type} {onclick} {disabled}>
     {@render children()}
   </button>
 </div>

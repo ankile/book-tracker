@@ -3,16 +3,56 @@
 // place, so id need not match the current name.
 export type AuthorKind = 'person' | 'entity' | 'placeholder';
 
-export interface Author {
+export type AuthorRetirement =
+  | { reason: 'deleted' }
+  | { reason: 'merged'; targetId: string };
+
+interface AuthorBase {
   id: string;
-  // For persons, always the stored join of the parts (audited):
-  // `${givenName} ${familyName}` or just familyName for mononyms.
   name: string;
   nameLower: string;
-  kind: AuthorKind;
-  // Person-only explicit name parts; abbreviation and sorting read
-  // familyName directly (no splitting heuristic at render time).
-  // givenName is absent for mononyms; both absent on non-person kinds.
-  givenName?: string;
-  familyName?: string;
+  retirement?: AuthorRetirement;
 }
+
+export interface PersonAuthor extends AuthorBase {
+  kind: 'person';
+  givenName?: string;
+  familyName: string;
+}
+
+export interface NonPersonAuthor extends AuthorBase {
+  kind: 'entity' | 'placeholder';
+  givenName?: never;
+  familyName?: never;
+}
+
+export type Author = PersonAuthor | NonPersonAuthor;
+
+export interface AuthorSummary {
+  id: string;
+  name: string;
+}
+
+export type LegacyEmbeddedAuthor = AuthorSummary;
+
+export interface ExistingAuthorChip extends AuthorSummary {
+  id: string;
+}
+
+export interface NewPersonAuthorChip {
+  id: null;
+  name: string;
+  kind: 'person';
+  givenName: string;
+  familyName: string;
+}
+
+export interface NewNonPersonAuthorChip {
+  id: null;
+  name: string;
+  kind: 'entity' | 'placeholder';
+  givenName?: never;
+  familyName?: never;
+}
+
+export type AuthorChip = ExistingAuthorChip | NewPersonAuthorChip | NewNonPersonAuthorChip;

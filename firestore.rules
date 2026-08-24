@@ -5,7 +5,15 @@ service cloud.firestore {
       allow read: if request.auth != null && userId == request.auth.uid;
     }
     match /users/{userId}/books/{bookId} {
-      allow read, write: if request.auth != null && userId == request.auth.uid;
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && validBookTitle()
+                    && validInitialBookTimer();
+      allow update: if request.auth != null && userId == request.auth.uid
+                    && validBookTitle()
+                    && validBookTimerTransition();
+      allow delete: if request.auth != null && userId == request.auth.uid
+                    && resource.data.get('activeTimer', null) == null;
 
       // Writes are validated so a client cannot forge owner — which the
       // collectionGroup rule below trusts for cross-book stats reads — nor
@@ -18,29 +26,183 @@ service cloud.firestore {
                       && request.resource.data.type in ['reading', 'update'];
       }
     }
+
+    // The callable owns Toggl lifecycle maps. Clients may start/stop a
+    // local timer, clear a confirmed unknown outcome, or clear an ordinary
+    // remote timer while queuing its offline stop. They cannot forge or
+    // erase a start claim while the server may be issuing the remote POST.
+    function validInitialBookTimer() {
+      let timer = request.resource.data.get('activeTimer', null);
+      return timer == null || validLocalTimer(timer);
+    }
+
+    function validBookTitle() {
+      return request.resource.data.title is string
+             && request.resource.data.title.size() > 0
+             && request.resource.data.title.size() <= 500;
+    }
+
+    function validBookTimerTransition() {
+      let before = resource.data.get('activeTimer', null);
+      let after = request.resource.data.get('activeTimer', null);
+      return before == after
+             || (before == null && validLocalTimer(after))
+             || (after == null
+                 && (validLocalTimer(before)
+                     || validRemoteTimer(before)
+                     || validUnknownTimer(before)));
+    }
+
+    function validLocalTimer(timer) {
+      return timer is map
+             && timer.keys().hasAll(['start'])
+             && timer.keys().hasOnly(['start'])
+             && timer.start is string;
+    }
+
+    function validRemoteTimer(timer) {
+      return timer is map
+             && timer.keys().hasAll(['entryId', 'start'])
+             && timer.keys().hasOnly(['entryId', 'start'])
+             && timer.entryId is int
+             && timer.entryId > 0
+             && timer.start is string;
+    }
+
+    function validUnknownTimer(timer) {
+      return timer is map
+             && timer.keys().hasAll([
+                  'state', 'operationId', 'start', 'claimedAt', 'error'
+                ])
+             && timer.keys().hasOnly([
+                  'state', 'operationId', 'start', 'claimedAt', 'error'
+                ])
+             && timer.state == 'outcome-unknown'
+             && timer.operationId is string
+             && timer.start is string
+             && timer.claimedAt is timestamp
+             && timer.error is string;
+    }
     // Author entities, written in the same client batch as the book that
     // references them. Own-user private data, so books-level strictness
     // applies (the validation-heavy style is for anonymous surfaces).
     match /users/{userId}/authors/{authorId} {
-      allow read, write: if request.auth != null && userId == request.auth.uid;
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && !request.resource.data.keys().hasAny(['retirement']);
+      allow update: if request.auth != null && userId == request.auth.uid
+                    && validAuthorRetirementTransition(userId, authorId);
     }
 
-    // Offline Toggl sync queue: owner enqueues and reads status; the
-    // toggl-syncqueue function (Admin SDK) processes items. The only
-    // client update allowed is the retry sweep flipping a stalled item's
-    // status back to 'pending' to re-fire the trigger.
-    //
-    // The attempts cap is enforced here, not just in the client sweep:
-    // each flip re-invokes the function, so an unbounded loop of flips is
-    // unbounded Toggl calls and unbounded logEvents rows. attempts is
-    // absent on items queued before the cap existed, hence the default.
+    function validAuthorRetirementTransition(userId, authorId) {
+      let before = resource.data.get('retirement', null);
+      let after = request.resource.data.get('retirement', null);
+      return before == after
+             || (before is map
+                 && before.reason == 'deleted'
+                 && after == null)
+             || (before == null
+                 && after is map
+                 && ((after.keys().hasAll(['reason'])
+                      && after.keys().hasOnly(['reason'])
+                      && after.reason == 'deleted')
+                     || (after.keys().hasAll(['reason', 'targetId'])
+                         && after.keys().hasOnly(['reason', 'targetId'])
+                         && after.reason == 'merged'
+                         && after.targetId is string
+                         && after.targetId != authorId
+                         && get(/databases/$(database)/documents/users/$(userId)/authors/$(after.targetId)).data.get('retirement', null) == null)));
+    }
+
+    // Offline Toggl sync queue: an owner can enqueue one exact, bounded
+    // payload and read its lifecycle. The Admin SDK alone writes processing,
+    // error and synced states. A client retry can only set pending plus a new
+    // server timestamp, only after the same stale windows the client sweep
+    // uses, and never after the fifth claim. The timestamp makes a retry of
+    // an unchanged pending status emit a production Firestore event. The cap
+    // bounds retries for one item; project-level abuse controls still bound
+    // how many new items an account may create.
     match /users/{userId}/togglQueue/{queueId} {
-      allow read, create: if request.auth != null && userId == request.auth.uid;
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && validInitialTogglQueueItem();
       allow update: if request.auth != null && userId == request.auth.uid
-                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['status', 'retryRequestedAt'])
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasAll(['retryRequestedAt'])
                     && request.resource.data.status == 'pending'
-                    && resource.data.status in ['pending', 'processing', 'error']
-                    && resource.data.get('attempts', 0) < 5;
+                    && validRetryTogglQueueItem()
+                    && resource.data.get('attempts', 0) < 5
+                    && togglRetryWindowOpen();
+    }
+
+    function validInitialTogglQueueItem() {
+      let item = request.resource.data;
+      return validTogglQueuePayload(item)
+             && item.status == 'pending'
+             && item.createdAt is timestamp
+             && item.keys().hasOnly([
+                  'type', 'bookTitle', 'start', 'stop', 'entryId',
+                  'status', 'createdAt'
+                ]);
+    }
+
+    function validRetryTogglQueueItem() {
+      let item = request.resource.data;
+      return validTogglQueuePayload(item)
+             && item.status == 'pending'
+             && item.createdAt is timestamp
+             && item.retryRequestedAt is timestamp
+             && item.retryRequestedAt == request.time
+             && item.keys().hasOnly([
+                  'type', 'bookTitle', 'start', 'stop', 'entryId',
+                  'status', 'createdAt', 'attempts', 'claimedAt', 'error',
+                  'retryRequestedAt'
+                ])
+             && ((!item.keys().hasAny(['attempts', 'claimedAt', 'error']))
+                  || (item.attempts is int
+                      && item.attempts > 0
+                      && item.attempts < 5
+                      && item.claimedAt is timestamp
+                      && (!item.keys().hasAny(['error'])
+                          || (item.error is string
+                              && item.error.size() <= 1000))));
+    }
+
+    function validTogglQueuePayload(item) {
+      return item.keys().hasAll([
+               'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt'
+             ])
+             && item.type in ['create', 'stop']
+             && item.bookTitle is string
+             && item.bookTitle.size() > 0
+             && item.bookTitle.size() <= 500
+             && item.start is string
+             && item.start.size() > 0
+             && item.start.size() <= 64
+             && item.start.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})')
+             && item.stop is string
+             && item.stop.size() > 0
+             && item.stop.size() <= 64
+             && item.stop.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})')
+             && (item.type == 'create'
+                  ? !item.keys().hasAny(['entryId'])
+                  : (item.keys().hasAll(['entryId'])
+                     && item.entryId is int
+                     && item.entryId > 0));
+    }
+
+    function togglRetryWindowOpen() {
+      return resource.data.status == 'error'
+             || (resource.data.status == 'pending'
+                 && resource.data.createdAt is timestamp
+                 && resource.data.createdAt
+                    < request.time - duration.value(600, 's'))
+             || (resource.data.status == 'processing'
+                 && resource.data.claimedAt is timestamp
+                 && resource.data.claimedAt
+                    < request.time - duration.value(21600, 's'));
     }
 
     // Opt-in public profile pages: /profiles/<username> renders this doc.
@@ -86,7 +248,7 @@ service cloud.firestore {
              && profile.familyName.size() <= 50
              // Public handles ({type, value, label?}); rules can't iterate
              // list elements, so the per-entry shape and string caps are
-             // client-enforced (utils/links.js). Owner-authenticated
+             // client-enforced (utils/links.ts). Owner-authenticated
              // writes only, and the client renders values as text and
              // scheme-guarded hrefs, so the count cap bounds the surface.
              && profile.links is list

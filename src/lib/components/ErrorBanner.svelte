@@ -1,5 +1,5 @@
-<script>
-  import { errors, dismissError, clearErrors } from '$lib/stores/errors.js';
+<script lang="ts">
+  import { errors, dismissError, clearErrors } from '$lib/stores/errors.ts';
 
   // Mounted twice: once in +layout.svelte and once inside ModalCard's
   // <dialog>. A modal dialog makes everything outside its subtree inert —

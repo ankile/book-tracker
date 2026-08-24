@@ -11,13 +11,13 @@ backfills — and still went through the whole loop; that run is the template.)
 
 | Script | What it does | Writes? |
 |---|---|---|
-| `migrate-lib.js` | shared target guard, batcher, snapshot codec | — |
-| `db-snapshot.js` | full-database dump to `snapshots/<ISO>-<target>.json` | no |
-| `db-restore.js` | load a dump into the emulator (or prod, disaster only) | yes |
-| `db-audit.js` | read-only drift report, diff-friendly output | no |
-| `migrate-*.js` | one script per migration, kept forever as history | yes |
+| `migrate-lib.ts` | shared target guard, batcher, snapshot codec | — |
+| `db-snapshot.ts` | full-database dump to `snapshots/<ISO>-<target>.json` | no |
+| `db-restore.ts` | load a dump into the emulator (or prod, disaster only) | yes |
+| `db-audit.ts` | read-only drift report, diff-friendly output | no |
+| `migrate-*.ts` | one script per migration, kept forever as history | yes |
 
-All scripts share the same target rules, enforced in `migrate-lib.js`:
+All scripts share the same target rules, enforced in `migrate-lib.ts`:
 
 - **Default target is the emulator.** Without `--prod` the service-account
   key is never read and the script crashes unless `FIRESTORE_EMULATOR_HOST`
@@ -34,7 +34,7 @@ All scripts share the same target rules, enforced in `migrate-lib.js`:
 
 ### 0. Prerequisites
 
-- The migration script uses `migrate-lib.js` (`connect`, `batcher`) and is
+- The migration script uses `migrate-lib.ts` (`connect`, `batcher`) and is
   **idempotent**: every write is guarded on the defect/old shape being
   present, so a re-run after a clean pass performs 0 writes. Migrations must
   stay cheap to re-run — stale offline clients flush old-shape writes days
@@ -45,7 +45,7 @@ All scripts share the same target rules, enforced in `migrate-lib.js`:
 ### 1. Baseline audit
 
 ```sh
-node db-audit.js --prod > audit-pre.txt
+node db-audit.ts --prod > audit-pre.txt
 ```
 
 ### 2. Emulator rehearsal, with real triggers
@@ -57,12 +57,12 @@ PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
   firebase emulators:start --only firestore,functions
 # in another shell:
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
-node db-snapshot.js --prod                      # fresh dump (or reuse a recent one)
-node db-restore.js snapshots/<file>.json --apply
-node migrate-<name>.js                          # dry-run: review every line
-node migrate-<name>.js --apply                  # triggers fire for real here
-node migrate-<name>.js --apply                  # MUST print 0 writes
-node db-audit.js > audit-emulator-post.txt
+node db-snapshot.ts --prod                      # fresh dump (or reuse a recent one)
+node db-restore.ts snapshots/<file>.json --apply
+node migrate-<name>.ts                          # dry-run: review every line
+node migrate-<name>.ts --apply                  # triggers fire for real here
+node migrate-<name>.ts --apply                  # MUST print 0 writes
+node db-audit.ts > audit-emulator-post.txt
 diff audit-pre.txt audit-emulator-post.txt      # exactly the intended lines, nothing else
 ```
 
@@ -87,8 +87,8 @@ await getAuth().createUser({ uid: '<your-prod-uid>', email: 'me@test.local', pas
 VITE_EMULATOR=1 npm run dev
 ```
 
-`VITE_EMULATOR` flips the DEV-gated hooks in `src/lib/firebase/db.js` and
-`auth.js` to the local emulators. Exercise every read and write path the
+`VITE_EMULATOR` flips the DEV-gated hooks in `src/lib/firebase/db.ts` and
+`auth.ts` to the local emulators. Exercise every read and write path the
 migration touches, then re-run the migration dry-run: the writes the fresh
 client just made must be invisible to it (0 ops against new-shape docs).
 
@@ -109,19 +109,19 @@ client code promptly, but assume days of overlap with stale cached clients
 ### 4. Production run
 
 ```sh
-node db-snapshot.js --prod                      # snapshot IMMEDIATELY before writing
-node migrate-<name>.js --prod                   # dry-run: review every line
-node migrate-<name>.js --prod --apply           # typed confirmation
-node db-audit.js --prod > audit-post.txt
+node db-snapshot.ts --prod                      # snapshot IMMEDIATELY before writing
+node migrate-<name>.ts --prod                   # dry-run: review every line
+node migrate-<name>.ts --prod --apply           # typed confirmation
+node db-audit.ts --prod > audit-post.txt
 diff audit-pre.txt audit-post.txt               # exactly the intended changes
-node migrate-<name>.js --prod --apply           # MUST print 0 writes
+node migrate-<name>.ts --prod --apply           # MUST print 0 writes
 ```
 
 ### 5. A few days later
 
 ```sh
-node db-audit.js --prod | diff audit-post.txt -
-node migrate-<name>.js --prod                   # dry-run; re-apply if stragglers
+node db-audit.ts --prod | diff audit-post.txt -
+node migrate-<name>.ts --prod                   # dry-run; re-apply if stragglers
 ```
 
 Stale clients: this is an offline-first PWA with fire-and-forget writes. A
@@ -133,7 +133,7 @@ re-run, and why the follow-up audit exists.
 ## Script conventions
 
 - **Traversal**: migrations and the audit iterate with `.get()` — orphaned
-  docs under deleted parents are not data to migrate. `db-snapshot.js`
+  docs under deleted parents are not data to migrate. `db-snapshot.ts`
   deliberately inverts this (`listCollections()`/`listDocuments()`) because
   a backup must capture those orphans; don't "fix" it.
 - **Batching**: always through `batcher()` — 500-op rollover, dry-run
@@ -152,10 +152,10 @@ re-run, and why the follow-up audit exists.
   they were written against; that is correct — re-running them against a
   newer schema would be wrong, and loud beats silent.
 - **Audit-changing migrations**: when a migration ships together with new
-  `db-audit.js` invariants, the baseline audit runs the NEW audit — the
+  `db-audit.ts` invariants, the baseline audit runs the NEW audit — the
   pre file then shows exactly the defect classes the migration will clear,
   and the pre/post diff is the intended-change signature.
-- **Author ids are opaque after creation** (as of `migrate-author-ids.js`):
+- **Author ids are opaque after creation** (as of `migrate-author-ids.ts`):
   deterministic `authorIdFor(name)` at mint time only; rename edits
   `name`/`nameLower` in place. No script or audit may assert
   `id === authorIdFor(name)` on an author doc. One sanctioned exception:
@@ -180,12 +180,12 @@ all belong to `(default)`. Recovery is always copy-back:
 gcloud firestore databases restore \
   --source-backup=<backup> --destination-database=recovered \
   --account=lars.ankile@gmail.com
-node db-snapshot.js --prod --database=recovered   # dump the restored db
-node db-restore.js snapshots/<file>.json --prod --apply   # copy back into (default)
+node db-snapshot.ts --prod --database=recovered   # dump the restored db
+node db-restore.ts snapshots/<file>.json --prod --apply   # copy back into (default)
 gcloud firestore databases delete --database=recovered ...
 ```
 
-Notes on `db-restore.js --prod` (disaster recovery only):
+Notes on `db-restore.ts --prod` (disaster recovery only):
 
 - Full-overwrite `set()`: restores every doc in the dump as-is.
 - **Never deletes** — documents *created* after the snapshot (e.g. by a bad
@@ -199,7 +199,7 @@ Lighter PITR path (no scratch database): the Admin SDK can read the live
 database as of any point in the PITR window via read-time reads — good
 enough to recover individual fields without a full restore.
 
-Posture change with `migrate-author-ids.js`: the legacy `author` string on
+Posture change with `migrate-author-ids.ts`: the legacy `author` string on
 book docs used to double as an informal rollback affordance; it is gone
 from docs once that migration applies. Rollback is now explicitly: redeploy
 the previous hosting build, then recover fields from the immediately-prior
@@ -209,7 +209,7 @@ snapshot or PITR. The affordances above fully replace it.
 
 No Firestore trigger touches book *content*: the client computes every
 book invariant (finished, aggregates) in the same `writeBatch` as the
-mutation, and `migrate-normalize-books.js` re-runs repair anything a stale
+mutation, and `migrate-normalize-books.ts` re-runs repair anything a stale
 client leaves behind. The transitional `bookIsFinished` backstop was
 deleted 2026-08-11. Standing constraint for any future trigger: eur3
 rejects newly *created* gen1 Firestore triggers, so it must be gen2
@@ -219,14 +219,14 @@ rejects newly *created* gen1 Firestore triggers, so it must be gen2
 
 | Date | Script | What it did |
 |---|---|---|
-| 2025-06 | `migrate-add-owner.js` | backfilled `owner` refs on books/updates |
-| 2026-08-11 | `migrate-normalize-books.js` | backfilled `isbn: ''` on 6 legacy books; carries the full normalize policy table for re-runs |
-| 2026-08-11 | `migrate-authors.js` | authors as first-class entities: split 220 books' author strings into `users/{uid}/authors` docs + `authors` arrays (459 ops); audit went to 0 findings |
-| 2026-08-11 | `migrate-placeholder-authors.js` | placeholder attributions ("Various Authors") are display text, not entities: stripped 1 book's array, deleted 1 author doc |
-| 2026-08-11 | `migrate-author-ids.js` | books reference authors by id only: rebuilt authorIds on 220 books, deleted legacy author/authors fields, backfilled explicit kind on 185 author docs (Harvard Business Review pinned entity), re-minted "Various Authors" as a kind-placeholder doc (406 ops); author ids opaque from here on; audit 625 findings -> 0 |
-| 2026-08-11 | `migrate-person-names.js` | explicit person name parts: backfilled givenName/familyName on 184 person docs via the last-token split (a prefill — wrong splits are corrected in the /authors edit form); sortName concept removed; audit 184 findings -> 0 |
-| 2026-08-12 | `migrate-enrich-given-names.js` | hand-curated given names for 20 surname-only authors on the owner account (looked up from their books' covers), and "Stortinget" fixed to kind entity; content enrichment, not schema |
-| 2026-08-24 | `migrate-enrich-books.js` | ISBN-derived metadata: backfilled coverUrl/publisher/publishedDate/subjects/fiction on all 220 books from Open Library (139 enriched, 120 with covers; 81 defaults-only — 52 no ISBN, 19 unknown to OL, 10 invalid, all REPORTed); normalizes stored ISBNs to ISBN-13; audit 1100 findings -> 0. Lookups cached in `ol-cache.json` (gitignored), so the prod apply ran with 0 live fetches. OL soft-blocks bursty IPs — the script trickles at 1 req/30s with escalating backoff |
-| 2026-08-24 | `migrate-enrich-google.js` | Google Books gap-fill over pass 1: improved 88 books (fiction unknown 159 -> 102, covers 120 -> 141, subjects 123 -> 138); gap-fill only, an existing Open Library value always wins. Its BISAC categories are what classify fiction/non-fiction — the remaining 102 unknowns are 52 books with no ISBN plus 50 whose volumes carry no categories. Key comes from the FUNCTIONS_CONFIG_EXPORT secret via `GOOGLE_BOOKS_KEY`; lookups cached in `gb-cache.json` (gitignored) |
-| 2026-08-24 | `migrate-enrich-nb.js` | Nasjonalbiblioteket gap-fill (pass 3): improved 17 books, the Norwegian editions the first two passes had never heard of. MODS genres ("Romaner", "Skuespill", the explicit "notfiction" marker) are the fiction signal; cover scans are verified with a HEAD request before storing, since in-copyright ones 403. Free, no key; lookups cached in `nb-cache.json` (gitignored) |
-| 2026-08-24 | `migrate-enrich-goodreads.js` | Goodreads gap-fill (pass 4, last resort): improved 36 books — covers for the Norwegian classics plus fiction/non-fiction for English non-fiction. Reads schema.org JSON-LD from `/book/isbn/<isbn>` (robots-permitted; `/search` is not). NOT wired into the app — no CORS, and the ToS disallow automated access — so it stays a hand-run backfill over the owner's own library, paced at 5s and cached in `gr-cache.json`. **Run it after pass 3**, or it fills fields Nasjonalbiblioteket should own. Combined result of passes 3+4: fiction unknown 102 -> 64, covers 141 -> 157, "nothing found" 14 -> 0; the remaining 64 unknowns are 52 books with no ISBN and 10 with an invalid one (see /isbns) |
+| 2025-06 | `migrate-add-owner.ts` | backfilled `owner` refs on books/updates |
+| 2026-08-11 | `migrate-normalize-books.ts` | backfilled `isbn: ''` on 6 legacy books; carries the full normalize policy table for re-runs |
+| 2026-08-11 | `migrate-authors.ts` | authors as first-class entities: split 220 books' author strings into `users/{uid}/authors` docs + `authors` arrays (459 ops); audit went to 0 findings |
+| 2026-08-11 | `migrate-placeholder-authors.ts` | placeholder attributions ("Various Authors") are display text, not entities: stripped 1 book's array, deleted 1 author doc |
+| 2026-08-11 | `migrate-author-ids.ts` | books reference authors by id only: rebuilt authorIds on 220 books, deleted legacy author/authors fields, backfilled explicit kind on 185 author docs (Harvard Business Review pinned entity), re-minted "Various Authors" as a kind-placeholder doc (406 ops); author ids opaque from here on; audit 625 findings -> 0 |
+| 2026-08-11 | `migrate-person-names.ts` | explicit person name parts: backfilled givenName/familyName on 184 person docs via the last-token split (a prefill — wrong splits are corrected in the /authors edit form); sortName concept removed; audit 184 findings -> 0 |
+| 2026-08-12 | `migrate-enrich-given-names.ts` | hand-curated given names for 20 surname-only authors on the owner account (looked up from their books' covers), and "Stortinget" fixed to kind entity; content enrichment, not schema |
+| 2026-08-24 | `migrate-enrich-books.ts` | ISBN-derived metadata: backfilled coverUrl/publisher/publishedDate/subjects/fiction on all 220 books from Open Library (139 enriched, 120 with covers; 81 defaults-only — 52 no ISBN, 19 unknown to OL, 10 invalid, all REPORTed); normalizes stored ISBNs to ISBN-13; audit 1100 findings -> 0. Lookups cached in `ol-cache.json` (gitignored), so the prod apply ran with 0 live fetches. OL soft-blocks bursty IPs — the script trickles at 1 req/30s with escalating backoff |
+| 2026-08-24 | `migrate-enrich-google.ts` | Google Books gap-fill over pass 1: improved 88 books (fiction unknown 159 -> 102, covers 120 -> 141, subjects 123 -> 138); gap-fill only, an existing Open Library value always wins. Its BISAC categories are what classify fiction/non-fiction — the remaining 102 unknowns are 52 books with no ISBN plus 50 whose volumes carry no categories. Key comes from the FUNCTIONS_CONFIG_EXPORT secret via `GOOGLE_BOOKS_KEY`; lookups cached in `gb-cache.json` (gitignored) |
+| 2026-08-24 | `migrate-enrich-nb.ts` | Nasjonalbiblioteket gap-fill (pass 3): improved 17 books, the Norwegian editions the first two passes had never heard of. MODS genres ("Romaner", "Skuespill", the explicit "notfiction" marker) are the fiction signal; cover scans are verified with a HEAD request before storing, since in-copyright ones 403. Free, no key; lookups cached in `nb-cache.json` (gitignored) |
+| 2026-08-24 | `migrate-enrich-goodreads.ts` | Goodreads gap-fill (pass 4, last resort): improved 36 books — covers for the Norwegian classics plus fiction/non-fiction for English non-fiction. Reads schema.org JSON-LD from `/book/isbn/<isbn>` (robots-permitted; `/search` is not). NOT wired into the app — no CORS, and the ToS disallow automated access — so it stays a hand-run backfill over the owner's own library, paced at 5s and cached in `gr-cache.json`. **Run it after pass 3**, or it fills fields Nasjonalbiblioteket should own. Combined result of passes 3+4: fiction unknown 102 -> 64, covers 141 -> 157, "nothing found" 14 -> 0; the remaining 64 unknowns are 52 books with no ISBN and 10 with an invalid one (see /isbns) |

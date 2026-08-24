@@ -1,15 +1,17 @@
-<script>
-  import { user } from '$lib/firebase/auth.js';
+<script lang="ts">
+  import { user } from '$lib/firebase/auth.ts';
   import BookList from '$lib/components/BookList.svelte';
-  import { Database } from '$lib/firebase/db.js';
-  import { formatTime } from '$lib/utils/format.js';
-  import { bookAuthors, joinAuthors } from '$lib/utils/authors.js';
+  import { Database } from '$lib/firebase/db.ts';
+  import { formatTime } from '$lib/utils/format.ts';
+  import { bookAuthors, joinAuthors } from '$lib/utils/authors.ts';
+  import type { Author } from '$lib/interfaces/author.ts';
+  import type { Book } from '$lib/interfaces/book.ts';
 
   let sortBy = $state('updatedAt'); // 'updatedAt', 'pageCount', 'timeRead', 'title'
   let filterYear = $state('all'); // 'all', '2020', '2021', etc.
   let searchTerm = $state(''); // Search filter
 
-  let allBooks = $state([]);
+  let allBooks = $state<Book[]>([]);
 
   $effect(() => {
     if ($user) {
@@ -23,7 +25,7 @@
 
   // Get available years from books
   let availableYears = $derived.by(() => {
-    const years = new Set();
+    const years = new Set<number>();
     allBooks.forEach(book => {
       if (book.updatedAt?.toDate) {
         years.add(book.updatedAt.toDate().getFullYear());
@@ -33,7 +35,7 @@
   });
 
   // Author docs for resolving each book's authorIds into searchable names.
-  let authorList = $state(undefined);
+  let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);

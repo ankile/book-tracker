@@ -7,8 +7,8 @@ initializeApp();
 const db = getFirestore();
 
 // No trigger touches book content: the client maintains finished in the
-// same writeBatch as every page mutation (src/lib/utils/finished.js), and
-// migrate-normalize-books.js repairs any drift a stale cached client
+// same writeBatch as every page mutation (src/lib/utils/finished.ts), and
+// migrate-normalize-books.ts repairs any drift a stale cached client
 // leaves behind. The bookIsFinished backstop trigger was deleted
 // 2026-08-11; note that eur3 rejects newly created gen1 Firestore
 // triggers, so any future book trigger must be gen2 (lowercase name).

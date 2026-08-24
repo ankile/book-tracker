@@ -1,9 +1,13 @@
-<script>
+<script lang="ts">
   // Top authors by total reading hours across their books. A multi-author
   // book credits each listed author fully (see authorLeaderboard).
-  import { authorLeaderboard } from '$lib/utils/sessions.js';
+  import { authorLeaderboard } from '$lib/utils/sessions.ts';
+  import type { LeaderboardBookView } from '$lib/utils/sessions.ts';
+  import type { AuthorSummary } from '$lib/interfaces/author.ts';
 
-  let { books = [], authors = [] } = $props();
+  let {
+    books = [], authors = [],
+  }: { books?: LeaderboardBookView[]; authors?: AuthorSummary[] } = $props();
 
   const rows = $derived(authorLeaderboard(books, authors).slice(0, 8));
 </script>

@@ -1,16 +1,21 @@
-<script>
+<script lang="ts">
   import Icon from "svelte-awesome";
   import { edit, trash } from "svelte-awesome/icons";
   import ModalCard from "$lib/components/ModalCard.svelte";
   import EditSessionModal from "$lib/components/EditSessionModal.svelte";
-  import { Database } from "$lib/firebase/db.js";
-  import { formatTime } from "$lib/utils/format.js";
+  import { Database } from "$lib/firebase/db.ts";
+  import { formatTime } from "$lib/utils/format.ts";
+  import type { Book } from "$lib/interfaces/book.ts";
+  import type { ReadingSession } from "$lib/interfaces/reading.ts";
+  import type { TimestampLike } from "$lib/interfaces/common.ts";
 
-  let { book, userId, onclose } = $props();
+  let {
+    book, userId, onclose,
+  }: { book: Book; userId: string; onclose: () => void } = $props();
 
   let open = $derived(!!book);
 
-  let sessions = $state([]);
+  let sessions = $state<ReadingSession[]>([]);
   $effect(() => {
     if (book && userId) {
       const sessionsStore = Database.getReadingSessions(userId, book.id);
@@ -21,15 +26,14 @@
     }
   });
 
-  let editingSessionId = $state(null);
+  let editingSessionId = $state<string | null>(null);
 
   // Derive the actual session object from the ID to always use fresh data
   let editingSession = $derived(
     editingSessionId ? sessions.find(s => s.id === editingSessionId) : null
   );
 
-  function formatDate(timestamp) {
-    if (!timestamp?.toDate) return 'N/A';
+  function formatDate(timestamp: TimestampLike) {
     const date = timestamp.toDate();
     return date.toLocaleDateString('en-US', {
       month: 'short',
@@ -40,11 +44,11 @@
     });
   }
 
-  function editSession(session) {
+  function editSession(session: ReadingSession) {
     editingSessionId = session.id;
   }
 
-  function updateSession(data) {
+  function updateSession(data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }) {
     Database.updateReadingSession({
       userId,
       bookId: book.id,
@@ -58,7 +62,7 @@
     editingSessionId = null;
   }
 
-  function deleteSession(session) {
+  function deleteSession(session: ReadingSession) {
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
       Database.deleteReadingSession(userId, book.id, session.id, book.title, book.pageCount);
@@ -191,14 +195,14 @@
                   class="edit-button"
                   aria-label={`Edit latest reading session for ${book.title}`}
                   onclick={() => editSession(session)}>
-                  <Icon data={edit} scale="0.8" style="color: #666;" />
+                  <Icon data={edit} scale={0.8} style="color: #666;" />
                 </button>
                 <button
                   type="button"
                   class="edit-button"
                   aria-label={`Delete latest reading session for ${book.title}`}
                   onclick={() => deleteSession(session)}>
-                  <Icon data={trash} scale="0.8" style="color: #d9534f;" />
+                  <Icon data={trash} scale={0.8} style="color: #d9534f;" />
                 </button>
               {:else}
                 <span class="button-spacer"></span>

@@ -1,7 +1,8 @@
-<script>
+<script lang="ts">
+  import { FirebaseError } from "firebase/app";
   import Button from "./Button.svelte";
-  import { signIn, signUp } from "$lib/firebase/auth.js";
-  import { logIssue } from "$lib/firebase/db.js";
+  import { signIn, signUp } from "$lib/firebase/auth.ts";
+  import { logIssue } from "$lib/firebase/db.ts";
 
   let login = $state(true);
   let email = $state("");
@@ -15,6 +16,7 @@
         await signUp(email, password);
       }
     } catch (error) {
+      if (!(error instanceof FirebaseError)) throw error;
       // No session exists yet, so the row is anonymous; detail.email keeps
       // the attempt attributable. Only an address-shaped value is recorded:
       // typing a password into the email box is a common slip, and logging

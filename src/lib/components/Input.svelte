@@ -1,15 +1,17 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
 
+  interface Props {
+    label: string;
+    inputId?: string;
+    children: Snippet;
+  }
+
   let {
     label,
     inputId = undefined,
     children
-  }: {
-    label: string;
-    inputId?: string;
-    children: Snippet;
-  } = $props();
+  }: Props = $props();
 </script>
 
 <style lang="scss">

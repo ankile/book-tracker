@@ -1,5 +1,10 @@
-<script>
-  let { icon, size = 20 } = $props();
+<script lang="ts">
+  interface Props {
+    icon: { path: string };
+    size?: number;
+  }
+
+  let { icon, size = 20 }: Props = $props();
 </script>
 
 <svg

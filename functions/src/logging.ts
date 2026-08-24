@@ -1,6 +1,6 @@
 import {getFirestore, Timestamp} from "firebase-admin/firestore";
 
-// Durable issue log shared with the client (src/lib/firebase/db.js writes
+// Durable issue log shared with the client (src/lib/firebase/db.ts writes
 // the same collection under rules validation): every row is a warn/error
 // worth surfacing, which is what lets the admin overview read the
 // collection wholesale with only a time filter. Never put secrets
@@ -13,7 +13,7 @@ interface Issue {
   uid?: string;
 }
 
-// Kept in step with ISSUE_RETENTION_DAYS in src/lib/firebase/db.js; the TTL
+// Kept in step with ISSUE_RETENTION_DAYS in src/lib/firebase/db.ts; the TTL
 // policy on expiresAt is what actually bounds the collection's growth.
 const RETENTION_DAYS = 90;
 

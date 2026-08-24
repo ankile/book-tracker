@@ -1,20 +1,22 @@
-<script>
+<script lang="ts">
   // When you read: minutes by start hour (raw local time) and by weekday
   // (3 AM-shifted, matching the heatmap's idea of a day).
   import BarChart from './charts/BarChart.svelte';
-  import { minutesByHour, minutesByWeekday } from '$lib/utils/sessions.js';
+  import { minutesByHour, minutesByWeekday } from '$lib/utils/sessions.ts';
+  import type { HourBucket, WeekdayBucket } from '$lib/interfaces/analytics.ts';
+  import type { BookUpdateView } from '$lib/interfaces/reading.ts';
 
-  let { sessions = [] } = $props();
+  let { sessions = [] }: { sessions?: BookUpdateView[] } = $props();
 
-  const hourLabel = (hour) => {
+  const hourLabel = (hour: number) => {
     if (hour === 0) return '12am';
     if (hour === 12) return '12pm';
     return hour < 12 ? `${hour}am` : `${hour - 12}pm`;
   };
 
-  const hoursTick = (minutes) => `${Math.round(minutes / 60)}h`;
+  const hoursTick = (minutes: number) => `${Math.round(minutes / 60)}h`;
 
-  const bucketTooltip = (name, bucket) => {
+  const bucketTooltip = (name: string, bucket: HourBucket | WeekdayBucket) => {
     const lines = [
       `${Math.round(bucket.minutes / 60)} hrs`,
       name,

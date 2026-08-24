@@ -3,25 +3,29 @@
   import ErrorBanner from "$lib/components/ErrorBanner.svelte";
   import type { Snippet } from "svelte";
 
-  let {
-    header = undefined,
-    open,
-    primaryAction = undefined,
-    primaryText = "Do it!",
-    secondaryText = "Close",
-    hideSecondary = false,
-    onclose,
-    children
-  }: {
+  interface Props {
     header?: string;
     open: boolean;
     primaryAction?: () => void;
+    primaryDisabled?: boolean;
     primaryText?: string;
     secondaryText?: string;
     hideSecondary?: boolean;
     onclose: () => void;
     children: Snippet;
-  } = $props();
+  }
+
+  let {
+    header = undefined,
+    open,
+    primaryAction = undefined,
+    primaryDisabled = false,
+    primaryText = "Do it!",
+    secondaryText = "Close",
+    hideSecondary = false,
+    onclose,
+    children
+  }: Props = $props();
 
   let dialogElement = $state<HTMLDialogElement>();
 
@@ -146,7 +150,7 @@
           <Button type="button" onclick={close}>{secondaryText}</Button>
         {/if}
         {#if primaryAction}
-          <Button primary type="submit">{primaryText}</Button>
+          <Button primary type="submit" disabled={primaryDisabled}>{primaryText}</Button>
         {/if}
       </div>
     </form>
