@@ -110,7 +110,7 @@
   function handleSubmit() {
     lookupError = "";
     if (!authorsLoaded) {
-      lookupError = 'Authors are still loading.';
+      lookupError = 'Authors loading.';
       return;
     }
     const titleResult = validateBookTitle(title);
@@ -127,8 +127,9 @@
       return;
     }
     const savedMetadata = $state.snapshot(metadata);
+    let write: Promise<void>;
     if (book === null) {
-      void Database.addBook({
+      write = Database.addBook({
         userId,
         authorChips,
         title: titleResult.title,
@@ -138,7 +139,7 @@
         metadata: savedMetadata,
       });
     } else {
-      void Database.updateBook({
+      write = Database.updateBook({
         userId,
         bookId: book.id,
         authorChips,
@@ -149,7 +150,9 @@
         metadata: savedMetadata,
       });
     }
-    onclose();
+    // reportWriteFailures renders the rejection in this modal's ErrorBanner;
+    // handling it here keeps the form open without an unhandled promise.
+    void write.then(onclose, () => {});
   }
 
   function handleDelete() {

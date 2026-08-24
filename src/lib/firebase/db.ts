@@ -166,14 +166,14 @@ function decodeStored<T>(decode: () => T): T {
   try {
     return decode();
   } catch (error) {
-    addError('Invalid stored data.');
+    addError('Invalid data.');
     // Anonymous clients can read public profiles, but allowing anonymous
     // decode telemetry would give anyone a free write-spam endpoint.
     if (auth.currentUser !== null) {
       logIssue({
         level: 'error',
         event: 'firestore.decode_failed',
-        message: 'Invalid stored data.',
+        message: 'Invalid data.',
       });
     }
     throw error;
