@@ -147,3 +147,5 @@ serviceAccountKey.json
 /enrich-*.txt
 /ol-cache.json
 /gb-cache.json
+/nb-cache.json
+/gr-cache.json

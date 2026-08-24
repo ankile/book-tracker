@@ -8,6 +8,7 @@
   import { normalizeIsbn } from "../utils/isbn.js";
   import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.js";
   import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.js";
+  import { nbSearchUrl, nbModsUrl, parseNbItem, extractModsGenres } from "../utils/nasjonalbiblioteket.js";
   import { lookupIsbn } from "../firebase/functions.js";
 
   let { open, userId, book = null, onclose } = $props();
@@ -28,7 +29,6 @@
     });
     return () => {
       unsubscribeStore();
-      store.unsubscribe();
       authorList = [];
       authorsLoaded = false;
     };
@@ -157,21 +157,23 @@
     lookupError = "";
 
     try {
-      // Two sources, same split as the backfill migrations: Open Library
-      // is primary (richer subject lists, stable cover URLs) and Google
-      // Books fills what it left empty — above all fiction/non-fiction,
-      // which its BISAC categories answer and OL's subjects often don't.
+      // Three sources, same order as the backfill migrations: Open Library
+      // is primary (richer subject lists, stable cover URLs), Google Books
+      // fills what it left empty — above all fiction/non-fiction, which
+      // its BISAC categories answer and OL's subjects often don't — and
+      // Nasjonalbiblioteket covers Norwegian editions neither one knows.
       const openLibrary = await fetchOpenLibrary(normalized);
       const google = await fetchGoogleBooks(normalized);
+      const nb = await fetchNasjonalbiblioteket(normalized);
 
-      if (openLibrary === null && google === null) {
+      if (openLibrary === null && google === null && nb === null) {
         lookupError = "No book found for this ISBN";
         return;
       }
 
       // Auto-fill fields (always overwrite when looking up). Whichever
-      // source answered wins for the plain fields; OL first when both did.
-      const primary = openLibrary ?? google;
+      // source answered wins for the plain fields, in source order.
+      const primary = openLibrary ?? google ?? nb;
 
       if (primary.title) {
         title = primary.title;
@@ -181,20 +183,20 @@
         authorChips = primary.authorNames.map((name) => resolveChip(name, authorList));
       }
 
-      if (primary.pageCount) {
-        pageCount = primary.pageCount;
-      } else if (google?.pageCount) {
-        pageCount = google.pageCount;
-      }
+      pageCount = primary.pageCount || google?.pageCount || nb?.pageCount || pageCount;
 
-      const fromPrimary = {
+      // Each source in turn fills only what is still empty.
+      let merged = {
         coverUrl: primary.coverUrl,
         publisher: primary.publisher,
         publishedDate: primary.publishedDate,
         subjects: primary.subjects,
         fiction: primary.fiction,
       };
-      metadata = { ...fromPrimary, ...(google === null ? {} : mergeMetadata(fromPrimary, google)) };
+      for (const source of [google, nb]) {
+        if (source !== null) merged = { ...merged, ...mergeMetadata(merged, source) };
+      }
+      metadata = merged;
 
     } catch (error) {
       lookupError = "Failed to look up ISBN. Please try again.";
@@ -216,6 +218,29 @@
     const data = await response.json();
     const record = data[`ISBN:${isbn13}`];
     return record === undefined ? null : parseOpenLibraryBook(record);
+  }
+
+  // Nasjonalbiblioteket is called straight from the browser (open, no key,
+  // and it reflects CORS origins). Genres — the fiction/non-fiction signal
+  // for Norwegian books — live in the separate MODS record. Cover scans
+  // are skipped here: they are restricted for in-copyright books, and the
+  // modal has no way to verify one before showing it.
+  async function fetchNasjonalbiblioteket(isbn13) {
+    try {
+      const response = await fetch(nbSearchUrl(isbn13));
+      if (!response.ok) throw new Error(`Nasjonalbiblioteket ${response.status}`);
+      const item = (await response.json())._embedded?.items?.[0];
+      if (item === undefined) return null;
+
+      const mods = await fetch(nbModsUrl(item.id));
+      if (!mods.ok) throw new Error(`Nasjonalbiblioteket MODS ${mods.status}`);
+      const parsed = parseNbItem(item, extractModsGenres(await mods.text()));
+      delete parsed.urn;
+      return parsed;
+    } catch (error) {
+      console.error("Nasjonalbiblioteket lookup failed", error);
+      return null;
+    }
   }
 
   // Google Books runs through a callable (it proxies a metered API key).
