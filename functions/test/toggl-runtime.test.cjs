@@ -346,7 +346,7 @@ test("an expired queue quota resets before remote work", async (t) => {
   assert.equal(expired.quotaWrites[0].type, "set");
 });
 
-test("an exhausted queue quota becomes terminal without config or fetch", async (t) => {
+test("an exhausted queue quota defers without consuming an attempt", async (t) => {
   const store = installQueueStore(t, queueItem(), {
     quota: {windowStartedAt: Timestamp.now(), count: 10},
   });
@@ -356,13 +356,43 @@ test("an exhausted queue quota becomes terminal without config or fetch", async 
     throw new Error("fetch must not run");
   });
 
-  await deployed.toggl.syncqueue.run(store.event);
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /Eventarc will retry/,
+  );
   assert.equal(fetchCalls, 0);
   assert.equal(store.configReads, 0);
-  assert.equal(store.transactionUpdates[0].status, "error");
-  assert.equal(store.transactionUpdates[0].attempts, 5);
-  assert.match(store.transactionUpdates[0].error, /hourly limit/);
-  assert.ok(store.transactionUpdates[0].expiresAt instanceof Timestamp);
+  assert.deepEqual(store.transactionUpdates, []);
+  assert.deepEqual(store.quotaWrites, []);
+  assert.equal(store.queueUpdates.length, 0);
+});
+
+test("quota deferral preserves a pending item's existing retry budget", async (t) => {
+  const claimedAt = Timestamp.now();
+  const item = queueItem({
+    attempts: 4,
+    claimedAt,
+    retryRequestedAt: Timestamp.now(),
+    error: "previous failure",
+  });
+  const store = installQueueStore(t, item, {
+    quota: {windowStartedAt: Timestamp.now(), count: 10},
+  });
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /Eventarc will retry/,
+  );
+  assert.deepEqual(store.transactionUpdates, []);
+  assert.deepEqual(store.quotaWrites, []);
+  assert.equal(fetchCalls, 0);
+  assert.equal(item.attempts, 4);
+  assert.equal(item.claimedAt, claimedAt);
 });
 
 test("a malformed queue quota fails closed without fetch", async (t) => {

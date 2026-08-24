@@ -67,7 +67,7 @@ test('Firestore serializes simultaneous starts on different books', async (t) =>
   assert.equal(snapshot.docs.filter((book) => book.data().activeTimer !== null).length, 1);
 });
 
-test('one remaining queue slot serializes simultaneous claims', async (t) => {
+test('one remaining queue slot defers and later recovers the other claim', async (t) => {
   await userRef.set({
     uid,
     email: 'timer@example.com',
@@ -98,7 +98,7 @@ test('one remaining queue slot serializes simultaneous claims', async (t) => {
     fetchCalls += 1;
     return new Response(JSON.stringify({id: 200 + fetchCalls}), {status: 200});
   });
-  await Promise.all([
+  const firstResults = await Promise.allSettled([
     deployed.toggl.syncqueue.run({
       data: {after: first},
       params: {uid, queueId: 'first'},
@@ -109,11 +109,35 @@ test('one remaining queue slot serializes simultaneous claims', async (t) => {
     }),
   ]);
 
+  assert.equal(firstResults.filter((result) => result.status === 'fulfilled').length, 1);
+  const deferred = firstResults.find((result) => result.status === 'rejected');
+  assert.ok(deferred && deferred.status === 'rejected');
+  assert.match(String(deferred.reason), /Eventarc will retry/);
   assert.equal(fetchCalls, 1);
   assert.equal((await quotaRef.get()).data()?.count, 10);
-  const remaining = await queue.get();
+  let remaining = await queue.get();
   assert.equal(remaining.size, 1);
-  assert.equal(remaining.docs[0].data().status, 'error');
-  assert.equal(remaining.docs[0].data().attempts, 5);
-  assert.match(remaining.docs[0].data().error, /hourly limit/);
+  assert.equal(remaining.docs[0].data().status, 'pending');
+  assert.equal(remaining.docs[0].data().attempts, undefined);
+
+  await quotaRef.set({
+    windowStartedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    count: 10,
+  });
+  const retried = await remaining.docs[0].ref.get();
+  await Promise.all([
+    deployed.toggl.syncqueue.run({
+      data: {after: retried},
+      params: {uid, queueId: retried.id},
+    }),
+    deployed.toggl.syncqueue.run({
+      data: {after: retried},
+      params: {uid, queueId: retried.id},
+    }),
+  ]);
+
+  assert.equal(fetchCalls, 2);
+  assert.equal((await quotaRef.get()).data()?.count, 1);
+  remaining = await queue.get();
+  assert.equal(remaining.empty, true);
 });

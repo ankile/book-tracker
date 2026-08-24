@@ -84,6 +84,13 @@ class OutcomeUnknownError extends Error {
   }
 }
 
+class QueueQuotaDeferredError extends Error {
+  constructor() {
+    super("Toggl queue hourly limit reached; Eventarc will retry.");
+    this.name = "QueueQuotaDeferredError";
+  }
+}
+
 type StartClaimResult =
   | {status: "claimed"; title: string}
   | {status: "recovered-unknown"};
@@ -597,7 +604,9 @@ async function syncQueueItem(
 // terminal outcome-unknown state before the remote call, which also covers
 // crashes after Toggl accepts the request. Every rules-permitted invocation,
 // including malformed data, consumes the transactional per-user quota before
-// remote work; server-owned expiry bounds terminal-row retention.
+// remote work; server-owned expiry bounds terminal-row retention. Quota
+// overflow leaves the row pending and throws so Eventarc redelivers it after
+// backoff without spending a remote-attempt slot.
 // timeoutSeconds leaves headroom for the 429 backoff; maxInstances limits
 // reconnect bursts.
 exports.syncqueue = onDocumentWritten(
@@ -606,6 +615,9 @@ exports.syncqueue = onDocumentWritten(
     region: "europe-west1",
     timeoutSeconds: 120,
     maxInstances: 5,
+    // Also retries malformed quota documents until an operator repairs them;
+    // the pending queue row stays intact instead of being discarded.
+    retry: true,
   },
   async (event) => {
     const after = event.data?.after;
@@ -618,6 +630,7 @@ exports.syncqueue = onDocumentWritten(
     );
     const claim = await db.runTransaction<
       | {status: "claimed"; item: TogglQueueDocument}
+      | {status: "deferred"}
       | {status: "malformed"; error: string}
       | null
     >(async (tx) => {
@@ -633,15 +646,7 @@ exports.syncqueue = onDocumentWritten(
           quota.windowStartedAt.toMillis() >
             now.toMillis() - TOGGL_QUEUE_WINDOW_MS &&
           quota.count >= TOGGL_QUEUE_LIMIT) {
-        tx.update(after.ref, {
-          status: "error",
-          attempts: MAX_QUEUE_ATTEMPTS,
-          claimedAt: now,
-          expiresAt,
-          error: "Toggl queue hourly limit reached.",
-          retryRequestedAt: FieldValue.delete(),
-        });
-        return null;
+        return {status: "deferred"};
       }
 
       let current: TogglQueueDocument;
@@ -695,6 +700,7 @@ exports.syncqueue = onDocumentWritten(
       return {status: "claimed", item: current};
     });
     if (claim === null) return;
+    if (claim.status === "deferred") throw new QueueQuotaDeferredError();
     if (claim.status === "malformed") throw new Error(claim.error);
     const claimedItem = claim.item;
 

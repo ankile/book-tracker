@@ -77,6 +77,10 @@ test("preserves the Firestore and Authentication event contracts", () => {
     "google.cloud.firestore.document.v1.written",
   );
   assert.equal(
+    functions.toggl.syncqueue.__endpoint.eventTrigger.retry,
+    true,
+  );
+  assert.equal(
     functions.toggl.syncqueue.__endpoint.eventTrigger
       .eventFilterPathPatterns.document,
     "users/{uid}/togglQueue/{queueId}",
