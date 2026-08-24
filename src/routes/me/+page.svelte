@@ -16,6 +16,7 @@
   import { Database } from '$lib/firebase/db.js';
   import { togglSaveToken } from '$lib/firebase/functions.js';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.js';
+  import { countIsbnProblems } from '$lib/utils/metadataHealth.js';
   import {
     computeStats,
     computeBooksByYear,
@@ -110,6 +111,10 @@
       },
     };
   });
+
+  // Books whose metadata cannot be filled in without a human: no ISBN, or
+  // one that fails its check digit. The /isbns page repairs them.
+  let isbnProblems = $derived(countIsbnProblems(allBooks ?? []));
 
   // Author docs, for the Authors management card's count.
   let authorList = $state(undefined);
@@ -1114,6 +1119,8 @@
         subtext={stats.firstFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
       <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
       <StatCard label="Authors" value={authorList?.length ?? '…'} subtext="Rename, merge, sort names" href="/authors" />
+      <StatCard label="Needs an ISBN" value={allBooks === undefined ? '…' : isbnProblems}
+        subtext="Missing or mistyped, so no cover or genre" href="/isbns" />
       <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}
         subtext={`${stats.totalPagesRead.toLocaleString()} pages${stats.firstBookAddedAt ? ` since ${formatMonthYear(stats.firstBookAddedAt)}` : ' read'}`} />
       <StatCard label="Books Per Year" value={stats.booksPerYear}
