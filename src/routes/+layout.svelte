@@ -15,6 +15,37 @@
   // just a "Go to app" link to /, which the gate below resolves to the
   // login screen when signed out and Currently Reading when signed in.
   const publicRoute = $derived(page.route.id?.startsWith('/profiles') ?? false);
+
+  // Let the requested page paint first, then load the other private routes'
+  // code and data. The timeout prevents a busy tab from postponing the work
+  // forever. The subscriptions stay alive until sign-out or a public route.
+  $effect(() => {
+    const userId = $user?.uid;
+    if (!userId || publicRoute) return;
+
+    let cancelled = false;
+    let stopPrefetch;
+    const start = async () => {
+      const { startAppPrefetch } = await import('$lib/app-prefetch.js');
+      if (cancelled) return;
+      stopPrefetch = startAppPrefetch(userId);
+    };
+
+    let cancelStart;
+    if ('requestIdleCallback' in window) {
+      const idleId = window.requestIdleCallback(start, { timeout: 1500 });
+      cancelStart = () => window.cancelIdleCallback(idleId);
+    } else {
+      const timeoutId = window.setTimeout(start, 0);
+      cancelStart = () => window.clearTimeout(timeoutId);
+    }
+
+    return () => {
+      cancelled = true;
+      cancelStart();
+      stopPrefetch?.();
+    };
+  });
 </script>
 
 <style>

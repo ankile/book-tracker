@@ -53,10 +53,7 @@
       const unsubscribe = booksStore.subscribe((books) => {
         allBooks = books;
       });
-      return () => {
-        unsubscribe();
-        booksStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
@@ -71,10 +68,7 @@
       const unsubscribe = sessionsStore.subscribe((sessions) => {
         allSessions = sessions;
       });
-      return () => {
-        unsubscribe();
-        sessionsStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
   // aggregateSessionsByDay filters to reading-only itself, so the heatmap
@@ -122,10 +116,7 @@
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
-      return () => {
-        unsubscribe();
-        authorsStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
@@ -137,10 +128,7 @@
       const unsubscribe = userStore.subscribe((data) => {
         userDoc = data;
       });
-      return () => {
-        unsubscribe();
-        userStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
@@ -172,10 +160,7 @@
     if ($user) {
       const profileStore = Database.getMyProfile($user.uid);
       const unsubscribe = profileStore.subscribe((data) => (myProfile = data));
-      return () => {
-        unsubscribe();
-        profileStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 

@@ -4,7 +4,6 @@ import {
   doc,
   query,
   where,
-  orderBy,
   onSnapshot,
   addDoc,
   setDoc,
@@ -23,10 +22,11 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager
 } from 'firebase/firestore';
-import { writable } from 'svelte/store';
+import { derived } from 'svelte/store';
 import { app } from './index.js';
 import { auth } from './auth.js';
 import { addError } from '../stores/errors.js';
+import { cachedReadable } from '../stores/cached-readable.js';
 import { isFinished } from '../utils/finished.js';
 import { authorIdFor, joinPersonName } from '../utils/authors.js';
 
@@ -58,6 +58,25 @@ const listenError = (label) => (error) => {
   addError(`Couldn't ${label} (${error.code}).`);
   logIssue({ level: 'error', event: 'firestore.listener_failed', message: `Couldn't ${label}`, code: error.code });
 };
+
+// Firestore's IndexedDB cache survives reloads, but each new listener still
+// delivers its first snapshot asynchronously. Keep one store per query in
+// module memory so route remounts can render the last snapshot immediately.
+// cachedReadable stops unused Firestore listeners while retaining their data.
+const userStores = new Map();
+const booksStores = new Map();
+const allBooksStores = new Map();
+const authorsStores = new Map();
+const profileStores = new Map();
+const readingSessionsStores = new Map();
+const allReadingSessionsStores = new Map();
+
+function cachedStore(cache, key, initialValue, start) {
+  if (!cache.has(key)) {
+    cache.set(key, cachedReadable(initialValue, start));
+  }
+  return cache.get(key);
+}
 
 // How long a logged issue is kept. Written as an absolute expiry because
 // that is what a Firestore TTL policy consumes: the policy deletes a doc
@@ -143,41 +162,28 @@ class Database {
   // loaded" from the first snapshot; user docs always exist (created by
   // the createUserDocument auth trigger).
   static getUser(userId) {
-    const store = writable(undefined);
-
-    const unsubscribe = onSnapshot(doc(db, 'users', userId), (snapshot) => {
-      store.set(snapshot.data() ?? null);
-    }, listenError('load your profile'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+    return cachedStore(userStores, userId, undefined, (set) => (
+      onSnapshot(doc(db, 'users', userId), (snapshot) => {
+        set(snapshot.data() ?? null);
+      }, listenError('load your profile'))
+    ));
   }
 
   // Returns a Svelte store that listens to book updates
   static getBooks(userId, finished) {
-    const store = writable([]);
-
-    const q = query(
-      collection(db, 'users', userId, 'books'),
-      where('finished', '==', finished),
-      orderBy('updatedAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const books = [];
-      snapshot.forEach((doc) => {
-        books.push({ id: doc.id, ...doc.data() });
-      });
-      store.set(books);
-    }, listenError('load your books'));
-
-    // Return store with unsubscribe method
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+    const key = `${userId}:${finished}`;
+    if (!booksStores.has(key)) {
+      booksStores.set(key, derived(this.getAllBooks(userId), (books) => (
+        (books ?? [])
+          .filter((book) => book.finished === finished)
+          .toSorted((a, b) => {
+            const aTime = a.updatedAt?.toMillis?.() ?? 0;
+            const bTime = b.updatedAt?.toMillis?.() ?? 0;
+            return bTime - aTime;
+          })
+      )));
+    }
+    return booksStores.get(key);
   }
 
   // Returns a Svelte store with all books (for statistics). Deliberately
@@ -190,22 +196,17 @@ class Database {
   // profile sync must be able to tell "no snapshot yet" from "library is
   // empty", or it would publish zeroed stats on every page load.
   static getAllBooks(userId) {
-    const store = writable(undefined);
+    return cachedStore(allBooksStores, userId, undefined, (set) => {
+      const q = query(collection(db, 'users', userId, 'books'));
 
-    const q = query(collection(db, 'users', userId, 'books'));
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const books = [];
-      snapshot.forEach((doc) => {
-        books.push({ id: doc.id, ...doc.data() });
-      });
-      store.set(books);
-    }, listenError('load your books'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+      return onSnapshot(q, (snapshot) => {
+        const books = [];
+        snapshot.forEach((doc) => {
+          books.push({ id: doc.id, ...doc.data() });
+        });
+        set(books);
+      }, listenError('load your books'));
+    });
   }
 
   // All author docs, for autocomplete and the book-list join. Deliberately
@@ -213,23 +214,18 @@ class Database {
   // client-side. Starts as undefined (loading, getUser convention) so the
   // join can distinguish "not yet loaded" from an empty collection.
   static getAuthors(userId) {
-    const store = writable(undefined);
+    return cachedStore(authorsStores, userId, undefined, (set) => {
+      const q = query(collection(db, 'users', userId, 'authors'));
 
-    const q = query(collection(db, 'users', userId, 'authors'));
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const authors = [];
-      snapshot.forEach((doc) => {
-        authors.push({ id: doc.id, ...doc.data() });
-      });
-      authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
-      store.set(authors);
-    }, listenError('load your authors'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+      return onSnapshot(q, (snapshot) => {
+        const authors = [];
+        snapshot.forEach((doc) => {
+          authors.push({ id: doc.id, ...doc.data() });
+        });
+        authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
+        set(authors);
+      }, listenError('load your authors'));
+    });
   }
 
   // The signed-in user's own public profile doc, found by uid because the
@@ -237,19 +233,14 @@ class Database {
   // The rules restrict list to uid == auth.uid, which this query provably
   // satisfies. undefined → loading, null → no profile (getUser convention).
   static getMyProfile(userId) {
-    const store = writable(undefined);
+    return cachedStore(profileStores, userId, undefined, (set) => {
+      const q = query(collection(db, 'profiles'), where('uid', '==', userId));
 
-    const q = query(collection(db, 'profiles'), where('uid', '==', userId));
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const profileDoc = snapshot.docs[0];
-      store.set(profileDoc ? { username: profileDoc.id, ...profileDoc.data() } : null);
-    }, listenError('load your public profile'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+      return onSnapshot(q, (snapshot) => {
+        const profileDoc = snapshot.docs[0];
+        set(profileDoc ? { username: profileDoc.id, ...profileDoc.data() } : null);
+      }, listenError('load your public profile'));
+    });
   }
 
   // One-shot read for the /profiles/<username> page; null when the profile
@@ -672,33 +663,28 @@ class Database {
   }
 
   static getReadingSessions(userId, bookId) {
-    const store = writable([]);
+    return cachedStore(readingSessionsStores, `${userId}:${bookId}`, [], (set) => {
+      const q = query(
+        collection(db, 'users', userId, 'books', bookId, 'updates')
+      );
 
-    const q = query(
-      collection(db, 'users', userId, 'books', bookId, 'updates')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const sessions = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        if (data.type === 'reading') {
-          sessions.push({ id: doc.id, ...data });
-        }
-      });
-      // Sort by createdAt descending on the client side
-      sessions.sort((a, b) => {
-        const aTime = a.createdAt?.toMillis?.() || 0;
-        const bTime = b.createdAt?.toMillis?.() || 0;
-        return bTime - aTime;
-      });
-      store.set(sessions);
-    }, listenError('load reading sessions'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+      return onSnapshot(q, (snapshot) => {
+        const sessions = [];
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          if (data.type === 'reading') {
+            sessions.push({ id: doc.id, ...data });
+          }
+        });
+        // Sort by createdAt descending on the client side
+        sessions.sort((a, b) => {
+          const aTime = a.createdAt?.toMillis?.() || 0;
+          const bTime = b.createdAt?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+        set(sessions);
+      }, listenError('load reading sessions'));
+    });
   }
 
   // Get all update docs across all books for a user using collectionGroup:
@@ -709,27 +695,22 @@ class Database {
   // Me page's profile sync must be able to tell "no snapshot yet" from "no
   // sessions", or it would blank the published heatmap on page load.
   static getAllReadingSessions(userId) {
-    const store = writable(undefined);
+    return cachedStore(allReadingSessionsStores, userId, undefined, (set) => {
+      const ownerRef = doc(db, 'users', userId);
+      const q = query(
+        collectionGroup(db, 'updates'),
+        where('owner', '==', ownerRef),
+        where('type', 'in', ['reading', 'update'])
+      );
 
-    const ownerRef = doc(db, 'users', userId);
-    const q = query(
-      collectionGroup(db, 'updates'),
-      where('owner', '==', ownerRef),
-      where('type', 'in', ['reading', 'update'])
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const sessions = [];
-      snapshot.forEach((doc) => {
-        sessions.push({ id: doc.id, ...doc.data() });
-      });
-      store.set(sessions);
-    }, listenError('load reading sessions'));
-
-    return {
-      subscribe: store.subscribe,
-      unsubscribe
-    };
+      return onSnapshot(q, (snapshot) => {
+        const sessions = [];
+        snapshot.forEach((doc) => {
+          sessions.push({ id: doc.id, ...doc.data() });
+        });
+        set(sessions);
+      }, listenError('load reading sessions'));
+    });
   }
 }
 

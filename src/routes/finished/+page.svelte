@@ -17,10 +17,7 @@
       const unsubscribe = booksStore.subscribe((data) => {
         allBooks = data;
       });
-      return () => {
-        unsubscribe();
-        booksStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
@@ -41,10 +38,7 @@
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
-      return () => {
-        unsubscribe();
-        authorsStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
   let authorMap = $derived(authorList === undefined ? null : new Map(authorList.map((a) => [a.id, a])));

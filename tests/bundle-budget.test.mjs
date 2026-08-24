@@ -35,9 +35,11 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // stats module, hand-rolled bar/line chart primitives, and six section
   // components (speed, clock, cadence, in-progress, authors, records,
   // ~7 KiB), plus headroom.
+  // Total raised 290 -> 292 KiB for signed-in app prefetch: the idle
+  // lifecycle and dynamic prefetch entry add just under 1 KiB.
   assert.ok(
-    totalBytes <= 290 * 1024,
-    `Expected at most 290 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 292 * 1024,
+    `Expected at most 292 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

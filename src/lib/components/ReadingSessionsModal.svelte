@@ -17,10 +17,7 @@
       const unsubscribeStore = sessionsStore.subscribe((data) => {
         sessions = data;
       });
-      return () => {
-        unsubscribeStore();
-        sessionsStore.unsubscribe();
-      };
+      return unsubscribeStore;
     }
   });
 

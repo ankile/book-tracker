@@ -37,10 +37,7 @@
     if (booksProp !== null) return;
     const booksStore = Database.getBooks(userId, finished);
     const unsubscribe = booksStore.subscribe((data) => (fetchedBooks = data));
-    return () => {
-      unsubscribe();
-      booksStore.unsubscribe();
-    };
+    return unsubscribe;
   });
   let books = $derived(booksProp ?? fetchedBooks);
 
@@ -52,10 +49,7 @@
   $effect(() => {
     const authorsStore = Database.getAuthors(userId);
     const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
-    return () => {
-      unsubscribe();
-      authorsStore.unsubscribe();
-    };
+    return unsubscribe;
   });
   let authorMap = $derived(authorList === undefined ? null : new Map(authorList.map((a) => [a.id, a])));
 
@@ -80,10 +74,7 @@
     if (finished) return; // timer UI never renders on the finished list
     const userStore = Database.getUser(userId);
     const unsubscribe = userStore.subscribe((data) => (userDoc = data));
-    return () => {
-      unsubscribe();
-      userStore.unsubscribe();
-    };
+    return unsubscribe;
   });
   let userLoaded = $derived(userDoc !== undefined);
   let hasToggl = $derived(!!userDoc?.toggl);

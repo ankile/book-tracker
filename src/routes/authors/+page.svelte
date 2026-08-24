@@ -10,10 +10,7 @@
     if ($user) {
       const authorsStore = Database.getAuthors($user.uid);
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
-      return () => {
-        unsubscribe();
-        authorsStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
@@ -22,10 +19,7 @@
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
       const unsubscribe = booksStore.subscribe((data) => (allBooks = data ?? []));
-      return () => {
-        unsubscribe();
-        booksStore.unsubscribe();
-      };
+      return unsubscribe;
     }
   });
 
