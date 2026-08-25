@@ -44,9 +44,14 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 298 -> 299 KiB for runtime validation of the server-owned
   // Toggl queue expiry field. The check adds under 0.1 KiB; the one-byte
   // headroom at 298 KiB could not accommodate a new persisted field safely.
+  // Total raised 299 -> 303 KiB for the reviewed correctness fixes that keep
+  // corrupt author/admin records repairable, surface authentication failures,
+  // preserve offline reading writes, and serialize timer lifecycle claims.
+  // A build at the prior budget-setting commit measures 298.0 KiB; the timer
+  // claim work itself adds under 1 KiB and the complete reviewed set adds 3.9 KiB.
   assert.ok(
-    totalBytes <= 299 * 1024,
-    `Expected at most 299 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 303 * 1024,
+    `Expected at most 303 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,
