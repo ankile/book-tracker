@@ -83,10 +83,17 @@ test('the strict-TypeScript rollback runbook preserves compatible release stages
   assert.match(rollback, /repository has no GitHub Actions[\s\S]*Merge only:[\s\S]*revert the merge commit/i);
   assert.match(rollback, /New rules only:[\s\S]*firestore:rules[\s\S]*Do not deploy `--only firestore`/i);
   assert.match(rollback, /New Functions, before timer migration:[\s\S]*wait for the superseded invocations to drain[\s\S]*firestore:rules/i);
-  assert.match(rollback, /After timer migration, before new Hosting:[\s\S]*Reconcile every affected Toggl entry/i);
+  assert.match(
+    rollback,
+    /After timer migration, before new Hosting:[\s\S]*Rollback is unsupported[\s\S]*no enforced gate[\s\S]*purpose-built repair migration/i,
+  );
   assert.match(rollback, /After new Hosting has ever been exposed:[\s\S]*do \*\*not\*\* roll back Hosting,[\s\S]*fix forward/i);
   assert.match(rollback, /Never roll back Functions alone[\s\S]*Never roll back Hosting alone/i);
-  assert.match(rollback, /Do not use `db-restore\.ts` for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
+  assert.match(rollback, /Do not use `db-restore\.ts`\s+for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
+  assert.match(
+    rollback,
+    /local snapshot is only a targeted recovery aid[\s\S]*without a shared read[\s\S]*does not currently provide enforced write quiescence/i,
+  );
 });
 
 test('the progress migration traverses phantom users and logs the applied transaction patch', async () => {

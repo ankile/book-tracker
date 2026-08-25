@@ -196,8 +196,9 @@ record these together in the rollout log:
   annotated tag at the latter;
 - the current Firebase Hosting release ID and timestamp from the console;
 - the deployed Functions set/revisions and Firestore rules release;
-- the pre-migration audit, the fresh snapshot filename, and the operator/time
-  for every stage.
+- the operator and start time. Append each stage's audit output and both fresh
+  migration snapshot filenames, timestamps, and checksums when they are
+  created.
 
 The timer migration and Hosting deployment are release gates, not a single
 all-at-once deploy. Use this rollback matrix:
@@ -209,35 +210,41 @@ all-at-once deploy. Use this rollback matrix:
 3. **New Functions, before timer migration:** deploy Functions from the
    pre-release tag, wait for the superseded invocations to drain, then deploy
    only the pre-release `firestore:rules`.
-4. **After timer migration, before new Hosting:** prefer a current-schema
-   fix-forward. If rollback is unavoidable, first stop timer activity and
-   require no `starting`, `stopping`, `outcome-unknown`, `processing`, or
-   retryable `pending` operation. Reconcile every affected Toggl entry, deploy
-   pre-release Functions, wait for invocations to drain, and finally deploy
-   only the pre-release rules. The old application ignores the additive
-   lifecycle documents, but may make them stale; a later forward attempt needs
-   a purpose-built repair migration and a fresh audit.
+4. **After timer migration, before new Hosting:** fix forward with the current
+   schema. Rollback is unsupported with the repository's current artifacts:
+   there is no enforced gate that can freeze callable timer activity, drain
+   Eventarc while retaining its queue worker, or inventory and reconcile the
+   Firestore queue against remote Toggl state. A rollback would first require
+   those tested controls plus a purpose-built repair migration; a clean audit
+   alone can race with a new client call or invocation.
 5. **After new Hosting has ever been exposed:** do **not** roll back Hosting,
    Functions, or rules to the pre-release contract. An already-running or
    offline cached new bundle can outlive a Hosting rollback, while old and new
    clients require incompatible atomic Firestore writes. Keep the current
-   schema contract and fix forward; if necessary, deploy a current-schema
-   maintenance UI while investigating. This remains true after the progress
-   backfill.
+   schema contract and fix forward. A current-schema maintenance UI can reduce
+   new sessions while investigating, but is not a write freeze because cached
+   clients outlive it. This remains true after the progress backfill.
 
 Never roll back Functions alone after timer migration: old queue handling can
 complete a remote Toggl stop without clearing the correlated Firestore claim.
 Never roll back Hosting alone after the progress backfill: old reading batches
 omit `currentPageUpdateId` and are rejected atomically by the new rules.
 
-PITR, managed backups, and the local snapshots below protect data, but they are
-disaster recovery rather than an application rollback. They cannot undo a
-remote Toggl API call. Do not use `db-restore.ts` for an ordinary release
-rollback: its live copy-back is non-atomic, intentionally skips Toggl queue
-rows, and does not delete documents created after the snapshot. If actual data
-loss requires recovery, stop writes first, inventory the live and recovery
-databases explicitly, reconcile Toggl separately, and approve the exact
-copy-back/deletion plan before applying it.
+PITR and managed backups are the coherent full-database recovery sources. A
+local snapshot is only a targeted recovery aid unless an enforced write freeze
+exists: `db-snapshot.ts` reads documents concurrently without a shared read
+time. These mechanisms are disaster recovery rather than an application
+rollback, and none can undo a remote Toggl API call. Do not use `db-restore.ts`
+for an ordinary release rollback: its live copy-back is non-atomic,
+intentionally skips Toggl queue rows, and does not delete documents created
+after the snapshot.
+
+The repository does not currently provide enforced write quiescence or
+side-effect-trigger suspension, so full-database copy-back is not a ready-to-run
+release procedure. If actual data loss requires it, first build and test an
+incident-specific gate for clients, callables, and triggers; then inventory the
+live and recovery databases explicitly, reconcile Toggl separately, and
+approve the exact copy-back/deletion plan before applying it.
 
 ### 4. Production run
 
@@ -316,7 +323,10 @@ with `--account=lars.ankile@gmail.com` per command.
 
 **PITR and backups restore into a NEW named database — never in-place, and
 never repoint the app.** The app, its rules, and the gen1 trigger binding
-all belong to `(default)`. Recovery is always copy-back:
+all belong to `(default)`. Recovery is always copy-back. The commands below
+select and stage a coherent source; they are not authorization to apply it
+without the write-quiescence, inventory, trigger, deletion, and Toggl plan
+required above:
 
 ```sh
 gcloud firestore databases restore \

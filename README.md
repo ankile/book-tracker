@@ -294,7 +294,9 @@ claim-aware web client is exposed. Before deploying, complete the
 [release record and rollback gates](MIGRATIONS.md#strict-typescript-release-record-and-rollback-boundary).
 After the new Hosting bundle has been exposed, keep the current schema contract
 and fix forward; cached old and new bundles make a blind full-stack rollback
-unsafe.
+unsafe. With the current release artifacts, the fix-forward boundary begins
+when the timer migration is applied because the repository has no enforced
+timer/queue write freeze.
 
 ```bash
 # 1. Reject uncorrelated legacy timer writes.
