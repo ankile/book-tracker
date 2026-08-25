@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   // In-progress books: projected finish dates for the active ones, the
   // dusty shelf for the stalled ones, and the finish-habit summary line.
   import {
@@ -6,11 +6,20 @@
     dustyShelf,
     daysToFinishSummary,
     completionRate,
-  } from '$lib/utils/sessions.js';
+  } from '$lib/utils/sessions.ts';
+  import type { DustyBookView, ProjectionBookView } from '$lib/utils/sessions.ts';
+  import type { BookTimeline } from '$lib/interfaces/analytics.ts';
+  import type { BookUpdateView } from '$lib/interfaces/reading.ts';
 
   // timelines is the page-level buildBookTimelines result, computed once
   // and shared across sections.
-  let { sessions = [], books = [], timelines = new Map() } = $props();
+  let {
+    sessions = [], books = [], timelines = new Map(),
+  }: {
+    sessions?: BookUpdateView[];
+    books?: (DustyBookView & ProjectionBookView)[];
+    timelines?: Map<string, BookTimeline>;
+  } = $props();
 
   const now = $derived.by(() => {
     // Recomputed whenever the listeners tick; good enough for day math.
@@ -23,14 +32,14 @@
   const finishSummary = $derived(daysToFinishSummary(books, timelines));
   const rate = $derived(completionRate(books, timelines));
 
-  const formatProjection = (date) =>
-    date.toLocaleDateString('en-US', {
+  const formatProjection = (date: Date | null) =>
+    (date ?? new Date()).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
-      ...(date.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}),
+      ...(date !== null && date.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}),
     });
 
-  const formatAgo = (days) => {
+  const formatAgo = (days: number) => {
     if (days < 30) return `${days} days ago`;
     if (days < 365) return `${Math.round(days / 30)} months ago`;
     return `${(days / 365).toFixed(1)} years ago`;

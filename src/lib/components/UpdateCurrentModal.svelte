@@ -1,27 +1,34 @@
-<script>
+<script lang="ts">
   import ModalCard from "$lib/components/ModalCard.svelte";
   import Input from "$lib/components/Input.svelte";
-  import { validateCurrentPage } from "../utils/validation";
+  import { validateCurrentPage } from "../utils/validation.ts";
+  import type { Book } from "$lib/interfaces/book.ts";
 
-  let { book, onupdateCurrentPage, oncloseModal } = $props();
+  let {
+    book, onupdateCurrentPage, oncloseModal,
+  }: {
+    book: Book;
+    onupdateCurrentPage: (data: { id: string; currentPage: number; previousPage: number }) => void;
+    oncloseModal: () => void;
+  } = $props();
 
   let open = $derived(!!book);
 
-  let inputPages = $state(undefined);
+  let inputPages = $state<number | null | undefined>(undefined);
 
   function updateCurrentPage() {
-    const { valid, message } = validateCurrentPage({
+    const result = validateCurrentPage({
       inputPages,
       pageCount: book.pageCount,
     });
 
-    if (!valid) {
-      alert(message);
+    if (!result.valid) {
+      alert(result.message);
       return;
     }
     onupdateCurrentPage({
       id: book.id,
-      currentPage: Number.parseInt(inputPages),
+      currentPage: result.page,
       previousPage: book.currentPage,
     });
     oncloseModal();

@@ -1,27 +1,44 @@
-<script>
+<script lang="ts">
   import { page } from '$app/state';
-  import { user } from '$lib/firebase/auth.js';
-  import { Database } from '$lib/firebase/db.js';
-  import { formatTime } from '$lib/utils/format.js';
-  import { joinPersonName } from '$lib/utils/authors.js';
+  import { user } from '$lib/firebase/auth.ts';
+  import { Database } from '$lib/firebase/db.ts';
+  import { addError } from '$lib/stores/errors.ts';
+  import { formatTime } from '$lib/utils/format.ts';
+  import { joinPersonName } from '$lib/utils/authors.ts';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
   import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
+  import type { Profile } from '$lib/interfaces/profile.ts';
 
-  const username = $derived(page.params.username);
+  const username = $derived(page.params.username ?? '');
 
   // undefined → loading, null → no such profile, or one this viewer may
   // not see (the rules make those indistinguishable on purpose). The fetch
   // waits for the auth session to finish restoring: whether a private
   // profile is readable depends on who is asking, and firing before the
   // token is back would deny the owner their own page.
-  let profile = $state(undefined);
+  let profile = $state<Profile | null | undefined>(undefined);
+  let profileLoadFailed = $state(false);
   $effect(() => {
     if ($user === undefined) return;
+    const requestedUsername = username;
+    let current = true;
     profile = undefined;
-    Database.getProfile(username).then((data) => (profile = data));
+    profileLoadFailed = false;
+    Database.getProfile(requestedUsername).then(
+      (data) => {
+        if (current) profile = data;
+      },
+      (error: unknown) => {
+        if (!current) return;
+        console.error(error);
+        profileLoadFailed = true;
+        addError(`Couldn't load @${requestedUsername}.`);
+      },
+    );
+    return () => (current = false);
   });
 </script>
 
@@ -164,7 +181,9 @@
   }
 </style>
 
-{#if profile === undefined}
+{#if profileLoadFailed}
+  <p class="status-message">This profile could not be loaded. Try again after reconnecting.</p>
+{:else if profile === undefined}
   <p class="status-message">Loading…</p>
 {:else if profile === null}
   <p class="status-message">No profile found for "{username}".</p>

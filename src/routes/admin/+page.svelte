@@ -1,16 +1,16 @@
-<script>
-  import { adminOverview } from '$lib/firebase/functions.js';
-  import { addError } from '$lib/stores/errors.js';
+<script lang="ts">
+  import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
+  import { addError } from '$lib/stores/errors.ts';
 
-  let overview = $state(null);
+  let overview = $state<AdminOverview | null>(null);
   let failed = $state(false);
 
   $effect(() => {
-    adminOverview()
+    adminOverview({})
       .then((result) => (overview = result.data))
-      .catch((error) => {
+      .catch((error: unknown) => {
         failed = true;
-        addError(`Couldn't load the admin overview (${error.code ?? error.message}).`);
+        addError(`Couldn't load the admin overview (${error instanceof Error ? error.message : String(error)}).`);
       });
   });
 
@@ -26,12 +26,12 @@
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
-  function utc(ms) {
+  function utc(ms: number | null) {
     if (ms == null) return '—';
     return new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   }
 
-  function utcDay(ms) {
+  function utcDay(ms: number | null) {
     if (ms == null) return '—';
     return new Date(ms).toISOString().slice(0, 10);
   }
@@ -117,7 +117,8 @@
   }
 
   .badge-anomaly,
-  .badge-unverified {
+  .badge-unverified,
+  .badge-malformed {
     display: inline-block;
     margin-left: 0.5rem;
     padding: 0.1rem 0.4rem;
@@ -132,6 +133,11 @@
     background: #e9ecef;
     color: #495057;
     cursor: help;
+  }
+
+  .badge-malformed {
+    background: #f8d7da;
+    color: #842029;
   }
 
   .truncated {
@@ -272,7 +278,9 @@
                   <td>{utc(issue.at)}</td>
                   <td>
                     {issue.email}
-                    {#if !issue.emailVerified && issue.uid === null}
+                    {#if issue.malformed}
+                      <span class="badge-malformed">malformed row</span>
+                    {:else if !issue.emailVerified && issue.uid === null}
                       <span class="badge-unverified" title="Self-reported by an unauthenticated client; not tied to any account">unverified</span>
                     {/if}
                   </td>

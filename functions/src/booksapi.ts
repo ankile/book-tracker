@@ -1,5 +1,12 @@
 import * as functions from "firebase-functions/v1";
+import {getFirestore, Timestamp} from "firebase-admin/firestore";
 import {defineJsonSecret} from "firebase-functions/params";
+import {env} from "node:process";
+import {
+  decodeBooksApiVolume,
+  decodeIsbnLookupRequest,
+  GoogleVolumeInfo,
+} from "./decoders";
 
 interface FunctionConfig {
   booksapi: {
@@ -8,30 +15,40 @@ interface FunctionConfig {
   };
 }
 
-// The subset of Google Books' volumeInfo the client parses (see
-// src/lib/utils/googleBooks.js). Returned verbatim rather than reshaped
-// here so the parsing rules — including the fiction/non-fiction call —
-// live in one tested place shared with the backfill migrations.
-interface VolumeInfo {
-  title?: string;
-  authors?: string[];
-  publisher?: string;
-  publishedDate?: string;
-  pageCount?: number;
-  categories?: string[];
-  imageLinks?: {
-    smallThumbnail?: string;
-    thumbnail?: string;
-  };
-}
-
-interface BooksApiResponse {
-  totalItems: number;
-  items?: { volumeInfo: VolumeInfo }[];
-}
-
 const runtimeConfig =
   defineJsonSecret<FunctionConfig>("FUNCTIONS_CONFIG_EXPORT");
+const db = getFirestore();
+
+const LOOKUPS_PER_WINDOW = 60;
+const LOOKUP_WINDOW_MS = 60 * 60 * 1000;
+
+const invalidArgument = (message: string): never => {
+  throw new functions.https.HttpsError("invalid-argument", message);
+};
+
+async function consumeLookupQuota(uid: string): Promise<void> {
+  const quotaRef = db.doc(`users/${uid}/functionQuotas/booksApi`);
+  const now = Timestamp.now();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(quotaRef);
+    const data = snap.data();
+    const windowStartedAt = data?.windowStartedAt;
+    const count = data?.count;
+    if (!(windowStartedAt instanceof Timestamp) ||
+        typeof count !== "number" || !Number.isInteger(count) || count < 0 ||
+        windowStartedAt.toMillis() <= now.toMillis() - LOOKUP_WINDOW_MS) {
+      tx.set(quotaRef, {windowStartedAt: now, count: 1});
+      return;
+    }
+    if (count >= LOOKUPS_PER_WINDOW) {
+      throw new functions.https.HttpsError(
+        "resource-exhausted",
+        "Google Books lookup limit reached. Try again later.",
+      );
+    }
+    tx.update(quotaRef, {count: count + 1});
+  });
+}
 
 // Callable, not onRequest: this proxies a metered API key, so it must not
 // be reachable without an authenticated caller. (It replaces a public
@@ -41,7 +58,10 @@ const runtimeConfig =
 exports.lookupisbn = functions
   .runWith({secrets: [runtimeConfig]})
   .region("europe-west1")
-  .https.onCall(async (data, context): Promise<{volume: VolumeInfo | null}> => {
+  .https.onCall(async (
+    data: unknown,
+    context,
+  ): Promise<{volume: GoogleVolumeInfo | null}> => {
     if (context.auth === undefined) {
       throw new functions.https.HttpsError(
         "unauthenticated",
@@ -49,14 +69,16 @@ exports.lookupisbn = functions
       );
     }
 
-    const isbn: unknown = data?.isbn;
     // The client normalizes to a checksum-valid ISBN-13 before calling
-    // (utils/isbn.js); anything else is a bug or a hand-rolled request.
-    if (typeof isbn !== "string" || !/^\d{13}$/.test(isbn)) {
-      throw new functions.https.HttpsError(
-        "invalid-argument",
-        "isbn must be a 13-digit ISBN-13 string.",
-      );
+    // (utils/isbn.ts); anything else is a bug or a hand-rolled request.
+    const {isbn} = decodeIsbnLookupRequest(data, invalidArgument);
+    await consumeLookupQuota(context.auth.uid);
+
+    // Emulator rehearsals must not consume the production API key or quota.
+    // Open Library and Nasjonalbiblioteket can still populate the client; a
+    // null Google result exercises the normal partial-source merge path.
+    if (env.FUNCTIONS_EMULATOR === "true") {
+      return {volume: null};
     }
 
     const {url, key} = runtimeConfig.value().booksapi;
@@ -71,8 +93,8 @@ exports.lookupisbn = functions
       );
     }
 
-    const result = await response.json() as BooksApiResponse;
+    const result: unknown = await response.json();
     // No match is a normal answer, not an error: the caller merges
     // whatever it has from Open Library and moves on.
-    return {volume: result.items?.[0]?.volumeInfo ?? null};
+    return {volume: decodeBooksApiVolume(result)};
   });

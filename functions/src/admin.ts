@@ -1,8 +1,17 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
+import {decodeEmptyCallableRequest} from "./decoders";
+import {
+  IssueIdentity,
+  mapIssueDocuments,
+} from "./adminIssues";
 
 const db = getFirestore();
+
+const invalidArgument = (message: string): never => {
+  throw new functions.https.HttpsError("invalid-argument", message);
+};
 
 // The operator's immutable Firebase Auth UID. Deliberately not the email:
 // signups are open and unverified, so an email address is a claimable
@@ -21,6 +30,7 @@ const AUDIT_RETENTION_DAYS = 365;
 // prevent. The event names mirror the allowlists in firestore.rules.
 const APP_EVENTS = [
   "firestore.listener_failed",
+  "firestore.decode_failed",
   "firestore.write_failed",
   "toggl.sync_stuck",
   "toggl.sync_failed",
@@ -87,8 +97,9 @@ function adminCallable(
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
-    .https.onCall(async (data, context) => {
+    .https.onCall(async (data: unknown, context) => {
       await requireAdmin(context);
+      decodeEmptyCallableRequest(data, invalidArgument);
       return handler();
     });
 }
@@ -100,6 +111,14 @@ function millis(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function timestampMillis(value: unknown): number | null {
+  return value instanceof Timestamp ? value.toMillis() : null;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 // All aggregation runs inside Firestore — a user's updates subcollection
@@ -130,34 +149,17 @@ async function domainStats(uid: string) {
   // correction is filed, and it deliberately does not move when a local
   // timer runs — so using it here dated reading activity for users who had
   // never logged a single session.
-  const readAt = lastRead.docs[0]?.get("createdAt") as Timestamp | undefined;
-  const editAt = lastEdit.docs[0]?.get("updatedAt") as Timestamp | undefined;
+  const readAt = timestampMillis(lastRead.docs[0]?.get("createdAt"));
+  const editAt = timestampMillis(lastEdit.docs[0]?.get("updatedAt"));
   return {
     books: bookAgg.data().count,
     pagesRead: pagesAgg.data().pagesRead,
     timeRead: timeAgg.data().timeRead,
     finishedBooks: finishedAgg.data().count,
     readingSessions: sessionAgg.data().count,
-    lastReadAt: readAt?.toMillis() ?? null,
-    lastEditAt: editAt?.toMillis() ?? null,
+    lastReadAt: readAt,
+    lastEditAt: editAt,
   };
-}
-
-interface IssueRow {
-  id: string;
-  at: number;
-  level: string;
-  event: string;
-  code: string | null;
-  message: string;
-  uid: string | null;
-  email: string;
-  emailVerified: boolean;
-}
-
-interface Identity {
-  email: string;
-  verified: boolean;
 }
 
 // Reads one issue budget. Returns the rows plus whether the limit was hit,
@@ -166,47 +168,23 @@ async function readIssues(
   events: string[],
   limit: number,
   cutoff: Timestamp,
-  identities: Map<string, Identity>,
-): Promise<{rows: IssueRow[]; truncated: boolean}> {
+  identities: Map<string, IssueIdentity>,
+) {
   const snap = await db.collection("logEvents")
     .where("event", "in", events)
     .where("createdAt", ">=", cutoff)
     .orderBy("createdAt", "desc")
     .limit(limit + 1)
     .get();
-  const truncated = snap.size > limit;
-  const rows = snap.docs.slice(0, limit).flatMap((doc) => {
-    const issue = doc.data();
-    // Firestore orders across types, so a non-Timestamp createdAt would
-    // satisfy the range filter and then throw on toMillis(), taking the
-    // whole page down with it. Rules block that today; skip it anyway.
-    const at = issue.createdAt;
-    if (!(at instanceof Timestamp)) return [];
-    const uid = (issue.uid as string | null) ?? null;
-    const detailEmail =
-      (issue.detail as {email?: string} | null)?.email ?? null;
-    const identity = uid ?
-      // A uid with no entry belongs to an account that no longer exists in
-      // either auth or the profile collection.
-      identities.get(uid) ?? {email: "(deleted user)", verified: false} :
-      // Anonymous rows (failed sign-ins before any session exists) carry
-      // the attempted address in detail.email. It is attacker-supplied and
-      // unverified, so it is flagged as such rather than being rendered
-      // like an address that came from a real session.
-      {email: detailEmail ?? "(anonymous)", verified: false};
-    return [{
+  return mapIssueDocuments(
+    snap.docs.map((doc) => ({
       id: doc.id,
-      at: at.toMillis(),
-      level: issue.level as string,
-      event: issue.event as string,
-      code: (issue.code as string | null) ?? null,
-      message: (issue.message as string | null) ?? "",
-      uid,
-      email: identity.email,
-      emailVerified: identity.verified,
-    }];
-  });
-  return {rows, truncated};
+      value: doc.data(),
+      fallbackAt: doc.createTime?.toMillis() ?? cutoff.toMillis(),
+    })),
+    limit,
+    identities,
+  );
 }
 
 exports.overview = adminCallable(async () => {
@@ -246,7 +224,7 @@ exports.overview = adminCallable(async () => {
     return {
       uid,
       email: authUser?.email ??
-        (profileByUid.get(uid)?.get("email") as string | undefined) ?? null,
+        optionalString(profileByUid.get(uid)?.get("email")) ?? null,
       emailVerified: authUser?.emailVerified ?? null,
       signedUpAt: millis(authUser?.metadata.creationTime),
       lastSignInAt,
@@ -262,11 +240,10 @@ exports.overview = adminCallable(async () => {
   // Distinguishes "this uid has no auth record" from "this account exists
   // but has no email address" — collapsing both into "(deleted user)"
   // stated something false about live accounts.
-  const identities = new Map<string, Identity>(uids.map((uid) => {
+  const identities = new Map<string, IssueIdentity>(uids.map((uid) => {
     const authUser = authByUid.get(uid);
     if (!authUser) return [uid, {email: "(deleted user)", verified: false}];
-    const profileEmail = profileByUid.get(uid)?.get("email") as
-      string | undefined;
+    const profileEmail = optionalString(profileByUid.get(uid)?.get("email"));
     return [uid, {email: authUser.email ?? profileEmail ?? uid, verified: true}];
   }));
 

@@ -1,26 +1,45 @@
-<script>
-  import { formatTime } from '../utils/format.js';
-  import { DAY_BOUNDARY_OFFSET_HOURS } from '../utils/stats.js';
+<script lang="ts">
+  import { formatTime } from '../utils/format.ts';
+  import { DAY_BOUNDARY_OFFSET_HOURS } from '../utils/stats.ts';
+  import type { ProfileDay } from '../interfaces/profile.ts';
+
+  interface HeatmapDay {
+    date: Date;
+    dayKey: string;
+    pagesRead: number;
+    timeRead: number;
+    sessions: number;
+  }
+
+  interface DateRange {
+    startDate: Date;
+    endDate: Date;
+  }
+
+  interface MonthLabel {
+    weekIndex: number;
+    month: string;
+  }
 
   // Per-day aggregates ({day: 'YYYY-MM-DD', pagesRead, timeRead, sessions},
   // the aggregateSessionsByDay shape). The component no longer loads
   // sessions itself: the Me page aggregates its live session listener, and
   // the public profile page passes the aggregates published on the profile
   // doc — same renderer, no private data required.
-  let { days = [] } = $props();
+  let { days = [] }: { days?: ProfileDay[] } = $props();
 
   let tooltipVisible = $state(false);
   let tooltipContent = $state('');
   let tooltipX = $state(0);
   let tooltipY = $state(0);
-  let focusedDayKey = $state(null);
+  let focusedDayKey = $state<string | null>(null);
 
   // Year selection for heatmap view
   let selectedYear = $state('last12months');
 
   // Index the day aggregates by their day key
   let activityByDay = $derived.by(() => {
-    const dayMap = new Map();
+    const dayMap = new Map<string, Omit<HeatmapDay, 'dayKey'>>();
 
     days.forEach((entry) => {
       const [year, month, dayOfMonth] = entry.day.split('-').map(Number);
@@ -37,7 +56,7 @@
 
   // Get available years from the day aggregates
   let availableYears = $derived.by(() => {
-    const years = new Set();
+    const years = new Set<number>();
     days.forEach((entry) => {
       years.add(Number(entry.day.slice(0, 4)));
     });
@@ -45,7 +64,7 @@
   });
 
   // Date range for the last 52 weeks, ending this week
-  function last12MonthsRange() {
+  function last12MonthsRange(): DateRange {
     const today = new Date();
     const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     const startDate = new Date(endDate);
@@ -65,7 +84,7 @@
   }
 
   // Date range for one calendar year, padded to whole Monday–Sunday weeks
-  function yearRange(year) {
+  function yearRange(year: number): DateRange {
     const startDate = new Date(year, 0, 1); // Jan 1
     const endDate = new Date(year, 11, 31); // Dec 31
 
@@ -82,12 +101,12 @@
     return { startDate, endDate };
   }
 
-  function buildWeeks({ startDate, endDate }) {
-    const weeks = [];
+  function buildWeeks({ startDate, endDate }: DateRange): HeatmapDay[][] {
+    const weeks: HeatmapDay[][] = [];
     let currentDate = new Date(startDate);
 
     while (currentDate <= endDate) {
-      const week = [];
+      const week: HeatmapDay[] = [];
       for (let i = 0; i < 7; i++) {
         const dayKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
         const activity = activityByDay.get(dayKey);
@@ -136,7 +155,7 @@
   });
 
   // Get color based on activity level
-  function getColor(pagesRead) {
+  function getColor(pagesRead: number): string {
     if (pagesRead === 0) return '#ebedf0';
     if (pagesRead < 10) return '#9be9a8';
     if (pagesRead < 25) return '#40c463';
@@ -145,7 +164,7 @@
   }
 
   // Format tooltip
-  function formatTooltip(day) {
+  function formatTooltip(day: HeatmapDay): string {
     const dateStr = day.date.toLocaleDateString('en-US', {
       weekday: 'short',
       month: 'short',
@@ -160,13 +179,14 @@
     return `${dateStr}\n${day.pagesRead} pages\n${formatTime(day.timeRead)}\n${day.sessions} session${day.sessions !== 1 ? 's' : ''}`;
   }
 
-  function showTooltip(event, day) {
+  function showTooltip(event: MouseEvent, day: HeatmapDay): void {
     tooltipContent = formatTooltip(day);
     updateTooltipPosition(event);
     tooltipVisible = true;
   }
 
-  function showKeyboardTooltip(event, day) {
+  function showKeyboardTooltip(event: FocusEvent, day: HeatmapDay): void {
+    if (!(event.currentTarget instanceof HTMLButtonElement)) throw new Error('Heatmap focus target must be a button.');
     const bounds = event.currentTarget.getBoundingClientRect();
     tooltipContent = formatTooltip(day);
     tooltipX = bounds.right;
@@ -174,7 +194,7 @@
     tooltipVisible = true;
   }
 
-  function updateTooltipPosition(event) {
+  function updateTooltipPosition(event: MouseEvent): void {
     tooltipX = event.clientX;
     tooltipY = event.clientY;
   }
@@ -183,14 +203,14 @@
     tooltipVisible = false;
   }
 
-  function handleDayKeydown(event, day) {
-    const dayOffsets = {
-      ArrowUp: -1,
-      ArrowDown: 1,
-      ArrowLeft: -7,
-      ArrowRight: 7
-    };
-    const offset = dayOffsets[event.key];
+  function handleDayKeydown(event: KeyboardEvent, day: HeatmapDay): void {
+    const dayOffsets = new Map([
+      ['ArrowUp', -1],
+      ['ArrowDown', 1],
+      ['ArrowLeft', -7],
+      ['ArrowRight', 7],
+    ]);
+    const offset = dayOffsets.get(event.key);
 
     if (offset === undefined) {
       return;
@@ -203,7 +223,10 @@
     // Scoped to the current grid: the all-time view's whole-week padding
     // duplicates boundary days across adjacent year grids, and a document-
     // wide query would teleport focus to the first (newest) match.
-    const target = event.currentTarget.closest('.heatmap').querySelector(`[data-day-key="${targetDayKey}"]`);
+    if (!(event.currentTarget instanceof HTMLButtonElement)) throw new Error('Heatmap key target must be a button.');
+    const heatmap = event.currentTarget.closest('.heatmap');
+    if (heatmap === null) throw new Error('Heatmap day is outside a heatmap grid.');
+    const target = heatmap.querySelector(`[data-day-key="${targetDayKey}"]`);
 
     if (target instanceof HTMLButtonElement) {
       focusedDayKey = targetDayKey;
@@ -212,19 +235,22 @@
   }
 
   // Get month labels for one grid's weeks
-  function buildMonthLabels(weeks) {
-    const labels = [];
+  function buildMonthLabels(weeks: HeatmapDay[][]): MonthLabel[] {
+    const labels: MonthLabel[] = [];
     let lastMonth = -1;
 
     weeks.forEach((week, weekIndex) => {
       const firstDay = week[0];
+      if (firstDay === undefined) throw new Error('Heatmap week cannot be empty.');
       const month = firstDay.date.getMonth();
 
       // Only add label if month changed
       if (month !== lastMonth) {
         // Count how many weeks remain for this month
         let weeksInMonth = 0;
-        for (let i = weekIndex; i < weeks.length && weeks[i][0].date.getMonth() === month; i++) {
+        for (let i = weekIndex; i < weeks.length; i++) {
+          const candidate = weeks[i]?.[0];
+          if (candidate === undefined || candidate.date.getMonth() !== month) break;
           weeksInMonth++;
         }
 

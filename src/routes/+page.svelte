@@ -1,5 +1,5 @@
-<script>
-  import { user } from '$lib/firebase/auth.js';
+<script lang="ts">
+  import { user } from '$lib/firebase/auth.ts';
   import BookList from '$lib/components/BookList.svelte';
 </script>
 

@@ -1,13 +1,24 @@
-<script>
+<script lang="ts">
   // Reading speed: the monthly pages/hour trend against the lifetime
   // average, plus the fastest and slowest finished books by their own
   // aggregate pace.
   import LineChart from './charts/LineChart.svelte';
-  import { lifetimePagesPerHour, BOOK_SPEED_MIN_MINUTES } from '$lib/utils/sessions.js';
+  import { lifetimePagesPerHour, BOOK_SPEED_MIN_MINUTES } from '$lib/utils/sessions.ts';
+  import type { MonthlyAggregate } from '$lib/interfaces/analytics.ts';
+  import type { BookUpdateView } from '$lib/interfaces/reading.ts';
+
+  interface SpeedBook {
+    title: string;
+    finished: boolean;
+    timeRead: number;
+    pagesRead: number;
+  }
 
   // months is the page-level monthlyAggregates result, computed once and
   // shared with the cadence section.
-  let { sessions = [], books = [], months = [] } = $props();
+  let {
+    sessions = [], books = [], months = [],
+  }: { sessions?: BookUpdateView[]; books?: SpeedBook[]; months?: MonthlyAggregate[] } = $props();
 
   const lifetime = $derived(lifetimePagesPerHour(sessions));
 

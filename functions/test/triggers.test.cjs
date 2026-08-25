@@ -1,9 +1,13 @@
-const assert = require("node:assert/strict");
-const test = require("node:test");
+require("./setup.cjs");
 
-process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
+const assert = require("node:assert/strict");
+const {readFileSync} = require("node:fs");
+const {join} = require("node:path");
+const test = require("node:test");
+const {getFirestore} = require("firebase-admin/firestore");
 
 const functions = require("../lib");
+const db = getFirestore();
 
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
@@ -17,6 +21,7 @@ test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions.admin), ["overview"]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
+    "clearstopping",
     "savetoken",
     "start",
     "stop",
@@ -34,6 +39,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
     functions.toggl.savetoken,
+    functions.toggl.clearstopping,
     functions.toggl.start,
     functions.toggl.stop,
   ];
@@ -73,6 +79,10 @@ test("preserves the Firestore and Authentication event contracts", () => {
     "google.cloud.firestore.document.v1.written",
   );
   assert.equal(
+    functions.toggl.syncqueue.__endpoint.eventTrigger.retry,
+    true,
+  );
+  assert.equal(
     functions.toggl.syncqueue.__endpoint.eventTrigger
       .eventFilterPathPatterns.document,
     "users/{uid}/togglQueue/{queueId}",
@@ -86,6 +96,68 @@ test("preserves the Firestore and Authentication event contracts", () => {
       .eventFilterPathPatterns.document,
     "users/{userId}/books/{bookId}",
   );
+});
+
+test("user creation merges identity without erasing concurrent setup", async (t) => {
+  const writes = [];
+  const lifecycleRef = {};
+  const userRef = {
+    collection: (name) => {
+      assert.equal(name, "timerLifecycle");
+      return {doc: (id) => {
+        assert.equal(id, "current");
+        return lifecycleRef;
+      }};
+    },
+  };
+  t.mock.method(db, "collection", (path) => {
+    assert.equal(path, "users");
+    return {
+      doc: (uid) => {
+        assert.equal(uid, "owner");
+        return userRef;
+      },
+    };
+  });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (ref) => {
+      assert.equal(ref, lifecycleRef);
+      return {exists: false};
+    },
+    set: (ref, value, options) => writes.push([ref, value, options]),
+  }));
+
+  await functions.createUserDocument.run({
+    uid: "owner",
+    email: "owner@example.test",
+  });
+
+  assert.deepEqual(writes, [
+    [userRef, {email: "owner@example.test", uid: "owner"}, {merge: true}],
+    [lifecycleRef, {version: 1, state: "idle", cleared: null}, undefined],
+  ]);
+});
+
+test("a retried user creation never overwrites an existing timer lifecycle", async (t) => {
+  const writes = [];
+  const lifecycleRef = {};
+  const userRef = {
+    collection: () => ({doc: () => lifecycleRef}),
+  };
+  t.mock.method(db, "collection", () => ({doc: () => userRef}));
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async () => ({exists: true}),
+    set: (ref, value, options) => writes.push([ref, value, options]),
+  }));
+
+  await functions.createUserDocument.run({
+    uid: "owner",
+    email: "owner@example.test",
+  });
+
+  assert.deepEqual(writes, [
+    [userRef, {email: "owner@example.test", uid: "owner"}, {merge: true}],
+  ]);
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
@@ -117,4 +189,49 @@ test("binds the migrated Runtime Config secret only to booksapi", () => {
   ]) {
     assert.notEqual(callable.__endpoint.callableTrigger, undefined);
   }
+});
+
+test("the emulator fixture covers every bound secret with loopback-only data", () => {
+  const fixtureLine = readFileSync(
+    join(__dirname, "..", ".secret.emulator"),
+    "utf8",
+  ).trim();
+  const separator = fixtureLine.indexOf("=");
+  assert.ok(separator > 0);
+  const fixtureKey = fixtureLine.slice(0, separator);
+  const fixtureValue = JSON.parse(fixtureLine.slice(separator + 1));
+  assert.deepEqual(fixtureValue, {
+    booksapi: {
+      key: "emulator-unused",
+      url: "http://127.0.0.1:9/google-books-emulator-must-not-fetch",
+    },
+  });
+
+  const deployedFunctions = [
+    functions.admin.overview,
+    functions.booksapi.lookupisbn,
+    functions.createUserDocument,
+    functions.deleteUserDocument,
+    functions.deletebookupdates,
+    ...Object.values(functions.toggl),
+  ];
+  const boundKeys = deployedFunctions.flatMap((deployedFunction) =>
+    (deployedFunction.__endpoint.secretEnvironmentVariables ?? [])
+      .map(({key}) => key),
+  );
+  assert.deepEqual([...new Set(boundKeys)].sort(), [fixtureKey]);
+
+  const packageJson = JSON.parse(readFileSync(
+    join(__dirname, "..", "package.json"),
+    "utf8",
+  ));
+  const serve = packageJson.scripts.serve;
+  assert.match(packageJson.scripts.build, /^npm run clean && tsc$/);
+  assert.match(packageJson.scripts.clean, /rmSync\('lib'/);
+  assert.ok(
+    serve.indexOf("stage-emulator-secrets.js") <
+      serve.indexOf("firebase emulators:start"),
+  );
+  assert.equal(packageJson.scripts.start, "npm run serve");
+  assert.equal(packageJson.scripts.shell, "npm run serve");
 });

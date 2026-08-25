@@ -55,16 +55,16 @@ This responsive single-page app allows one to keep track of what one's reading, 
 
 Covers, genres and the fiction/non-fiction flag are all derived from a book's
 ISBN. Four sources are consulted in a fixed order, each filling only the fields
-the previous ones left empty (`mergeMetadata` in `src/lib/utils/googleBooks.js`).
+the previous ones left empty (`mergeMetadata` in `src/lib/utils/googleBooks.ts`).
 An earlier source always wins — the order encodes which source is most
 trustworthy for a given field, not which one answered first.
 
 | # | Source | Why it is at this position | Parser |
 |---|---|---|---|
-| 1 | **Open Library** | Richest subject lists and stable, hot-linkable cover URLs. Free, no key. | `utils/bookMetadata.js` |
-| 2 | **Google Books** | BISAC top-level categories ("Business & Economics", "Science") settle fiction/non-fiction where Open Library's free-form subjects cannot. Needs an API key. | `utils/googleBooks.js` |
-| 3 | **Nasjonalbiblioteket** | The only source that reliably knows Norwegian editions. MODS genres ("Romaner", "Skuespill", the explicit `notfiction` marker) classify them. Free, no key. | `utils/nasjonalbiblioteket.js` |
-| 4 | **Goodreads** | Last resort, **backfill only** — see the caveat below. | `utils/goodreads.js` |
+| 1 | **Open Library** | Richest subject lists and stable, hot-linkable cover URLs. Free, no key. | `utils/bookMetadata.ts` |
+| 2 | **Google Books** | BISAC top-level categories ("Business & Economics", "Science") settle fiction/non-fiction where Open Library's free-form subjects cannot. Needs an API key. | `utils/googleBooks.ts` |
+| 3 | **Nasjonalbiblioteket** | The only source that reliably knows Norwegian editions. MODS genres ("Romaner", "Skuespill", the explicit `notfiction` marker) classify them. Free, no key. | `utils/nasjonalbiblioteket.ts` |
+| 4 | **Goodreads** | Last resort, **backfill only** — see the caveat below. | `utils/goodreads.ts` |
 
 Books store the result in `coverUrl`, `publisher`, `publishedDate`, `subjects`
 and `fiction` (`null` when genuinely unknown). The fields are advisory display
@@ -88,12 +88,15 @@ One migration per source, run in numeric order and following the
 [MIGRATIONS.md](MIGRATIONS.md) loop. Each is gap-fill only and idempotent, and
 each caches its lookups (`ol-cache.json`, `gb-cache.json`, `nb-cache.json`,
 `gr-cache.json`, all gitignored) so re-runs and the prod pass cost no requests.
+Cache files are runtime-validated before any migration connects or writes. If a
+cache is truncated or hand-edited into an invalid shape, the script stops with
+the offending field; repair that entry or delete the cache to refetch it.
 
 ```bash
-node migrate-enrich-books.js --prod --apply      # 1. Open Library
-node migrate-enrich-google.js --prod --apply     # 2. Google Books (needs GOOGLE_BOOKS_KEY)
-node migrate-enrich-nb.js --prod --apply         # 3. Nasjonalbiblioteket
-node migrate-enrich-goodreads.js --prod --apply  # 4. Goodreads
+node migrate-enrich-books.ts --prod --apply      # 1. Open Library
+node migrate-enrich-google.ts --prod --apply     # 2. Google Books (needs GOOGLE_BOOKS_KEY)
+node migrate-enrich-nb.ts --prod --apply         # 3. Nasjonalbiblioteket
+node migrate-enrich-goodreads.ts --prod --apply  # 4. Goodreads
 ```
 
 Order matters: running a later pass first lets it claim fields an earlier,
@@ -111,7 +114,7 @@ export GOOGLE_BOOKS_KEY=$(gcloud secrets versions access latest \
 ### The Goodreads caveat
 
 Goodreads retired its public API in December 2020 and its Terms of Service
-disallow automated access. `migrate-enrich-goodreads.js` is therefore a
+disallow automated access. `migrate-enrich-goodreads.ts` is therefore a
 deliberate, hand-run exception rather than infrastructure, and it is written to
 stay one:
 
@@ -148,7 +151,7 @@ Version 2.0 brings a complete modernization of the tech stack:
 
 ## Prerequisites
 
-- Node.js 22.12+ (pinned to Node.js 22.23.1 in `.nvmrc`)
+- Node.js 22.18+ (pinned to Node.js 22.23.1 in `.nvmrc`)
 - npm (comes with Node.js)
 - Firebase CLI when deploying (the commands below use a pinned temporary copy)
 
@@ -222,7 +225,26 @@ To test Firebase Functions locally using emulators:
 
 ```bash
 npm --prefix functions run serve
+# in another shell, route the web client to all three emulators
+VITE_EMULATOR=1 npm run dev
 ```
+
+The command starts Authentication, Firestore, and Functions together so an
+emulated function can never fall through to production Firestore. Toggl calls
+use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
+production tokens are never sent to Toggl, and start, stop, token, and queue
+flows still exercise their real Firestore state transitions. The metered Google
+Books proxy also returns a local miss instead of consuming its production key.
+Queued Toggl work is claimed under a server-owned ten-per-hour user quota.
+Successful queue rows are deleted, while terminal rows receive a 90-day TTL;
+malformed events consume quota before they are rejected.
+Before Firebase starts, `serve` stages the checked-in dummy
+`functions/.secret.emulator` as the ignored `.secret.local`; Firebase resolves
+bound secrets before handler guards run, so this prevents an emulator startup
+from consulting Secret Manager. Never put credentials in `.secret.emulator`.
+If a different `.secret.local` already exists, `serve` fails without changing
+it; move that file aside before starting the emulators. Do not bypass `serve`
+with a raw `firebase emulators:start` command.
 
 ### Run the complete validation suite
 
@@ -265,15 +287,53 @@ security audits for both workspaces.
 
 ### Deploy Everything
 
-To deploy both hosting and functions:
+The first strict-TypeScript release must follow the authoritative
+[timer-claim rollout](MIGRATIONS.md#timer-claim-rollout). Do not use an
+all-at-once `firebase deploy`: every user needs a lifecycle document before the
+claim-aware web client is exposed. Before deploying, complete the
+[release record and rollback gates](MIGRATIONS.md#strict-typescript-release-record-and-rollback-boundary).
+After the new Hosting bundle has been exposed, keep the current schema contract
+and fix forward; cached old and new bundles make a blind full-stack rollback
+unsafe. With the current release artifacts, the fix-forward boundary begins
+when the new Functions are deployed: the queue worker can already produce an
+ambiguous remote Toggl outcome that the pre-release stack cannot reconcile.
 
 ```bash
-# Build the web app first
-npm run build
+# 1. Reject uncorrelated legacy timer writes.
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
 
-# Deploy everything
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
+# 2. Deploy the claim-aware callables.
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
+# Before migrating, let old in-flight invocations drain.
+
+# 3. Review, snapshot, apply, and prove the timer migration is idempotent.
+node migrate-timer-claims.ts --prod
+node db-snapshot.ts --prod
+node migrate-timer-claims.ts --prod --apply
+node migrate-timer-claims.ts --prod --apply
+node db-audit.ts --prod
+
+# 4. Expose the claim-aware, progress-source-compatible client.
+npm run build
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
+
+# 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
+node migrate-reading-progress-sources.ts --prod
+node db-snapshot.ts --prod
+node migrate-reading-progress-sources.ts --prod --apply
+node migrate-reading-progress-sources.ts --prod --apply
+node db-audit.ts --prod
 ```
+
+Review every migration line, then take each snapshot immediately before that
+migration's first apply. The second applies must report zero users and zero
+books. The pre-Hosting audit must contain no `timer-lifecycle.*` findings. In
+the final audit, investigate every `book.progress-source-null-baseline` as a
+possible missing history row; all other `book.progress-source-*` findings must
+be absent. Record each accepted nonzero baseline in the rollout log.
+After this one-time rollout has completed
+successfully, routine full deployments can use the standard `firebase deploy`
+command.
 
 ### Deploy Hosting Only
 
@@ -345,8 +405,8 @@ book-tracker/
 ├── public/                # Build output (generated by SvelteKit)
 ├── functions/             # Firebase Cloud Functions
 │   └── src/              # Function source code
-├── svelte.config.js      # SvelteKit configuration
-├── vite.config.js        # Vite bundler configuration
+├── svelte.config.ts      # SvelteKit configuration
+├── vite.config.ts        # Vite bundler configuration
 ├── package.json          # Root dependencies
 └── firebase.json         # Firebase configuration
 ```
@@ -407,7 +467,7 @@ import { getFirestore, collection, query, where } from 'firebase/firestore';
 
 ### Node.js Version Issues
 
-This project requires Node.js 22.12+. If you're running a different version, consider using a Node version manager like `nvm`:
+This project requires Node.js 22.18+. If you're running a different version, consider using a Node version manager like `nvm`:
 
 ```bash
 nvm install 22

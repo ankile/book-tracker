@@ -1,4 +1,30 @@
-<script>
+<script lang="ts">
+  interface LinePoint {
+    label: string;
+    value: number | null;
+    tooltip: string;
+  }
+
+  interface XLabel {
+    index: number;
+    text: string;
+  }
+
+  interface SegmentPoint {
+    index: number;
+    value: number;
+  }
+
+  interface Props {
+    points?: LinePoint[];
+    referenceValue?: number | null;
+    referenceLabel?: string;
+    plotHeight?: number;
+    formatTick?: (value: number) => string;
+    ariaLabel: string;
+    xLabels?: XLabel[];
+  }
+
   // Single-series line chart. The SVG holds only the line (percentage
   // coordinates, preserveAspectRatio none, non-scaling 2px stroke); all
   // text and the end-dot are HTML overlays so nothing distorts when the
@@ -15,10 +41,10 @@
     formatTick = (value) => value.toLocaleString(),
     ariaLabel,
     xLabels = [],
-  } = $props();
+  }: Props = $props();
 
-  let activeIndex = $state(null);
-  let plotElement = $state(null);
+  let activeIndex = $state<number | null>(null);
+  let plotElement = $state<HTMLDivElement>();
   let tooltipX = $state(0);
   let tooltipY = $state(0);
 
@@ -26,19 +52,19 @@
     const max = Math.max(...points.map((p) => p.value ?? 0), referenceValue ?? 0);
     if (max === 0) return 1;
     const magnitude = 10 ** Math.floor(Math.log10(max));
-    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((s) => s * magnitude >= max);
+    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((s) => s * magnitude >= max) ?? 10;
     return step * magnitude;
   });
   const ticks = $derived([0.5, 1].map((f) => f * niceMax));
 
-  const xPercent = (index) =>
+  const xPercent = (index: number) =>
     points.length > 1 ? (index / (points.length - 1)) * 100 : 50;
-  const yPercent = (value) => 100 - (value / niceMax) * 100;
+  const yPercent = (value: number) => 100 - (value / niceMax) * 100;
 
   // Contiguous non-null runs, each its own path.
   const segments = $derived.by(() => {
-    const runs = [];
-    let run = [];
+    const runs: SegmentPoint[][] = [];
+    let run: SegmentPoint[] = [];
     points.forEach((point, index) => {
       if (point.value === null) {
         if (run.length > 0) runs.push(run);
@@ -51,21 +77,29 @@
     return runs;
   });
 
-  const pathFor = (run) =>
+  const pathFor = (run: SegmentPoint[]) =>
     run
       .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xPercent(p.index)} ${yPercent(p.value)}`)
       .join(' ');
 
   const lastPoint = $derived.by(() => {
     for (let i = points.length - 1; i >= 0; i--) {
-      if (points[i].value !== null) return { index: i, value: points[i].value };
+      const value = points[i]?.value;
+      if (value !== null && value !== undefined) return { index: i, value };
     }
     return null;
   });
 
-  function positionTooltip(index) {
+  const activePoint = $derived(
+    activeIndex === null ? null : points[activeIndex] ?? null
+  );
+
+  function positionTooltip(index: number) {
+    if (!plotElement) throw new Error('LineChart plot element is not mounted');
+    const point = points[index];
+    if (!point) throw new Error(`LineChart point ${index} does not exist`);
     const bounds = plotElement.getBoundingClientRect();
-    const value = points[index].value;
+    const value = point.value;
     tooltipX = bounds.left + (xPercent(index) / 100) * bounds.width;
     tooltipY = value === null
       ? bounds.top + bounds.height / 2
@@ -73,7 +107,9 @@
   }
 
   // The crosshair finds the X: snap the pointer to the nearest index.
-  function handlePointer(event) {
+  function handlePointer(event: PointerEvent) {
+    if (points.length === 0) return;
+    if (!plotElement) throw new Error('LineChart plot element is not mounted');
     const bounds = plotElement.getBoundingClientRect();
     const fraction = (event.clientX - bounds.left) / bounds.width;
     const index = Math.max(0, Math.min(points.length - 1, Math.round(fraction * (points.length - 1))));
@@ -81,8 +117,9 @@
     positionTooltip(index);
   }
 
-  function handleKeydown(event) {
-    const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+  function handleKeydown(event: KeyboardEvent) {
+    if (points.length === 0) return;
+    const step = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : undefined;
     if (step === undefined) return;
     event.preventDefault();
     const index = Math.max(0, Math.min(points.length - 1, (activeIndex ?? points.length - 1) + step));
@@ -249,12 +286,12 @@
     {/if}
     <!-- points[activeIndex] check: a snapshot can shrink the series while
          the pointer or focus still holds a now-out-of-range index. -->
-    {#if activeIndex !== null && points[activeIndex]}
+    {#if activeIndex !== null && activePoint}
       <div class="crosshair" style="left: {xPercent(activeIndex)}%"></div>
-      {#if points[activeIndex].value !== null}
+      {#if activePoint.value !== null}
         <div
           class="active-dot"
-          style="left: {xPercent(activeIndex)}%; top: {yPercent(points[activeIndex].value)}%">
+          style="left: {xPercent(activeIndex)}%; top: {yPercent(activePoint.value)}%">
         </div>
       {/if}
     {/if}
@@ -274,8 +311,8 @@
   </table>
 </div>
 
-{#if activeIndex !== null && points[activeIndex]}
+{#if activePoint}
   <div style="position: fixed; left: {tooltipX}px; top: {tooltipY}px; background: rgba(0, 0, 0, 0.9); color: white; padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.75rem; white-space: pre-line; pointer-events: none; z-index: 9999; transform: translate(-50%, calc(-100% - 10px)); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">
-    {points[activeIndex].tooltip}
+    {activePoint.tooltip}
   </div>
 {/if}

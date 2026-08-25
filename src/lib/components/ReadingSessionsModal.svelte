@@ -1,35 +1,73 @@
-<script>
+<script lang="ts">
+  import { untrack } from "svelte";
   import Icon from "svelte-awesome";
   import { edit, trash } from "svelte-awesome/icons";
   import ModalCard from "$lib/components/ModalCard.svelte";
   import EditSessionModal from "$lib/components/EditSessionModal.svelte";
-  import { Database } from "$lib/firebase/db.js";
-  import { formatTime } from "$lib/utils/format.js";
+  import { Database } from "$lib/firebase/db.ts";
+  import { formatTime } from "$lib/utils/format.ts";
+  import { acceptReportedWrite } from "$lib/utils/offlineWrite.ts";
+  import { precedingProgressUpdate } from "$lib/utils/readingSessionMutation.ts";
+  import {
+    readingSessionMutationConfirmed,
+    readingSessionVersion,
+    type PendingReadingSessionMutation,
+  } from "$lib/utils/readingSessionLatch.ts";
+  import type { Book } from "$lib/interfaces/book.ts";
+  import type { BookUpdate, ReadingSession } from "$lib/interfaces/reading.ts";
+  import type { TimestampLike } from "$lib/interfaces/common.ts";
 
-  let { book, userId, onclose } = $props();
+  let {
+    book, userId, onclose,
+  }: { book: Book; userId: string; onclose: () => void } = $props();
 
   let open = $derived(!!book);
 
-  let sessions = $state([]);
+  let updates = $state<BookUpdate[]>([]);
+  let sessions = $derived(
+    updates.filter((update): update is ReadingSession => update.type === 'reading')
+  );
+  let sessionWrite = $state({ accepted: false });
+  let sessionWriteError = $state('');
+  let pendingSessionWrite = $state<PendingReadingSessionMutation | null>(null);
+  let nextSessionOperationId = 0;
+  let bookId = $derived(book.id);
+
+  function releaseSessionWrite(operationId: number) {
+    if (pendingSessionWrite?.operationId !== operationId) return;
+    pendingSessionWrite = null;
+    sessionWrite.accepted = false;
+  }
+
+  function releaseWhenSettled(completion: Promise<void> | null, operationId: number | null) {
+    if (completion === null || operationId === null) return;
+    void completion.then(() => releaseSessionWrite(operationId));
+  }
+
   $effect(() => {
-    if (book && userId) {
-      const sessionsStore = Database.getReadingSessions(userId, book.id);
-      const unsubscribeStore = sessionsStore.subscribe((data) => {
-        sessions = data;
+    if (bookId && userId) {
+      const updatesStore = Database.getBookUpdates(userId, bookId);
+      const unsubscribeStore = updatesStore.subscribe((data) => {
+        updates = data;
+        untrack(() => {
+          if (pendingSessionWrite !== null &&
+              readingSessionMutationConfirmed(pendingSessionWrite, data)) {
+            releaseSessionWrite(pendingSessionWrite.operationId);
+          }
+        });
       });
       return unsubscribeStore;
     }
   });
 
-  let editingSessionId = $state(null);
+  let editingSessionId = $state<string | null>(null);
 
   // Derive the actual session object from the ID to always use fresh data
   let editingSession = $derived(
     editingSessionId ? sessions.find(s => s.id === editingSessionId) : null
   );
 
-  function formatDate(timestamp) {
-    if (!timestamp?.toDate) return 'N/A';
+  function formatDate(timestamp: TimestampLike) {
     const date = timestamp.toDate();
     return date.toLocaleDateString('en-US', {
       month: 'short',
@@ -40,28 +78,76 @@
     });
   }
 
-  function editSession(session) {
+  function editSession(session: ReadingSession) {
     editingSessionId = session.id;
   }
 
-  function updateSession(data) {
-    Database.updateReadingSession({
-      userId,
-      bookId: book.id,
-      title: book.title,
-      pageCount: book.pageCount,
-      ...data
-    });
+  function updateSession(data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }): boolean {
+    const session = sessions.find((candidate) => candidate.id === data.sessionId);
+    if (session === undefined) throw new Error('The reading session is no longer loaded.');
+    sessionWriteError = '';
+    let accepted = false;
+    let operationId: number | null = null;
+    const completion = acceptReportedWrite(
+      sessionWrite,
+      () => Database.updateReadingSession({
+        userId,
+        bookId: book.id,
+        title: book.title,
+        session,
+        bookProgress: book,
+        timeRead: data.timeRead,
+        fromPage: data.fromPage,
+        toPage: data.toPage,
+      }),
+      () => {
+        accepted = true;
+        operationId = ++nextSessionOperationId;
+        pendingSessionWrite = {
+          operationId,
+          kind: 'edit',
+          sessionId: session.id,
+          priorVersion: readingSessionVersion(session),
+        };
+      },
+      (error) => {
+        sessionWriteError = error instanceof Error ? error.message : String(error);
+      },
+    );
+    releaseWhenSettled(completion, operationId);
+    return accepted;
   }
 
   function closeEditModal() {
     editingSessionId = null;
   }
 
-  function deleteSession(session) {
+  function deleteSession(session: ReadingSession) {
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
-      Database.deleteReadingSession(userId, book.id, session.id, book.title, book.pageCount);
+      sessionWriteError = '';
+      let operationId: number | null = null;
+      const completion = acceptReportedWrite(
+        sessionWrite,
+        () => Database.deleteReadingSession({
+          userId,
+          bookId: book.id,
+          title: book.title,
+          session,
+          bookProgress: book,
+          previousProgressUpdate: book.currentPageUpdateId === session.id
+            ? precedingProgressUpdate(updates, session)
+            : null,
+        }),
+        () => {
+          operationId = ++nextSessionOperationId;
+          pendingSessionWrite = {operationId, kind: 'delete', sessionId: session.id};
+        },
+        (error) => {
+          sessionWriteError = error instanceof Error ? error.message : String(error);
+        },
+      );
+      releaseWhenSettled(completion, operationId);
     }
   }
 </script>
@@ -189,16 +275,18 @@
                 <button
                   type="button"
                   class="edit-button"
+                  disabled={sessionWrite.accepted}
                   aria-label={`Edit latest reading session for ${book.title}`}
                   onclick={() => editSession(session)}>
-                  <Icon data={edit} scale="0.8" style="color: #666;" />
+                  <Icon data={edit} scale={0.8} style="color: #666;" />
                 </button>
                 <button
                   type="button"
                   class="edit-button"
+                  disabled={sessionWrite.accepted}
                   aria-label={`Delete latest reading session for ${book.title}`}
                   onclick={() => deleteSession(session)}>
-                  <Icon data={trash} scale="0.8" style="color: #d9534f;" />
+                  <Icon data={trash} scale={0.8} style="color: #d9534f;" />
                 </button>
               {:else}
                 <span class="button-spacer"></span>
@@ -221,12 +309,16 @@
       {/each}
     {/if}
   </div>
+  {#if sessionWriteError}
+    <p role="alert">{sessionWriteError}</p>
+  {/if}
 </ModalCard>
 
 {#if editingSession}
   <EditSessionModal
     session={editingSession}
     {book}
+    error={sessionWriteError}
     onupdateSession={updateSession}
     oncloseModal={closeEditModal} />
 {/if}

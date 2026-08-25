@@ -1,5 +1,12 @@
-<script>
-  let { label, value, subtext, href = null } = $props();
+<script lang="ts">
+  interface Props {
+    label: string;
+    value: string | number;
+    subtext: string;
+    href?: string | null;
+  }
+
+  let { label, value, subtext, href = null }: Props = $props();
 </script>
 
 <style>

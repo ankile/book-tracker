@@ -1,52 +1,58 @@
-<script>
+<script lang="ts">
   // Chips author field: the bound value is a list of chips {id, name}
   // (id null = new author, minted at write time), so the field shows
   // exactly the author entities the book will reference — new authors
   // dashed, existing ones solid. Hand-rolled (bundle budget): a relative
   // wrapper with an absolutely positioned suggestion list, which works
   // inside the <dialog> top layer without a portal.
-  import { resolveChip, splitAuthors, joinPersonName } from "../utils/authors.js";
+  import { resolveChip, selectableAuthors, splitAuthors, joinPersonName } from "../utils/authors.ts";
+  import type { Author, AuthorChip } from "../interfaces/author.ts";
 
-  let { chips = $bindable(), authors, inputId } = $props();
+  let {
+    chips = $bindable(),
+    authors,
+    inputId,
+  }: { chips: AuthorChip[]; authors: Author[]; inputId: string } = $props();
 
   let text = $state("");
   let focused = $state(false);
   let dismissed = $state(false);
   let highlighted = $state(0);
-  let inputEl = $state(null);
+  let inputEl = $state<HTMLInputElement | null>(null);
 
   const draft = $derived(text.trim().toLowerCase());
   const chipIds = $derived(new Set(chips.filter((c) => c.id !== null).map((c) => c.id)));
   const chipNamesLower = $derived(new Set(chips.map((c) => c.name.toLowerCase())));
+  const availableAuthors = $derived(selectableAuthors(authors));
 
   const suggestions = $derived(
     focused && !dismissed && draft !== ""
-      ? authors.filter((a) => a.nameLower.includes(draft) && !chipIds.has(a.id)).slice(0, 6)
+      ? availableAuthors.filter((a) => a.nameLower.includes(draft) && !chipIds.has(a.id)).slice(0, 6)
       : []
   );
 
-  function isDuplicate(chip) {
+  function isDuplicate(chip: AuthorChip) {
     return chip.id !== null ? chipIds.has(chip.id) : chipNamesLower.has(chip.name.toLowerCase());
   }
 
-  function commit(name) {
+  function commit(name: string) {
     const chip = resolveChip(name, authors);
     if (chip.name !== "" && !isDuplicate(chip)) chips = [...chips, chip];
     text = "";
     highlighted = 0;
   }
 
-  function select(author) {
+  function select(author: Author) {
     if (!chipIds.has(author.id)) chips = [...chips, { id: author.id, name: author.name }];
     text = "";
     highlighted = 0;
   }
 
-  function removeChip(index) {
+  function removeChip(index: number) {
     chips = chips.filter((_, i) => i !== index);
   }
 
-  function onkeydown(event) {
+  function onkeydown(event: KeyboardEvent) {
     if (event.key === ",") {
       event.preventDefault();
       commit(text);
@@ -77,8 +83,8 @@
 
   // Pasted author lists ("Kahneman, Tversky & Thaler") split into chips;
   // plain pastes fall through to normal input.
-  function onpaste(event) {
-    const pasted = event.clipboardData.getData("text");
+  function onpaste(event: ClipboardEvent) {
+    const pasted = event.clipboardData?.getData("text") ?? '';
     if (!pasted.includes(",") && !pasted.includes("&")) return;
     event.preventDefault();
     for (const name of splitAuthors(text + pasted)) commit(name);
@@ -177,7 +183,7 @@
       // preventDefault stops the click from blurring it again.
       if (event.target === event.currentTarget) {
         event.preventDefault();
-        inputEl.focus();
+        inputEl?.focus();
       }
     }}>
     {#each chips as chip, index (chip.id ?? `new:${chip.name.toLowerCase()}`)}

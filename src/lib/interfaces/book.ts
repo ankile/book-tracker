@@ -1,42 +1,97 @@
-import type { DocumentReference, Timestamp } from "firebase/firestore";
+import type { DocumentReference, Timestamp } from 'firebase/firestore';
+import type { LegacyEmbeddedAuthor } from './author.ts';
+import type { BookMetadata } from './metadata.ts';
 
-// A users/{uid}/books doc. Every field below is written by the current
-// client on create; the optional markers mean "may be absent on docs last
-// written by an older client" — migrate-normalize-books.js and
-// migrate-enrich-books.js are the repair paths that close those gaps.
-export interface Book {
+// A normalized users/{uid}/books doc returned by the Firestore decoder.
+// Legacy stored shapes are repaired at that boundary before application
+// code sees this model.
+export interface LocalActiveTimer {
+  start: string;
+  operationId?: string;
+  entryId?: undefined;
+}
+
+export interface TogglActiveTimer {
+  start: string;
+  entryId: number;
+}
+
+export interface StartingTogglTimer {
+  state: 'starting';
+  operationId: string;
+  start: string;
+  claimedAt: Timestamp;
+}
+
+export interface UnknownTogglTimerOutcome {
+  state: 'outcome-unknown';
+  operationId: string;
+  start: string;
+  claimedAt: Timestamp;
+  error: string;
+}
+
+export interface StoppingTogglTimer {
+  state: 'stopping';
+  entryId: number;
+  start: string;
+  queueId: string;
+}
+
+export type ActiveTimer =
+  | LocalActiveTimer
+  | TogglActiveTimer
+  | StartingTogglTimer
+  | UnknownTogglTimerOutcome
+  | StoppingTogglTimer;
+
+interface BookBase extends BookMetadata {
   id: string;
   currentPage: number;
+  // The update-row id that most recently set currentPage. The decoder maps
+  // unmigrated stored books to null; application code always handles the
+  // field explicitly.
+  currentPageUpdateId: string | null;
   pageCount: number;
-  // Lifetime aggregates over reading sessions; used to project pace.
-  pagesRead?: number;
-  timeRead?: number;
+  pagesRead: number;
+  timeRead: number;
   title: string;
-  finished?: boolean;
-  // Always present (possibly '') since the 2026-08-11 normalize backfill;
-  // the Look up button rewrites it as a bare ISBN-13 when it validates.
-  isbn?: string;
-  owner?: DocumentReference;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
-  // ISBN-derived metadata from Open Library (Look up button or
-  // migrate-enrich-books.js); shapes defined in utils/bookMetadata.js.
-  // Advisory display data — owner-forgeable, never load-bearing.
-  // coverUrl is the covers.openlibrary.org -M size ('' when none);
-  // fiction is a subjects-derived guess, null when unknown.
-  coverUrl?: string;
-  publisher?: string;
-  publishedDate?: string;
-  subjects?: string[];
-  fiction?: boolean | null;
-  // Author doc ids into users/{uid}/authors, in display order.
+  finished: boolean;
+  isbn: string;
+  owner: DocumentReference;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+  activeTimer: ActiveTimer | null;
+}
+
+export interface CurrentBook extends BookBase {
+  authorIds: string[];
+  author?: never;
+  authors?: never;
+}
+
+interface LegacyBookBase extends BookBase {
+  // An old writer may leave stale ids beside the legacy fields. The legacy
+  // fields remain authoritative until the reconciliation migration runs.
   authorIds?: string[];
-  // Legacy authorship, present only on docs last written by pre-authorIds
-  // clients. Legacy wins on read: its presence proves an old client wrote
-  // last, so any authorIds alongside it are stale. Removed once the
-  // straggler migration passes clean.
+}
+
+export interface LegacyStringAuthorBook extends LegacyBookBase {
+  author: string;
+  authors?: LegacyEmbeddedAuthor[];
+}
+
+export interface LegacyEmbeddedAuthorsBook extends LegacyBookBase {
   author?: string;
-  authors?: { id: string; name: string }[];
-  // entryId is only present for Toggl-backed timers; local timers store just the start time
-  activeTimer?: { entryId?: number; start: string } | null;
+  authors: LegacyEmbeddedAuthor[];
+}
+
+export type Book = CurrentBook | LegacyStringAuthorBook | LegacyEmbeddedAuthorsBook;
+
+export function hasCurrentAuthorship(book: Book): book is CurrentBook {
+  return book.author === undefined && book.authors === undefined;
+}
+
+export function isTogglTimer(timer: ActiveTimer): timer is TogglActiveTimer {
+  return !('state' in timer) && 'entryId' in timer && timer.entryId !== undefined;
 }

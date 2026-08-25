@@ -1,5 +1,5 @@
-<script>
-  import { user, signOut } from '$lib/firebase/auth.js';
+<script lang="ts">
+  import { user, signOut } from '$lib/firebase/auth.ts';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
@@ -13,10 +13,15 @@
   import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
-  import { Database } from '$lib/firebase/db.js';
-  import { togglSaveToken } from '$lib/firebase/functions.js';
-  import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.js';
-  import { countIsbnProblems } from '$lib/utils/metadataHealth.js';
+  import { Database } from '$lib/firebase/db.ts';
+  import { togglSaveToken } from '$lib/firebase/functions.ts';
+  import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.ts';
+  import { countIsbnProblems } from '$lib/utils/metadataHealth.ts';
+  import {
+    effectiveBookAuthorIds,
+    readableBookAuthorIds,
+    selectableAuthors,
+  } from '$lib/utils/authors.ts';
   import {
     computeStats,
     computeBooksByYear,
@@ -24,15 +29,22 @@
     buildProfilePayload,
     profilePayloadEqual,
     USERNAME_PATTERN,
-  } from '$lib/utils/stats.js';
+  } from '$lib/utils/stats.ts';
   import {
     buildBookTimelines,
     computeMomentum,
     computeSuperlatives,
     finishedAtByBook,
     monthlyAggregates,
-  } from '$lib/utils/sessions.js';
-  import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.js';
+  } from '$lib/utils/sessions.ts';
+  import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.ts';
+  import { acceptReportedWrite } from '$lib/utils/offlineWrite.ts';
+  import { FirebaseError } from 'firebase/app';
+  import type { Author } from '$lib/interfaces/author.ts';
+  import type { Book } from '$lib/interfaces/book.ts';
+  import type { Profile, ProfileLink, ProfileLinkType, ProfileRecords } from '$lib/interfaces/profile.ts';
+  import type { BookUpdate } from '$lib/interfaces/reading.ts';
+  import type { UserDocument } from '$lib/firebase/decoders.ts';
 
   let newBookModal = $state(false);
 
@@ -46,7 +58,7 @@
 
   // Get all books for statistics; undefined until the first snapshot (the
   // profile sync below must not run against the pre-snapshot empty list).
-  let allBooks = $state(undefined);
+  let allBooks = $state<Book[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const booksStore = Database.getAllBooks($user.uid);
@@ -57,11 +69,39 @@
     }
   });
 
+  // Author docs, for analytics identity and the management-card count.
+  let authorList = $state<Author[] | undefined>(undefined);
+  $effect(() => {
+    if ($user) {
+      const authorsStore = Database.getAuthors($user.uid);
+      const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
+      return unsubscribe;
+    }
+  });
+
+  // Analytics need a total authorIds array. Legacy books derive it only
+  // from their authoritative embedded author records; a lone legacy name
+  // has no stable author identity and therefore contributes no author id.
+  const analyticsBooks = $derived.by(() => {
+    const authorMap = new Map((authorList ?? []).map((author) => [author.id, author]));
+    return (allBooks ?? []).map((book) => {
+      return {
+        ...book,
+        // Aggregate counts retain a raw dangling id instead of undercounting;
+        // named analytics such as the leaderboard omit it because there is no
+        // selectable author row to supply a name.
+        authorIds: authorList === undefined
+          ? effectiveBookAuthorIds(book)
+          : readableBookAuthorIds(book, authorMap),
+      };
+    });
+  });
+
   // All update docs ('reading' sessions plus page-only 'update'
   // corrections), for the heatmap, the published profile, and the session
   // analytics; undefined until the first snapshot (same loading sentinel
   // as allBooks, and for the same reason).
-  let allSessions = $state(undefined);
+  let allSessions = $state<BookUpdate[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const sessionsStore = Database.getAllReadingSessions($user.uid);
@@ -82,11 +122,11 @@
   // was actually finished. timelines and months are computed once here and
   // passed to the sections — each is a full pass over ~3.5k session docs.
   const timelines = $derived(buildBookTimelines(allSessions ?? []));
-  const finishedAt = $derived(finishedAtByBook(allBooks ?? [], timelines));
+  const finishedAt = $derived(finishedAtByBook(analyticsBooks, timelines));
   const months = $derived(monthlyAggregates(allSessions ?? []));
-  const profileRecords = $derived.by(() => {
+  const profileRecords = $derived.by((): ProfileRecords | null => {
     const momentum = computeMomentum(allSessions ?? [], new Date());
-    const superlatives = computeSuperlatives(allSessions ?? [], allBooks ?? [], timelines);
+    const superlatives = computeSuperlatives(allSessions ?? [], analyticsBooks, timelines);
     if (!superlatives) return null;
     return {
       momentum,
@@ -110,18 +150,8 @@
   // one that fails its check digit. The /isbns page repairs them.
   let isbnProblems = $derived(countIsbnProblems(allBooks ?? []));
 
-  // Author docs, for the Authors management card's count.
-  let authorList = $state(undefined);
-  $effect(() => {
-    if ($user) {
-      const authorsStore = Database.getAuthors($user.uid);
-      const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
-      return unsubscribe;
-    }
-  });
-
   // User document (for the Toggl connection status)
-  let userDoc = $state(null);
+  let userDoc = $state<UserDocument | null | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const userStore = Database.getUser($user.uid);
@@ -141,21 +171,21 @@
       await togglSaveToken({ token: togglToken });
       togglToken = '';
     } catch (error) {
-      alert(error.message);
+      alert(errorMessage(error));
     } finally {
       savingToken = false;
     }
   }
 
-  // Statistics (shared with the public-profile payload, see utils/stats.js)
-  const stats = $derived(computeStats(allBooks ?? [], finishedAt));
-  const booksByYear = $derived(computeBooksByYear(allBooks ?? [], finishedAt));
+  // Statistics (shared with the public-profile payload, see utils/stats.ts)
+  const stats = $derived(computeStats(analyticsBooks, finishedAt));
+  const booksByYear = $derived(computeBooksByYear(analyticsBooks, finishedAt));
 
   // Extract username from email
-  const username = $derived($user ? $user.email.split('@')[0] : '');
+  const username = $derived(($user?.email ?? '').split('@')[0]);
 
   // Public profile: undefined → loading, null → none enabled.
-  let myProfile = $state(undefined);
+  let myProfile = $state<Profile | null | undefined>(undefined);
   $effect(() => {
     if ($user) {
       const profileStore = Database.getMyProfile($user.uid);
@@ -191,6 +221,14 @@
   const profileUrl = $derived(myProfile ? `${page.url.origin}/profiles/${myProfile.username}` : '');
 
   async function saveProfile() {
+    const currentUser = $user;
+    const books = analyticsBooks;
+    if (
+      currentUser === null || currentUser === undefined ||
+      allBooks === undefined || allSessions === undefined || authorList === undefined
+    ) {
+      throw new Error('Profile saving requires an authenticated user and loaded library data.');
+    }
     const chosenSlug = profileSlug.trim().toLowerCase();
     const chosenGiven = profileGivenName.trim().replace(/\s+/g, ' ').slice(0, 50);
     const chosenFamily = profileFamilyName.trim().replace(/\s+/g, ' ').slice(0, 50);
@@ -207,20 +245,20 @@
         // Born private: the page is only ever opened to the world by the
         // explicit visibility checkbox below.
         await Database.createProfile({
-          userId: $user.uid, username: chosenSlug, ...names, links: [],
-          isPublic: false, ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
+          userId: currentUser.uid, username: chosenSlug, ...names, links: [],
+          isPublic: false, ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
-          userId: $user.uid, username: chosenSlug, ...names,
+          userId: currentUser.uid, username: chosenSlug, ...names,
           links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       } else {
         await Database.renameProfile({
-          userId: $user.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
+          userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       }
       profileGivenName = chosenGiven;
@@ -231,46 +269,84 @@
     } catch (error) {
       // The rules turn "slug taken" into permission-denied (create on an
       // existing doc evaluates as an update of someone else's doc).
-      profileError = error.code === 'permission-denied'
+      profileError = errorCode(error) === 'permission-denied'
         ? `"${chosenSlug}" is already taken.`
-        : error.message;
+        : errorMessage(error);
     } finally {
       savingProfile = false;
     }
   }
 
   async function deleteProfile() {
+    const currentUser = $user;
+    if (currentUser === null || currentUser === undefined || !myProfile) {
+      throw new Error('Profile deletion requires an authenticated user and loaded profile.');
+    }
     savingProfile = true;
-    await Database.deleteProfile({ userId: $user.uid, username: myProfile.username });
-    savingProfile = false;
+    profileError = '';
+    try {
+      await Database.deleteProfile({ userId: currentUser.uid, username: myProfile.username });
+    } catch (error) {
+      profileError = errorMessage(error);
+    } finally {
+      savingProfile = false;
+    }
   }
 
   // Full-doc rewrite from the current profile plus fresh stats; overrides
   // carry the one field an immediate-write control (visibility checkbox,
   // handle add/remove) is changing.
-  function persistProfile(overrides = {}) {
+  function persistProfile(overrides: { isPublic?: boolean; links?: ProfileLink[] } = {}) {
+    const currentUser = $user;
+    const books = analyticsBooks;
+    if (
+      currentUser === null || currentUser === undefined || !myProfile ||
+      allBooks === undefined || allSessions === undefined || authorList === undefined
+    ) {
+      throw new Error('Profile persistence requires an authenticated user, profile, and loaded library data.');
+    }
     return Database.updateProfile({
-      userId: $user.uid,
+      userId: currentUser.uid,
       username: myProfile.username,
       givenName: myProfile.givenName ?? '',
       familyName: myProfile.familyName ?? '',
       links: myProfile.links ?? [],
       isPublic: myProfile.public,
-      ...buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords),
+      ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
       ...overrides,
     });
   }
 
-  function setProfileVisibility(isPublic) {
-    persistProfile({ isPublic });
+  async function persistProfileWithFeedback(
+    overrides: { isPublic?: boolean; links?: ProfileLink[] } = {},
+  ): Promise<boolean> {
+    profileError = '';
+    try {
+      await persistProfile(overrides);
+      return true;
+    } catch (error) {
+      profileError = errorMessage(error);
+      return false;
+    }
+  }
+
+  async function setProfileVisibility(input: HTMLInputElement) {
+    const saved = await persistProfileWithFeedback({ isPublic: input.checked });
+    if (!saved) input.checked = myProfile?.public ?? false;
   }
 
   // Handle editor: the plus opens the picker, choosing a platform reveals
   // the value field, Add writes immediately (like the visibility checkbox).
   let linkPickerOpen = $state(false);
-  let newLinkType = $state('');
+  let newLinkType = $state<ProfileLinkType | ''>('');
   let newLinkLabel = $state('');
   let newLinkValue = $state('');
+  let linkWrite = $state({ accepted: false });
+
+  function openLinkPicker() {
+    linkWrite.accepted = false;
+    linkPickerOpen = true;
+  }
 
   function closeLinkPicker() {
     linkPickerOpen = false;
@@ -281,17 +357,38 @@
 
   function addLink() {
     const value = newLinkValue.trim().slice(0, 200);
-    if (!value) return;
-    const link = { type: newLinkType, value };
+    if (!value || newLinkType === '') return;
+    const link: ProfileLink = { type: newLinkType, value };
     if (newLinkType === 'other' && newLinkLabel.trim()) {
       link.label = newLinkLabel.trim().slice(0, 50);
     }
-    persistProfile({ links: [...(myProfile.links ?? []), link] });
-    closeLinkPicker();
+    if (!myProfile) throw new Error('A loaded profile is required to add a link.');
+    const profile = myProfile;
+    const links = [...profile.links, link];
+    profileError = '';
+    void acceptReportedWrite(
+      linkWrite,
+      () => Database.addProfileLink({
+        userId: profile.uid,
+        username: profile.username,
+        link,
+      }),
+      () => {
+        // arrayUnion preserves links added concurrently by another client.
+        // Keep this optimistic copy too, so another offline link edit does
+        // not wait for the local listener echo before building on this one.
+        myProfile = { ...profile, links };
+        closeLinkPicker();
+      },
+      (error) => {
+        profileError = errorMessage(error);
+      },
+    );
   }
 
-  function removeLink(index) {
-    persistProfile({ links: (myProfile.links ?? []).filter((_, i) => i !== index) });
+  async function removeLink(index: number) {
+    if (!myProfile) throw new Error('A loaded profile is required to remove a link.');
+    await persistProfileWithFeedback({ links: myProfile.links.filter((_, i) => i !== index) });
   }
 
   async function copyProfileLink() {
@@ -300,15 +397,23 @@
     setTimeout(() => (linkCopied = false), 2000);
   }
 
+  function errorCode(error: unknown): string {
+    return error instanceof FirebaseError ? error.code : '';
+  }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
   // Keep the published doc in step with live stats: whenever this page
   // recomputes and the public copy differs, overwrite it. The equality
   // check excludes updatedAt, so the listener echo of our own write reads
   // as clean and the effect settles instead of looping.
   $effect(() => {
-    if (!$user || !myProfile || allBooks === undefined || allSessions === undefined) return;
-    const payload = buildProfilePayload(allBooks, sessionDays, finishedAt, profileRecords);
+    if (!$user || !myProfile || allBooks === undefined || allSessions === undefined || authorList === undefined) return;
+    const payload = buildProfilePayload(analyticsBooks, sessionDays, finishedAt, profileRecords);
     if (profilePayloadEqual(myProfile, payload)) return;
-    persistProfile();
+    void persistProfileWithFeedback();
   });
 </script>
 
@@ -973,7 +1078,7 @@
                 autocomplete="off"
                 bind:value={profileSlug} />
             </div>
-            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined}>
+            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -995,14 +1100,14 @@
               <div class="links-heading">
                 <h3>Links</h3>
                 {#if !linkPickerOpen && (myProfile.links ?? []).length < MAX_PROFILE_LINKS}
-                  <button class="secondary-button" type="button" onclick={() => (linkPickerOpen = true)}>
+                  <button class="secondary-button" type="button" disabled={authorList === undefined} onclick={openLinkPicker}>
                     Add link
                   </button>
                 {/if}
               </div>
 
               {#if (myProfile.links ?? []).length > 0}
-                <ProfileLinks links={myProfile.links} editable onremove={removeLink} />
+                <ProfileLinks links={myProfile.links} editable={authorList !== undefined} onremove={removeLink} />
               {:else}
                 <p class="links-empty">No links added yet.</p>
               {/if}
@@ -1041,7 +1146,7 @@
                       disabled={!newLinkType}
                       bind:value={newLinkValue} />
                   </div>
-                  <button class="primary-button" type="button" onclick={addLink} disabled={!newLinkType || !newLinkValue.trim()}>
+                  <button class="primary-button" type="button" onclick={addLink} disabled={linkWrite.accepted || authorList === undefined || !newLinkType || !newLinkValue.trim()}>
                     Add
                   </button>
                   <button class="quiet-button" type="button" onclick={closeLinkPicker}>Cancel</button>
@@ -1055,7 +1160,8 @@
                   type="checkbox"
                   role="switch"
                   checked={myProfile.public}
-                  onchange={(event) => setProfileVisibility(event.currentTarget.checked)} />
+                  disabled={authorList === undefined}
+                  onchange={(event) => void setProfileVisibility(event.currentTarget)} />
                 <span class="visibility-copy">
                   <span class="visibility-title">Public profile</span>
                   <span class="visibility-detail">Anyone with the link can view your stats.</span>
@@ -1101,9 +1207,9 @@
 
     <StatGrid>
       <StatCard label="Books Read" value={stats.finishedBooks} href="/finished"
-        subtext={stats.firstFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
+        subtext={stats.firstFinishedAt && stats.lastFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
       <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
-      <StatCard label="Authors" value={authorList?.length ?? '…'} subtext="Rename, merge, sort names" href="/authors" />
+      <StatCard label="Authors" value={authorList === undefined ? '…' : selectableAuthors(authorList).length} subtext="Rename, merge, sort names" href="/authors" />
       <StatCard label="Needs an ISBN" value={allBooks === undefined ? '…' : isbnProblems}
         subtext="Missing or mistyped, so no cover or genre" href="/isbns" />
       <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}
@@ -1116,12 +1222,12 @@
     </StatGrid>
 
     <ReadingHeatmap days={sessionDays} />
-    <SuperlativesRow sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
-    <SpeedSection sessions={allSessions ?? []} books={allBooks ?? []} {months} />
+    <SuperlativesRow sessions={allSessions ?? []} books={analyticsBooks} {timelines} />
+    <SpeedSection sessions={allSessions ?? []} books={analyticsBooks} {months} />
     <ClockSection sessions={allSessions ?? []} />
     <CadenceSection {months} />
-    <ProgressSection sessions={allSessions ?? []} books={allBooks ?? []} {timelines} />
-    <AuthorLeaderboardSection books={allBooks ?? []} authors={authorList ?? []} />
+    <ProgressSection sessions={allSessions ?? []} books={analyticsBooks} {timelines} />
+    <AuthorLeaderboardSection books={analyticsBooks} authors={selectableAuthors(authorList ?? [])} />
 
     {#if booksByYear.length > 0}
       <div class="books-by-year">

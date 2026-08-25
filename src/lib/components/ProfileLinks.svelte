@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import Icon from 'svelte-awesome';
   import { times } from 'svelte-awesome/icons';
   import BrandIcon from '$lib/components/BrandIcon.svelte';
@@ -8,9 +8,12 @@
     linkHref,
     linkIcon,
     linkTypeName,
-  } from '$lib/utils/links.js';
+  } from '$lib/utils/links.ts';
+  import type { ProfileLink } from '$lib/interfaces/profile.ts';
 
-  let { links = [], editable = false, onremove = undefined } = $props();
+  let {
+    links = [], editable = false, onremove = undefined,
+  }: { links?: ProfileLink[]; editable?: boolean; onremove?: (index: number) => void } = $props();
 </script>
 
 <style>
@@ -161,13 +164,15 @@
           <span class="service">{linkTypeName(link)}</span>
           <span class="destination" title={link.value}>{linkDisplay(link)}</span>
         </span>
-        <button
-          type="button"
-          class="remove"
-          aria-label="Remove {linkTypeName(link)}"
-          onclick={() => onremove(index)}>
-          <Icon data={times} />
-        </button>
+        {#if onremove}
+          <button
+            type="button"
+            class="remove"
+            aria-label="Remove {linkTypeName(link)}"
+            onclick={() => onremove(index)}>
+            <Icon data={times} />
+          </button>
+        {/if}
       </li>
     {/each}
   </ul>
