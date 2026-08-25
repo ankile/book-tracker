@@ -1384,6 +1384,10 @@ test('an owner can request a valid queue retry while the server quota is full', 
     doc(db, 'users', uid, 'togglQueue', 'failed-stop'),
     {status: 'pending', retryRequestedAt: serverTimestamp()},
   ));
+  await assertFails(updateDoc(
+    doc(db, 'users', uid, 'togglQueue', 'failed-stop'),
+    {status: 'pending', retryRequestedAt: serverTimestamp()},
+  ));
 });
 
 test('queue retries cannot change payload or server lifecycle fields', async () => {

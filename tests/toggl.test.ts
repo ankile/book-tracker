@@ -50,6 +50,9 @@ test('corrupt Toggl report dedup state resets without blocking the sweep', () =>
 
 test('the sweep opens transactions only for retryable lifecycle rows', () => {
   assert.equal(isTogglSweepTransactionCandidate({status: 'pending', attempts: 0}), true);
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0, retryRequestedAt: Timestamp.now(),
+  }), false);
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 4}), true);
   assert.equal(isTogglSweepTransactionCandidate({status: 'outcome-unknown', attempts: 1}), false);
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 5}), false);

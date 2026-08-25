@@ -48,6 +48,8 @@ export function writeTogglReportedIds(
 export function isTogglSweepTransactionCandidate(item: {
   status: string;
   attempts: number;
+  retryRequestedAt?: unknown | null;
 }): boolean {
-  return item.status !== 'outcome-unknown' && item.attempts < 5;
+  return item.status !== 'outcome-unknown' && item.attempts < 5 &&
+    !(item.status === 'pending' && item.retryRequestedAt != null);
 }

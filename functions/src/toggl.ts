@@ -97,6 +97,41 @@ type StartClaimResult =
   | {status: "claimed"; title: string}
   | {status: "recovered-unknown"};
 
+interface QueueClaimToken {
+  attempts: number;
+  claimedAt: Timestamp;
+}
+
+// A successful remote stop can still fail while clearing its correlated
+// local timer. Only the exact worker claim that performed that PUT may mark
+// the row failed: a lost commit acknowledgement can leave it synced, and a
+// stale Eventarc delivery can observe a later processing claim.
+export async function markCorrelatedStopFailure(
+  queueRef: DocumentReference,
+  token: QueueClaimToken,
+  entryId: number,
+  message: string,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(queueRef);
+    if (!snap.exists) return false;
+    const value = snap.data();
+    if (value === undefined) throw new Error("Existing Toggl queue has no data.");
+    if (value.status !== "processing" || value.attempts !== token.attempts ||
+        !(value.claimedAt instanceof Timestamp) ||
+        !value.claimedAt.isEqual(token.claimedAt)) {
+      return false;
+    }
+    tx.update(queueRef, {
+      status: "error",
+      entryId,
+      error: message.slice(0, 1000),
+      retryRequestedAt: FieldValue.delete(),
+    });
+    return true;
+  });
+}
+
 function emulatorJson(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -803,7 +838,7 @@ exports.syncqueue = onDocumentWritten(
       `users/${event.params.uid}/functionQuotas/togglQueue`,
     );
     const claim = await db.runTransaction<
-      | {status: "claimed"; item: TogglQueueDocument}
+      | {status: "claimed"; item: TogglQueueDocument; token: QueueClaimToken}
       | {status: "deferred"}
       | {status: "malformed"; error: string}
       | null
@@ -871,7 +906,11 @@ exports.syncqueue = onDocumentWritten(
         error: FieldValue.delete(),
         retryRequestedAt: FieldValue.delete(),
       });
-      return {status: "claimed", item: current};
+      return {
+        status: "claimed",
+        item: current,
+        token: {attempts: current.attempts + 1, claimedAt: now},
+      };
     });
     if (claim === null) return;
     if (claim.status === "deferred") throw new QueueQuotaDeferredError();
@@ -961,12 +1000,7 @@ exports.syncqueue = onDocumentWritten(
         // repeat a completed write. Preserve the known entry id and move the
         // queue to an explicit recovery state before Eventarc redelivers it.
         const raw = errorMessage(error);
-        await after.ref.update({
-          status: "error",
-          entryId,
-          error: raw.slice(0, 1000),
-          retryRequestedAt: FieldValue.delete(),
-        });
+        await markCorrelatedStopFailure(after.ref, claim.token, entryId, raw);
         const title = claimedItem.bookTitle;
         await logIssue({
           level: "error",

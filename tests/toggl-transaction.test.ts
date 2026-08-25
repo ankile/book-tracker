@@ -28,6 +28,14 @@ const deployed = functionsRequire('./lib') as {
     };
   };
 };
+const { markCorrelatedStopFailure } = functionsRequire('./lib/toggl') as {
+  markCorrelatedStopFailure: (
+    queueRef: import('firebase-admin/firestore').DocumentReference,
+    token: { attempts: number; claimedAt: import('firebase-admin/firestore').Timestamp },
+    entryId: number,
+    message: string,
+  ) => Promise<boolean>;
+};
 
 const db = getFirestore();
 const uid = `toggl-transaction-${Date.now()}`;
@@ -235,7 +243,11 @@ test('a stale queue worker cannot clear a newer timer lifecycle', async (t) => {
       status: 'pending', createdAt: Timestamp.now(),
     }),
   ]);
-  t.mock.method(globalThis, 'fetch', async () => new Response('', {status: 200}));
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    return new Response('', {status: 200});
+  });
   const after = await queueRef.get();
   await assert.rejects(deployed.toggl.syncqueue.run({
     data: {after},
@@ -247,6 +259,34 @@ test('a stale queue worker cannot clear a newer timer lifecycle', async (t) => {
   assert.equal(failedQueue?.status, 'error');
   assert.equal(failedQueue?.entryId, 451);
   assert.match(failedQueue?.error, /no longer matches/);
+  await deployed.toggl.syncqueue.run({
+    data: {after},
+    params: {uid, queueId},
+  });
+  assert.equal(fetchCalls, 1);
+});
+
+test('post-PUT recovery never downgrades a synced row or a newer worker claim', async () => {
+  const queueRef = userRef.collection('togglQueue').doc('post-put-claim-token');
+  const claimedAt = Timestamp.now();
+  const token = {attempts: 1, claimedAt};
+  await queueRef.set({status: 'synced', attempts: 1, claimedAt, entryId: 700});
+  assert.equal(
+    await markCorrelatedStopFailure(queueRef, token, 700, 'lost acknowledgement'),
+    false,
+  );
+  assert.equal((await queueRef.get()).data()?.status, 'synced');
+
+  const newerClaimedAt = Timestamp.fromMillis(claimedAt.toMillis() + 1);
+  await queueRef.set({status: 'processing', attempts: 2, claimedAt: newerClaimedAt});
+  assert.equal(
+    await markCorrelatedStopFailure(queueRef, token, 700, 'stale worker'),
+    false,
+  );
+  const newer = (await queueRef.get()).data();
+  assert.equal(newer?.status, 'processing');
+  assert.equal(newer?.attempts, 2);
+  assert.equal(newer?.claimedAt.isEqual(newerClaimedAt), true);
 });
 
 test('checked recovery clears capped failures but refuses live processing work', async () => {
