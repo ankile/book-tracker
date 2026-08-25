@@ -1,37 +1,35 @@
 <script lang="ts">
-  import { FirebaseError } from "firebase/app";
   import Button from "./Button.svelte";
   import { signIn, signUp } from "$lib/firebase/auth.ts";
   import { logIssue } from "$lib/firebase/db.ts";
+  import {
+    runAuthAttempt,
+    type AuthAttemptState,
+  } from "$lib/utils/authFailure.ts";
 
   let login = $state(true);
   let email = $state("");
   let password = $state("");
+  let errorMessage = $state("");
+  let authAttempt = $state<AuthAttemptState>({ pending: false });
 
   async function signInOrUp() {
-    try {
-      if (login) {
-        await signIn(email, password);
-      } else {
-        await signUp(email, password);
-      }
-    } catch (error) {
-      if (!(error instanceof FirebaseError)) throw error;
-      // No session exists yet, so the row is anonymous; detail.email keeps
-      // the attempt attributable. Only an address-shaped value is recorded:
-      // typing a password into the email box is a common slip, and logging
-      // whatever was in the field would write that credential to the issue
-      // log verbatim. The password field itself is never read here.
-      const isAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-      logIssue({
-        level: "warn",
-        event: login ? "auth.sign_in_failed" : "auth.sign_up_failed",
-        message: error.message,
-        code: error.code,
-        detail: isAddress ? { email } : null,
-      });
-      alert(error.message);
+    const operation = login ? 'sign_in' : 'sign_up';
+    errorMessage = "";
+    const result = await runAuthAttempt(authAttempt, operation, () => (
+      operation === 'sign_in'
+        ? signIn(email, password)
+        : signUp(email, password)
+    ));
+    if (result.status === 'failed') {
+      if (result.failure.issue) logIssue(result.failure.issue);
+      errorMessage = result.failure.userMessage;
     }
+  }
+
+  function switchMode() {
+    login = !login;
+    errorMessage = "";
   }
 </script>
 
@@ -73,6 +71,11 @@
       filter: brightness(0.8);
       text-decoration: underline;
     }
+
+    &:disabled {
+      cursor: default;
+      opacity: 0.6;
+    }
   }
 
   input {
@@ -113,6 +116,11 @@
     font-size: smaller;
     color: darkgray;
   }
+
+  .error {
+    color: firebrick;
+    margin: 0.75rem 0 0;
+  }
 </style>
 
 <div class="container">
@@ -126,21 +134,28 @@
   </div>
   <form
     class="column form"
+    aria-busy={authAttempt.pending}
     onsubmit={(event) => {
       event.preventDefault();
       signInOrUp();
     }}>
     <div class="column hover">
       <label for="email">Email address</label>
-      <input id="email" placeholder="Email" type="email" bind:value={email} />
+      <input id="email" placeholder="Email" type="email" bind:value={email} required />
       <label for="password">Password</label>
       <input
         id="password"
         placeholder="Password"
         type="password"
+        required
         bind:value={password} />
     </div>
-    <Button type="submit">{login ? 'Log in' : 'Register'}</Button>
+    <Button type="submit" disabled={authAttempt.pending}>
+      {authAttempt.pending ? 'Please wait…' : login ? 'Log in' : 'Register'}
+    </Button>
+    {#if errorMessage}
+      <p class="error" role="alert">{errorMessage}</p>
+    {/if}
   </form>
 
   <div class="left">
@@ -149,14 +164,16 @@
         If you're not already registered, press
         <button
           type="button"
-          onclick={() => (login = !login)}
+          onclick={switchMode}
+          disabled={authAttempt.pending}
           class="link">here</button>
         to register instead.
       {:else}
         If you're already registered, press
         <button
           type="button"
-          onclick={() => (login = !login)}
+          onclick={switchMode}
+          disabled={authAttempt.pending}
           class="link">here</button>
         to log in instead.
       {/if}

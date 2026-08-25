@@ -640,9 +640,10 @@ service cloud.firestore {
     // Create-only so telemetry cannot be scrubbed, and uid is pinned to the
     // session so rows cannot be attributed to someone else. Anonymous
     // creates are allowed with uid == null so failed sign-ins before any
-    // session exists still land (detail.email carries the attempted
-    // address) — that path is unauthenticated and therefore spammable, so
-    // everything it can influence is constrained:
+    // session exists still land. They cannot carry detail because an
+    // address-shaped value entered before authentication could be a password.
+    // That path is unauthenticated and therefore spammable, so everything it
+    // can influence is constrained:
     //
     //   - createdAt == request.time. The admin panel orders by this field
     //     and shows a fixed number of rows, so a client-chosen timestamp
@@ -662,6 +663,7 @@ service cloud.firestore {
       allow create: if validIssue()
                     && (request.auth == null
                           ? (request.resource.data.uid == null
+                             && request.resource.data.detail == null
                              && request.resource.data.event in ['auth.sign_in_failed', 'auth.sign_up_failed'])
                           : (request.resource.data.uid == request.auth.uid
                              && request.resource.data.event in ['firestore.listener_failed',

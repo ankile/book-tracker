@@ -1212,6 +1212,21 @@ test('authenticated clients can report decode failures without opening anonymous
   ));
 });
 
+test('anonymous auth telemetry contains no pre-auth user input', async () => {
+  const anonymous = environment.unauthenticatedContext().firestore();
+  await assertSucceeds(setDoc(
+    doc(anonymous, 'logEvents', 'sign-in-failure'),
+    issue(null, 'auth.sign_in_failed'),
+  ));
+  await assertFails(setDoc(
+    doc(anonymous, 'logEvents', 'sign-up-failure-with-input'),
+    {
+      ...issue(null, 'auth.sign_up_failed'),
+      detail: { email: 'Secret1@example.com' },
+    },
+  ));
+});
+
 test('owners can create and read only exact pending Toggl queue payloads', async () => {
   await seedToggl('queue-owner');
   const owner = environment.authenticatedContext('queue-owner').firestore();

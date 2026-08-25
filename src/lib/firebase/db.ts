@@ -125,8 +125,9 @@ const ISSUE_RETENTION_DAYS = 90;
 
 // Persist a warn/error event to the logEvents collection, where the admin
 // overview surfaces it. Rules pin uid to the current session (null when
-// signed out — failed sign-ins carry the attempted address in detail.email
-// instead). Never pass secrets in message/code/detail, and prefer operation
+// signed out). Pre-auth failures carry no user-entered identifier because an
+// address-shaped value could still be a password. Never pass secrets in
+// message/code/detail, and prefer operation
 // names over user content: the operator reads this log, so another user's
 // book titles do not belong in it. Fire-and-forget with a console-only
 // catch: the logger reporting the app's failures must not feed back into
