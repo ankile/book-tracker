@@ -185,6 +185,60 @@ its provenance.
 Keep the migration cheap and idempotent, re-run it with the follow-up audit for
 stragglers, and do not remove it from the repository.
 
+#### Strict-TypeScript release record and rollback boundary
+
+Merging this change does not deploy it: this repository has no GitHub Actions
+or other merge-to-Firebase automation. Merge with a merge commit so the whole
+conversion has one revert boundary. Before the first production command,
+record these together in the rollout log:
+
+- the merge SHA and the exact pre-release production SHA; create and push an
+  annotated tag at the latter;
+- the current Firebase Hosting release ID and timestamp from the console;
+- the deployed Functions set/revisions and Firestore rules release;
+- the pre-migration audit, the fresh snapshot filename, and the operator/time
+  for every stage.
+
+The timer migration and Hosting deployment are release gates, not a single
+all-at-once deploy. Use this rollback matrix:
+
+1. **Merge only:** revert the merge commit. No Firebase state changed.
+2. **New rules only:** deploy `firestore:rules` from the pre-release tag.
+   Do not deploy `--only firestore`: retain the additive indexes and TTL
+   policies in the current `firestore.indexes.json`.
+3. **New Functions, before timer migration:** deploy Functions from the
+   pre-release tag, wait for the superseded invocations to drain, then deploy
+   only the pre-release `firestore:rules`.
+4. **After timer migration, before new Hosting:** prefer a current-schema
+   fix-forward. If rollback is unavoidable, first stop timer activity and
+   require no `starting`, `stopping`, `outcome-unknown`, `processing`, or
+   retryable `pending` operation. Reconcile every affected Toggl entry, deploy
+   pre-release Functions, wait for invocations to drain, and finally deploy
+   only the pre-release rules. The old application ignores the additive
+   lifecycle documents, but may make them stale; a later forward attempt needs
+   a purpose-built repair migration and a fresh audit.
+5. **After new Hosting has ever been exposed:** do **not** roll back Hosting,
+   Functions, or rules to the pre-release contract. An already-running or
+   offline cached new bundle can outlive a Hosting rollback, while old and new
+   clients require incompatible atomic Firestore writes. Keep the current
+   schema contract and fix forward; if necessary, deploy a current-schema
+   maintenance UI while investigating. This remains true after the progress
+   backfill.
+
+Never roll back Functions alone after timer migration: old queue handling can
+complete a remote Toggl stop without clearing the correlated Firestore claim.
+Never roll back Hosting alone after the progress backfill: old reading batches
+omit `currentPageUpdateId` and are rejected atomically by the new rules.
+
+PITR, managed backups, and the local snapshots below protect data, but they are
+disaster recovery rather than an application rollback. They cannot undo a
+remote Toggl API call. Do not use `db-restore.ts` for an ordinary release
+rollback: its live copy-back is non-atomic, intentionally skips Toggl queue
+rows, and does not delete documents created after the snapshot. If actual data
+loss requires recovery, stop writes first, inventory the live and recovery
+databases explicitly, reconcile Toggl separately, and approve the exact
+copy-back/deletion plan before applying it.
+
 ### 4. Production run
 
 ```sh
@@ -283,8 +337,8 @@ Notes on `db-restore.ts --prod` (disaster recovery only):
 
 - Full-overwrite `set()`: restores every doc in the dump as-is.
 - **Never deletes** — documents *created* after the snapshot (e.g. by a bad
-  migration) survive a restore and need manual cleanup (the audit diff will
-  show them as unexpected paths).
+  migration) survive a restore and need explicit inventory and cleanup. The
+  audit checks schema invariants, not a complete path inventory.
 - Skips `users/*/togglQueue/*` — a restored `pending` queue item would
   replay a real Toggl API call.
 - Triggers fire during restore; the hardened trigger set is idempotent.
@@ -294,10 +348,10 @@ database as of any point in the PITR window via read-time reads — good
 enough to recover individual fields without a full restore.
 
 Posture change with `migrate-author-ids.ts`: the legacy `author` string on
-book docs used to double as an informal rollback affordance; it is gone
-from docs once that migration applies. Rollback is now explicitly: redeploy
-the previous hosting build, then recover fields from the immediately-prior
-snapshot or PITR. The affordances above fully replace it.
+book docs used to double as an informal recovery affordance; it is gone from
+docs once that migration applies. Recover lost fields from the
+immediately-prior snapshot or PITR under the write-quiesced disaster-recovery
+procedure above. Do not treat a Hosting rollback as data recovery.
 
 ## Triggers and book content
 

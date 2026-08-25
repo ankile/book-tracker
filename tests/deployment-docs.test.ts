@@ -73,6 +73,22 @@ test('the general migration order links to the timer-claim exception', async () 
   );
 });
 
+test('the strict-TypeScript rollback runbook preserves compatible release stages', async () => {
+  const migrations = await readFile(new URL('../MIGRATIONS.md', import.meta.url), 'utf8');
+  const rollback = migrations.slice(
+    migrations.indexOf('#### Strict-TypeScript release record and rollback boundary'),
+    migrations.indexOf('### 4. Production run'),
+  );
+
+  assert.match(rollback, /repository has no GitHub Actions[\s\S]*Merge only:[\s\S]*revert the merge commit/i);
+  assert.match(rollback, /New rules only:[\s\S]*firestore:rules[\s\S]*Do not deploy `--only firestore`/i);
+  assert.match(rollback, /New Functions, before timer migration:[\s\S]*wait for the superseded invocations to drain[\s\S]*firestore:rules/i);
+  assert.match(rollback, /After timer migration, before new Hosting:[\s\S]*Reconcile every affected Toggl entry/i);
+  assert.match(rollback, /After new Hosting has ever been exposed:[\s\S]*do \*\*not\*\* roll back Hosting,[\s\S]*fix forward/i);
+  assert.match(rollback, /Never roll back Functions alone[\s\S]*Never roll back Hosting alone/i);
+  assert.match(rollback, /Do not use `db-restore\.ts` for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
+});
+
 test('the progress migration traverses phantom users and logs the applied transaction patch', async () => {
   const migration = await readFile(progressMigrationUrl, 'utf8');
   assert.match(migration, /collection\('users'\)\.listDocuments\(\)/);
