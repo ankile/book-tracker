@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import Icon from "svelte-awesome";
   import { edit, trash } from "svelte-awesome/icons";
   import ModalCard from "$lib/components/ModalCard.svelte";
@@ -48,10 +49,12 @@
       const updatesStore = Database.getBookUpdates(userId, bookId);
       const unsubscribeStore = updatesStore.subscribe((data) => {
         updates = data;
-        if (pendingSessionWrite !== null &&
-            readingSessionMutationConfirmed(pendingSessionWrite, data)) {
-          releaseSessionWrite(pendingSessionWrite.operationId);
-        }
+        untrack(() => {
+          if (pendingSessionWrite !== null &&
+              readingSessionMutationConfirmed(pendingSessionWrite, data)) {
+            releaseSessionWrite(pendingSessionWrite.operationId);
+          }
+        });
       });
       return unsubscribeStore;
     }

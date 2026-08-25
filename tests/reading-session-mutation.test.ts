@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import {acceptReportedWrite} from '../src/lib/utils/offlineWrite.ts';
 import {
@@ -176,4 +177,16 @@ test('stale snapshot echoes keep edit and delete mutation latches closed', () =>
     () => {},
   ), null);
   assert.equal(duplicateWrites, 0);
+});
+
+test('the sessions listener does not track mutation-latch state', async () => {
+  const source = await readFile(
+    new URL('../src/lib/components/ReadingSessionsModal.svelte', import.meta.url),
+    'utf8',
+  );
+  assert.match(source, /import \{ untrack \} from ['"]svelte['"]/);
+  assert.match(
+    source,
+    /updatesStore\.subscribe\(\(data\) => \{[\s\S]*?untrack\(\(\) => \{[\s\S]*?pendingSessionWrite/,
+  );
 });
