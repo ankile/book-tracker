@@ -117,6 +117,13 @@ it. Hosting serves `index.html` with `no-cache`, so navigations pick up new
 client code promptly, but assume days of overlap with stale cached clients
 (offline PWA).
 
+The timer-lifecycle schema is an exception to this general order. For the
+strict-TypeScript release, follow the [timer-claim rollout](#timer-claim-rollout)
+below; it deploys correlation rules before Functions and migrates every user
+before Hosting.
+
+#### Timer-claim rollout
+
 The `migrate-timer-claims.ts` rollout is deliberately stricter than the usual
 order because the lifecycle document serializes every timer start:
 

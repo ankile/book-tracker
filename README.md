@@ -287,32 +287,36 @@ security audits for both workspaces.
 
 ### Deploy Everything
 
-To deploy both hosting and functions:
+The first strict-TypeScript release must follow the authoritative
+[timer-claim rollout](MIGRATIONS.md#timer-claim-rollout). Do not use an
+all-at-once `firebase deploy`: every user needs a lifecycle document before the
+claim-aware web client is exposed.
 
 ```bash
-# Build the web app first
-npm run build
+# 1. Reject uncorrelated legacy timer writes.
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
 
-# Deploy everything
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
-```
-
-For the strict-TypeScript migration release, deploy Functions and Hosting
-before the stricter Firestore rules. Then close and reload every active app
-tab (including installed PWAs) before deploying the rules. An already-open
-legacy client clears a timer and enqueues its Toggl operation as separate
-writes; at a full quota, deploying the strict rules while such a client is
-still active can accept the clear and reject its legacy queue write. The
-service worker activates an update only after the previous worker releases
-its clients, so a Hosting deploy alone does not refresh open tabs.
-
-```bash
+# 2. Deploy the claim-aware callables.
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
+# Before migrating, let old in-flight invocations drain.
+
+# 3. Review, snapshot, apply, and prove the migration is idempotent.
+node migrate-timer-claims.ts --prod
+node db-snapshot.ts --prod
+node migrate-timer-claims.ts --prod --apply
+node migrate-timer-claims.ts --prod --apply
+node db-audit.ts --prod
+
+# 4. Expose the claim-aware client only after the migration is clean.
 npm run build
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
-# Close and reload every open browser/PWA client, then:
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
 ```
+
+Review every migration line, then take the snapshot immediately before the
+first apply. The second apply must report zero users, and the audit must contain
+no `timer-lifecycle.*` findings. After this one-time rollout has completed
+successfully, routine full deployments can use the standard `firebase deploy`
+command.
 
 ### Deploy Hosting Only
 
