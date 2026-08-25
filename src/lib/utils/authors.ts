@@ -144,6 +144,14 @@ export function bookAuthorReferenceCounts(
   return counts;
 }
 
+export function booksReferencingAuthor<T extends AuthorshipBookView>(
+  books: readonly T[],
+  authorId: string,
+  authorMap: ReadonlyMap<string, Author>,
+): T[] {
+  return books.filter((book) => readableBookAuthorIds(book, authorMap).includes(authorId));
+}
+
 // The regular join stays deliberately strict so corrupt authorship cannot be
 // rendered as if it were valid. The edit modal is the repair boundary: it
 // needs to open even when a referenced author is missing or has a broken
@@ -315,7 +323,13 @@ export function resolveChip(name: string, authors: readonly ResolvableAuthor[]):
   if (existing) {
     const byAuthorId = new Map(authors.map((author) => [author.id, author]));
     const resolution = inspectAuthorRedirect(existing, byAuthorId);
-    if (!resolution.ok) throw new Error(resolution.problem);
+    if (!resolution.ok) {
+      return {
+        id: existing.id,
+        name: `[Unresolved author] ${existing.name}`,
+        unresolved: true,
+      };
+    }
     const current = resolution.author;
     if (current.retirement?.reason !== 'deleted') {
       return { id: current.id, name: current.name };

@@ -9,6 +9,7 @@ import {
   resolveChip,
   canonicalAuthorIds,
   bookAuthorReferenceCounts,
+  booksReferencingAuthor,
   editableBookAuthorChips,
   effectiveBookAuthorIds,
   readableBookAuthorIds,
@@ -473,6 +474,53 @@ test('author redirect cycles crash as corrupt data', () => {
   };
   const authorMap = new Map([[first.id, first], [second.id, second]]);
   assert.throws(() => canonicalAuthorIds(['first'], authorMap), /Cyclic author merge/);
+});
+
+test('merge counting tolerates unrelated and same-book corrupt references', () => {
+  const source: Author = {
+    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
+  };
+  const healthy: Author = {
+    id: 'healthy', name: 'Healthy', nameLower: 'healthy', kind: 'person', familyName: 'Healthy',
+  };
+  const broken: Author = {
+    id: 'broken', name: 'Broken', nameLower: 'broken', kind: 'person', familyName: 'Broken',
+    retirement: {reason: 'merged', targetId: 'missing'},
+  };
+  const map = new Map([source, healthy, broken].map((author) => [author.id, author]));
+  const books = [
+    {id: 'source-and-corrupt', authorIds: ['source', 'missing']},
+    {id: 'unrelated-corrupt', authorIds: ['broken']},
+    {id: 'healthy', authorIds: ['healthy']},
+  ];
+  assert.deepEqual(
+    booksReferencingAuthor(books, 'source', map).map((book) => book.id),
+    ['source-and-corrupt'],
+  );
+});
+
+test('typed authors with missing or cyclic redirects become repair chips', () => {
+  const missing: Author = {
+    id: 'missing-source', name: 'Missing Source', nameLower: 'missing source',
+    kind: 'person', familyName: 'Source',
+    retirement: {reason: 'merged', targetId: 'absent'},
+  };
+  const first: Author = {
+    id: 'first-cycle', name: 'First Cycle', nameLower: 'first cycle',
+    kind: 'person', familyName: 'Cycle',
+    retirement: {reason: 'merged', targetId: 'second-cycle'},
+  };
+  const second: Author = {
+    id: 'second-cycle', name: 'Second Cycle', nameLower: 'second cycle',
+    kind: 'person', familyName: 'Cycle',
+    retirement: {reason: 'merged', targetId: 'first-cycle'},
+  };
+  assert.deepEqual(resolveChip('Missing Source', [missing]), {
+    id: 'missing-source', name: '[Unresolved author] Missing Source', unresolved: true,
+  });
+  assert.deepEqual(resolveChip('First Cycle', [first, second]), {
+    id: 'first-cycle', name: '[Unresolved author] First Cycle', unresolved: true,
+  });
 });
 
 test('abbreviatedName reads the explicit familyName for persons', () => {

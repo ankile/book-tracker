@@ -6,8 +6,7 @@
   import {
     AUTHOR_KINDS,
     bookAuthorReferenceCounts,
-    canonicalAuthorIds,
-    effectiveBookAuthorIds,
+    booksReferencingAuthor,
     selectableAuthors,
     splitPersonName,
     joinPersonName,
@@ -39,9 +38,9 @@
   const authorMap = $derived(new Map((authorList ?? []).map((author) => [author.id, author])));
 
   // Read-only counts keep an unresolvable raw id instead of taking down the
-  // management page. This is fail-safe for deletion: a referenced active id
-  // still has a non-zero count even if another redirect in the library is
-  // corrupt. Merge submission below remains strict.
+  // management page. This is fail-safe for deletion and merge confirmation:
+  // a referenced active id still has a non-zero count even if another
+  // redirect in the library is corrupt.
   const bookCounts = $derived(bookAuthorReferenceCounts(allBooks ?? [], authorMap));
 
   let editAuthor = $state<Author | null>(null);
@@ -93,12 +92,7 @@
     const target = authors.find((a) => a.id === mergeTargetId);
     if (target === undefined) throw new Error('A merge target is required.');
     const source = mergeSource;
-    const books = allBooks
-      .map((book) => ({
-        id: book.id,
-        authorIds: canonicalAuthorIds(effectiveBookAuthorIds(book), authorMap),
-      }))
-      .filter((book) => book.authorIds.includes(source.id));
+    const books = booksReferencingAuthor(allBooks, source.id, authorMap);
     const confirmed = confirm(
       `Merge "${source.name}" into "${target.name}"? ${books.length} book(s) will resolve to "${target.name}" and "${source.name}" will be hidden.`
     );
