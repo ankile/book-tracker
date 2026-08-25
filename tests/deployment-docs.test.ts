@@ -82,7 +82,10 @@ test('the strict-TypeScript rollback runbook preserves compatible release stages
 
   assert.match(rollback, /repository has no GitHub Actions[\s\S]*Merge only:[\s\S]*revert the merge commit/i);
   assert.match(rollback, /New rules only:[\s\S]*firestore:rules[\s\S]*Do not deploy `--only firestore`/i);
-  assert.match(rollback, /New Functions, before timer migration:[\s\S]*wait for the superseded invocations to drain[\s\S]*firestore:rules/i);
+  assert.match(
+    rollback,
+    /After new Functions are deployed:[\s\S]*Rollback is unsupported[\s\S]*outcome-unknown[\s\S]*Waiting for invocations to drain does not resolve/i,
+  );
   assert.match(
     rollback,
     /After timer migration, before new Hosting:[\s\S]*Rollback is unsupported[\s\S]*no enforced gate[\s\S]*purpose-built repair migration/i,

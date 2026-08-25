@@ -207,9 +207,13 @@ all-at-once deploy. Use this rollback matrix:
 2. **New rules only:** deploy `firestore:rules` from the pre-release tag.
    Do not deploy `--only firestore`: retain the additive indexes and TTL
    policies in the current `firestore.indexes.json`.
-3. **New Functions, before timer migration:** deploy Functions from the
-   pre-release tag, wait for the superseded invocations to drain, then deploy
-   only the pre-release `firestore:rules`.
+3. **After new Functions are deployed:** fix forward with the current schema.
+   Rollback is unsupported once those Functions can process traffic. The new
+   queue worker can retain an `outcome-unknown` row after an ambiguous remote
+   Toggl create, and the pre-release stack cannot safely interpret or reconcile
+   it. A newly created user can also enter a transitional timer lifecycle before
+   the bulk migration. Waiting for invocations to drain does not resolve either
+   case.
 4. **After timer migration, before new Hosting:** fix forward with the current
    schema. Rollback is unsupported with the repository's current artifacts:
    there is no enforced gate that can freeze callable timer activity, drain

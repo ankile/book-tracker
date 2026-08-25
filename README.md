@@ -295,8 +295,8 @@ claim-aware web client is exposed. Before deploying, complete the
 After the new Hosting bundle has been exposed, keep the current schema contract
 and fix forward; cached old and new bundles make a blind full-stack rollback
 unsafe. With the current release artifacts, the fix-forward boundary begins
-when the timer migration is applied because the repository has no enforced
-timer/queue write freeze.
+when the new Functions are deployed: the queue worker can already produce an
+ambiguous remote Toggl outcome that the pre-release stack cannot reconcile.
 
 ```bash
 # 1. Reject uncorrelated legacy timer writes.
