@@ -463,7 +463,26 @@ function installBooksStore(t, books) {
       toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
     }),
   };
-  const booksRef = {};
+  const active = Object.entries(books).find(([, book]) => book.activeTimer !== null);
+  let claim = active === undefined ?
+    {version: 1, state: "idle", cleared: null} :
+    {version: 1, bookId: active[0], ...active[1].activeTimer};
+  if (active !== undefined && !("state" in active[1].activeTimer)) {
+    claim = active[1].activeTimer.entryId === undefined ? {
+      version: 1,
+      state: "local",
+      bookId: active[0],
+      operationId: active[1].activeTimer.operationId,
+      start: active[1].activeTimer.start,
+    } : {
+      version: 1,
+      state: "remote",
+      bookId: active[0],
+      entryId: active[1].activeTimer.entryId,
+      start: active[1].activeTimer.start,
+    };
+  }
+  const claimRef = {id: "current"};
   const bookRefs = new Map(Object.entries(books).map(([id, book]) => [id, {
     id,
     get: async () => snapshot(book),
@@ -476,21 +495,16 @@ function installBooksStore(t, books) {
   });
   t.mock.method(db, "doc", (path) => {
     if (path === "users/owner") return userRef;
+    if (path === "users/owner/timerLifecycle/current") return claimRef;
     const prefix = "users/owner/books/";
     assert.ok(path.startsWith(prefix));
     const ref = bookRefs.get(path.slice(prefix.length));
     assert.ok(ref);
     return ref;
   });
-  t.mock.method(db, "collection", (path) => {
-    assert.equal(path, "users/owner/books");
-    return booksRef;
-  });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (ref) => {
-      if (ref === booksRef) {
-        return {docs: Object.keys(books).map(bookSnapshot)};
-      }
+      if (ref === claimRef) return snapshot(claim, claim !== null);
       const entry = [...bookRefs.entries()].find(([, bookRef]) => bookRef === ref);
       assert.ok(entry);
       return snapshot(books[entry[0]]);
@@ -500,8 +514,16 @@ function installBooksStore(t, books) {
       assert.ok(entry);
       Object.assign(books[entry[0]], patch);
     },
+    set: (ref, value) => {
+      assert.equal(ref, claimRef);
+      claim = value;
+    },
+    delete: (ref) => {
+      assert.equal(ref, claimRef);
+      claim = null;
+    },
   }));
-  return {books, bookRefs};
+  return {books, bookRefs, get claim() { return claim; }};
 }
 
 function installBookStore(t, book) {
@@ -708,6 +730,28 @@ test("stop decodes activeTimer without requiring a title", async (t) => {
   );
   assert.equal(fetchCalls, 1);
   assert.equal(store.book.activeTimer, null);
+});
+
+test("a 404 does not claim the timer was cleared after its identity changed", async (t) => {
+  const store = installBookStore(t, {
+    activeTimer: {
+      entryId: 12,
+      start: "2026-08-24T12:00:00Z",
+    },
+  });
+  t.mock.method(global, "fetch", async () => {
+    store.book.activeTimer = {
+      entryId: 13,
+      start: "2026-08-24T12:00:01Z",
+    };
+    return new Response("missing", {status: 404});
+  });
+
+  await assert.rejects(
+    deployed.toggl.stop.run({bookId: "book"}, authContext),
+    /entry is gone, but its local timer claim changed/,
+  );
+  assert.equal(store.book.activeTimer.entryId, 13);
 });
 
 test("the Functions emulator starts and stops using Firestore state only", async (t) => {

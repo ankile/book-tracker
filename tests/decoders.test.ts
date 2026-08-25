@@ -201,6 +201,19 @@ test('book decoder accepts every explicit activeTimer lifecycle state', () => {
       : null,
     'outcome-unknown',
   );
+
+  const stopping = decodeBook('book', bookData({
+    state: 'stopping',
+    entryId: 42,
+    start: '2026-08-24T12:00:00.000Z',
+    queueId: 'book_2026-08-24T12:00:00.000Z',
+  }), 'users/owner/books/book');
+  assert.deepEqual(stopping.activeTimer, {
+    state: 'stopping',
+    entryId: 42,
+    start: '2026-08-24T12:00:00.000Z',
+    queueId: 'book_2026-08-24T12:00:00.000Z',
+  });
 });
 
 test('book decoder rejects malformed timer lifecycle data', () => {
@@ -222,6 +235,22 @@ test('book decoder rejects malformed timer lifecycle data', () => {
       entryId: 42,
     }), 'users/owner/books/book'),
     /only keys/,
+  );
+  assert.throws(
+    () => decodeBook('book', bookData({
+      start: '2026-08-24T12:00:00.000Z',
+      operationId: 'x'.repeat(101),
+    }), 'users/owner/books/book'),
+    /operationId/,
+  );
+  assert.throws(
+    () => decodeBook('book', bookData({
+      state: 'stopping',
+      entryId: 42,
+      start: '2026-08-24T12:00:00.000Z',
+      queueId: 'x'.repeat(601),
+    }), 'users/owner/books/book'),
+    /queueId/,
   );
 });
 

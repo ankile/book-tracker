@@ -13,7 +13,7 @@ service cloud.firestore {
                     && request.resource.data.get('currentPageUpdateId', null) == null;
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
-                    && validBookTimerTransition()
+                    && validBookTimerTransition(userId, bookId)
                     && validBookPageStateTransition()
                     && validBookProgressSourceTransition(userId, bookId);
       // A local timer has no remote side effect. The UI explicitly warns
@@ -21,7 +21,8 @@ service cloud.firestore {
       // Toggl lifecycle states must be cleared through their stop/resolve path.
       allow delete: if request.auth != null && userId == request.auth.uid
                     && (resource.data.get('activeTimer', null) == null
-                        || validLocalTimer(resource.data.activeTimer));
+                        || (validLocalTimer(resource.data.activeTimer)
+                            && validDeletedLocalTimerClaim(userId, bookId)));
 
       // Writes are validated so a client cannot forge owner — which the
       // collectionGroup rule below trusts for cross-book stats reads — nor
@@ -42,6 +43,14 @@ service cloud.firestore {
                       && resource.data.type == 'reading'
                       && validDeletedBookUpdate(userId, bookId, updateId);
       }
+    }
+
+    match /users/{userId}/timerLifecycle/{lifecycleId} {
+      allow read: if request.auth != null && userId == request.auth.uid
+                  && lifecycleId == 'current';
+      allow update: if request.auth != null && userId == request.auth.uid
+                    && lifecycleId == 'current'
+                    && validClientTimerClaimTransition(userId);
     }
 
     function validBookUpdateIdentity(userId, bookId) {
@@ -235,7 +244,7 @@ service cloud.firestore {
     // erase a start claim while the server may be issuing the remote POST.
     function validInitialBookTimer() {
       let timer = request.resource.data.get('activeTimer', null);
-      return timer == null || validLocalTimer(timer);
+      return timer == null;
     }
 
     function validBookProgressSourceTransition(userId, bookId) {
@@ -296,22 +305,45 @@ service cloud.firestore {
              && request.resource.data.title.size() <= 500;
     }
 
-    function validBookTimerTransition() {
+    function validBookTimerTransition(userId, bookId) {
       let before = resource.data.get('activeTimer', null);
       let after = request.resource.data.get('activeTimer', null);
       return before == after
-             || (before == null && validLocalTimer(after))
+             || validChangedBookTimerTransition(userId, bookId, before, after);
+    }
+
+    function validChangedBookTimerTransition(userId, bookId, before, after) {
+      let claimPath = /databases/$(database)/documents/users/$(userId)/timerLifecycle/current;
+      let beforeClaim = get(claimPath).data;
+      let afterClaim = getAfter(claimPath).data;
+      return (before == null
+                 && validLocalTimer(after)
+                 && validIdleTimerClaim(beforeClaim)
+                 && localClaimMatchesTimer(afterClaim, bookId, after))
              || (after == null
-                 && (validLocalTimer(before)
-                     || validRemoteTimer(before)
-                     || validUnknownTimer(before)));
+                 && ((validLocalTimer(before)
+                      && localClaimMatchesTimer(beforeClaim, bookId, before))
+                     || (validUnknownTimer(before)
+                         && unknownClaimMatchesTimer(beforeClaim, bookId, before)))
+                 && validClearedTimerClaim(afterClaim, beforeClaim))
+             || (validRemoteTimer(before)
+                 && validStoppingTimer(after)
+                 && remoteClaimMatchesTimer(beforeClaim, bookId, before)
+                 && validStoppingTimerClaim(afterClaim)
+                 && afterClaim.bookId == bookId
+                 && afterClaim.entryId == after.entryId
+                 && afterClaim.start == after.start
+                 && afterClaim.queueId == after.queueId);
     }
 
     function validLocalTimer(timer) {
       return timer is map
-             && timer.keys().hasAll(['start'])
-             && timer.keys().hasOnly(['start'])
-             && timer.start is string;
+             && timer.keys().hasAll(['start', 'operationId'])
+             && timer.keys().hasOnly(['start', 'operationId'])
+             && validTimerStart(timer.start)
+             && timer.operationId is string
+             && timer.operationId.size() > 0
+             && timer.operationId.size() <= 100;
     }
 
     function validRemoteTimer(timer) {
@@ -320,7 +352,7 @@ service cloud.firestore {
              && timer.keys().hasOnly(['entryId', 'start'])
              && timer.entryId is int
              && timer.entryId > 0
-             && timer.start is string;
+             && validTimerStart(timer.start);
     }
 
     function validUnknownTimer(timer) {
@@ -333,9 +365,240 @@ service cloud.firestore {
                 ])
              && timer.state == 'outcome-unknown'
              && timer.operationId is string
-             && timer.start is string
+             && timer.operationId.size() > 0
+             && timer.operationId.size() <= 100
+             && validTimerStart(timer.start)
              && timer.claimedAt is timestamp
-             && timer.error is string;
+             && timer.error is string
+             && timer.error.size() > 0
+             && timer.error.size() <= 1000;
+    }
+
+    function validStoppingTimer(timer) {
+      return timer is map
+             && timer.keys().hasAll(['state', 'entryId', 'start', 'queueId'])
+             && timer.keys().hasOnly(['state', 'entryId', 'start', 'queueId'])
+             && timer.state == 'stopping'
+             && timer.entryId is int
+             && timer.entryId > 0
+             && validTimerStart(timer.start)
+             && timer.queueId is string
+             && timer.queueId.size() > 0
+             && timer.queueId.size() <= 600;
+    }
+
+    function validIdleTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'cleared'])
+             && claim.keys().hasOnly(['version', 'state', 'cleared'])
+             && claim.version == 1
+             && claim.state == 'idle'
+             && (claim.cleared == null || validActiveTimerClaim(claim.cleared));
+    }
+
+    function validClearedTimerClaim(after, before) {
+      return validIdleTimerClaim(after) && after.cleared == before;
+    }
+
+    function validActiveTimerClaim(claim) {
+      return validLocalTimerClaim(claim)
+             || validRemoteTimerClaim(claim)
+             || validStartingTimerClaim(claim)
+             || validUnknownTimerClaim(claim)
+             || validStoppingTimerClaim(claim);
+    }
+
+    function validClaimBookId(claim) {
+      return claim.version == 1
+             && claim.bookId is string
+             && claim.bookId.size() > 0
+             && claim.bookId.size() <= 500
+             && !claim.bookId.matches('.*[/].*')
+             && claim.bookId != '.'
+             && claim.bookId != '..';
+    }
+
+    function validLocalTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'bookId', 'operationId', 'start'])
+             && claim.keys().hasOnly(['version', 'state', 'bookId', 'operationId', 'start'])
+             && validClaimBookId(claim)
+             && claim.state == 'local'
+             && claim.operationId is string
+             && claim.operationId.size() > 0
+             && claim.operationId.size() <= 100
+             && validTimerStart(claim.start);
+    }
+
+    function validRemoteTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'bookId', 'entryId', 'start'])
+             && claim.keys().hasOnly(['version', 'state', 'bookId', 'entryId', 'start'])
+             && validClaimBookId(claim)
+             && claim.state == 'remote'
+             && claim.entryId is int
+             && claim.entryId > 0
+             && validTimerStart(claim.start);
+    }
+
+    function validStartingTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'bookId', 'operationId', 'start', 'claimedAt'])
+             && claim.keys().hasOnly(['version', 'state', 'bookId', 'operationId', 'start', 'claimedAt'])
+             && validClaimBookId(claim)
+             && claim.state == 'starting'
+             && claim.operationId is string
+             && claim.operationId.size() > 0
+             && claim.operationId.size() <= 100
+             && validTimerStart(claim.start)
+             && claim.claimedAt is timestamp;
+    }
+
+    function validUnknownTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'bookId', 'operationId', 'start', 'claimedAt', 'error'])
+             && claim.keys().hasOnly(['version', 'state', 'bookId', 'operationId', 'start', 'claimedAt', 'error'])
+             && validClaimBookId(claim)
+             && claim.state == 'outcome-unknown'
+             && claim.operationId is string
+             && claim.operationId.size() > 0
+             && claim.operationId.size() <= 100
+             && validTimerStart(claim.start)
+             && claim.claimedAt is timestamp
+             && claim.error is string
+             && claim.error.size() > 0
+             && claim.error.size() <= 1000;
+    }
+
+    function validStoppingTimerClaim(claim) {
+      return claim is map
+             && claim.keys().hasAll(['version', 'state', 'bookId', 'entryId', 'start', 'queueId'])
+             && claim.keys().hasOnly(['version', 'state', 'bookId', 'entryId', 'start', 'queueId'])
+             && validClaimBookId(claim)
+             && claim.state == 'stopping'
+             && claim.entryId is int
+             && claim.entryId > 0
+             && validTimerStart(claim.start)
+             && claim.queueId is string
+             && claim.queueId.size() > 0
+             && claim.queueId.size() <= 600;
+    }
+
+    function validTimerStart(start) {
+      return start is string
+             && start.size() > 0
+             && start.size() <= 64
+             && start.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})');
+    }
+
+    function localClaimMatchesTimer(claim, bookId, timer) {
+      return validLocalTimerClaim(claim)
+             && validLocalTimer(timer)
+             && claim.bookId == bookId
+             && claim.operationId == timer.operationId
+             && claim.start == timer.start;
+    }
+
+    function remoteClaimMatchesTimer(claim, bookId, timer) {
+      return validRemoteTimerClaim(claim)
+             && validRemoteTimer(timer)
+             && claim.bookId == bookId
+             && claim.entryId == timer.entryId
+             && claim.start == timer.start;
+    }
+
+    function unknownClaimMatchesTimer(claim, bookId, timer) {
+      return validUnknownTimerClaim(claim)
+             && validUnknownTimer(timer)
+             && claim.bookId == bookId
+             && claim.operationId == timer.operationId
+             && claim.start == timer.start
+             && claim.claimedAt == timer.claimedAt
+             && claim.error == timer.error;
+    }
+
+    function stoppingClaimMatchesTimer(claim, bookId, timer) {
+      return validStoppingTimerClaim(claim)
+             && validStoppingTimer(timer)
+             && claim.bookId == bookId
+             && claim.entryId == timer.entryId
+             && claim.start == timer.start
+             && claim.queueId == timer.queueId;
+    }
+
+    function validClientTimerClaimTransition(userId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return (validIdleTimerClaim(before)
+              && validLocalTimerClaim(after)
+              && validLocalBookStart(userId, after))
+             || (validLocalTimerClaim(before)
+                 && validClearedTimerClaim(after, before)
+                 && validLocalBookClear(userId, before))
+             || (validUnknownTimerClaim(before)
+                 && validClearedTimerClaim(after, before)
+                 && validUnknownBookClear(userId, before))
+             || (validRemoteTimerClaim(before)
+                 && validStoppingTimerClaim(after)
+                 && validRemoteBookStopQueue(userId, before, after));
+    }
+
+    function validLocalBookStart(userId, claim) {
+      let path = /databases/$(database)/documents/users/$(userId)/books/$(claim.bookId);
+      return exists(path)
+             && get(path).data.get('activeTimer', null) == null
+             && localClaimMatchesTimer(
+                  claim, claim.bookId, getAfter(path).data.activeTimer
+                );
+    }
+
+    function validLocalBookClear(userId, claim) {
+      let path = /databases/$(database)/documents/users/$(userId)/books/$(claim.bookId);
+      return exists(path)
+             && localClaimMatchesTimer(claim, claim.bookId, get(path).data.activeTimer)
+             && (!existsAfter(path)
+                 || getAfter(path).data.get('activeTimer', null) == null);
+    }
+
+    function validUnknownBookClear(userId, claim) {
+      let path = /databases/$(database)/documents/users/$(userId)/books/$(claim.bookId);
+      return exists(path)
+             && existsAfter(path)
+             && unknownClaimMatchesTimer(claim, claim.bookId, get(path).data.activeTimer)
+             && getAfter(path).data.get('activeTimer', null) == null;
+    }
+
+    function validRemoteBookStopQueue(userId, before, after) {
+      let path = /databases/$(database)/documents/users/$(userId)/books/$(before.bookId);
+      let queuePath = /databases/$(database)/documents/users/$(userId)/togglQueue/$(after.queueId);
+      let item = getAfter(queuePath).data;
+      return before.bookId == after.bookId
+             && before.entryId == after.entryId
+             && before.start == after.start
+             && after.queueId == before.bookId + '_' + before.start
+             && exists(path)
+             && existsAfter(path)
+             && validRemoteTimer(get(path).data.activeTimer)
+             && get(path).data.activeTimer.entryId == before.entryId
+             && get(path).data.activeTimer.start == before.start
+             && validStoppingTimer(getAfter(path).data.activeTimer)
+             && getAfter(path).data.activeTimer.entryId == after.entryId
+             && getAfter(path).data.activeTimer.start == after.start
+             && getAfter(path).data.activeTimer.queueId == after.queueId
+             && existsAfter(queuePath)
+             && item.type == 'stop'
+             && item.timerClaimVersion == 1
+             && item.bookId == before.bookId
+             && item.entryId == before.entryId
+             && item.start == before.start;
+    }
+
+    function validDeletedLocalTimerClaim(userId, bookId) {
+      let path = /databases/$(database)/documents/users/$(userId)/timerLifecycle/current;
+      let before = get(path).data;
+      let after = getAfter(path).data;
+      return localClaimMatchesTimer(before, bookId, resource.data.activeTimer)
+             && validClearedTimerClaim(after, before);
     }
     // Author entities, written in the same client batch as the book that
     // references them. Own-user private data, so books-level strictness
@@ -381,8 +644,9 @@ service cloud.firestore {
       allow create: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
                     && validInitialTogglQueueItem()
-                    && (togglQueueQuotaAvailable(userId)
-                        || validAtomicTimerStop(userId, queueId));
+                    && (request.resource.data.get('timerClaimVersion', 0) == 1
+                        ? validAtomicTimerStop(userId, queueId)
+                        : togglQueueQuotaAvailable(userId));
       allow update: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
                     && togglQueueQuotaAvailable(userId)
@@ -403,7 +667,7 @@ service cloud.firestore {
              && item.createdAt is timestamp
              && item.keys().hasOnly([
                   'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
-                  'status', 'createdAt'
+                  'timerClaimVersion', 'status', 'createdAt'
                 ]);
     }
 
@@ -416,7 +680,7 @@ service cloud.firestore {
              && item.retryRequestedAt == request.time
              && item.keys().hasOnly([
                   'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
-                  'status', 'createdAt', 'attempts', 'claimedAt', 'error',
+                  'timerClaimVersion', 'status', 'createdAt', 'attempts', 'claimedAt', 'error',
                   'expiresAt', 'retryRequestedAt'
                 ])
              && ((!item.keys().hasAny(['attempts', 'claimedAt', 'error']))
@@ -435,6 +699,8 @@ service cloud.firestore {
                'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt'
              ])
              && item.type in ['create', 'stop']
+             && (!item.keys().hasAny(['timerClaimVersion'])
+                 || item.timerClaimVersion == 1)
              && (!item.keys().hasAny(['bookId'])
                   || (item.bookId is string
                       && item.bookId.matches('[^/]{1,500}')
@@ -466,19 +732,37 @@ service cloud.firestore {
       let item = request.resource.data;
       let bookId = item.get('bookId', '');
       let path = /databases/$(database)/documents/users/$(userId)/books/$(bookId);
+      let claimPath = /databases/$(database)/documents/users/$(userId)/timerLifecycle/current;
       let before = get(path).data;
+      let after = getAfter(path).data;
       let timer = before.get('activeTimer', null);
+      let beforeClaim = get(claimPath).data;
+      let afterClaim = getAfter(claimPath).data;
       return item.keys().hasAll(['bookId'])
+             && item.timerClaimVersion == 1
              && queueId == bookId + '_' + item.start
              && exists(path)
-             && getAfter(path).data.get('activeTimer', null) == null
              && ((item.type == 'create'
                   && validLocalTimer(timer)
-                  && timer.start == item.start)
+                  && timer.start == item.start
+                  && localClaimMatchesTimer(beforeClaim, bookId, timer)
+                  && after.get('activeTimer', null) == null
+                  && validClearedTimerClaim(afterClaim, beforeClaim))
                  || (item.type == 'stop'
                      && validRemoteTimer(timer)
                      && timer.entryId == item.entryId
-                     && timer.start == item.start));
+                     && timer.start == item.start
+                     && validRemoteTimerClaim(beforeClaim)
+                     && beforeClaim.bookId == bookId
+                     && beforeClaim.entryId == timer.entryId
+                     && beforeClaim.start == timer.start
+                     && validStoppingTimer(after.activeTimer)
+                     && after.activeTimer.queueId == queueId
+                     && validStoppingTimerClaim(afterClaim)
+                     && afterClaim.bookId == bookId
+                     && afterClaim.entryId == after.activeTimer.entryId
+                     && afterClaim.start == after.activeTimer.start
+                     && afterClaim.queueId == after.activeTimer.queueId));
     }
 
     function togglRetryWindowOpen() {

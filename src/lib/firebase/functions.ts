@@ -72,5 +72,6 @@ if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
 export const togglSaveToken = httpsCallable<{ token: string }, TogglConfigResponse>(fns, 'toggl-savetoken');
 export const togglStart = httpsCallable<{ bookId: string }, TogglStartResponse>(fns, 'toggl-start');
 export const togglStop = httpsCallable<{ bookId: string }, TogglStopResponse>(fns, 'toggl-stop');
+export const togglClearStopping = httpsCallable<{ bookId: string }, { cleared: true }>(fns, 'toggl-clearstopping');
 export const adminOverview = httpsCallable<Record<string, never>, AdminOverview>(fns, 'admin-overview');
 export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolumeInfo | null }>(fns, 'booksapi-lookupisbn');

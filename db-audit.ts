@@ -11,6 +11,7 @@
 import { parseFlags, connect } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
+import { auditTimerClaimState } from './timer-claim-migration.ts';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -37,6 +38,13 @@ let authorOrphanCount = 0;
 
 for (const user of users.docs) {
   const books = await user.ref.collection('books').get();
+  const lifecycle = await user.ref.collection('timerLifecycle').doc('current').get();
+  for (const finding of auditTimerClaimState(
+    books.docs.map((book) => ({id: book.id, data: book.data()})),
+    {exists: lifecycle.exists, data: lifecycle.data()},
+  )) {
+    found(finding.cls, lifecycle.ref.path, finding.detail);
+  }
 
   // Author entity checks: doc shape only. Ids are deterministic at
   // creation but OPAQUE afterward (rename edits name/nameLower in place),

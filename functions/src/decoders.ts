@@ -200,7 +200,7 @@ export function decodeTogglConfig(
 }
 
 export type ActiveTimer =
-  | {start: string}
+  | {start: string; operationId?: string}
   | {entryId: number; start: string}
   | {
       state: "starting";
@@ -214,7 +214,24 @@ export type ActiveTimer =
       start: string;
       claimedAt: Timestamp;
       error: string;
+    }
+  | {
+      state: "stopping";
+      entryId: number;
+      start: string;
+      queueId: string;
     };
+
+export type ActiveTimerClaim =
+  | {version: 1; state: "local"; bookId: string; operationId: string; start: string}
+  | {version: 1; state: "remote"; bookId: string; entryId: number; start: string}
+  | {version: 1; state: "starting"; bookId: string; operationId: string; start: string; claimedAt: Timestamp}
+  | {version: 1; state: "outcome-unknown"; bookId: string; operationId: string; start: string; claimedAt: Timestamp; error: string}
+  | {version: 1; state: "stopping"; bookId: string; entryId: number; start: string; queueId: string};
+
+export type TimerClaim =
+  | ActiveTimerClaim
+  | {version: 1; state: "idle"; cleared: ActiveTimerClaim | null};
 
 export interface BookForTimer {
   title: string;
@@ -226,6 +243,15 @@ function decodeActiveTimer(
   fail: DecodeFailure,
 ): ActiveTimer {
   const decoded = record(value, "active timer", fail);
+  if (decoded.state === "stopping") {
+    exactKeys(decoded, ["state", "entryId", "start", "queueId"], "active timer", fail);
+    return {
+      state: "stopping",
+      entryId: positiveInteger(decoded.entryId, "active timer entry id", fail),
+      start: isoTimestamp(decoded.start, "active timer start", fail),
+      queueId: string(decoded.queueId, "active timer queue id", fail, 600),
+    };
+  }
   if (decoded.state === "starting" || decoded.state === "outcome-unknown") {
     const outcomeUnknown = decoded.state === "outcome-unknown";
     exactKeys(
@@ -256,13 +282,90 @@ function decodeActiveTimer(
       error: string(decoded.error, "active timer error", fail, 1000),
     };
   }
-  exactKeys(decoded, ["entryId", "start"], "active timer", fail);
+  exactKeys(decoded, ["entryId", "operationId", "start"], "active timer", fail);
   const start = isoTimestamp(decoded.start, "active timer start", fail);
-  if (decoded.entryId === undefined) return {start};
+  if (decoded.entryId === undefined) {
+    return decoded.operationId === undefined ? {start} : {
+      start,
+      operationId: string(decoded.operationId, "active timer operation id", fail, 100),
+    };
+  }
   return {
     entryId: positiveInteger(decoded.entryId, "active timer entry id", fail),
     start,
   };
+}
+
+export function decodeTimerClaim(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): TimerClaim {
+  const decoded = record(value, "timer claim", fail);
+  if (decoded.version !== 1) fail("Timer claim version must be 1.");
+  const state = string(decoded.state, "timer claim state", fail, 32);
+  if (state === "idle") {
+    exactKeys(decoded, ["version", "state", "cleared"], "timer claim", fail);
+    if (decoded.cleared === null) return {version: 1, state, cleared: null};
+    const cleared = decodeTimerClaim(decoded.cleared, fail);
+    if (cleared.state === "idle") fail("An idle timer claim cannot contain another idle claim.");
+    return {version: 1, state, cleared};
+  }
+  const bookId = string(decoded.bookId, "timer claim book id", fail, 500);
+  const start = isoTimestamp(decoded.start, "timer claim start", fail);
+  if (state === "local") {
+    exactKeys(decoded, ["version", "state", "bookId", "operationId", "start"], "timer claim", fail);
+    return {
+      version: 1,
+      state,
+      bookId,
+      operationId: string(decoded.operationId, "timer claim operation id", fail, 100),
+      start,
+    };
+  }
+  if (state === "remote") {
+    exactKeys(decoded, ["version", "state", "bookId", "entryId", "start"], "timer claim", fail);
+    return {
+      version: 1,
+      state,
+      bookId,
+      entryId: positiveInteger(decoded.entryId, "timer claim entry id", fail),
+      start,
+    };
+  }
+  if (state === "stopping") {
+    exactKeys(decoded, ["version", "state", "bookId", "entryId", "start", "queueId"], "timer claim", fail);
+    return {
+      version: 1,
+      state,
+      bookId,
+      entryId: positiveInteger(decoded.entryId, "timer claim entry id", fail),
+      start,
+      queueId: string(decoded.queueId, "timer claim queue id", fail, 600),
+    };
+  }
+  if (state === "starting" || state === "outcome-unknown") {
+    const unknown = state === "outcome-unknown";
+    exactKeys(
+      decoded,
+      ["version", "state", "bookId", "operationId", "start", "claimedAt", ...(unknown ? ["error"] : [])],
+      "timer claim",
+      fail,
+    );
+    const common = {
+      state,
+      version: 1 as const,
+      bookId,
+      operationId: string(decoded.operationId, "timer claim operation id", fail, 100),
+      start,
+      claimedAt: firestoreTimestamp(decoded.claimedAt, "timer claim time", fail),
+    };
+    return unknown ? {
+      ...common,
+      state: "outcome-unknown",
+      error: string(decoded.error, "timer claim error", fail, 1000),
+    } : {...common, state: "starting"};
+  }
+  return fail("Timer claim state must be idle, local, remote, starting, stopping, or outcome-unknown.");
 }
 
 export function decodeActiveTimerFromBook(
@@ -348,6 +451,7 @@ export function decodeCreatedTogglEntryId(
 
 interface QueueCommon {
   bookId?: string;
+  timerClaimVersion?: 1;
   bookTitle: string;
   start: string;
   stop: string;
@@ -402,6 +506,7 @@ export function decodeTogglQueueDocument(
     [
       "type", "bookTitle", "start", "stop", "status", "createdAt",
       "bookId",
+      "timerClaimVersion",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
@@ -414,8 +519,12 @@ export function decodeTogglQueueDocument(
   if (bookId === "." || bookId === ".." || bookId?.includes("/")) {
     fail("Queue book id must be one Firestore document id.");
   }
+  if (decoded.timerClaimVersion !== undefined && decoded.timerClaimVersion !== 1) {
+    fail("Queue timer claim version must be 1 when present.");
+  }
   const common = {
     ...(bookId === undefined ? {} : {bookId}),
+    ...(decoded.timerClaimVersion === undefined ? {} : {timerClaimVersion: 1 as const}),
     bookTitle: string(decoded.bookTitle, "queue book title", fail, 500),
     start: isoTimestamp(decoded.start, "queue start", fail),
     stop: isoTimestamp(decoded.stop, "queue stop", fail),

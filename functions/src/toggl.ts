@@ -20,12 +20,14 @@ import {
   decodeSaveTokenRequest,
   decodeStartedTogglEntry,
   decodeStoppedTogglDuration,
+  decodeTimerClaim,
   decodeTogglConfig,
   decodeTogglProjects,
   decodeTogglQueueDocument,
   TogglConfig,
   TogglQueueDocument,
   TogglQueuePayload,
+  TimerClaim,
 } from "./decoders";
 
 const db = getFirestore();
@@ -206,7 +208,8 @@ function requireUid(context: functions.https.CallableContext): string {
 
 async function getTogglConfig(uid: string): Promise<TogglConfig> {
   const userSnap = await db.doc(`users/${uid}`).get();
-  const toggl = userSnap.data()?.toggl;
+  const user = userSnap.data();
+  const toggl = user?.toggl;
   if (!toggl) {
     throw new functions.https.HttpsError(
       "failed-precondition",
@@ -219,6 +222,46 @@ async function getTogglConfig(uid: string): Promise<TogglConfig> {
       `Stored Toggl configuration is invalid: ${message}`,
     );
   });
+}
+
+function claimForTimer(bookId: string, timer: ActiveTimer): TimerClaim {
+  if (!("state" in timer)) {
+    if ("entryId" in timer) {
+      return {version: 1, state: "remote", bookId, entryId: timer.entryId, start: timer.start};
+    }
+    if (timer.operationId === undefined) {
+      throw new Error("Local timer is missing its operation id.");
+    }
+    return {version: 1, state: "local", bookId, operationId: timer.operationId, start: timer.start};
+  }
+  return {version: 1, ...timer, bookId};
+}
+
+function timerMatchesClaim(
+  bookId: string,
+  timer: ActiveTimer | null,
+  claim: TimerClaim,
+): boolean {
+  if (timer === null || claim.state === "idle" || claim.bookId !== bookId) return false;
+  const expected = claimForTimer(bookId, timer);
+  if (expected.state !== claim.state || expected.start !== claim.start) return false;
+  if (expected.state === "local") {
+    return claim.state === "local" && expected.operationId === claim.operationId;
+  }
+  if (expected.state === "remote") {
+    return claim.state === "remote" && expected.entryId === claim.entryId;
+  }
+  if (expected.state === "stopping") {
+    return claim.state === "stopping" && expected.entryId === claim.entryId &&
+      expected.queueId === claim.queueId;
+  }
+  if (expected.state === "starting") {
+    return claim.state === "starting" && expected.operationId === claim.operationId &&
+      expected.claimedAt.isEqual(claim.claimedAt);
+  }
+  return claim.state === "outcome-unknown" &&
+    expected.operationId === claim.operationId &&
+    expected.claimedAt.isEqual(claim.claimedAt) && expected.error === claim.error;
 }
 
 exports.savetoken = functions
@@ -270,66 +313,69 @@ exports.start = functions
     const toggl = await getTogglConfig(uid);
 
     const bookRef = db.doc(`users/${uid}/books/${bookId}`);
-    const booksRef = db.collection(`users/${uid}/books`);
+    const claimRef = db.doc(`users/${uid}/timerLifecycle/current`);
     const operationId = randomUUID();
     const requestedStart = new Date().toISOString();
     const claimedAt = Timestamp.now();
     const claim = await db.runTransaction<StartClaimResult>(async (tx) => {
-      // Read the whole user's book set before writing the claim. Every start
-      // transaction therefore locks every existing target book, including
-      // calls racing on different books/devices. The library is small and a
-      // timer start is rare, so the read cost buys one authoritative
-      // user-wide timer invariant without a second lifecycle document.
-      const booksSnap = await tx.get(booksRef);
-      const bookSnap = booksSnap.docs.find((snap) => snap.id === bookId);
-      if (!bookSnap) {
+      const [bookSnap, claimSnap] = await Promise.all([
+        tx.get(bookRef),
+        tx.get(claimRef),
+      ]);
+      if (!bookSnap.exists) {
         throw new functions.https.HttpsError("not-found", "Book not found.");
       }
       const book = decodeBookForTimer(bookSnap.data());
-      const activeBooks = booksSnap.docs.flatMap((snap) => {
-        const activeTimer = decodeActiveTimerFromBook(snap.data());
-        return activeTimer === null ? [] : [{snap, activeTimer}];
-      });
-      const staleStarts = activeBooks.filter(({activeTimer}) =>
-        "state" in activeTimer && activeTimer.state === "starting" &&
-        activeTimer.claimedAt.toMillis() < Date.now() - START_CLAIM_STALE_MS,
-      );
-      if (staleStarts.length > 0) {
-        for (const {snap, activeTimer} of staleStarts) {
-          if (!("state" in activeTimer) || activeTimer.state !== "starting") {
-            throw new Error("Stale-start filter returned a non-starting timer.");
-          }
-          tx.update(snap.ref, {
-            activeTimer: {
-              ...activeTimer,
-              state: "outcome-unknown",
-              error: "The Toggl start invocation ended before it confirmed " +
-                "the remote timer. Check Toggl before clearing this state.",
-            },
-          });
+      const currentClaim = claimSnap.exists ? decodeTimerClaim(claimSnap.data()) : null;
+      if (currentClaim?.state === "starting" &&
+          currentClaim.claimedAt.toMillis() < Date.now() - START_CLAIM_STALE_MS) {
+        const claimedBookRef = db.doc(`users/${uid}/books/${currentClaim.bookId}`);
+        const claimedBookSnap = currentClaim.bookId === bookId ?
+          bookSnap : await tx.get(claimedBookRef);
+        if (!claimedBookSnap.exists) {
+          throw new Error("Stale timer claim references a missing book.");
         }
+        const activeTimer = decodeActiveTimerFromBook(claimedBookSnap.data());
+        if (!timerMatchesClaim(currentClaim.bookId, activeTimer, currentClaim)) {
+          throw new Error("Stale timer claim does not match its book.");
+        }
+        const replacement: ActiveTimer = {
+          state: "outcome-unknown",
+          operationId: currentClaim.operationId,
+          start: currentClaim.start,
+          claimedAt: currentClaim.claimedAt,
+          error: "The Toggl start invocation ended before it confirmed " +
+            "the remote timer. Check Toggl before clearing this state.",
+        };
+        tx.update(claimedBookRef, {activeTimer: replacement});
+        tx.set(claimRef, claimForTimer(currentClaim.bookId, replacement));
         return {status: "recovered-unknown"};
       }
-      if (activeBooks.length > 0) {
-        const requestedTimer = book.activeTimer;
-        const message = requestedTimer && "state" in requestedTimer ?
-          requestedTimer.state === "starting" ?
+      if (currentClaim === null) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Timer data is being upgraded. Try again after maintenance completes.",
+        );
+      }
+      if (currentClaim.state !== "idle") {
+        const message = currentClaim.bookId === bookId && currentClaim.state === "starting" ?
             "A Toggl timer start is already in progress for this book." :
-            "The previous Toggl timer start has an unknown outcome. " +
-              "Check Toggl before clearing it." :
-          requestedTimer ?
-            "A timer is already running for this book." :
-            "A timer is already running for another book.";
+          currentClaim.bookId === bookId && currentClaim.state === "outcome-unknown" ?
+            "The previous Toggl timer start has an unknown outcome. Check Toggl before clearing it." :
+            `A timer is already active for ${currentClaim.bookId === bookId ? "this" : "another"} book.`;
         throw new functions.https.HttpsError("failed-precondition", message);
       }
-      tx.update(bookRef, {
-        activeTimer: {
-          state: "starting",
-          operationId,
-          start: requestedStart,
-          claimedAt,
-        },
-      });
+      if (book.activeTimer !== null) {
+        throw new Error("Book timer exists without its user-wide timer claim.");
+      }
+      const timer: ActiveTimer = {
+        state: "starting",
+        operationId,
+        start: requestedStart,
+        claimedAt,
+      };
+      tx.update(bookRef, {activeTimer: timer});
+      tx.set(claimRef, claimForTimer(bookId, timer));
       return {status: "claimed", title: book.title};
     });
     if (claim.status === "recovered-unknown") {
@@ -356,7 +402,7 @@ exports.start = functions
         },
       );
     } catch (error) {
-      await transitionStartClaim(bookRef, operationId, {
+      await transitionStartClaim(bookRef, claimRef, operationId, {
         state: "outcome-unknown",
         operationId,
         start: requestedStart,
@@ -368,7 +414,7 @@ exports.start = functions
     }
     if (!resp.ok) {
       const error = `Toggl start failed with status ${resp.status}.`;
-      await transitionStartClaim(bookRef, operationId, resp.status >= 500 ? {
+      await transitionStartClaim(bookRef, claimRef, operationId, resp.status >= 500 ? {
         state: "outcome-unknown",
         operationId,
         start: requestedStart,
@@ -383,7 +429,7 @@ exports.start = functions
       const entryData: unknown = await resp.json();
       entry = decodeStartedTogglEntry(entryData);
     } catch (error) {
-      await transitionStartClaim(bookRef, operationId, {
+      await transitionStartClaim(bookRef, claimRef, operationId, {
         state: "outcome-unknown",
         operationId,
         start: requestedStart,
@@ -394,7 +440,7 @@ exports.start = functions
       throw error;
     }
 
-    const finalized = await transitionStartClaim(bookRef, operationId, {
+    const finalized = await transitionStartClaim(bookRef, claimRef, operationId, {
       entryId: entry.id,
       start: entry.start,
     });
@@ -407,18 +453,27 @@ exports.start = functions
 
 async function transitionStartClaim(
   bookRef: DocumentReference,
+  claimRef: DocumentReference,
   operationId: string,
   replacement: ActiveTimer | null,
 ): Promise<boolean> {
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(bookRef);
-    if (!snap.exists) return false;
+    const [snap, claimSnap] = await Promise.all([
+      tx.get(bookRef),
+      tx.get(claimRef),
+    ]);
+    if (!snap.exists || !claimSnap.exists) return false;
     const current = decodeActiveTimerFromBook(snap.data());
+    const claim = decodeTimerClaim(claimSnap.data());
     if (!current || !("state" in current) ||
-        current.state !== "starting" || current.operationId !== operationId) {
+        current.state !== "starting" || current.operationId !== operationId ||
+        claim.state !== "starting" || claim.operationId !== operationId ||
+        !timerMatchesClaim(bookRef.id, current, claim)) {
       return false;
     }
     tx.update(bookRef, {activeTimer: replacement});
+    if (replacement === null) tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
+    else tx.set(claimRef, claimForTimer(bookRef.id, replacement));
     return true;
   });
 }
@@ -430,22 +485,34 @@ exports.stop = functions
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
 
     const bookRef = db.doc(`users/${uid}/books/${bookId}`);
-    const bookSnap = await bookRef.get();
-    if (!bookSnap.exists) {
-      throw new functions.https.HttpsError("not-found", "Book not found.");
-    }
-    const activeTimer = decodeActiveTimerFromBook(bookSnap.data());
-    if (!activeTimer || !("entryId" in activeTimer)) {
-      const message = activeTimer && "state" in activeTimer ?
-        activeTimer.state === "starting" ?
-          "The Toggl timer is still starting." :
-          "The Toggl timer start has an unknown outcome. Check Toggl first." :
-        "No Toggl-backed timer is running for this book.";
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        message,
-      );
-    }
+    const claimRef = db.doc(`users/${uid}/timerLifecycle/current`);
+    const activeTimer = await db.runTransaction(async (tx) => {
+      const [bookSnap, claimSnap] = await Promise.all([
+        tx.get(bookRef),
+        tx.get(claimRef),
+      ]);
+      if (!bookSnap.exists) {
+        throw new functions.https.HttpsError("not-found", "Book not found.");
+      }
+      if (!claimSnap.exists) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Timer data is being upgraded. Try again after maintenance completes.",
+        );
+      }
+      const timer = decodeActiveTimerFromBook(bookSnap.data());
+      const claim = decodeTimerClaim(claimSnap.data());
+      if (!timer || "state" in timer || !("entryId" in timer) ||
+          claim.state !== "remote" || !timerMatchesClaim(bookId, timer, claim)) {
+        const message = timer && "state" in timer ?
+          timer.state === "starting" ?
+            "The Toggl timer is still starting." :
+            "The Toggl timer cannot be stopped in its current state." :
+          "No Toggl-backed timer is running for this book.";
+        throw new functions.https.HttpsError("failed-precondition", message);
+      }
+      return timer;
+    });
 
     const toggl = await getTogglConfig(uid);
 
@@ -461,7 +528,14 @@ exports.stop = functions
       seconds = decodeStoppedTogglDuration(entryData);
     } else if (stopResp.status === 404) {
       // Entry was deleted in Toggl; clear the timer so the app recovers.
-      await bookRef.update({activeTimer: null});
+      const missingEntryCleared = await clearMatchedTimer(
+        bookRef,
+        claimRef,
+        activeTimer,
+      );
+      if (!missingEntryCleared) {
+        throw new Error("The Toggl entry is gone, but its local timer claim changed.");
+      }
       throw new functions.https.HttpsError(
         "not-found",
         "The Toggl entry no longer exists; timer cleared. " +
@@ -488,10 +562,105 @@ exports.stop = functions
       );
     }
 
-    await bookRef.update({activeTimer: null});
+    const cleared = await clearMatchedTimer(bookRef, claimRef, activeTimer);
+    if (!cleared) {
+      throw new Error("The Toggl timer stopped, but its local claim changed.");
+    }
 
     return {seconds, minutes: Math.max(1, Math.round(seconds / 60))};
   });
+
+exports.clearstopping = functions
+  .region("europe-west1")
+  .https.onCall(async (data: unknown, context) => {
+    const uid = requireUid(context);
+    const {bookId} = decodeBookCallableRequest(data, invalidArgument);
+    const bookRef = db.doc(`users/${uid}/books/${bookId}`);
+    const claimRef = db.doc(`users/${uid}/timerLifecycle/current`);
+    await db.runTransaction(async (tx) => {
+      const [bookSnap, claimSnap] = await Promise.all([
+        tx.get(bookRef),
+        tx.get(claimRef),
+      ]);
+      if (!bookSnap.exists || !claimSnap.exists) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The queued stop no longer has complete local state.",
+        );
+      }
+      const timer = decodeActiveTimerFromBook(bookSnap.data());
+      const claim = decodeTimerClaim(claimSnap.data());
+      if (!timer || !("state" in timer) || timer.state !== "stopping" ||
+          claim.state !== "stopping" || !timerMatchesClaim(bookId, timer, claim)) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The queued stop changed. Reload before trying again.",
+        );
+      }
+      const queueRef = db.doc(`users/${uid}/togglQueue/${timer.queueId}`);
+      const queueSnap = await tx.get(queueRef);
+      if (!queueSnap.exists) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The queued stop is missing. Contact the administrator before clearing it.",
+        );
+      }
+      const queue = decodeTogglQueueDocument(queueSnap.data());
+      const exactQueue = queue.type === "stop" &&
+        queue.timerClaimVersion === 1 && queue.bookId === bookId &&
+        queue.entryId === timer.entryId && queue.start === timer.start;
+      if (!exactQueue) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The queued stop does not match this timer.",
+        );
+      }
+      const staleCappedProcessing = queue.status === "processing" &&
+        queue.attempts >= MAX_QUEUE_ATTEMPTS &&
+        queue.claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000;
+      if (queue.status === "processing" && !staleCappedProcessing) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The Toggl stop is processing. Wait for it to finish.",
+        );
+      }
+      if (!(queue.status === "synced" || staleCappedProcessing ||
+          (queue.status === "error" && queue.attempts >= MAX_QUEUE_ATTEMPTS))) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "The Toggl stop is still retryable. Reconnect and let it finish.",
+        );
+      }
+      tx.update(bookRef, {activeTimer: null});
+      tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
+      tx.delete(queueRef);
+    });
+    return {cleared: true};
+  });
+
+async function clearMatchedTimer(
+  bookRef: DocumentReference,
+  claimRef: DocumentReference,
+  expectedTimer: ActiveTimer,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const [bookSnap, claimSnap] = await Promise.all([
+      tx.get(bookRef),
+      tx.get(claimRef),
+    ]);
+    if (!bookSnap.exists || !claimSnap.exists) return false;
+    const timer = decodeActiveTimerFromBook(bookSnap.data());
+    const claim = decodeTimerClaim(claimSnap.data());
+    const expectedClaim = claimForTimer(bookRef.id, expectedTimer);
+    if (!timerMatchesClaim(bookRef.id, timer, expectedClaim) ||
+        claim.state === "idle" || !timerMatchesClaim(bookRef.id, timer, claim)) {
+      return false;
+    }
+    tx.update(bookRef, {activeTimer: null});
+    tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
+    return true;
+  });
+}
 
 // Performs one queued Toggl operation and returns the entry id it touched.
 // Queue docs are client-writable, so every field is validated before it
@@ -739,11 +908,55 @@ exports.syncqueue = onDocumentWritten(
       });
       throw error;
     }
-    await after.ref.update({
-      status: "synced",
-      entryId,
-      error: FieldValue.delete(),
-      retryRequestedAt: FieldValue.delete(),
-    });
+    if (claimedItem.type === "stop" && claimedItem.bookId !== undefined &&
+        claimedItem.timerClaimVersion === 1) {
+      const queueBookId = claimedItem.bookId;
+      const bookRef = db.doc(
+        `users/${event.params.uid}/books/${queueBookId}`,
+      );
+      const claimRef = db.doc(
+        `users/${event.params.uid}/timerLifecycle/current`,
+      );
+      const expectedClaim: TimerClaim = {
+        version: 1,
+        state: "stopping",
+        bookId: queueBookId,
+        entryId: claimedItem.entryId,
+        start: claimedItem.start,
+        queueId: event.params.queueId,
+      };
+      await db.runTransaction(async (tx) => {
+        const [queueSnap, bookSnap, claimSnap] = await Promise.all([
+          tx.get(after.ref),
+          tx.get(bookRef),
+          tx.get(claimRef),
+        ]);
+        if (!queueSnap.exists || !bookSnap.exists || !claimSnap.exists) {
+          throw new Error("Toggl stop queue lost its correlated timer state.");
+        }
+        const timer = decodeActiveTimerFromBook(bookSnap.data());
+        const lifecycle = decodeTimerClaim(claimSnap.data());
+        if (!timerMatchesClaim(queueBookId, timer, expectedClaim) ||
+            lifecycle.state === "idle" ||
+            !timerMatchesClaim(queueBookId, timer, lifecycle)) {
+          throw new Error("Toggl stop queue no longer matches the active timer claim.");
+        }
+        tx.update(after.ref, {
+          status: "synced",
+          entryId,
+          error: FieldValue.delete(),
+          retryRequestedAt: FieldValue.delete(),
+        });
+        tx.update(bookRef, {activeTimer: null});
+        tx.set(claimRef, {version: 1, state: "idle", cleared: lifecycle});
+      });
+    } else {
+      await after.ref.update({
+        status: "synced",
+        entryId,
+        error: FieldValue.delete(),
+        retryRequestedAt: FieldValue.delete(),
+      });
+    }
     await after.ref.delete();
   });

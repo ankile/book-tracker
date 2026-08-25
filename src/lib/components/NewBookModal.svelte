@@ -148,7 +148,7 @@
       // Not awaited: offline, the promise only resolves after reconnect,
       // but the local cache removes the book from the list instantly. A
       // flush-time rejection surfaces via the global error banner.
-      void Database.deleteBook(userId, book.id, book.title);
+      void Database.deleteBook(userId, book.id, book.title, book.activeTimer);
       onclose();
     }
   }

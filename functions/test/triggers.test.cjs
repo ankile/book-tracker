@@ -21,6 +21,7 @@ test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions.admin), ["overview"]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
+    "clearstopping",
     "savetoken",
     "start",
     "stop",
@@ -38,6 +39,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
     functions.toggl.savetoken,
+    functions.toggl.clearstopping,
     functions.toggl.start,
     functions.toggl.stop,
   ];
@@ -98,8 +100,15 @@ test("preserves the Firestore and Authentication event contracts", () => {
 
 test("user creation merges identity without erasing concurrent setup", async (t) => {
   const writes = [];
+  const lifecycleRef = {};
   const userRef = {
-    set: async (...args) => writes.push(args),
+    collection: (name) => {
+      assert.equal(name, "timerLifecycle");
+      return {doc: (id) => {
+        assert.equal(id, "current");
+        return lifecycleRef;
+      }};
+    },
   };
   t.mock.method(db, "collection", (path) => {
     assert.equal(path, "users");
@@ -110,16 +119,45 @@ test("user creation merges identity without erasing concurrent setup", async (t)
       },
     };
   });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (ref) => {
+      assert.equal(ref, lifecycleRef);
+      return {exists: false};
+    },
+    set: (ref, value, options) => writes.push([ref, value, options]),
+  }));
 
   await functions.createUserDocument.run({
     uid: "owner",
     email: "owner@example.test",
   });
 
-  assert.deepEqual(writes, [[{
-    email: "owner@example.test",
+  assert.deepEqual(writes, [
+    [userRef, {email: "owner@example.test", uid: "owner"}, {merge: true}],
+    [lifecycleRef, {version: 1, state: "idle", cleared: null}, undefined],
+  ]);
+});
+
+test("a retried user creation never overwrites an existing timer lifecycle", async (t) => {
+  const writes = [];
+  const lifecycleRef = {};
+  const userRef = {
+    collection: () => ({doc: () => lifecycleRef}),
+  };
+  t.mock.method(db, "collection", () => ({doc: () => userRef}));
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async () => ({exists: true}),
+    set: (ref, value, options) => writes.push([ref, value, options]),
+  }));
+
+  await functions.createUserDocument.run({
     uid: "owner",
-  }, {merge: true}]]);
+    email: "owner@example.test",
+  });
+
+  assert.deepEqual(writes, [
+    [userRef, {email: "owner@example.test", uid: "owner"}, {merge: true}],
+  ]);
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {

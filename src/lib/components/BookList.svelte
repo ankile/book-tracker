@@ -6,7 +6,7 @@
   import NewBookModal from "$lib/components/NewBookModal.svelte";
   import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
   import { Database } from "../firebase/db.ts";
-  import { togglStart, togglStop } from "../firebase/functions.ts";
+  import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { FirebaseError } from "firebase/app";
@@ -185,8 +185,9 @@
     }
   }
 
-  // Stop without the network: clear the timer locally and, when Toggl is
-  // involved, queue the real interval for the toggl-syncqueue trigger.
+  // Stop without the network. A fully local timer can clear immediately;
+  // a remote Toggl timer enters an immutable stopping state until the queue
+  // worker confirms its PUT, so another timer cannot start meanwhile.
   // 'stop' items patch an entry started online in Toggl with the recorded
   // stop time (instead of stopping it at reconnect time with an inflated
   // duration); 'create' items cover timers that ran entirely locally.
@@ -218,16 +219,16 @@
         stop,
       };
     }
-    // Not awaited: offline, the local cache applies both writes together
-    // and the promise resolves when the batch reaches the server.
-    Database.stopTimerAndEnqueue(userId, book.id, book.title, entry);
+    // Not awaited: offline, the local cache applies the correlated writes
+    // together and the promise resolves when the batch reaches the server.
+    Database.stopTimerAndEnqueue(userId, book.id, book.title, entry, timer);
     setModalBook(book, 'addReading');
   }
 
   async function stopTimer(book: Book): Promise<void> {
     const timer = book.activeTimer;
     if (timer === null) throw new Error('Cannot stop a timer that is not running.');
-    if ('state' in timer) throw new Error('Cannot stop a Toggl timer before its start outcome is resolved.');
+    if ('state' in timer) throw new Error('Cannot stop a Toggl timer before its lifecycle transition is resolved.');
     if (timerPending) return;
     // No entryId means the timer is local, even if Toggl was connected later
     if (timer.entryId === undefined || !navigator.onLine) {
@@ -277,7 +278,30 @@
     const confirmed = confirm(
       'Toggl may have created this timer. Check Toggl first and stop or delete it there if needed. Clear the local timer state now?',
     );
-    if (confirmed) Database.stopLocalTimer(userId, book.id, book.title);
+    if (confirmed) Database.stopLocalTimer(userId, book.id, book.title, timer);
+  }
+
+  async function clearStoppingTimer(book: Book): Promise<void> {
+    const timer = book.activeTimer;
+    if (timer === null || !('state' in timer) || timer.state !== 'stopping') {
+      throw new Error('Only a queued Toggl stop can be cleared here.');
+    }
+    if (!navigator.onLine) {
+      alert('Reconnect so the queued Toggl stop can finish.');
+      return;
+    }
+    const confirmed = confirm(
+      'Only clear this after checking Toggl and stopping or deleting the remote timer there. Clear the capped local stop and queue now?',
+    );
+    if (!confirmed) return;
+    busy = true;
+    try {
+      await togglClearStopping({ bookId: book.id });
+    } catch (error) {
+      alert(errorMessage(error));
+    } finally {
+      busy = false;
+    }
   }
 
 </script>
@@ -584,6 +608,16 @@
       <Icon data={stop} {scale} style="color: #dc3545;" />
       <span class="elapsed">Check Toggl</span>
     </button>
+  {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'stopping'}
+    <button
+      type="button"
+      class="action-button timer-button"
+      disabled={busy || !online}
+      aria-label={online ? `The Toggl stop for ${book.title} is syncing` : `The Toggl stop for ${book.title} is queued until reconnect`}
+      onclick={() => clearStoppingTimer(book)}>
+      <Icon data={stop} {scale} style="color: #666;" />
+      <span class="elapsed">{online ? 'Stop queued — syncing' : 'Stop queued — reconnect'}</span>
+    </button>
   {:else if book.activeTimer}
     <button
       type="button"
@@ -765,6 +799,16 @@
               onclick={() => clearUnknownTimer(book)}>
               <Icon data={stop} scale={0.9} />
               <span>Check Toggl, then clear</span>
+            </button>
+          {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'stopping'}
+            <button
+              type="button"
+              class="mobile-action-button stop-button"
+              disabled={busy || !online}
+              aria-label={online ? `The Toggl stop for ${book.title} is syncing` : `The Toggl stop for ${book.title} is queued until reconnect`}
+              onclick={() => clearStoppingTimer(book)}>
+              <Icon data={stop} scale={0.9} />
+              <span>{online ? 'Stop queued — syncing' : 'Stop queued — reconnect'}</span>
             </button>
           {:else if book.activeTimer}
             <button

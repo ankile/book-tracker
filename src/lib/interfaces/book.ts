@@ -7,6 +7,7 @@ import type { BookMetadata } from './metadata.ts';
 // code sees this model.
 export interface LocalActiveTimer {
   start: string;
+  operationId?: string;
   entryId?: undefined;
 }
 
@@ -30,11 +31,19 @@ export interface UnknownTogglTimerOutcome {
   error: string;
 }
 
+export interface StoppingTogglTimer {
+  state: 'stopping';
+  entryId: number;
+  start: string;
+  queueId: string;
+}
+
 export type ActiveTimer =
   | LocalActiveTimer
   | TogglActiveTimer
   | StartingTogglTimer
-  | UnknownTogglTimerOutcome;
+  | UnknownTogglTimerOutcome
+  | StoppingTogglTimer;
 
 interface BookBase extends BookMetadata {
   id: string;
@@ -84,5 +93,5 @@ export function hasCurrentAuthorship(book: Book): book is CurrentBook {
 }
 
 export function isTogglTimer(timer: ActiveTimer): timer is TogglActiveTimer {
-  return 'entryId' in timer && timer.entryId !== undefined;
+  return !('state' in timer) && 'entryId' in timer && timer.entryId !== undefined;
 }

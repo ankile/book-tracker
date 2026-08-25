@@ -117,6 +117,28 @@ it. Hosting serves `index.html` with `no-cache`, so navigations pick up new
 client code promptly, but assume days of overlap with stale cached clients
 (offline PWA).
 
+The `migrate-timer-claims.ts` rollout is deliberately stricter than the usual
+order because the lifecycle document serializes every timer start:
+
+1. Deploy the timer-correlation rules first. They keep metadata edits working
+   but reject every legacy client timer mutation that lacks the lifecycle
+   write.
+2. Immediately deploy the claim-aware Toggl Functions. Calls for an unmigrated
+   user fail closed because `timerLifecycle/current` is missing. Let old
+   in-flight start invocations drain before continuing; they use the prior
+   all-books transaction and the migration will capture their final state.
+3. Run `migrate-timer-claims.ts --prod`, review it, apply it, then apply it
+   again. The second apply must report zero users. Run the audit before moving
+   on. A malformed timer, malformed existing lifecycle document, conflicting
+   claim, or multiple active books aborts the migration for a human decision.
+4. Deploy Hosting last. Cached old clients remain unable to write an
+   uncorrelated timer, while unrelated book edits still work.
+
+The migration writes a persistent `users/<uid>/timerLifecycle/current`
+document. Idle state is explicit, and every clear records the exact prior
+claim. That identity makes a stale offline clear reject if the same book has
+started a newer timer. Do not delete idle lifecycle documents.
+
 ### 4. Production run
 
 ```sh
@@ -151,7 +173,10 @@ re-run, and why the follow-up audit exists.
   counting, and it **crashes if an `update()` payload touches `updatedAt`**
   (on books it drives the reading-list order; no migration may touch it).
   `batcher.set()` allows `updatedAt` — it is for documents the script owns
-  outright (restores, new-entity upserts).
+  outright (restores, new-entity upserts). The timer-claim migration is the
+  documented exception: each legacy book patch and its lifecycle claim must
+  be committed in one Firestore transaction or a crash could leave an
+  unmatchable active timer.
 - **Snapshot codec**: Timestamp/ref/GeoPoint/bytes round-trip via `__type`
   markers; the encoder crashes on unknown types and on documents using the
   reserved `__type` key. Crash-don't-corrupt.

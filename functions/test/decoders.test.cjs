@@ -72,6 +72,39 @@ test("stored Toggl configuration and timer books are decoded field by field", ()
     start: "2026-08-24T12:00:00Z",
     claimedAt,
   });
+  assert.deepEqual(decoders.decodeTimerClaim({
+    version: 1,
+    state: "stopping",
+    bookId: "book",
+    entryId: 99,
+    start: "2026-08-24T12:00:00Z",
+    queueId: "book_2026-08-24T12:00:00Z",
+  }), {
+    version: 1,
+    state: "stopping",
+    bookId: "book",
+    entryId: 99,
+    start: "2026-08-24T12:00:00Z",
+    queueId: "book_2026-08-24T12:00:00Z",
+  });
+  assert.throws(
+    () => decoders.decodeTimerClaim({
+      version: 1,
+      state: "idle",
+      cleared: {version: 1, state: "idle", cleared: null},
+    }),
+    /cannot contain another idle claim/,
+  );
+  assert.throws(
+    () => decoders.decodeTimerClaim({
+      version: 1,
+      state: "local",
+      bookId: "book",
+      operationId: "x".repeat(101),
+      start: "2026-08-24T12:00:00Z",
+    }),
+    /operation id/,
+  );
   assert.throws(
     () => decoders.decodeTogglConfig({
       apiToken: "secret",

@@ -37,10 +37,22 @@ exports.createUserDocument = functions
   .region("europe-west1")
   .auth.user()
   .onCreate(async (user) => {
-    await db.collection("users").doc(user.uid).set({
-      email: user.email,
-      uid: user.uid,
-    }, {merge: true});
+    const userRef = db.collection("users").doc(user.uid);
+    const lifecycleRef = userRef.collection("timerLifecycle").doc("current");
+    await db.runTransaction(async (tx) => {
+      const lifecycle = await tx.get(lifecycleRef);
+      tx.set(userRef, {
+        email: user.email,
+        uid: user.uid,
+      }, {merge: true});
+      if (!lifecycle.exists) {
+        tx.set(lifecycleRef, {
+          version: 1,
+          state: "idle",
+          cleared: null,
+        });
+      }
+    });
     return null;
   });
 

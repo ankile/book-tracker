@@ -56,6 +56,7 @@ export type QueueStatus = 'pending' | 'processing' | 'error';
 interface QueueBase {
   id: string;
   bookId?: string;
+  timerClaimVersion?: 1;
   bookTitle: string;
   start: string;
   stop: string;
@@ -181,6 +182,17 @@ function metadata(data: Data, context: string): BookMetadata {
 function activeTimer(value: unknown, context: string): ActiveTimer | null {
   if (value === undefined || value === null) return null;
   const data = record(value, context);
+  if (data.state === 'stopping') {
+    exactKeys(data, ['state', 'entryId', 'start', 'queueId'], context);
+    const entryId = integer(data.entryId, `${context}.entryId`);
+    if (entryId <= 0) fail(`${context}.entryId`, 'a positive integer');
+    return {
+      state: 'stopping',
+      entryId,
+      start: isoTimestamp(data.start, `${context}.start`),
+      queueId: boundedString(data.queueId, `${context}.queueId`, 600),
+    };
+  }
   if (data.state === 'starting' || data.state === 'outcome-unknown') {
     exactKeys(
       data,
@@ -197,10 +209,12 @@ function activeTimer(value: unknown, context: string): ActiveTimer | null {
       ? shared
       : { ...shared, error: boundedString(data.error, `${context}.error`, 1000) };
   }
-  if (data.state !== undefined) fail(`${context}.state`, 'starting, outcome-unknown, or absent');
-  exactKeys(data, ['entryId', 'start'], context);
+  if (data.state !== undefined) fail(`${context}.state`, 'starting, stopping, outcome-unknown, or absent');
+  exactKeys(data, ['entryId', 'operationId', 'start'], context);
   const start = isoTimestamp(data.start, `${context}.start`);
-  if (data.entryId === undefined) return { start };
+  if (data.entryId === undefined) return data.operationId === undefined
+    ? { start }
+    : { start, operationId: boundedString(data.operationId, `${context}.operationId`, 100) };
   const entryId = integer(data.entryId, `${context}.entryId`);
   if (entryId <= 0) fail(`${context}.entryId`, 'a positive integer');
   return { start, entryId };
@@ -542,6 +556,7 @@ export function decodeQueueSweepItem(
     [
       'type', 'bookTitle', 'start', 'stop', 'status', 'createdAt',
       'bookId',
+      'timerClaimVersion',
       'attempts', 'claimedAt', 'expiresAt', 'retryRequestedAt', 'error',
       ...(type === 'stop' ? ['entryId'] : []),
     ],
@@ -565,9 +580,13 @@ export function decodeQueueSweepItem(
   if (bookId === '.' || bookId === '..' || bookId?.includes('/')) {
     fail(`${path}.bookId`, 'one Firestore document id');
   }
+  if (data.timerClaimVersion !== undefined && data.timerClaimVersion !== 1) {
+    fail(`${path}.timerClaimVersion`, '1 or absent');
+  }
   const shared: Omit<QueueBase, 'status'> = {
     id,
     ...(bookId === undefined ? {} : { bookId }),
+    ...(data.timerClaimVersion === undefined ? {} : { timerClaimVersion: 1 as const }),
     bookTitle: boundedString(data.bookTitle, `${path}.bookTitle`, 500),
     start: isoTimestamp(data.start, `${path}.start`),
     stop: isoTimestamp(data.stop, `${path}.stop`),

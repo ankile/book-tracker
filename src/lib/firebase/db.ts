@@ -41,11 +41,16 @@ import {
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
 import { invokeReportedWrite } from '../utils/offlineWrite.ts';
 import {
+  activeTimerClaim,
+  idleTimerClaim,
+  stoppingTimer,
+} from '../utils/timerClaim.ts';
+import {
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from './readingSessionWrites.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
-import type { Book } from '../interfaces/book.ts';
+import type { ActiveTimer, Book } from '../interfaces/book.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type { Profile, ProfileLink, ProfilePayload } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
@@ -718,15 +723,30 @@ class Database {
   // The trailing `title` on this and the other positional write methods is
   // not used by the method body — writeLabels reads it for error messages.
   static async startLocalTimer(userId: string, bookId: string, title: string): Promise<void> {
-    await updateDoc(doc(db, 'users', userId, 'books', bookId), {
-      activeTimer: { start: new Date().toISOString() },
-    });
+    const batch = writeBatch(db);
+    const timer = { start: new Date().toISOString(), operationId: crypto.randomUUID() };
+    batch.update(doc(db, 'users', userId, 'books', bookId), { activeTimer: timer });
+    batch.set(
+      doc(db, 'users', userId, 'timerLifecycle', 'current'),
+      activeTimerClaim(bookId, timer),
+    );
+    await batch.commit();
   }
 
-  static async stopLocalTimer(userId: string, bookId: string, title: string): Promise<void> {
-    await updateDoc(doc(db, 'users', userId, 'books', bookId), {
-      activeTimer: null,
-    });
+  static async stopLocalTimer(
+    userId: string,
+    bookId: string,
+    title: string,
+    timer: ActiveTimer,
+  ): Promise<void> {
+    const batch = writeBatch(db);
+    const claim = activeTimerClaim(bookId, timer);
+    batch.update(doc(db, 'users', userId, 'books', bookId), { activeTimer: null });
+    batch.set(
+      doc(db, 'users', userId, 'timerLifecycle', 'current'),
+      idleTimerClaim(claim),
+    );
+    await batch.commit();
   }
 
   // Clear the local book timer and enqueue its Toggl operation in one
@@ -738,21 +758,37 @@ class Database {
     bookId: string,
     title: string,
     entry: NewQueueOperation | null,
+    timer: ActiveTimer,
   ): Promise<void> {
     const batch = writeBatch(db);
-    batch.update(doc(db, 'users', userId, 'books', bookId), {
-      activeTimer: null,
-    });
+    const bookRef = doc(db, 'users', userId, 'books', bookId);
+    const claimRef = doc(db, 'users', userId, 'timerLifecycle', 'current');
+    const currentClaim = activeTimerClaim(bookId, timer);
     if (entry !== null) {
       // The stable id lets rules prove this is the one queue row coupled to
       // this timer clear and prevents a repeated stop minting another row.
       const queueId = togglQueueId(bookId, entry.start);
+      if (entry.type === 'stop') {
+        if ('state' in timer || timer.entryId === undefined) {
+          throw new Error('A remote stop queue requires an active Toggl timer.');
+        }
+        const stopping = stoppingTimer(timer, queueId);
+        batch.update(bookRef, { activeTimer: stopping });
+        batch.set(claimRef, activeTimerClaim(bookId, stopping));
+      } else {
+        batch.update(bookRef, { activeTimer: null });
+        batch.set(claimRef, idleTimerClaim(currentClaim));
+      }
       batch.set(doc(db, 'users', userId, 'togglQueue', queueId), {
         ...entry,
         bookId,
+        timerClaimVersion: 1,
         status: 'pending',
         createdAt: Timestamp.now(),
       });
+    } else {
+      batch.update(bookRef, { activeTimer: null });
+      batch.set(claimRef, idleTimerClaim(currentClaim));
     }
     await batch.commit();
   }
@@ -878,8 +914,27 @@ class Database {
   // to the updates subcollection server-side. Deleting the subcollection
   // here would be wrong offline: an offline getDocs silently returns only
   // whatever happens to be cached, orphaning the rest forever.
-  static async deleteBook(userId: string, bookId: string, title: string): Promise<void> {
-    await deleteDoc(doc(db, 'users', userId, 'books', bookId));
+  static async deleteBook(
+    userId: string,
+    bookId: string,
+    title: string,
+    timer: ActiveTimer | null,
+  ): Promise<void> {
+    const bookRef = doc(db, 'users', userId, 'books', bookId);
+    if (timer === null) {
+      await deleteDoc(bookRef);
+      return;
+    }
+    if ('state' in timer || timer.entryId !== undefined) {
+      throw new Error('Only a local timer can be discarded with its book.');
+    }
+    const batch = writeBatch(db);
+    batch.delete(bookRef);
+    batch.set(
+      doc(db, 'users', userId, 'timerLifecycle', 'current'),
+      idleTimerClaim(activeTimerClaim(bookId, timer)),
+    );
+    await batch.commit();
   }
 
   static updateReadingSession({ userId, bookId, session, bookProgress, timeRead, fromPage, toPage }: UpdateReadingSessionInput): Promise<void> {

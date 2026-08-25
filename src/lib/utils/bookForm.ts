@@ -60,6 +60,13 @@ export function bookDeletionPolicy(activeTimer: Book['activeTimer']): BookDeleti
         'Wait for the Toggl timer start to finish. If it stalls, resolve the start before deleting this book.',
     };
   }
+  if (activeTimer.state === 'stopping') {
+    return {
+      allowed: false,
+      guidance:
+        'This Toggl stop is queued. Reconnect and wait for it to finish before deleting the book.',
+    };
+  }
   return {
     allowed: false,
     guidance:
