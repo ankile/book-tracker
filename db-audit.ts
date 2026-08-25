@@ -12,6 +12,7 @@ import { parseFlags, connect } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
+import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -201,25 +202,11 @@ for (const user of users) {
     }
 
     const updates = await book.ref.collection('updates').get();
-    if (b.currentPageUpdateId !== undefined && b.currentPageUpdateId !== null &&
-        (typeof b.currentPageUpdateId !== 'string' || b.currentPageUpdateId === '')) {
-      found('book.progress-source-bad-shape', p, JSON.stringify(b.currentPageUpdateId));
-    } else if (typeof b.currentPageUpdateId === 'string') {
-      const source = updates.docs.find((update) => update.id === b.currentPageUpdateId);
-      if (source === undefined) {
-        found('book.progress-source-missing', p, b.currentPageUpdateId);
-      } else if (source.data().toPage !== b.currentPage) {
-        found(
-          'book.progress-source-page-mismatch',
-          p,
-          `${b.currentPageUpdateId}:${String(source.data().toPage)} != ${String(b.currentPage)}`,
-        );
-      }
-    } else if (b.currentPageUpdateId === null) {
-      const matching = updates.docs.filter((update) => update.data().toPage === b.currentPage);
-      if (matching.length > 0) {
-        found('book.progress-source-unclaimed', p, matching.map((update) => update.id).sort().join(','));
-      }
+    for (const finding of auditReadingProgressSource(
+      b,
+      updates.docs.map((update) => ({id: update.id, data: update.data()})),
+    )) {
+      found(finding.cls, p, finding.detail);
     }
     for (const update of updates.docs) {
       const u = update.data();
@@ -261,7 +248,9 @@ console.log('---');
 const counts: Record<string, number> = {};
 for (const f of findings) counts[f.cls] = (counts[f.cls] ?? 0) + 1;
 for (const cls of Object.keys(counts).sort()) console.log(`${cls}: ${counts[cls]}`);
-console.log(`users: ${userProfiles.size}`);
+console.log(`user-documents: ${userProfiles.size}`);
+console.log(`user-refs: ${users.length}`);
+console.log(`phantom-users: ${users.filter((user) => !existingUsers.has(user.id)).length}`);
 console.log(`author-docs: ${authorDocCount}`);
 console.log(`author-orphans: ${authorOrphanCount}`);
 console.log(`findings: ${findings.length}`);

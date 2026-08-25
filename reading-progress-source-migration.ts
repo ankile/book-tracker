@@ -11,6 +11,11 @@ export interface ReadingProgressSourcePatch {
   currentPageUpdateId: string | null;
 }
 
+export interface ReadingProgressSourceFinding {
+  cls: string;
+  detail: string;
+}
+
 function safePage(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative safe integer`);
@@ -68,4 +73,51 @@ export function planReadingProgressSource(
     )[0];
   if (newest !== undefined) return {currentPageUpdateId: newest.id};
   return hasSource ? null : {currentPageUpdateId: null};
+}
+
+// Audit is intentionally distinct from planning: an explicit null is a valid
+// persisted baseline, but nonzero progress without an establishing row needs
+// operator review before that baseline is accepted.
+export function auditReadingProgressSource(
+  book: Record<string, unknown>,
+  updates: readonly StoredProgressUpdate[],
+): ReadingProgressSourceFinding[] {
+  const source = book.currentPageUpdateId;
+  if (source !== undefined && source !== null &&
+      (typeof source !== 'string' || source.length === 0)) {
+    return [{
+      cls: 'book.progress-source-bad-shape',
+      detail: JSON.stringify(source),
+    }];
+  }
+  if (typeof source === 'string') {
+    const current = updates.find((update) => update.id === source);
+    if (current === undefined) {
+      return [{cls: 'book.progress-source-missing', detail: source}];
+    }
+    if (current.data.toPage !== book.currentPage) {
+      return [{
+        cls: 'book.progress-source-page-mismatch',
+        detail: `${source}:${String(current.data.toPage)} != ${String(book.currentPage)}`,
+      }];
+    }
+    return [];
+  }
+  if (source !== null) return [];
+
+  const matching = updates
+    .filter((update) => update.data.toPage === book.currentPage)
+    .map((update) => update.id)
+    .sort();
+  if (matching.length > 0) {
+    return [{cls: 'book.progress-source-unclaimed', detail: matching.join(',')}];
+  }
+  if (typeof book.currentPage === 'number' &&
+      Number.isSafeInteger(book.currentPage) && book.currentPage > 0) {
+    return [{
+      cls: 'book.progress-source-null-baseline',
+      detail: `page ${book.currentPage} has no establishing update`,
+    }];
+  }
+  return [];
 }

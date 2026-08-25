@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {Timestamp} from 'firebase-admin/firestore';
-import {planReadingProgressSource} from '../reading-progress-source-migration.ts';
+import {
+  auditReadingProgressSource,
+  planReadingProgressSource,
+} from '../reading-progress-source-migration.ts';
 
 const update = (id: string, toPage: number, millis: number, type: 'reading' | 'update' = 'reading') => ({
   id,
@@ -52,5 +55,29 @@ test('progress migration is idempotent and rejects dangling or mismatched owners
       [update('reading', 19, 1)],
     ),
     /does not establish/,
+  );
+});
+
+test('progress audit distinguishes an unread baseline from unexplained nonzero progress', () => {
+  assert.deepEqual(
+    auditReadingProgressSource(
+      {currentPage: 12, currentPageUpdateId: null},
+      [update('other', 11, 1)],
+    ),
+    [{
+      cls: 'book.progress-source-null-baseline',
+      detail: 'page 12 has no establishing update',
+    }],
+  );
+  assert.deepEqual(
+    auditReadingProgressSource({currentPage: 0, currentPageUpdateId: null}, []),
+    [],
+  );
+  assert.deepEqual(
+    auditReadingProgressSource(
+      {currentPage: 12, currentPageUpdateId: null},
+      [update('reading', 12, 1)],
+    ),
+    [{cls: 'book.progress-source-unclaimed', detail: 'reading'}],
   );
 });

@@ -1,3 +1,5 @@
+import './setup.ts';
+
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import test, {after} from 'node:test';
@@ -5,7 +7,6 @@ import {fileURLToPath} from 'node:url';
 import {initializeApp} from 'firebase-admin/app';
 import {getFirestore, Timestamp} from 'firebase-admin/firestore';
 
-process.env.GCLOUD_PROJECT = 'book-tracker-d8f24';
 const db = getFirestore(initializeApp({projectId: 'book-tracker-d8f24'}, 'progress-migration-test'));
 const uid = `progress-migration-${Date.now()}`;
 const userRef = db.doc(`users/${uid}`);
@@ -57,10 +58,15 @@ test('progress-source migration dry-runs, applies, and is idempotent in Firestor
   await db.recursiveDelete(userRef);
 });
 
-test('timer migration and audit traverse books beneath a missing user document', async () => {
+test('timer and progress migrations and audit traverse books beneath a missing user document', async () => {
   const bookRef = phantomUserRef.collection('books').doc('legacy');
+  const baselineBookRef = phantomUserRef.collection('books').doc('unexplained-baseline');
   const start = '2026-08-25T12:00:00.000Z';
-  await bookRef.set({activeTimer: {start}});
+  await bookRef.set({activeTimer: {start}, currentPage: 20});
+  await baselineBookRef.set({currentPage: 12, currentPageUpdateId: null});
+  await bookRef.collection('updates').doc('phantom-reading').set({
+    type: 'reading', toPage: 20, createdAt: Timestamp.fromMillis(1),
+  });
   assert.equal((await phantomUserRef.get()).exists, false);
 
   const auditBefore = runScript(auditPath);
@@ -69,6 +75,16 @@ test('timer migration and audit traverse books beneath a missing user document',
     auditBefore,
     new RegExp(`timer-lifecycle\\.missing users/${phantomUid}/timerLifecycle/current`),
   );
+  assert.match(
+    auditBefore,
+    new RegExp(
+      `book\\.progress-source-null-baseline users/${phantomUid}/books/unexplained-baseline ` +
+      '\\[page 12 has no establishing update\\]',
+    ),
+  );
+  assert.match(auditBefore, /^user-documents: 0$/m);
+  assert.match(auditBefore, /^user-refs: 1$/m);
+  assert.match(auditBefore, /^phantom-users: 1$/m);
 
   assert.match(runScript(timerMigrationPath), new RegExp(`DRY users/${phantomUid} timer=local`));
   assert.equal((await phantomUserRef.collection('timerLifecycle').doc('current').get()).exists, false);
@@ -87,10 +103,33 @@ test('timer migration and audit traverse books beneath a missing user document',
   assert.equal((await phantomUserRef.get()).exists, false);
   assert.match(runScript(timerMigrationPath, '--apply'), /0 users migrated/);
 
+  assert.match(
+    runScript(migrationPath),
+    new RegExp(`DRY users/${phantomUid}/books/legacy currentPageUpdateId=phantom-reading`),
+  );
+  assert.equal((await bookRef.get()).data()?.currentPageUpdateId, undefined);
+  assert.match(
+    runScript(migrationPath, '--apply'),
+    new RegExp(`MIGRATE users/${phantomUid}/books/legacy currentPageUpdateId=phantom-reading`),
+  );
+  assert.equal((await bookRef.get()).data()?.currentPageUpdateId, 'phantom-reading');
+  assert.match(runScript(migrationPath, '--apply'), /0 books migrated/);
+
   const auditAfter = runScript(auditPath);
   assert.match(auditAfter, new RegExp(`orphan\\.user users/${phantomUid}`));
   assert.doesNotMatch(
     auditAfter,
     new RegExp(`timer-lifecycle\\.missing users/${phantomUid}/timerLifecycle/current`),
+  );
+  assert.doesNotMatch(
+    auditAfter,
+    new RegExp(`book\\.missing\\.currentPageUpdateId users/${phantomUid}/books/legacy`),
+  );
+  assert.match(
+    auditAfter,
+    new RegExp(
+      `book\\.progress-source-null-baseline users/${phantomUid}/books/unexplained-baseline ` +
+      '\\[page 12 has no establishing update\\]',
+    ),
   );
 });

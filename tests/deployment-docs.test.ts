@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const readmeUrl = new URL('../README.md', import.meta.url);
 const migrationsUrl = new URL('../MIGRATIONS.md', import.meta.url);
+const progressMigrationUrl = new URL('../migrate-reading-progress-sources.ts', import.meta.url);
 
 function section(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -23,7 +24,7 @@ function assertOrdered(source: string, values: string[]): void {
   }
 }
 
-test('the README preserves the timer-claim rollout order', async () => {
+test('the README deploys compatible Hosting before the progress-source backfill', async () => {
   const readme = await readFile(readmeUrl, 'utf8');
   const deployment = section(readme, '### Deploy Everything', '### Deploy Hosting Only');
 
@@ -33,14 +34,17 @@ test('the README preserves the timer-claim rollout order', async () => {
     'firebase deploy --only functions',
     'let old in-flight invocations drain',
     'node migrate-timer-claims.ts --prod',
-    'node migrate-reading-progress-sources.ts --prod',
     'node db-snapshot.ts --prod',
     'node migrate-timer-claims.ts --prod --apply',
     'node migrate-timer-claims.ts --prod --apply',
+    'node db-audit.ts --prod',
+    'firebase deploy --only hosting',
+    'let cached old clients reload and the overlap window pass',
+    'node migrate-reading-progress-sources.ts --prod',
+    'node db-snapshot.ts --prod',
     'node migrate-reading-progress-sources.ts --prod --apply',
     'node migrate-reading-progress-sources.ts --prod --apply',
     'node db-audit.ts --prod',
-    'firebase deploy --only hosting',
   ]);
   assert.equal(
     deployment.match(/node migrate-timer-claims\.ts --prod --apply/g)?.length,
@@ -58,4 +62,15 @@ test('the general migration order links to the timer-claim exception', async () 
   const migrations = await readFile(migrationsUrl, 'utf8');
   assert.match(migrations, /\[timer-claim rollout\]\(#timer-claim-rollout\)/);
   assert.match(migrations, /#### Timer-claim rollout/);
+  assert.match(migrations, /#### Reading-progress-source rollout/);
+});
+
+test('the progress migration traverses phantom users and logs the applied transaction patch', async () => {
+  const migration = await readFile(progressMigrationUrl, 'utf8');
+  assert.match(migration, /collection\('users'\)\.listDocuments\(\)/);
+
+  const transaction = migration.indexOf('const appliedPatch = await db.runTransaction');
+  const appliedLog = migration.indexOf('appliedPatch.currentPageUpdateId', transaction);
+  assert.notEqual(transaction, -1, 'apply mode must return the patch chosen inside the transaction');
+  assert.ok(appliedLog > transaction, 'apply mode must log the transaction-applied patch');
 });

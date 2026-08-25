@@ -300,24 +300,31 @@ npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firest
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
 # Before migrating, let old in-flight invocations drain.
 
-# 3. Review, snapshot, apply, and prove the migration is idempotent.
+# 3. Review, snapshot, apply, and prove the timer migration is idempotent.
 node migrate-timer-claims.ts --prod
-node migrate-reading-progress-sources.ts --prod
 node db-snapshot.ts --prod
 node migrate-timer-claims.ts --prod --apply
 node migrate-timer-claims.ts --prod --apply
+node db-audit.ts --prod
+
+# 4. Expose the claim-aware, progress-source-compatible client.
+npm run build
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
+
+# 5. Before backfilling progress ownership, let cached old clients reload and the overlap window pass.
+node migrate-reading-progress-sources.ts --prod
+node db-snapshot.ts --prod
 node migrate-reading-progress-sources.ts --prod --apply
 node migrate-reading-progress-sources.ts --prod --apply
 node db-audit.ts --prod
-
-# 4. Expose the claim-aware client only after the migration is clean.
-npm run build
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
 ```
 
-Review every migration line, then take the snapshot immediately before the
-first apply. The second applies must report zero users and zero books, and the
-audit must contain no `timer-lifecycle.*` or `book.progress-source-*` findings.
+Review every migration line, then take each snapshot immediately before that
+migration's first apply. The second applies must report zero users and zero
+books. The pre-Hosting audit must contain no `timer-lifecycle.*` findings. In
+the final audit, investigate every `book.progress-source-null-baseline` as a
+possible missing history row; all other `book.progress-source-*` findings must
+be absent. Record each accepted nonzero baseline in the rollout log.
 After this one-time rollout has completed
 successfully, routine full deployments can use the standard `firebase deploy`
 command.

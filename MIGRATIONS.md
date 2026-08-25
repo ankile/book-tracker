@@ -119,8 +119,9 @@ client code promptly, but assume days of overlap with stale cached clients
 
 The timer-lifecycle schema is an exception to this general order. For the
 strict-TypeScript release, follow the [timer-claim rollout](#timer-claim-rollout)
-below; it deploys correlation rules before Functions and migrates every user
-before Hosting.
+and then the [reading-progress-source rollout](#reading-progress-source-rollout)
+below. Timer claims are migrated before Hosting; progress ownership is
+backfilled only after the compatible client has replaced stale clients.
 
 #### Timer-claim rollout
 
@@ -134,17 +135,11 @@ order because the lifecycle document serializes every timer start:
    user fail closed because `timerLifecycle/current` is missing. Let old
    in-flight start invocations drain before continuing; they use the prior
    all-books transaction and the migration will capture their final state.
-3. Dry-run both `migrate-timer-claims.ts --prod` and
-   `migrate-reading-progress-sources.ts --prod`, then take the production
-   snapshot. Apply each migration twice; the second applies must report zero
-   users and zero books. Run the audit before moving on. The progress-source
-   migration assigns each legacy book the newest deterministic reading or
-   page-correction row whose endpoint matches `currentPage`, without touching
-   `updatedAt`; books with no such row receive an explicit null baseline.
-   Transactions re-read each book and its updates so concurrent progress wins.
-   A malformed timer, malformed existing lifecycle document, conflicting
-   claim, multiple active books, or invalid existing progress source aborts
-   the migration for a human decision.
+3. Dry-run `migrate-timer-claims.ts --prod`, then take the production snapshot.
+   Apply the migration twice; the second apply must report zero users. Run the
+   audit and require zero `timer-lifecycle.*` findings before moving on. A
+   malformed timer, malformed existing lifecycle document, conflicting claim,
+   or multiple active books aborts the migration for a human decision.
 4. Deploy Hosting last. Cached old clients remain unable to write an
    uncorrelated timer, while unrelated book edits still work.
 
@@ -153,10 +148,31 @@ document. Idle state is explicit, and every clear records the exact prior
 claim. That identity makes a stale offline clear reject if the same book has
 started a newer timer. Do not delete idle lifecycle documents.
 
-Cached old clients can still omit `currentPageUpdateId` on a new book so their
-unrelated offline writes are not rejected during rollout. Keep the progress
-migration cheap and idempotent, re-run it with the follow-up audit after the
-overlap window, and do not remove it from the repository.
+#### Reading-progress-source rollout
+
+The new client tolerates a missing `currentPageUpdateId`, so deploy it before
+backfilling that field. This order matters: once a book has a source key, a
+cached old client can submit an offline reading batch that omits the key and is
+rejected as a whole. A rejected batch loses the reading update rather than only
+its provenance.
+
+1. After the timer rollout deploys Hosting, let cached old clients reload and
+   the overlap window pass. Use the project's chosen stale-client support
+   window; do not use the progress backfill itself to force the transition.
+2. Dry-run `migrate-reading-progress-sources.ts --prod` and review every line,
+   then take a fresh production snapshot immediately before writing.
+3. Apply the migration twice; the second apply must report zero books. It
+   assigns the newest deterministic reading or page-correction row whose
+   endpoint matches `currentPage`, without touching `updatedAt`. Transactions
+   re-read each book and its updates so concurrent progress wins. An invalid
+   existing source aborts for a human decision.
+4. Run the audit. Investigate every
+   `book.progress-source-null-baseline`: it means nonzero `currentPage` has no
+   establishing history row. Record each accepted legacy baseline in the
+   rollout log. All other `book.progress-source-*` findings must be zero.
+
+Keep the migration cheap and idempotent, re-run it with the follow-up audit for
+stragglers, and do not remove it from the repository.
 
 ### 4. Production run
 
@@ -184,21 +200,24 @@ re-run, and why the follow-up audit exists.
 
 ## Script conventions
 
-- **Traversal**: book migrations iterate with `.get()` — orphaned book docs
-  under deleted parents are report-only, not data to migrate. User-level
-  timer lifecycle is the exception: `migrate-timer-claims.ts` and the audit
-  use `listDocuments()` because a missing user parent may still have live
-  book/timer subcollections. `db-snapshot.ts` also deliberately uses
+- **Traversal**: most book migrations iterate existing user documents with
+  `.get()` — orphaned book docs under deleted parents are report-only, not data
+  to migrate. Timer claims and reading-progress ownership are exceptions:
+  `migrate-timer-claims.ts`, `migrate-reading-progress-sources.ts`, and the
+  audit use `listDocuments()` because a missing user parent may still have live
+  book/timer subcollections whose state must remain internally consistent.
+  `db-snapshot.ts` also deliberately uses
   `listCollections()`/`listDocuments()` because a backup must capture every
   orphan; don't "fix" it.
 - **Batching**: always through `batcher()` — 500-op rollover, dry-run
   counting, and it **crashes if an `update()` payload touches `updatedAt`**
   (on books it drives the reading-list order; no migration may touch it).
   `batcher.set()` allows `updatedAt` — it is for documents the script owns
-  outright (restores, new-entity upserts). The timer-claim migration is the
-  documented exception: each legacy book patch and its lifecycle claim must
-  be committed in one Firestore transaction or a crash could leave an
-  unmatchable active timer.
+  outright (restores, new-entity upserts). The timer-claim and reading-progress
+  migrations are documented exceptions. Timer claims must commit each legacy
+  book patch and lifecycle claim atomically. Reading-progress migration must
+  re-read each book and its updates in one transaction so the logged and stored
+  source reflects concurrent progress rather than a stale dry-run candidate.
 - **Snapshot codec**: Timestamp/ref/GeoPoint/bytes round-trip via `__type`
   markers; the encoder crashes on unknown types and on documents using the
   reserved `__type` key. Crash-don't-corrupt.
