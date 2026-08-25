@@ -12,6 +12,9 @@
 //   node db-restore.ts snapshots/<file>.json --apply            # emulator apply
 //   node db-restore.ts snapshots/<file>.json --prod             # prod dry-run
 //   node db-restore.ts snapshots/<file>.json --prod --apply     # disaster recovery
+// A dry run prints NOTHING WRITTEN at both startup and completion. --prod
+// chooses the target only; --apply enables writes, and production apply still
+// requires typing the project id through connect().
 import { readFileSync } from 'node:fs';
 import {
   parseFlags,
@@ -21,6 +24,10 @@ import {
   PROJECT_ID,
   type EncodedDocument,
 } from './migrate-lib.ts';
+import {
+  restoreCompletionBanner,
+  restoreStartBanner,
+} from './db-restore-messages.ts';
 
 interface SnapshotDump {
   projectId: string;
@@ -40,6 +47,7 @@ if (dump.projectId !== PROJECT_ID) {
   throw new Error(`snapshot is from ${dump.projectId}, expected ${PROJECT_ID}`);
 }
 
+console.log(restoreStartBanner({ file, flags }));
 const { db } = await connect({ ...flags, confirmWrite: flags.apply });
 const writer = batcher(db, { apply: flags.apply });
 
@@ -52,7 +60,9 @@ for (const { path, data } of dump.docs) {
   await writer.set(db.doc(path), decodeValue(db, data));
 }
 await writer.flush();
-console.log(
-  `${writer.count()} documents ${flags.apply ? 'restored' : 'checked (dry run, nothing written)'} ` +
-  `from ${file} (${skipped} togglQueue docs skipped)`,
-);
+console.log(restoreCompletionBanner({
+  file,
+  flags,
+  documents: writer.count(),
+  skipped,
+}));

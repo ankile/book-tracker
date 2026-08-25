@@ -27,6 +27,11 @@ All scripts share the same target rules, enforced in `migrate-lib.ts`:
   reads `./serviceAccountKey.json`, and asserts its `project_id`.
 - Write scripts are **dry-run by default**; `--apply` is required to write,
   and `--prod --apply` additionally requires typing the project id.
+  `db-restore.ts --prod` selects production but still writes nothing. It checks
+  local restore inputs and service-account project identity; it does not verify
+  production connectivity or permissions. Its opening and closing banners print
+  `NOTHING WRITTEN` and the exact `--prod --apply` command needed to perform the
+  restore.
 - `--database=<id>` targets a named database (used for backup recovery).
 - Unknown flags crash — a typoed `--aply` must not demote a run to dry-run.
 
@@ -192,6 +197,12 @@ gcloud firestore databases delete --database=recovered ...
 ```
 
 Notes on `db-restore.ts --prod` (disaster recovery only):
+
+- `node db-restore.ts snapshots/<file>.json --prod` is a **dry run**. It
+  checks the local snapshot and service-account project identity, plans the
+  restore without a Firestore RPC, and prints `NOTHING WRITTEN` at startup and
+  completion. Only `--prod --apply`, followed by typing `book-tracker-d8f24`,
+  enables the copy-back writes.
 
 - Full-overwrite `set()`: restores every doc in the dump as-is.
 - **Never deletes** — documents *created* after the snapshot (e.g. by a bad
