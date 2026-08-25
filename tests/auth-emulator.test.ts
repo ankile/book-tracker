@@ -11,8 +11,9 @@ import {
 } from 'firebase/auth';
 import { describeAuthFailure } from '../src/lib/utils/authFailure.ts';
 
-test('a real Auth emulator rejection reaches the safe failure classifier', async () => {
+test('a real Auth emulator rejection reaches the safe failure classifier', async (t) => {
   const app = initializeApp({ projectId: 'book-tracker-rules-test', apiKey: 'test-key' }, randomUUID());
+  t.after(() => deleteApp(app));
   const auth = getAuth(app);
   connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
   const email = `${randomUUID()}@example.com`;
@@ -34,5 +35,4 @@ test('a real Auth emulator rejection reaches the safe failure classifier', async
   assert.equal(description.userMessage, 'The email address or password is incorrect.');
   assert.equal(description.issue?.event, 'auth.sign_in_failed');
   assert.equal(description.issue?.detail, null);
-  await deleteApp(app);
 });
