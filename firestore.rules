@@ -517,15 +517,6 @@ service cloud.firestore {
              && claim.error == timer.error;
     }
 
-    function stoppingClaimMatchesTimer(claim, bookId, timer) {
-      return validStoppingTimerClaim(claim)
-             && validStoppingTimer(timer)
-             && claim.bookId == bookId
-             && claim.entryId == timer.entryId
-             && claim.start == timer.start
-             && claim.queueId == timer.queueId;
-    }
-
     function validClientTimerClaimTransition(userId) {
       let before = resource.data;
       let after = request.resource.data;
