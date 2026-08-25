@@ -26,7 +26,7 @@ function assertOrdered(source: string, values: string[]): void {
 
 test('the README deploys compatible Hosting before the progress-source backfill', async () => {
   const readme = await readFile(readmeUrl, 'utf8');
-  const deployment = section(readme, '### Deploy Everything', '### Deploy Hosting Only');
+  const deployment = section(readme, '### Deploy Everything', '### Deploy Hosting and Profile Renderer');
 
   assert.match(deployment, /\[timer-claim rollout\]\(MIGRATIONS\.md#timer-claim-rollout\)/);
   assertOrdered(deployment, [
@@ -38,7 +38,7 @@ test('the README deploys compatible Hosting before the progress-source backfill'
     'node migrate-timer-claims.ts --prod --apply',
     'node migrate-timer-claims.ts --prod --apply',
     'node db-audit.ts --prod',
-    'firebase deploy --only hosting',
+    'firebase deploy --only functions:publicweb,hosting',
     '7-day old-bundle overlap window',
     'node migrate-reading-progress-sources.ts --prod',
     'node db-snapshot.ts --prod',
@@ -56,6 +56,28 @@ test('the README deploys compatible Hosting before the progress-source backfill'
     2,
     'the progress migration must apply twice to prove idempotency',
   );
+});
+
+test('profile renderer deployment stays coupled to Hosting and follows its rules', async () => {
+  const [readme, migrations] = await Promise.all([
+    readFile(readmeUrl, 'utf8'),
+    readFile(migrationsUrl, 'utf8'),
+  ]);
+  const deployment = section(
+    readme,
+    '### Deploy Hosting and Profile Renderer',
+    '### Deploy to Preview Channel',
+  );
+
+  assert.match(deployment, /There is intentionally no Hosting-only release path/i);
+  assertOrdered(deployment, [
+    'npm run build',
+    'firebase deploy --only functions:publicweb,hosting',
+  ]);
+  assert.match(readme, /profileDiscovery\/<username>/);
+  assert.match(readme, /public profile without a marker:[^\n]*`200` with `noindex,follow`/i);
+  assert.match(migrations, /Deploy the additive `profileDiscovery` Firestore rules before exposing the UI/i);
+  assert.match(migrations, /Do not deploy Hosting alone/i);
 });
 
 test('the general migration order links to the timer-claim exception', async () => {

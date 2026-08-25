@@ -104,7 +104,7 @@
   <div class="app-view">
     <header class="public-bar">
       <span class="brand">Book Tracker</span>
-      <a class="go-to-app" href="/">Go to app</a>
+      <a class="go-to-app" href="/" data-sveltekit-reload>Go to app</a>
     </header>
     <main>
       {@render children()}

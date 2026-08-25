@@ -53,6 +53,28 @@ function finiteNumber(
   return value;
 }
 
+function boolean(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): boolean {
+  if (typeof value !== "boolean") fail(`${label} must be a boolean.`);
+  return value;
+}
+
+function boundedPossiblyEmptyString(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+  maximumLength: number,
+): string {
+  if (typeof value !== "string") fail(`${label} must be a string.`);
+  if (value.length > maximumLength) {
+    fail(`${label} must be at most ${maximumLength} characters.`);
+  }
+  return value;
+}
+
 function positiveInteger(
   value: unknown,
   label: string,
@@ -196,6 +218,191 @@ export function decodeIsbnLookupRequest(
     fail("isbn must be a checksum-valid ISBN-13 string.");
   }
   return {isbn: decoded.isbn};
+}
+
+const PROFILE_LINK_TYPES = [
+  "twitter", "github", "linkedin", "instagram", "scholar", "goodreads",
+  "strava", "homepage", "other",
+] as const;
+
+type PublicProfileLinkType = typeof PROFILE_LINK_TYPES[number];
+
+export interface PublicProfileLink {
+  type: PublicProfileLinkType;
+  value: string;
+  label?: string;
+}
+
+export interface PublicProfileStats {
+  totalBooks: number;
+  finishedBooks: number;
+  readingBooks: number;
+  totalTimeReadHours: number;
+  totalPagesRead: number;
+  booksPerYear: number;
+  avgTimePerBook: number;
+  authors: number;
+}
+
+export interface PublicProfileYear {
+  year: number;
+  count: number;
+  hours: number;
+  pages: number;
+}
+
+export interface PublicProfileDay {
+  day: string;
+  pagesRead: number;
+  timeRead: number;
+  sessions: number;
+}
+
+export interface PublicProfile {
+  username: string;
+  uid: string;
+  public: true;
+  givenName: string;
+  familyName: string;
+  links: PublicProfileLink[];
+  stats: PublicProfileStats;
+  years: PublicProfileYear[];
+  days: PublicProfileDay[];
+  updatedAt: Timestamp;
+}
+
+export interface ProfileDiscoveryMarker {
+  uid: string;
+  createdAt: Timestamp;
+}
+
+function publicProfileLink(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): PublicProfileLink {
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, ["type", "value", "label"], label, fail);
+  const type = string(decoded.type, `${label} type`, fail, 20);
+  const supported = PROFILE_LINK_TYPES.find((candidate) => candidate === type);
+  if (supported === undefined) fail(`${label} type is unsupported.`);
+  const link: PublicProfileLink = {
+    type: supported,
+    value: string(decoded.value, `${label} value`, fail, 200),
+  };
+  if (decoded.label !== undefined) {
+    link.label = boundedPossiblyEmptyString(
+      decoded.label,
+      `${label} label`,
+      fail,
+      50,
+    );
+  }
+  return link;
+}
+
+function publicProfileStats(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): PublicProfileStats {
+  const decoded = record(value, label, fail);
+  const fields = [
+    "totalBooks", "finishedBooks", "readingBooks", "totalTimeReadHours",
+    "totalPagesRead", "booksPerYear", "avgTimePerBook", "authors",
+  ] as const;
+  exactKeys(decoded, fields, label, fail);
+  return {
+    totalBooks: finiteNumber(decoded.totalBooks, `${label} total books`, fail),
+    finishedBooks: finiteNumber(decoded.finishedBooks, `${label} finished books`, fail),
+    readingBooks: finiteNumber(decoded.readingBooks, `${label} reading books`, fail),
+    totalTimeReadHours: finiteNumber(decoded.totalTimeReadHours, `${label} reading hours`, fail),
+    totalPagesRead: finiteNumber(decoded.totalPagesRead, `${label} pages read`, fail),
+    booksPerYear: finiteNumber(decoded.booksPerYear, `${label} books per year`, fail),
+    avgTimePerBook: finiteNumber(decoded.avgTimePerBook, `${label} average time`, fail),
+    authors: finiteNumber(decoded.authors, `${label} authors`, fail),
+  };
+}
+
+function publicProfileYears(
+  value: unknown,
+  fail: DecodeFailure,
+): PublicProfileYear[] {
+  if (!Array.isArray(value)) fail("profile years must be an array.");
+  return value.map((entry, index) => {
+    const label = `profile year ${index}`;
+    const decoded = record(entry, label, fail);
+    exactKeys(decoded, ["year", "count", "hours", "pages"], label, fail);
+    return {
+      year: finiteNumber(decoded.year, `${label} year`, fail),
+      count: finiteNumber(decoded.count, `${label} count`, fail),
+      hours: finiteNumber(decoded.hours, `${label} hours`, fail),
+      pages: finiteNumber(decoded.pages, `${label} pages`, fail),
+    };
+  });
+}
+
+function publicProfileDays(
+  value: unknown,
+  fail: DecodeFailure,
+): PublicProfileDay[] {
+  if (!Array.isArray(value)) fail("profile days must be an array.");
+  return value.map((entry, index) => {
+    const label = `profile day ${index}`;
+    const decoded = record(entry, label, fail);
+    exactKeys(decoded, ["day", "pagesRead", "timeRead", "sessions"], label, fail);
+    return {
+      day: string(decoded.day, `${label} date`, fail, 10),
+      pagesRead: finiteNumber(decoded.pagesRead, `${label} pages`, fail),
+      timeRead: finiteNumber(decoded.timeRead, `${label} time`, fail),
+      sessions: finiteNumber(decoded.sessions, `${label} sessions`, fail),
+    };
+  });
+}
+
+export function decodePublicProfile(
+  username: string,
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): PublicProfile {
+  const decoded = record(value, `profile ${username}`, fail);
+  exactKeys(decoded, [
+    "uid", "public", "givenName", "familyName", "links", "stats",
+    "records", "years", "days", "updatedAt",
+  ], `profile ${username}`, fail);
+  if (boolean(decoded.public, "profile public flag", fail) !== true) {
+    fail("profile must be public before rendering.");
+  }
+  if (!Array.isArray(decoded.links)) fail("profile links must be an array.");
+  return {
+    username,
+    uid: string(decoded.uid, "profile owner", fail, 128),
+    public: true,
+    givenName: boundedPossiblyEmptyString(decoded.givenName, "profile given name", fail, 50),
+    familyName: boundedPossiblyEmptyString(decoded.familyName, "profile family name", fail, 50),
+    links: decoded.links.map((entry, index) =>
+      publicProfileLink(entry, `profile link ${index}`, fail)),
+    stats: publicProfileStats(decoded.stats, "profile stats", fail),
+    years: publicProfileYears(decoded.years, fail),
+    days: publicProfileDays(decoded.days, fail),
+    updatedAt: firestoreTimestamp(decoded.updatedAt, "profile update time", fail),
+  };
+}
+
+export function decodeProfileDiscoveryMarker(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): ProfileDiscoveryMarker {
+  const decoded = record(value, "profile discovery marker", fail);
+  exactKeys(decoded, ["uid", "createdAt"], "profile discovery marker", fail);
+  return {
+    uid: string(decoded.uid, "profile discovery owner", fail, 128),
+    createdAt: firestoreTimestamp(
+      decoded.createdAt,
+      "profile discovery creation time",
+      fail,
+    ),
+  };
 }
 
 export interface TogglConfig {

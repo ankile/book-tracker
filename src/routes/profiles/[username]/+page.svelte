@@ -20,6 +20,11 @@
   // profile is readable depends on who is asking, and firing before the
   // token is back would deny the owner their own page.
   let profile = $state<Profile | null | undefined>(undefined);
+  const profileTitle = $derived(
+    profile
+      ? `${joinPersonName(profile) || profile.username}'s reading profile | Book Tracker`
+      : `${username} | Book Tracker`,
+  );
   let profileLoadFailed = $state(false);
   $effect(() => {
     if ($user === undefined) return;
@@ -40,10 +45,20 @@
     );
     return () => (current = false);
   });
+
+  // The Hosting function fills this slot with indexable HTML before the
+  // client starts. Keep it on screen through auth restoration and the
+  // Firestore read, then reveal the interactive Svelte page. If the client
+  // load fails, the server snapshot remains useful instead of becoming an
+  // empty error state.
+  $effect(() => {
+    if (profile === undefined || profileLoadFailed) return;
+    document.getElementById('profile-snapshot-slot')?.replaceChildren();
+  });
 </script>
 
 <svelte:head>
-  <title>{username} | Book Tracker</title>
+  <title>{profileTitle}</title>
 </svelte:head>
 
 <style lang="scss">

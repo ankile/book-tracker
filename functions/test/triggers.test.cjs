@@ -16,6 +16,7 @@ test("preserves the deployed function export names", () => {
     "createUserDocument",
     "deleteUserDocument",
     "deletebookupdates",
+    "publicweb",
     "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.admin), ["overview"]);
@@ -63,6 +64,10 @@ test("keeps every function in europe-west1 on its required generation", () => {
       namespace: "(default)",
     });
   }
+
+  assert.equal(functions.publicweb.__endpoint.platform, "gcfv2");
+  assert.deepEqual(functions.publicweb.__endpoint.region, ["europe-west1"]);
+  assert.notEqual(functions.publicweb.__endpoint.httpsTrigger, undefined);
 });
 
 test("preserves the Firestore and Authentication event contracts", () => {
@@ -160,6 +165,43 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
   ]);
 });
 
+test("user deletion removes public profiles and discovery markers atomically", async (t) => {
+  const userRef = {path: "users/owner"};
+  const profileRef = {path: "profiles/ada-lovelace"};
+  const discoveryRef = {path: "profileDiscovery/ada-lovelace"};
+  const deletes = [];
+  let committed = false;
+  const profiles = {
+    where: (field, operator, value) => {
+      assert.deepEqual([field, operator, value], ["uid", "==", "owner"]);
+      return {get: async () => ({docs: [{id: "ada-lovelace", ref: profileRef}]})};
+    },
+  };
+  t.mock.method(db, "collection", (path) => {
+    if (path === "profiles") return profiles;
+    if (path === "users") return {doc: (uid) => {
+      assert.equal(uid, "owner");
+      return userRef;
+    }};
+    assert.equal(path, "profileDiscovery");
+    return {doc: (username) => {
+      assert.equal(username, "ada-lovelace");
+      return discoveryRef;
+    }};
+  });
+  t.mock.method(db, "batch", () => ({
+    delete: (ref) => deletes.push(ref),
+    commit: async () => {
+      committed = true;
+    },
+  }));
+
+  await functions.deleteUserDocument.run({uid: "owner"});
+
+  assert.deepEqual(deletes, [userRef, profileRef, discoveryRef]);
+  assert.equal(committed, true);
+});
+
 test("binds the migrated Runtime Config secret only to booksapi", () => {
   assert.deepEqual(
     functions.booksapi.lookupisbn.__endpoint.secretEnvironmentVariables,
@@ -213,6 +255,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.deletebookupdates,
+    functions.publicweb,
     ...Object.values(functions.toggl),
   ];
   const boundKeys = deployedFunctions.flatMap((deployedFunction) =>

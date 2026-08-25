@@ -219,6 +219,31 @@ npm run preview
 
 This serves the built app locally to test the production build before deploying.
 
+### Public Profile Search Indexing
+
+Profile pages are rendered as complete HTML by the `publicweb` HTTPS Function;
+they do not need to be generated as one static file per username. Firebase
+Hosting sends `/profiles/**` and `/sitemap.xml` to that Function, while the
+Svelte app still hydrates the profile page for interactive visitors.
+
+Search discovery is a separate, explicit opt-in from public sharing. A profile
+owner first enables **Public profile**, then enables **Appear in search
+engines**. The second switch creates `profileDiscovery/<username>` with the
+same owner uid. The server applies these states:
+
+- public profile plus matching discovery marker: `200`, indexable metadata,
+  canonical URL, and inclusion in `/sitemap.xml`;
+- public profile without a marker: `200` with `noindex,follow`;
+- private or missing profile: indistinguishable `404` HTML with
+  `noindex,nofollow`;
+- a stale marker whose profile is missing, private, or owned by a different uid:
+  excluded from the sitemap and reported by `db-audit.ts`.
+
+`npm run build` creates both `public/index.html` and
+`functions/assets/profile-shell.html`. They deliberately contain the same
+hashed JS/CSS references. Treat the Hosting release and `publicweb` revision as
+one coupled artifact; the build and artifact tests fail if those shells drift.
+
 ### Testing Functions Locally
 
 To test Firebase Functions locally using emulators:
@@ -313,9 +338,9 @@ node migrate-timer-claims.ts --prod --apply
 node migrate-timer-claims.ts --prod --apply
 node db-audit.ts --prod
 
-# 4. Expose the claim-aware, progress-source-compatible client.
+# 4. Expose the claim-aware, progress-source-compatible client and its matching profile renderer.
 npm run build
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
 
 # 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
 node migrate-reading-progress-sources.ts --prod
@@ -333,18 +358,21 @@ possible missing history row; all other `book.progress-source-*` findings must
 be absent. Record each accepted nonzero baseline in the rollout log.
 After this one-time rollout has completed
 successfully, routine full deployments can use the standard `firebase deploy`
-command.
+command, but must run `npm run build` first so Hosting and `publicweb` receive
+the same generated shell.
 
-### Deploy Hosting Only
+### Deploy Hosting and Profile Renderer
 
-To deploy just the web app (faster for frontend-only changes):
+There is intentionally no Hosting-only release path. Even a frontend-only
+build changes the generated SvelteKit shell identifier, and the profile
+Function embeds that shell. Deploy both targets from one build:
 
 ```bash
 # Build the web app
 npm run build
 
-# Deploy hosting
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
+# Deploy the matching renderer revision and Hosting release together
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
 ```
 
 ### Deploy to Preview Channel
@@ -355,14 +383,16 @@ Test your changes on a temporary URL before deploying to production:
 # Build the app
 npm run build
 
-# Deploy to a preview channel (expires in 30 days)
+# Publish the matching renderer revision, then pin it to the preview release.
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb
 npm exec --yes --package firebase-tools@15.24.0 -- \
   firebase hosting:channel:deploy preview --expires 30d
 ```
 
 ### Deploy Functions Only
 
-To deploy just the Firebase Functions (faster for backend-only changes):
+To deploy backend-only Firebase Functions changes that do not touch
+`publicweb`, `src/app.html`, client assets, or the shell sync script:
 
 ```bash
 # The predeploy hooks will automatically lint and build
@@ -374,6 +404,10 @@ Or use the npm script:
 ```bash
 npm --prefix functions run deploy
 ```
+
+If `publicweb` or any web-shell input changed, use **Deploy Hosting and Profile
+Renderer** instead. Deploying either half alone can return HTML whose hashed
+assets do not exist in that Hosting release.
 
 ### View Deployment Logs
 

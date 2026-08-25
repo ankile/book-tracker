@@ -123,6 +123,22 @@ and then the [reading-progress-source rollout](#reading-progress-source-rollout)
 below. Timer claims are migrated before Hosting; progress ownership is
 backfilled only after the compatible client has replaced stale clients.
 
+The public-profile renderer is another explicit exception to a standalone
+Hosting deployment. `npm run build` copies the generated `public/index.html`
+to `functions/assets/profile-shell.html`, including its hashed asset
+references. After profile search indexing exists, deploy the renderer and
+Hosting from that same build with:
+
+```bash
+npm run build
+npm exec --yes --package firebase-tools@15.24.0 -- \
+  firebase deploy --only functions:publicweb,hosting
+```
+
+Deploy the additive `profileDiscovery` Firestore rules before exposing the UI
+that writes markers. Do not deploy Hosting alone: old and new `publicweb`
+revisions are safe only with the Hosting release whose shell they embed.
+
 #### Timer-claim rollout
 
 The `migrate-timer-claims.ts` rollout is deliberately stricter than the usual

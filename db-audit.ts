@@ -13,6 +13,7 @@ import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
+import { Timestamp } from 'firebase-admin/firestore';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -30,6 +31,38 @@ const found = (cls: string, path: string, detail = ''): void => {
 
 const userProfiles = await db.collection('users').get();
 const users = await db.collection('users').listDocuments();
+const publicProfiles = await db.collection('profiles').get();
+const profileDiscoveries = await db.collection('profileDiscovery').get();
+
+const publicProfilesByUsername = new Map(
+  publicProfiles.docs.map((profile) => [profile.id, profile.data()]),
+);
+for (const discovery of profileDiscoveries.docs) {
+  const marker = discovery.data();
+  const path = discovery.ref.path;
+  if (!/^[a-z0-9-]{3,30}$/.test(discovery.id)) {
+    found('profile-discovery.bad-username', path, discovery.id);
+  }
+  if (
+    Object.keys(marker).sort().join(',') !== 'createdAt,uid' ||
+    typeof marker.uid !== 'string' ||
+    marker.uid === '' ||
+    !(marker.createdAt instanceof Timestamp)
+  ) {
+    found('profile-discovery.bad-shape', path, JSON.stringify(marker));
+  }
+  const profile = publicProfilesByUsername.get(discovery.id);
+  if (profile === undefined) {
+    found('profile-discovery.profile-missing', path);
+  } else {
+    if (profile.uid !== marker.uid) {
+      found('profile-discovery.owner-mismatch', path, `${String(marker.uid)} != ${String(profile.uid)}`);
+    }
+    if (profile.public !== true) {
+      found('profile-discovery.profile-private', path);
+    }
+  }
+}
 
 // Info-level author bookkeeping (summary lines, not findings): orphaned
 // author docs are a legitimate steady state — deleting or editing a book
@@ -253,4 +286,6 @@ console.log(`user-refs: ${users.length}`);
 console.log(`phantom-users: ${users.filter((user) => !existingUsers.has(user.id)).length}`);
 console.log(`author-docs: ${authorDocCount}`);
 console.log(`author-orphans: ${authorOrphanCount}`);
+console.log(`public-profiles: ${publicProfiles.size}`);
+console.log(`profile-discoveries: ${profileDiscoveries.size}`);
 console.log(`findings: ${findings.length}`);

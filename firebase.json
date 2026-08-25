@@ -13,6 +13,22 @@
     ],
     "rewrites": [
       {
+        "source": "/sitemap.xml",
+        "function": {
+          "functionId": "publicweb",
+          "region": "europe-west1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "/profiles/**",
+        "function": {
+          "functionId": "publicweb",
+          "region": "europe-west1",
+          "pinTag": true
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
@@ -28,6 +44,18 @@
         "source": "/_app/immutable/**",
         "headers": [
           { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+        ]
+      },
+      {
+        "source": "/profiles/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-store" }
+        ]
+      },
+      {
+        "source": "/sitemap.xml",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=300, s-maxage=300" }
         ]
       }
     ]

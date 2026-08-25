@@ -74,3 +74,11 @@ export interface Profile extends ProfilePayload {
   links: ProfileLink[];
   updatedAt: Timestamp;
 }
+
+// Search discovery is deliberately stored outside the exact profile document.
+// Old cached clients overwrite profiles wholesale, but they never touch this
+// marker collection. The marker's existence means the owner opted into search.
+export interface ProfileDiscovery {
+  uid: string;
+  createdAt: Timestamp;
+}

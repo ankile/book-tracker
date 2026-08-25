@@ -829,6 +829,31 @@ service cloud.firestore {
                      || get(path).data.count < 10));
     }
 
+    // A separate marker opts an already-public profile into search. Keeping
+    // this outside the profile doc matters for cached clients: they replace
+    // profile docs wholesale, but know nothing about this collection and
+    // therefore cannot erase a newer search choice. Client list is forbidden;
+    // the server-side sitemap enumerates markers with the Admin SDK.
+    match /profileDiscovery/{username} {
+      allow get: if request.auth != null
+                 && resource.data.uid == request.auth.uid;
+      allow list: if false;
+      allow create: if request.auth != null
+                    && username.matches('[a-z0-9-]{3,30}')
+                    && request.resource.data.keys().hasAll(['uid', 'createdAt'])
+                    && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.createdAt is timestamp
+                    && getAfter(/databases/$(database)/documents/profiles/$(username)).data.uid == request.auth.uid
+                    && getAfter(/databases/$(database)/documents/profiles/$(username)).data.public == true;
+      allow update: if false;
+      allow delete: if request.auth != null
+                    && ((exists(/databases/$(database)/documents/profiles/$(username))
+                            && get(/databases/$(database)/documents/profiles/$(username)).data.uid
+                               == request.auth.uid)
+                        || resource.data.uid == request.auth.uid);
+    }
+
     // Opt-in public profile pages: /profiles/<username> renders this doc.
     // `get` is open only while the owner has explicitly flipped the doc's
     // `public` flag; otherwise only the signed-in owner can read it — a

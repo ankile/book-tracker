@@ -54,7 +54,12 @@ import {
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { ActiveTimer, Book } from '../interfaces/book.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
-import type { Profile, ProfileLink, ProfilePayload } from '../interfaces/profile.ts';
+import type {
+  Profile,
+  ProfileDiscovery,
+  ProfileLink,
+  ProfilePayload,
+} from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
 import {
   decodeAuthor,
@@ -62,6 +67,7 @@ import {
   decodeBookUpdate,
   decodeLiveQueueSweepItem,
   decodeProfile,
+  decodeProfileDiscovery,
   decodeQueueSweepBatch,
   decodeUser,
   type NewQueueOperation,
@@ -106,6 +112,7 @@ const booksStores = new Map<string, Readable<Book[]>>();
 const allBooksStores = new Map<string, Readable<Book[] | undefined>>();
 const authorsStores = new Map<string, Readable<Author[] | undefined>>();
 const profileStores = new Map<string, Readable<Profile | null | undefined>>();
+const profileDiscoveryStores = new Map<string, Readable<ProfileDiscovery | null | undefined>>();
 const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
 
@@ -214,11 +221,18 @@ interface ProfileWrite extends ProfilePayload {
   familyName: string;
   links: ProfileLink[];
   isPublic: boolean;
+  removeDiscovery?: boolean;
 }
 
 interface RenameProfileWrite extends Omit<ProfileWrite, 'username'> {
   oldUsername: string;
   newUsername: string;
+  isDiscoverable: boolean;
+}
+
+interface ProfileDiscoveryWrite {
+  userId: string;
+  username: string;
 }
 
 interface AddProfileLinkInput {
@@ -450,6 +464,18 @@ class Database {
       : null;
   }
 
+  static getProfileDiscovery(username: string): Readable<ProfileDiscovery | null | undefined> {
+    return cachedStore(profileDiscoveryStores, username, undefined, (set) => (
+      onSnapshot(doc(db, 'profileDiscovery', username), (snapshot) => {
+        set(snapshot.exists()
+          ? decodeStored(
+            () => decodeProfileDiscovery(snapshot.data(), snapshot.ref.path),
+          )
+          : null);
+      }, listenError('load your profile search setting'))
+    ));
+  }
+
   // setDoc, not addDoc: the username is the doc id. If the username is
   // already taken the rules evaluate this as an update of someone else's
   // doc and reject it, so the caller sees permission-denied and reports
@@ -473,8 +499,9 @@ class Database {
   // Full overwrite with the freshly computed payload (the Me page keeps the
   // published doc in step with live stats whenever it differs, and the
   // profile-edit form and visibility checkbox write through here too).
-  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, stats, records, years, days }: ProfileWrite): Promise<void> {
-    await setDoc(doc(db, 'profiles', username), {
+  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, stats, records, years, days }: ProfileWrite): Promise<void> {
+    const profileRef = doc(db, 'profiles', username);
+    const profile = {
       uid: userId,
       public: isPublic,
       givenName,
@@ -485,7 +512,26 @@ class Database {
       years,
       days,
       updatedAt: Timestamp.now(),
+    };
+    if (!removeDiscovery) {
+      await setDoc(profileRef, profile);
+      return;
+    }
+    const batch = writeBatch(db);
+    batch.set(profileRef, profile);
+    batch.delete(doc(db, 'profileDiscovery', username));
+    await batch.commit();
+  }
+
+  static enableProfileDiscovery({ userId, username }: ProfileDiscoveryWrite): Promise<void> {
+    return setDoc(doc(db, 'profileDiscovery', username), {
+      uid: userId,
+      createdAt: Timestamp.now(),
     });
+  }
+
+  static disableProfileDiscovery({ username }: ProfileDiscoveryWrite): Promise<void> {
+    return deleteDoc(doc(db, 'profileDiscovery', username));
   }
 
   // Target only the link being added: a full-profile rewrite built from a
@@ -503,7 +549,7 @@ class Database {
   // profile is never gone or doubled — offline included. A taken new
   // username rejects the whole batch (see createProfile), which is why
   // this, like createProfile, stays out of writeLabels and reports inline.
-  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, stats, records, years, days }: RenameProfileWrite): Promise<void> {
+  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, stats, records, years, days }: RenameProfileWrite): Promise<void> {
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newUsername), {
       uid: userId,
@@ -518,11 +564,23 @@ class Database {
       updatedAt: Timestamp.now(),
     });
     batch.delete(doc(db, 'profiles', oldUsername));
+    if (isDiscoverable) {
+      batch.set(doc(db, 'profileDiscovery', newUsername), {
+        uid: userId,
+        createdAt: Timestamp.now(),
+      });
+    }
+    // Always clear the old marker. This is a no-op when it is absent and a
+    // privacy-safe cleanup if local discovery state was stale.
+    batch.delete(doc(db, 'profileDiscovery', oldUsername));
     await batch.commit();
   }
 
-  static async deleteProfile({ username }: Pick<ProfileWrite, 'userId' | 'username'>): Promise<void> {
-    await deleteDoc(doc(db, 'profiles', username));
+  static async deleteProfile({ username }: ProfileDiscoveryWrite): Promise<void> {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'profiles', username));
+    batch.delete(doc(db, 'profileDiscovery', username));
+    await batch.commit();
   }
 
   static async addPageUpdate({ userId, id, currentPage, previousPage, pageCount }: AddPageUpdateInput): Promise<void> {
@@ -1094,6 +1152,14 @@ Database.updateProfile = reportWriteFailures(
 Database.addProfileLink = reportWriteFailures(
   'addProfileLink', ({ userId }) => userId,
   ({ username }) => `add a link to your public profile "${username}"`, Database.addProfileLink,
+);
+Database.enableProfileDiscovery = reportWriteFailures(
+  'enableProfileDiscovery', ({ userId }) => userId,
+  ({ username }) => `make your public profile "${username}" searchable`, Database.enableProfileDiscovery,
+);
+Database.disableProfileDiscovery = reportWriteFailures(
+  'disableProfileDiscovery', ({ userId }) => userId,
+  ({ username }) => `remove your public profile "${username}" from search`, Database.disableProfileDiscovery,
 );
 Database.deleteProfile = reportWriteFailures(
   'deleteProfile', ({ userId }) => userId,

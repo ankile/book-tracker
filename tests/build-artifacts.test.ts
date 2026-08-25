@@ -7,6 +7,7 @@ import test from 'node:test';
 const publicIndexUrl = new URL('../public/index.html', import.meta.url);
 const publicServiceWorkerUrl = new URL('../public/service-worker.js', import.meta.url);
 const publicVersionUrl = new URL('../public/_app/version.json', import.meta.url);
+const profileShellUrl = new URL('../functions/assets/profile-shell.html', import.meta.url);
 
 function immutableAssetPaths(source: string): string[] {
   return [...source.matchAll(/\/_app\/immutable\/[^"'`\\\s)]+/g)]
@@ -90,13 +91,20 @@ test('tracked index matches the latest build', async () => {
 });
 
 test('built deploy entrypoints reference emitted assets', async () => {
-  const [index, serviceWorker] = await Promise.all([
+  const [index, serviceWorker, profileShell] = await Promise.all([
     readFile(publicIndexUrl, 'utf8'),
     readFile(publicServiceWorkerUrl, 'utf8'),
+    readFile(profileShellUrl, 'utf8'),
   ]);
 
+  assert.equal(
+    sha256(profileShell),
+    sha256(index),
+    'functions/assets/profile-shell.html must be generated from public/index.html',
+  );
   await Promise.all([
     assertReferencesCurrentAssets('public/index.html', index),
     assertReferencesCurrentAssets('public/service-worker.js', serviceWorker),
+    assertReferencesCurrentAssets('functions/assets/profile-shell.html', profileShell),
   ]);
 });

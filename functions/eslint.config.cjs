@@ -14,6 +14,7 @@ module.exports = [
       },
       globals: {
         console: "readonly",
+        __dirname: "readonly",
         exports: "writable",
         fetch: "readonly",
         require: "readonly",
@@ -34,6 +35,7 @@ module.exports = [
       "@typescript-eslint/unified-signatures": "warn",
       "comma-dangle": ["error", "always-multiline"],
       "no-invalid-this": "error",
+      "no-unused-vars": ["error", {"argsIgnorePattern": "^_"}],
       "no-param-reassign": "error",
       "no-shadow": ["error", {"hoist": "all"}],
       "no-throw-literal": "error",

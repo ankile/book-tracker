@@ -10,6 +10,7 @@ import {
   decodeBookUpdate,
   decodeLiveQueueSweepItem,
   decodeProfile,
+  decodeProfileDiscovery,
   decodeQueueSweepBatch,
   decodeQueueSweepItem,
   decodeUser,
@@ -171,6 +172,30 @@ test('profile decoder validates exact nested public payloads', () => {
       years: [{year: 2026, count: 'one', hours: 2, pages: 100}],
     }, 'profiles/ada'),
     /count.*finite number/,
+  );
+});
+
+test('profile discovery decoder accepts only the owner marker shape', () => {
+  assert.deepEqual(
+    decodeProfileDiscovery(
+      { uid: 'owner', createdAt: updatedAt },
+      'profileDiscovery/ada',
+    ),
+    { uid: 'owner', createdAt: updatedAt },
+  );
+  assert.throws(
+    () => decodeProfileDiscovery(
+      { uid: 'owner', createdAt: updatedAt, searchable: true },
+      'profileDiscovery/ada',
+    ),
+    /only keys/,
+  );
+  assert.throws(
+    () => decodeProfileDiscovery(
+      { uid: '', createdAt: updatedAt },
+      'profileDiscovery/ada',
+    ),
+    /non-empty string/,
   );
 });
 

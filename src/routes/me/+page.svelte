@@ -42,7 +42,13 @@
   import { FirebaseError } from 'firebase/app';
   import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
-  import type { Profile, ProfileLink, ProfileLinkType, ProfileRecords } from '$lib/interfaces/profile.ts';
+  import type {
+    Profile,
+    ProfileDiscovery,
+    ProfileLink,
+    ProfileLinkType,
+    ProfileRecords,
+  } from '$lib/interfaces/profile.ts';
   import type { BookUpdate } from '$lib/interfaces/reading.ts';
   import type { UserDocument } from '$lib/firebase/decoders.ts';
 
@@ -194,6 +200,22 @@
     }
   });
 
+  // Search discovery is a separate marker so old cached clients cannot
+  // overwrite it during their full profile-stat sync. Only the owner reads
+  // this document; public enumeration happens through the server sitemap.
+  let profileDiscovery = $state<ProfileDiscovery | null | undefined>(undefined);
+  $effect(() => {
+    const profile = myProfile;
+    if (!profile) {
+      profileDiscovery = profile === null ? null : undefined;
+      return;
+    }
+    profileDiscovery = undefined;
+    const discoveryStore = Database.getProfileDiscovery(profile.username);
+    return discoveryStore.subscribe((data) => (profileDiscovery = data));
+  });
+  const profileDiscoverable = $derived(profileDiscovery !== null && profileDiscovery !== undefined);
+
   // Profile-edit form. Seeded from the loaded profile exactly once: the
   // stat-sync effect below rewrites the doc while the page is open, and
   // reseeding on every listener echo would stomp in-progress typing. With
@@ -258,6 +280,7 @@
         await Database.renameProfile({
           userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
+          isDiscoverable: profileDiscoverable,
           ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       }
@@ -285,7 +308,10 @@
     savingProfile = true;
     profileError = '';
     try {
-      await Database.deleteProfile({ userId: currentUser.uid, username: myProfile.username });
+      await Database.deleteProfile({
+        userId: currentUser.uid,
+        username: myProfile.username,
+      });
     } catch (error) {
       profileError = errorMessage(error);
     } finally {
@@ -296,7 +322,13 @@
   // Full-doc rewrite from the current profile plus fresh stats; overrides
   // carry the one field an immediate-write control (visibility checkbox,
   // handle add/remove) is changing.
-  function persistProfile(overrides: { isPublic?: boolean; links?: ProfileLink[] } = {}) {
+  interface ProfileOverrides {
+    isPublic?: boolean;
+    links?: ProfileLink[];
+    removeDiscovery?: boolean;
+  }
+
+  function persistProfile(overrides: ProfileOverrides = {}) {
     const currentUser = $user;
     const books = analyticsBooks;
     if (
@@ -318,7 +350,7 @@
   }
 
   async function persistProfileWithFeedback(
-    overrides: { isPublic?: boolean; links?: ProfileLink[] } = {},
+    overrides: ProfileOverrides = {},
   ): Promise<boolean> {
     profileError = '';
     try {
@@ -331,8 +363,36 @@
   }
 
   async function setProfileVisibility(input: HTMLInputElement) {
-    const saved = await persistProfileWithFeedback({ isPublic: input.checked });
+    const saved = await persistProfileWithFeedback({
+      isPublic: input.checked,
+      removeDiscovery: !input.checked,
+    });
     if (!saved) input.checked = myProfile?.public ?? false;
+  }
+
+  async function setProfileDiscovery(input: HTMLInputElement) {
+    const currentUser = $user;
+    const profile = myProfile;
+    if (currentUser === null || currentUser === undefined || !profile) {
+      throw new Error('Search discovery requires an authenticated user and loaded profile.');
+    }
+    profileError = '';
+    try {
+      if (input.checked) {
+        await Database.enableProfileDiscovery({
+          userId: currentUser.uid,
+          username: profile.username,
+        });
+      } else {
+        await Database.disableProfileDiscovery({
+          userId: currentUser.uid,
+          username: profile.username,
+        });
+      }
+    } catch (error) {
+      profileError = errorMessage(error);
+      input.checked = profileDiscoverable;
+    }
   }
 
   // Handle editor: the plus opens the picker, choosing a platform reveals
@@ -590,6 +650,15 @@
           background: #24925d;
         }
       }
+
+      &.searchable {
+        color: #1f5f78;
+        background: #eaf5f9;
+
+        &::before {
+          background: #2d829f;
+        }
+      }
     }
 
     .profile-description {
@@ -799,6 +868,12 @@
       border-top: 1px solid #ededed;
     }
 
+    .visibility-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+    }
+
     .visibility-control {
       display: flex;
       align-items: center;
@@ -860,6 +935,15 @@
           outline: 3px solid rgba(31, 111, 120, 0.28);
           outline-offset: 2px;
         }
+
+        &:disabled {
+          cursor: default;
+          opacity: 0.5;
+        }
+      }
+
+      &:has(input:disabled) {
+        cursor: default;
       }
     }
   }
@@ -1022,8 +1106,11 @@
           <div class="profile-heading">
             <h2>Profile</h2>
             {#if myProfile}
-              <span class:public={myProfile.public} class="visibility-badge">
-                {myProfile.public ? 'Public' : 'Private'}
+              <span
+                class:public={myProfile.public && !profileDiscoverable}
+                class:searchable={profileDiscoverable}
+                class="visibility-badge">
+                {profileDiscoverable ? 'Searchable' : myProfile.public ? 'Public' : 'Private'}
               </span>
             {/if}
           </div>
@@ -1078,7 +1165,7 @@
                 autocomplete="off"
                 bind:value={profileSlug} />
             </div>
-            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined}>
+            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined || (myProfile !== null && profileDiscovery === undefined)}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -1155,19 +1242,33 @@
             </div>
 
             <div class="profile-footer">
-              <label class="visibility-control">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={myProfile.public}
-                  disabled={authorList === undefined}
-                  onchange={(event) => void setProfileVisibility(event.currentTarget)} />
-                <span class="visibility-copy">
-                  <span class="visibility-title">Public profile</span>
-                  <span class="visibility-detail">Anyone with the link can view your stats.</span>
-                </span>
-              </label>
-              <button class="danger-button" type="button" onclick={deleteProfile} disabled={savingProfile}>
+              <div class="visibility-controls">
+                <label class="visibility-control">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={myProfile.public}
+                    disabled={authorList === undefined || profileDiscovery === undefined}
+                    onchange={(event) => void setProfileVisibility(event.currentTarget)} />
+                  <span class="visibility-copy">
+                    <span class="visibility-title">Public profile</span>
+                    <span class="visibility-detail">Anyone with the link can view your stats.</span>
+                  </span>
+                </label>
+                <label class="visibility-control">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={profileDiscoverable}
+                    disabled={!myProfile.public || profileDiscovery === undefined}
+                    onchange={(event) => void setProfileDiscovery(event.currentTarget)} />
+                  <span class="visibility-copy">
+                    <span class="visibility-title">Appear in search engines</span>
+                    <span class="visibility-detail">List this profile in the public sitemap and allow indexing.</span>
+                  </span>
+                </label>
+              </div>
+              <button class="danger-button" type="button" onclick={deleteProfile} disabled={savingProfile || profileDiscovery === undefined}>
                 Delete profile
               </button>
             </div>

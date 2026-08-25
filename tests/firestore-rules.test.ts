@@ -168,6 +168,77 @@ test('public profiles are readable but private profiles are not', async () => {
   await assertFails(getDoc(doc(anonymous, 'profiles', 'private-reader')));
 });
 
+test('owners can opt public profiles into search without making markers listable', async () => {
+  const owner = environment.authenticatedContext('discovery-owner').firestore();
+  const profileRef = doc(owner, 'profiles', 'searchable-reader');
+  const discoveryRef = doc(owner, 'profileDiscovery', 'searchable-reader');
+  await assertSucceeds(setDoc(profileRef, profile('discovery-owner')));
+  await assertSucceeds(setDoc(discoveryRef, {
+    uid: 'discovery-owner',
+    createdAt: serverTimestamp(),
+  }));
+  await assertSucceeds(getDoc(discoveryRef));
+
+  const anonymous = environment.unauthenticatedContext().firestore();
+  await assertFails(getDoc(doc(anonymous, 'profileDiscovery', 'searchable-reader')));
+  await assertFails(getDocs(collection(anonymous, 'profileDiscovery')));
+
+  const stranger = environment.authenticatedContext('discovery-stranger').firestore();
+  await assertFails(getDoc(doc(stranger, 'profileDiscovery', 'searchable-reader')));
+  await assertFails(deleteDoc(doc(stranger, 'profileDiscovery', 'searchable-reader')));
+  await assertSucceeds(deleteDoc(discoveryRef));
+  // Profile owners may safely include a marker delete in every rename or
+  // profile delete batch, even when no marker exists.
+  await assertSucceeds(deleteDoc(discoveryRef));
+});
+
+test('profile discovery requires an owned public profile and an exact marker', async () => {
+  const owner = environment.authenticatedContext('private-discovery-owner').firestore();
+  await assertSucceeds(setDoc(
+    doc(owner, 'profiles', 'private-discovery'),
+    profile('private-discovery-owner', { public: false }),
+  ));
+  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'private-discovery'), {
+    uid: 'private-discovery-owner',
+    createdAt: serverTimestamp(),
+  }));
+
+  await assertSucceeds(setDoc(
+    doc(owner, 'profiles', 'public-discovery'),
+    profile('private-discovery-owner'),
+  ));
+  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'public-discovery'), {
+    uid: 'someone-else',
+    createdAt: serverTimestamp(),
+  }));
+  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'public-discovery'), {
+    uid: 'private-discovery-owner',
+    createdAt: serverTimestamp(),
+    extra: true,
+  }));
+});
+
+test('profile rename can move its discovery marker atomically', async () => {
+  const db = environment.authenticatedContext('rename-discovery-owner').firestore();
+  const oldProfile = doc(db, 'profiles', 'old-search-name');
+  const oldDiscovery = doc(db, 'profileDiscovery', 'old-search-name');
+  await assertSucceeds(setDoc(oldProfile, profile('rename-discovery-owner')));
+  await assertSucceeds(setDoc(oldDiscovery, {
+    uid: 'rename-discovery-owner',
+    createdAt: serverTimestamp(),
+  }));
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'profiles', 'new-search-name'), profile('rename-discovery-owner'));
+  batch.delete(oldProfile);
+  batch.set(doc(db, 'profileDiscovery', 'new-search-name'), {
+    uid: 'rename-discovery-owner',
+    createdAt: Timestamp.now(),
+  });
+  batch.delete(oldDiscovery);
+  await assertSucceeds(batch.commit());
+});
+
 test('only the owner can write or list their profiles', async () => {
   const stranger = environment.authenticatedContext('stranger').firestore();
   await assertFails(setDoc(doc(stranger, 'profiles', 'stolen-profile'), profile('owner')));

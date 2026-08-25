@@ -2,6 +2,7 @@ import * as functions from "firebase-functions/v1";
 import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
+import {publicweb} from "./publicWeb";
 
 initializeApp();
 const db = getFirestore();
@@ -60,10 +61,23 @@ exports.deleteUserDocument = functions
   .region("europe-west1")
   .auth.user()
   .onDelete(async (user) => {
-    await db.collection("users").doc(user.uid).delete();
+    // Account deletion must immediately remove both the public document and
+    // its search opt-in. Otherwise a deleted account could remain in Google
+    // and in the sitemap indefinitely.
+    const profiles = await db.collection("profiles")
+      .where("uid", "==", user.uid)
+      .get();
+    const batch = db.batch();
+    batch.delete(db.collection("users").doc(user.uid));
+    for (const profile of profiles.docs) {
+      batch.delete(profile.ref);
+      batch.delete(db.collection("profileDiscovery").doc(profile.id));
+    }
+    await batch.commit();
     return null;
   });
 
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
 exports.toggl = require("./toggl");
+exports.publicweb = publicweb;

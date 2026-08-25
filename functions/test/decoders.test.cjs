@@ -40,6 +40,58 @@ test("callable request decoders reject malformed and extra fields", () => {
   );
 });
 
+test("public profile and discovery decoders pin their published shapes", () => {
+  const updatedAt = Timestamp.now();
+  const profile = {
+    uid: "owner",
+    public: true,
+    givenName: "Ada",
+    familyName: "Lovelace",
+    links: [{type: "github", value: "ada"}],
+    stats: {
+      totalBooks: 12,
+      finishedBooks: 10,
+      readingBooks: 2,
+      totalTimeReadHours: 80,
+      totalPagesRead: 3200,
+      booksPerYear: 8.5,
+      avgTimePerBook: 480,
+      authors: 9,
+    },
+    records: null,
+    years: [{year: 2026, count: 10, hours: 80, pages: 3200}],
+    days: [{day: "2026-08-20", pagesRead: 120, timeRead: 95, sessions: 1}],
+    updatedAt,
+  };
+  assert.deepEqual(decoders.decodePublicProfile("ada-lovelace", profile), {
+    username: "ada-lovelace",
+    uid: "owner",
+    public: true,
+    givenName: "Ada",
+    familyName: "Lovelace",
+    links: [{type: "github", value: "ada"}],
+    stats: profile.stats,
+    years: profile.years,
+    days: profile.days,
+    updatedAt,
+  });
+  assert.throws(
+    () => decoders.decodePublicProfile("ada-lovelace", {...profile, privateTitle: "secret"}),
+    /unexpected field "privateTitle"/,
+  );
+  assert.throws(
+    () => decoders.decodePublicProfile("ada-lovelace", {...profile, public: false}),
+    /must be public/,
+  );
+
+  const marker = {uid: "owner", createdAt: updatedAt};
+  assert.deepEqual(decoders.decodeProfileDiscoveryMarker(marker), marker);
+  assert.throws(
+    () => decoders.decodeProfileDiscoveryMarker({...marker, searchable: true}),
+    /unexpected field "searchable"/,
+  );
+});
+
 test("stored Toggl configuration and timer books are decoded field by field", () => {
   assert.deepEqual(decoders.decodeTogglConfig({
     apiToken: "secret",

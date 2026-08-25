@@ -23,6 +23,7 @@ import {
   type ProfileDay,
   type ProfileLink,
   type Profile,
+  type ProfileDiscovery,
   type ProfileRecords,
   type ProfileStats,
   type ProfileYear,
@@ -505,6 +506,15 @@ export function decodeProfile(username: string, value: unknown, path: string): P
     years: data.years.map((entry, index) => profileYear(entry, `${path}.years[${index}]`)),
     days: data.days.map((entry, index) => profileDay(entry, `${path}.days[${index}]`)),
     updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
+  };
+}
+
+export function decodeProfileDiscovery(value: unknown, path: string): ProfileDiscovery {
+  const data = record(value, path);
+  exactKeys(data, ['uid', 'createdAt'], path);
+  return {
+    uid: nonEmptyString(data.uid, `${path}.uid`),
+    createdAt: timestamp(data.createdAt, `${path}.createdAt`),
   };
 }
 

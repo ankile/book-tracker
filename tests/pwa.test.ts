@@ -5,6 +5,8 @@ import { test } from 'node:test';
 const manifestPath = new URL('../static/manifest.json', import.meta.url);
 const appTemplatePath = new URL('../src/app.html', import.meta.url);
 const serviceWorkerPath = new URL('../src/service-worker.ts', import.meta.url);
+const robotsPath = new URL('../static/robots.txt', import.meta.url);
+const firebaseConfigPath = new URL('../firebase.json', import.meta.url);
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 
 test('manifest has a stable standalone launch configuration', () => {
@@ -46,4 +48,41 @@ test('service worker excludes screenshots and does not grow a navigation cache',
   assert.match(source, /files\.filter\(\(path\) => !path\.startsWith\('\/screenshots\/'\)\)/);
   assert.doesNotMatch(source, /cache\.put\(request/);
   assert.match(source, /caches\s*\.match\(APP_SHELL\)/);
+});
+
+test('robots allow crawling and advertise the generated sitemap', async () => {
+  const robots = await readFile(robotsPath, 'utf8');
+
+  assert.match(robots, /^User-agent: \*$/m);
+  assert.match(robots, /^Allow: \/$/m);
+  assert.match(robots, /^Sitemap: https:\/\/book\.ankile\.com\/sitemap\.xml$/m);
+  assert.doesNotMatch(robots, /Disallow:\s*\/profiles/i);
+});
+
+test('Hosting routes crawlable pages to the pinned renderer before the SPA fallback', async () => {
+  const config = JSON.parse(await readFile(firebaseConfigPath, 'utf8'));
+  const rewrites = config.hosting.rewrites;
+
+  assert.deepEqual(rewrites.slice(0, 2), [
+    {
+      source: '/sitemap.xml',
+      function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
+    },
+    {
+      source: '/profiles/**',
+      function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
+    },
+  ]);
+  assert.deepEqual(rewrites.at(-1), {source: '**', destination: '/index.html'});
+
+  const profileHeaders = config.hosting.headers.find(
+    (entry: {source: string}) => entry.source === '/profiles/**',
+  );
+  const sitemapHeaders = config.hosting.headers.find(
+    (entry: {source: string}) => entry.source === '/sitemap.xml',
+  );
+  assert.deepEqual(profileHeaders.headers, [{key: 'Cache-Control', value: 'no-store'}]);
+  assert.deepEqual(sitemapHeaders.headers, [{
+    key: 'Cache-Control', value: 'public, max-age=300, s-maxage=300',
+  }]);
 });
