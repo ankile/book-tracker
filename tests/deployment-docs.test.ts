@@ -63,6 +63,10 @@ test('the general migration order links to the timer-claim exception', async () 
   assert.match(migrations, /\[timer-claim rollout\]\(#timer-claim-rollout\)/);
   assert.match(migrations, /#### Timer-claim rollout/);
   assert.match(migrations, /#### Reading-progress-source rollout/);
+  assert.match(
+    migrations,
+    /clients offline longer than the chosen overlap window[\s\S]*queued reading batches can still reject/i,
+  );
 });
 
 test('the progress migration traverses phantom users and logs the applied transaction patch', async () => {

@@ -159,6 +159,9 @@ its provenance.
 1. After the timer rollout deploys Hosting, let cached old clients reload and
    the overlap window pass. Use the project's chosen stale-client support
    window; do not use the progress backfill itself to force the transition.
+   Clients offline longer than the chosen overlap window remain a known risk:
+   their old queued reading batches can still reject after the backfill. Record
+   the chosen window and this residual risk in the rollout log.
 2. Dry-run `migrate-reading-progress-sources.ts --prod` and review every line,
    then take a fresh production snapshot immediately before writing.
 3. Apply the migration twice; the second apply must report zero books. It
