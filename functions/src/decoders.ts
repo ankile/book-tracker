@@ -618,18 +618,22 @@ export interface StoredIssue {
 export function decodeStoredIssue(value: unknown): StoredIssue | null {
   if (!isRecord(value) || !(value.createdAt instanceof Timestamp)) return null;
   if (value.level !== "warn" && value.level !== "error") return null;
-  if (typeof value.event !== "string" || typeof value.message !== "string") {
+  if (typeof value.event !== "string" ||
+      typeof value.message !== "string" || value.message.length > 1000) {
     return null;
   }
   if (value.code !== null && value.code !== undefined &&
-      typeof value.code !== "string") return null;
+      (typeof value.code !== "string" || value.code.length > 100)) return null;
   if (value.uid !== null && value.uid !== undefined &&
-      typeof value.uid !== "string") return null;
+      (typeof value.uid !== "string" || value.uid.length === 0 ||
+       value.uid.length > 128)) return null;
   let detailEmail: string | null = null;
   if (value.detail !== null && value.detail !== undefined) {
     if (!isRecord(value.detail)) return null;
+    if (Object.keys(value.detail).some((key) => key !== "email")) return null;
     if (value.detail.email !== undefined &&
-        typeof value.detail.email !== "string") return null;
+        (typeof value.detail.email !== "string" ||
+         value.detail.email.length > 320)) return null;
     detailEmail = value.detail.email ?? null;
   }
   return {

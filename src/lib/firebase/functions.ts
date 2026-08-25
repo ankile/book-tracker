@@ -46,13 +46,14 @@ export interface AdminUserRow {
 export interface AdminIssueRow {
   id: string;
   at: number;
-  level: string;
+  level: 'warn' | 'error';
   event: string;
   code: string | null;
   message: string;
   uid: string | null;
   email: string;
   emailVerified: boolean;
+  malformed: boolean;
 }
 
 export interface AdminOverview {

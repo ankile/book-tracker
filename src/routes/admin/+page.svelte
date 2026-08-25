@@ -117,7 +117,8 @@
   }
 
   .badge-anomaly,
-  .badge-unverified {
+  .badge-unverified,
+  .badge-malformed {
     display: inline-block;
     margin-left: 0.5rem;
     padding: 0.1rem 0.4rem;
@@ -132,6 +133,11 @@
     background: #e9ecef;
     color: #495057;
     cursor: help;
+  }
+
+  .badge-malformed {
+    background: #f8d7da;
+    color: #842029;
   }
 
   .truncated {
@@ -272,7 +278,9 @@
                   <td>{utc(issue.at)}</td>
                   <td>
                     {issue.email}
-                    {#if !issue.emailVerified && issue.uid === null}
+                    {#if issue.malformed}
+                      <span class="badge-malformed">malformed row</span>
+                    {:else if !issue.emailVerified && issue.uid === null}
                       <span class="badge-unverified" title="Self-reported by an unauthenticated client; not tied to any account">unverified</span>
                     {/if}
                   </td>

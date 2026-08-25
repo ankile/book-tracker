@@ -1,7 +1,11 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
-import {decodeEmptyCallableRequest, decodeStoredIssue} from "./decoders";
+import {decodeEmptyCallableRequest} from "./decoders";
+import {
+  IssueIdentity,
+  mapIssueDocuments,
+} from "./adminIssues";
 
 const db = getFirestore();
 
@@ -158,68 +162,29 @@ async function domainStats(uid: string) {
   };
 }
 
-interface IssueRow {
-  id: string;
-  at: number;
-  level: string;
-  event: string;
-  code: string | null;
-  message: string;
-  uid: string | null;
-  email: string;
-  emailVerified: boolean;
-}
-
-interface Identity {
-  email: string;
-  verified: boolean;
-}
-
 // Reads one issue budget. Returns the rows plus whether the limit was hit,
 // so the page can say so instead of silently showing a truncated feed.
 async function readIssues(
   events: string[],
   limit: number,
   cutoff: Timestamp,
-  identities: Map<string, Identity>,
-): Promise<{rows: IssueRow[]; truncated: boolean}> {
+  identities: Map<string, IssueIdentity>,
+) {
   const snap = await db.collection("logEvents")
     .where("event", "in", events)
     .where("createdAt", ">=", cutoff)
     .orderBy("createdAt", "desc")
     .limit(limit + 1)
     .get();
-  const truncated = snap.size > limit;
-  const rows = snap.docs.slice(0, limit).flatMap((doc) => {
-    const issue = decodeStoredIssue(doc.data());
-    // Firestore orders across types, so a non-Timestamp createdAt would
-    // satisfy the range filter and then throw on toMillis(), taking the
-    // whole page down with it. The decoder also rejects malformed historical
-    // rows written before the current rules pinned the complete shape.
-    if (issue === null) return [];
-    const uid = issue.uid;
-    const identity = uid ?
-      // A uid with no entry belongs to an account that no longer exists in
-      // either auth or the profile collection.
-      identities.get(uid) ?? {email: "(deleted user)", verified: false} :
-      // Anonymous rows (failed sign-ins before any session exists) carry
-      // the attempted address in detail.email. It is attacker-supplied and
-      // unverified, so it is flagged as such rather than being rendered
-      // like an address that came from a real session.
-      {email: issue.detailEmail ?? "(anonymous)", verified: false};
-    return [{
+  return mapIssueDocuments(
+    snap.docs.map((doc) => ({
       id: doc.id,
-      at: issue.createdAt.toMillis(),
-      level: issue.level,
-      event: issue.event,
-      code: issue.code,
-      message: issue.message,
-      uid,
-      email: identity.email,
-      emailVerified: identity.verified,
-    }];
-  });
-  return {rows, truncated};
+      value: doc.data(),
+      fallbackAt: doc.createTime?.toMillis() ?? cutoff.toMillis(),
+    })),
+    limit,
+    identities,
+  );
 }
 
 exports.overview = adminCallable(async () => {
@@ -275,7 +240,7 @@ exports.overview = adminCallable(async () => {
   // Distinguishes "this uid has no auth record" from "this account exists
   // but has no email address" — collapsing both into "(deleted user)"
   // stated something false about live accounts.
-  const identities = new Map<string, Identity>(uids.map((uid) => {
+  const identities = new Map<string, IssueIdentity>(uids.map((uid) => {
     const authUser = authByUid.get(uid);
     if (!authUser) return [uid, {email: "(deleted user)", verified: false}];
     const profileEmail = optionalString(profileByUid.get(uid)?.get("email"));
