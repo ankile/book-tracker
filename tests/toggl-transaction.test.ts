@@ -28,7 +28,7 @@ const deployed = functionsRequire('./lib') as {
     };
   };
 };
-const { markCorrelatedStopFailure } = functionsRequire('./lib/toggl') as {
+const { markCorrelatedStopFailure } = functionsRequire('./lib/toggl-recovery') as {
   markCorrelatedStopFailure: (
     queueRef: import('firebase-admin/firestore').DocumentReference,
     token: { attempts: number; claimedAt: import('firebase-admin/firestore').Timestamp },
