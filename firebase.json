@@ -13,15 +13,7 @@
     ],
     "rewrites": [
       {
-        "source": "/sitemap.xml",
-        "function": {
-          "functionId": "publicweb",
-          "region": "europe-west1",
-          "pinTag": true
-        }
-      },
-      {
-        "source": "/profiles/**",
+        "source": "/{sitemap.xml,profiles/**}",
         "function": {
           "functionId": "publicweb",
           "region": "europe-west1",

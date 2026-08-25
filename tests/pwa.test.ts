@@ -63,16 +63,10 @@ test('Hosting routes crawlable pages to the pinned renderer before the SPA fallb
   const config = JSON.parse(await readFile(firebaseConfigPath, 'utf8'));
   const rewrites = config.hosting.rewrites;
 
-  assert.deepEqual(rewrites.slice(0, 2), [
-    {
-      source: '/sitemap.xml',
-      function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
-    },
-    {
-      source: '/profiles/**',
-      function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
-    },
-  ]);
+  assert.deepEqual(rewrites.at(0), {
+    source: '/{sitemap.xml,profiles/**}',
+    function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
+  });
   assert.deepEqual(rewrites.at(-1), {source: '**', destination: '/index.html'});
 
   const profileHeaders = config.hosting.headers.find(
