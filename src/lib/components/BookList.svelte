@@ -105,7 +105,9 @@
   let hasToggl = $derived(!!userDoc?.toggl);
 
   $effect(() => {
-    if (hasToggl) Database.retryStalledTogglSync(userId);
+    // Database reports the failure before rethrowing; observe it here so the
+    // fire-and-forget recovery sweep never creates an unhandled rejection.
+    if (hasToggl) void Database.retryStalledTogglSync(userId).catch(() => {});
   });
 
   let anyTimerRunning = $derived(books.some((b) => b.activeTimer));

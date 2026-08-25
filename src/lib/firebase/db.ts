@@ -40,6 +40,7 @@ import {
 } from '../utils/toggl.ts';
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
 import { invokeReportedWrite } from '../utils/offlineWrite.ts';
+import { runRetryableSessionTask } from '../utils/sessionTask.ts';
 import {
   activeTimerClaim,
   idleTimerClaim,
@@ -809,105 +810,107 @@ class Database {
   // six hours: far beyond any function timeout or plausible device clock
   // skew, while still recovering claims whose invocation died.
   static async retryStalledTogglSync(userId: string): Promise<void> {
-    if (togglSweptUsers.has(userId) || !navigator.onLine) return;
-    togglSweptUsers.add(userId);
-    let items;
-    try {
-      items = await getDocsFromServer(query(
-        collection(db, 'users', userId, 'togglQueue'),
-        where('status', 'in', ['pending', 'processing', 'error', 'outcome-unknown'])
-      ));
-    } catch {
-      // navigator.onLine lied; the reconnect flush will handle pending
-      // items and the next real online session will sweep the rest.
-      togglSweptUsers.delete(userId);
-      return;
-    }
-    // Items past the retry cap are poison: the sweep below skips them
-    // forever, and the rules allow no client delete, so they sit in the
-    // queue for good. Report each one once per device (localStorage), not
-    // on every launch — the user can't act on it beyond taking note.
-    // attempts increments at claim time, so a doc whose fifth invocation
-    // died mid-run sits at 'processing' with attempts 5, just as stuck as
-    // a five-time 'error' — but a *live* fifth claim isn't stuck yet, so
-    // 'processing' only counts past the same six-hour window the requeue
-    // uses. Counted before the requeue transactions so a transaction
-    // failure can't swallow the report.
-    const queueDocs = new Map(items.docs.map((item) => [item.id, item]));
-    const decoded = decodeQueueSweepBatch(items.docs.map((item) => ({
-      id: item.id,
-      value: item.data(),
-      path: item.ref.path,
-    })));
-    const decodedItems = decoded.items.map((item) => {
-      const snapshot = queueDocs.get(item.id);
-      if (!snapshot) throw new Error(`Missing Toggl queue snapshot ${item.id}`);
-      return {ref: snapshot.ref, item};
-    });
-    const uncertain = decodedItems.filter(({ item }) => item.status === 'outcome-unknown');
-    const stuck = decodedItems.filter(({ item }) => {
-      const { status, attempts, claimedAt } = item;
-      if (attempts < 5) return false;
-      if (status === 'processing') {
-        if (claimedAt === null) throw new Error(`${item.id}: processing queue item has no claimedAt`);
-        return claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000;
+    if (!navigator.onLine) return;
+    await runRetryableSessionTask(togglSweptUsers, userId, async () => {
+      let items;
+      try {
+        items = await getDocsFromServer(query(
+          collection(db, 'users', userId, 'togglQueue'),
+          where('status', 'in', ['pending', 'processing', 'error', 'outcome-unknown'])
+        ));
+      } catch (error) {
+        // navigator.onLine lied; the reconnect flush will handle pending
+        // items and the next real online session will sweep the rest.
+        if (error instanceof FirebaseError && error.code === 'unavailable') return false;
+        throw error;
       }
-      return status === 'error';
-    });
-    const reportedKey = `togglStuckReported:${userId}`;
-    const reported = new Set(readTogglReportedIds(localStorage, reportedKey));
-    const freshInvalid = decoded.invalidIds.filter((id) => !reported.has(id));
-    const freshUncertain = uncertain.filter(({ item }) => !reported.has(item.id));
-    const fresh = stuck.filter(({ item }) => !reported.has(item.id));
-    if (freshInvalid.length > 0) {
-      addError(`${freshInvalid.length} Toggl ${freshInvalid.length === 1 ? 'entry has' : 'entries have'} invalid stored data and was skipped.`);
-      logIssue({
-        level: 'error',
-        event: 'firestore.decode_failed',
-        message: `${freshInvalid.length} invalid Toggl queue ${freshInvalid.length === 1 ? 'entry' : 'entries'} skipped`,
+      // Items past the retry cap are poison: the sweep below skips them
+      // forever, and the rules allow no client delete, so they sit in the
+      // queue for good. Report each one once per device (localStorage), not
+      // on every launch — the user can't act on it beyond taking note.
+      // attempts increments at claim time, so a doc whose fifth invocation
+      // died mid-run sits at 'processing' with attempts 5, just as stuck as
+      // a five-time 'error' — but a *live* fifth claim isn't stuck yet, so
+      // 'processing' only counts past the same six-hour window the requeue
+      // uses. Counted before the requeue transactions so a transaction
+      // failure can't swallow the report.
+      const queueDocs = new Map(items.docs.map((item) => [item.id, item]));
+      const decoded = decodeQueueSweepBatch(items.docs.map((item) => ({
+        id: item.id,
+        value: item.data(),
+        path: item.ref.path,
+      })));
+      const decodedItems = decoded.items.map((item) => {
+        const snapshot = queueDocs.get(item.id);
+        if (!snapshot) throw new Error(`Missing Toggl queue snapshot ${item.id}`);
+        return {ref: snapshot.ref, item};
       });
-    }
-    if (freshUncertain.length > 0) {
-      addError(`${freshUncertain.length} Toggl ${freshUncertain.length === 1 ? 'entry has' : 'entries have'} an unknown outcome. Check Toggl before adding again.`);
-      logIssue({
-        level: 'warn',
-        event: 'toggl.sync_stuck',
-        message: `${freshUncertain.length} Toggl sync ${freshUncertain.length === 1 ? 'outcome is' : 'outcomes are'} unknown`,
+      const uncertain = decodedItems.filter(({ item }) => item.status === 'outcome-unknown');
+      const stuck = decodedItems.filter(({ item }) => {
+        const { status, attempts, claimedAt } = item;
+        if (attempts < 5) return false;
+        if (status === 'processing') {
+          if (claimedAt === null) throw new Error(`${item.id}: processing queue item has no claimedAt`);
+          return claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000;
+        }
+        return status === 'error';
       });
-    }
-    if (fresh.length > 0) {
-      addError(`${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
-      logIssue({
-        level: 'warn',
-        event: 'toggl.sync_stuck',
-        message: `${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync`,
-      });
-    }
-    writeTogglReportedIds(
-      localStorage,
-      reportedKey,
-      [...decoded.invalidIds, ...stuck.map(({ item }) => item.id), ...uncertain.map(({ item }) => item.id)],
-    );
+      const reportedKey = `togglStuckReported:${userId}`;
+      const reported = new Set(readTogglReportedIds(localStorage, reportedKey));
+      const freshInvalid = decoded.invalidIds.filter((id) => !reported.has(id));
+      const freshUncertain = uncertain.filter(({ item }) => !reported.has(item.id));
+      const fresh = stuck.filter(({ item }) => !reported.has(item.id));
+      if (freshInvalid.length > 0) {
+        addError(`${freshInvalid.length} Toggl ${freshInvalid.length === 1 ? 'entry has' : 'entries have'} invalid stored data and was skipped.`);
+        logIssue({
+          level: 'error',
+          event: 'firestore.decode_failed',
+          message: `${freshInvalid.length} invalid Toggl queue ${freshInvalid.length === 1 ? 'entry' : 'entries'} skipped`,
+        });
+      }
+      if (freshUncertain.length > 0) {
+        addError(`${freshUncertain.length} Toggl ${freshUncertain.length === 1 ? 'entry has' : 'entries have'} an unknown outcome. Check Toggl before adding again.`);
+        logIssue({
+          level: 'warn',
+          event: 'toggl.sync_stuck',
+          message: `${freshUncertain.length} Toggl sync ${freshUncertain.length === 1 ? 'outcome is' : 'outcomes are'} unknown`,
+        });
+      }
+      if (fresh.length > 0) {
+        addError(`${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync.`);
+        logIssue({
+          level: 'warn',
+          event: 'toggl.sync_stuck',
+          message: `${fresh.length} Toggl ${fresh.length === 1 ? 'entry' : 'entries'} permanently failed to sync`,
+        });
+      }
+      writeTogglReportedIds(
+        localStorage,
+        reportedKey,
+        [...decoded.invalidIds, ...stuck.map(({ item }) => item.id), ...uncertain.map(({ item }) => item.id)],
+      );
 
-    const retryable = decodedItems.filter(({ item }) =>
-      isTogglSweepTransactionCandidate(item)
-    );
-    await Promise.all(retryable.map(({ ref }) => runTransaction(db, async (tx) => {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) return;
-      const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
-      if (item === null) return;
-      if (!isTogglSweepTransactionCandidate(item)) return;
-      const { status, attempts, claimedAt, createdAt } = item;
-      const retry =
-        status === 'error' ||
-        (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
-        (status === 'processing' && claimedAt !== null && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
-      if (retry) tx.update(ref, {
-        status: 'pending',
-        retryRequestedAt: serverTimestamp(),
-      });
-    })));
+      const retryable = decodedItems.filter(({ item }) =>
+        isTogglSweepTransactionCandidate(item)
+      );
+      await Promise.all(retryable.map(({ ref }) => runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (!snap.exists()) return;
+        const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
+        if (item === null) return;
+        if (!isTogglSweepTransactionCandidate(item)) return;
+        const { status, attempts, claimedAt, createdAt } = item;
+        const retry =
+          status === 'error' ||
+          (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
+          (status === 'processing' && claimedAt !== null && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
+        if (retry) tx.update(ref, {
+          status: 'pending',
+          retryRequestedAt: serverTimestamp(),
+        });
+      })));
+      return true;
+    });
   }
 
   // Only deletes the book document; the deletebookupdates trigger cascades
