@@ -14,6 +14,7 @@
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
   import { bookDeletionPolicy, executeBookWrite, prepareBookWrite } from "../utils/bookForm.ts";
+  import { acceptReportedWrite } from "../utils/offlineWrite.ts";
 
   let {
     open, userId, book = null, onclose,
@@ -51,6 +52,7 @@
   let deletionPolicy = $derived(book === null ? null : bookDeletionPolicy(book.activeTimer));
   let isLookingUp = $state(false);
   let lookupError = $state("");
+  let bookWrite = $state({ accepted: false });
   const unresolvedAuthorCount = $derived(authorChips.filter(
     (chip) => chip.id !== null && 'unresolved' in chip,
   ).length);
@@ -76,6 +78,7 @@
   let seededBookId: string | null | undefined;
   $effect(() => {
     if (!open) {
+      bookWrite.accepted = false;
       seededBookId = undefined;
       authorChips = [];
       lookupError = "";
@@ -116,9 +119,18 @@
       lookupError = prepared.message;
       return;
     }
-    // reportWriteFailures renders the rejection in this modal's ErrorBanner;
-    // handling it here keeps the form open without an unhandled promise.
-    void executeBookWrite(Database, prepared.write).then(onclose, () => {});
+    // The SDK has accepted the mutation into its offline queue once the
+    // wrapped method returns its promise. Close now; waiting for that promise
+    // would leave the modal open until server acknowledgement after reconnect.
+    // reportWriteFailures surfaces a later rejection in the global banner.
+    void acceptReportedWrite(
+      bookWrite,
+      () => executeBookWrite(Database, prepared.write),
+      onclose,
+      (error) => {
+        lookupError = error instanceof Error ? error.message : String(error);
+      },
+    );
   }
 
   function handleDelete() {
@@ -406,7 +418,7 @@
   onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
-  primaryDisabled={!authorsLoaded}
+  primaryDisabled={!authorsLoaded || bookWrite.accepted}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
     <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import type { RulesTestContext, RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import {
+  arrayUnion,
   collection,
   deleteField,
   deleteDoc,
@@ -67,6 +68,31 @@ test('the owner can create and update a valid profile', async () => {
   const ref = doc(db, 'profiles', 'ada-lovelace');
   await assertSucceeds(setDoc(ref, profile('owner')));
   await assertSucceeds(setDoc(ref, profile('owner', { familyName: 'Byron' })));
+});
+
+test('profile links support targeted, deduplicated arrayUnion writes up to the cap', async () => {
+  const db = environment.authenticatedContext('profile-link-owner').firestore();
+  const ref = doc(db, 'profiles', 'targeted-links');
+  const link = { type: 'homepage', value: 'https://example.com' };
+  await assertSucceeds(setDoc(ref, profile('profile-link-owner')));
+  await assertSucceeds(updateDoc(ref, { links: arrayUnion(link), updatedAt: serverTimestamp() }));
+  await assertSucceeds(updateDoc(ref, { links: arrayUnion(link), updatedAt: serverTimestamp() }));
+  const saved = await getDoc(ref);
+  assert.deepEqual(saved.data()?.links, [
+    { type: 'github', value: 'ada' },
+    link,
+  ]);
+
+  const fullRef = doc(db, 'profiles', 'targeted-links-full');
+  const tenLinks = Array.from(
+    { length: 10 },
+    (_, index) => ({ type: 'other', value: `example.com/${index}` }),
+  );
+  await assertSucceeds(setDoc(fullRef, profile('profile-link-owner', { links: tenLinks })));
+  await assertFails(updateDoc(fullRef, {
+    links: arrayUnion({ type: 'other', value: 'example.com/overflow' }),
+    updatedAt: serverTimestamp(),
+  }));
 });
 
 test('public profiles are readable but private profiles are not', async () => {

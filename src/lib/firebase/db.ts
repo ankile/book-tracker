@@ -14,6 +14,7 @@ import {
   getDocsFromServer,
   runTransaction,
   writeBatch,
+  arrayUnion,
   increment,
   Timestamp,
   serverTimestamp,
@@ -38,6 +39,7 @@ import {
   writeTogglReportedIds,
 } from '../utils/toggl.ts';
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
+import { invokeReportedWrite } from '../utils/offlineWrite.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { Book } from '../interfaces/book.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
@@ -206,6 +208,12 @@ interface ProfileWrite extends ProfilePayload {
 interface RenameProfileWrite extends Omit<ProfileWrite, 'username'> {
   oldUsername: string;
   newUsername: string;
+}
+
+interface AddProfileLinkInput {
+  userId: string;
+  username: string;
+  link: ProfileLink;
 }
 
 interface AddPageUpdateInput {
@@ -459,6 +467,16 @@ class Database {
     });
   }
 
+  // Target only the link being added: a full-profile rewrite built from a
+  // listener snapshot could overwrite a link accepted concurrently by
+  // another client. arrayUnion also deduplicates an exact repeated click.
+  static addProfileLink({ username, link }: AddProfileLinkInput): Promise<void> {
+    return updateDoc(doc(db, 'profiles', username), {
+      links: arrayUnion(link),
+      updatedAt: Timestamp.now(),
+    });
+  }
+
   // Changing the username means moving the doc (the username IS the doc
   // id): one batch that creates the new doc and deletes the old, so the
   // profile is never gone or doubled — offline included. A taken new
@@ -554,7 +572,7 @@ class Database {
   // legacy author/authors fields, so their presence on any doc proves an
   // old client wrote it last — the invariant the legacy-wins read rule
   // and the migration re-run policy both stand on.
-  static async addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata }: AddBookInput): Promise<void> {
+  static addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata }: AddBookInput): Promise<void> {
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
@@ -576,10 +594,10 @@ class Database {
       createdAt: Timestamp.now(),
     });
 
-    await batch.commit();
+    return batch.commit();
   }
 
-  static async updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn, metadata }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn, metadata }: UpdateBookInput): Promise<void> {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
 
@@ -598,7 +616,7 @@ class Database {
       updatedAt: Timestamp.now(),
     });
 
-    await batch.commit();
+    return batch.commit();
   }
 
   // Author entity mutations, driven by the /authors page. Rename and
@@ -960,10 +978,9 @@ function reportWriteFailures<Args extends unknown[]>(
   label: (...args: Args) => string,
   method: (...args: Args) => Promise<void>,
 ): (...args: Args) => Promise<void> {
-  return async (...args) => {
-    try {
-      await method(...args);
-    } catch (error) {
+  return (...args) => invokeReportedWrite(
+    () => method(...args),
+    (error) => {
       // A queued rejection can arrive after a sign-out or account switch.
       // Never paint one user's title or failure onto another user's screen.
       if (auth.currentUser?.uid === writer(...args)) {
@@ -976,14 +993,17 @@ function reportWriteFailures<Args extends unknown[]>(
           code,
         });
       }
-      throw error;
-    }
-  };
+    },
+  );
 }
 
 Database.updateProfile = reportWriteFailures(
   'updateProfile', ({ userId }) => userId,
   ({ username }) => `update your public profile "${username}"`, Database.updateProfile,
+);
+Database.addProfileLink = reportWriteFailures(
+  'addProfileLink', ({ userId }) => userId,
+  ({ username }) => `add a link to your public profile "${username}"`, Database.addProfileLink,
 );
 Database.deleteProfile = reportWriteFailures(
   'deleteProfile', ({ userId }) => userId,

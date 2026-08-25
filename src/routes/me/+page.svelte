@@ -34,6 +34,7 @@
     monthlyAggregates,
   } from '$lib/utils/sessions.ts';
   import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.ts';
+  import { acceptReportedWrite } from '$lib/utils/offlineWrite.ts';
   import { FirebaseError } from 'firebase/app';
   import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
@@ -334,6 +335,12 @@
   let newLinkType = $state<ProfileLinkType | ''>('');
   let newLinkLabel = $state('');
   let newLinkValue = $state('');
+  let linkWrite = $state({ accepted: false });
+
+  function openLinkPicker() {
+    linkWrite.accepted = false;
+    linkPickerOpen = true;
+  }
 
   function closeLinkPicker() {
     linkPickerOpen = false;
@@ -342,7 +349,7 @@
     newLinkValue = '';
   }
 
-  async function addLink() {
+  function addLink() {
     const value = newLinkValue.trim().slice(0, 200);
     if (!value || newLinkType === '') return;
     const link: ProfileLink = { type: newLinkType, value };
@@ -350,8 +357,27 @@
       link.label = newLinkLabel.trim().slice(0, 50);
     }
     if (!myProfile) throw new Error('A loaded profile is required to add a link.');
-    const saved = await persistProfileWithFeedback({ links: [...myProfile.links, link] });
-    if (saved) closeLinkPicker();
+    const profile = myProfile;
+    const links = [...profile.links, link];
+    profileError = '';
+    void acceptReportedWrite(
+      linkWrite,
+      () => Database.addProfileLink({
+        userId: profile.uid,
+        username: profile.username,
+        link,
+      }),
+      () => {
+        // arrayUnion preserves links added concurrently by another client.
+        // Keep this optimistic copy too, so another offline link edit does
+        // not wait for the local listener echo before building on this one.
+        myProfile = { ...profile, links };
+        closeLinkPicker();
+      },
+      (error) => {
+        profileError = errorMessage(error);
+      },
+    );
   }
 
   async function removeLink(index: number) {
@@ -1068,7 +1094,7 @@
               <div class="links-heading">
                 <h3>Links</h3>
                 {#if !linkPickerOpen && (myProfile.links ?? []).length < MAX_PROFILE_LINKS}
-                  <button class="secondary-button" type="button" disabled={authorList === undefined} onclick={() => (linkPickerOpen = true)}>
+                  <button class="secondary-button" type="button" disabled={authorList === undefined} onclick={openLinkPicker}>
                     Add link
                   </button>
                 {/if}
@@ -1114,7 +1140,7 @@
                       disabled={!newLinkType}
                       bind:value={newLinkValue} />
                   </div>
-                  <button class="primary-button" type="button" onclick={addLink} disabled={authorList === undefined || !newLinkType || !newLinkValue.trim()}>
+                  <button class="primary-button" type="button" onclick={addLink} disabled={linkWrite.accepted || authorList === undefined || !newLinkType || !newLinkValue.trim()}>
                     Add
                   </button>
                   <button class="quiet-button" type="button" onclick={closeLinkPicker}>Cancel</button>
