@@ -228,10 +228,11 @@ service cloud.firestore {
              && after.updatedAt is timestamp;
     }
 
-    // Editing metadata may shrink pageCount below the rendered currentPage.
-    // The client records that clamp as a page-correction row, and the common
+    // Editing metadata may shrink pageCount below the rendered currentPage,
+    // or encounter a legacy book whose page is already beyond its count. The
+    // client records that repair as a page-correction row, and the common
     // create checks above pin entry.fromPage to the server's current page.
-    // That makes an offline stale clamp reject atomically after a newer read.
+    // That makes an offline stale repair reject atomically after a newer read.
     function validPageCountClampBook(before, after, entry) {
       return after.diff(before).affectedKeys().hasOnly([
                'authorIds', 'author', 'authors', 'title', 'pageCount',
@@ -242,7 +243,6 @@ service cloud.firestore {
              && after.pageCount is int
              && after.pageCount > 0
              && after.pageCount <= 9007199254740991
-             && after.pageCount < before.pageCount
              && before.currentPage > after.pageCount
              && after.currentPage == after.pageCount
              && entry.toPage == after.pageCount

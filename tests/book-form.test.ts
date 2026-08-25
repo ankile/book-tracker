@@ -144,6 +144,34 @@ test('shrinking a finished book prepares the same explicit correction', () => {
   assert.equal(result.write.input.pageCountClampFrom, 350);
 });
 
+test('a title-only edit repairs legacy progress already beyond the unchanged page count', () => {
+  const book = {
+    ...baseBook,
+    authorIds: ['author'],
+    title: 'Old title',
+    currentPage: 350,
+    currentPageUpdateId: 'prior-reading',
+    pageCount: 320,
+    finished: false,
+  } as Book;
+  const result = prepareBookWrite({
+    userId: 'user',
+    book,
+    authorChips: [{id: 'author', name: 'Author'}],
+    title: 'New title',
+    pageCount: 320,
+    currentPage: 350,
+    isbn: book.isbn,
+    metadata: EMPTY_METADATA,
+  });
+
+  assert.ok(result.valid);
+  assert.equal(result.write.kind, 'update');
+  assert.equal(result.write.input.pageCount, 320);
+  assert.equal(result.write.input.currentPage, 320);
+  assert.equal(result.write.input.pageCountClampFrom, 350);
+});
+
 test('unchanged, growing, and non-clamping page counts preserve progress', () => {
   for (const pageCount of [100, 200, 50]) {
     const result = preparePageCountEdit({

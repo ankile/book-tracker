@@ -446,6 +446,55 @@ test('a page-count clamp establishes progress provenance on a legacy book', asyn
   assert.equal(saved?.currentPageUpdateId, 'legacy-clamp');
 });
 
+test('a title-only edit repairs legacy progress beyond an unchanged page count', async () => {
+  const uid = 'page-count-clamp-inflated-legacy';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const correctionRef = doc(
+    db,
+    'users',
+    uid,
+    'books',
+    bookId,
+    'updates',
+    'title-edit-repair',
+  );
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'books', bookId),
+      readingBook({
+        title: 'Old title',
+        currentPage: 350,
+        currentPageUpdateId: 'prior-reading',
+        pageCount: 320,
+        finished: false,
+      }),
+    );
+  });
+
+  const batch = writeBatch(db);
+  batch.set(correctionRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 350,
+    toPage: 320,
+    pagesRead: -30,
+  }));
+  batch.update(bookRef, {
+    title: 'New title',
+    currentPage: 320,
+    currentPageUpdateId: correctionRef.id,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(batch.commit());
+
+  const saved = (await getDoc(bookRef)).data();
+  assert.equal(saved?.title, 'New title');
+  assert.equal(saved?.pageCount, 320);
+  assert.equal(saved?.currentPage, 320);
+  assert.equal(saved?.currentPageUpdateId, correctionRef.id);
+});
+
 test('a stale offline page-count clamp rejects and rolls back after a newer reading', async () => {
   const uid = 'page-count-clamp-stale';
   const bookId = 'book';
