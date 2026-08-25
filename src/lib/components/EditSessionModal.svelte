@@ -8,12 +8,14 @@
   let {
     session,
     book,
+    error,
     onupdateSession,
     oncloseModal
   }: {
     session: ReadingSession;
     book: Book;
-    onupdateSession: (data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }) => void;
+    error: string;
+    onupdateSession: (data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }) => boolean;
     oncloseModal: () => void;
   } = $props();
 
@@ -36,18 +38,19 @@
       alert(result.message);
       return;
     }
+    // Session writes and rules require positive page progress independently
+    // of the shared validation policy.
     if (result.pages === session.fromPage) {
       alert(`End page must be greater than start page (${session.fromPage})`);
       return;
     }
-
-    onupdateSession({
+    const accepted = onupdateSession({
       sessionId: session.id,
       timeRead: result.time,
       fromPage: session.fromPage, // Keep the original fromPage
       toPage: result.pages,
     });
-    oncloseModal();
+    if (accepted) oncloseModal();
   }
 
   function closeModal() {
@@ -69,6 +72,9 @@
       bind:value={inputTime}
       type="number" />
   </Input>
+  {#if error}
+    <p role="alert">{error}</p>
+  {/if}
   <div style="height: 8px;"></div>
   <div style="margin-bottom: 1rem;">
     <p style="font-size: 0.9rem; color: #666; margin-bottom: 0.25rem;">From page (cannot be changed)</p>

@@ -44,6 +44,41 @@ const bookData = (activeTimer: unknown = null) => ({
   fiction: null,
 });
 
+test('book decoder normalizes legacy progress-source state and validates new ids', () => {
+  assert.equal(
+    decodeBook('legacy', bookData(), 'users/owner/books/legacy').currentPageUpdateId,
+    null,
+  );
+  assert.equal(
+    decodeBook('null', {
+      ...bookData(),
+      currentPageUpdateId: null,
+    }, 'users/owner/books/null').currentPageUpdateId,
+    null,
+  );
+  assert.equal(
+    decodeBook('current', {
+      ...bookData(),
+      currentPageUpdateId: 'reading-session',
+    }, 'users/owner/books/current').currentPageUpdateId,
+    'reading-session',
+  );
+  assert.throws(
+    () => decodeBook('empty', {
+      ...bookData(),
+      currentPageUpdateId: '',
+    }, 'users/owner/books/empty'),
+    /currentPageUpdateId.*non-empty string/,
+  );
+  assert.throws(
+    () => decodeBook('invalid', {
+      ...bookData(),
+      currentPageUpdateId: 42,
+    }, 'users/owner/books/invalid'),
+    /currentPageUpdateId.*string/,
+  );
+});
+
 test('book decoder distinguishes current and documented legacy authorship', () => {
   const { authorIds: _authorIds, ...shared } = bookData();
   const legacyString = decodeBook('legacy-string', {

@@ -40,6 +40,10 @@ import {
 } from '../utils/toggl.ts';
 import { authorIdFor, joinPersonName } from '../utils/authors.ts';
 import { invokeReportedWrite } from '../utils/offlineWrite.ts';
+import {
+  queueReadingSessionDelete,
+  queueReadingSessionUpdate,
+} from './readingSessionWrites.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { Book } from '../interfaces/book.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
@@ -51,7 +55,6 @@ import {
   decodeBookUpdate,
   decodeLiveQueueSweepItem,
   decodeProfile,
-  decodeReadingSession,
   decodeQueueSweepBatch,
   decodeUser,
   type NewQueueOperation,
@@ -265,11 +268,19 @@ interface DeleteAuthorInput {
 interface UpdateReadingSessionInput {
   userId: string;
   bookId: string;
-  sessionId: string;
+  session: ReadingSession;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
   timeRead: number;
   fromPage: number;
   toPage: number;
-  pageCount: number;
+  title: string;
+}
+
+interface DeleteReadingSessionInput {
+  userId: string;
+  bookId: string;
+  session: ReadingSession;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
   title: string;
 }
 
@@ -526,6 +537,7 @@ class Database {
     // Update book with new currentPage and updatedAt
     batch.update(bookRef, {
       currentPage,
+      currentPageUpdateId: updateRef.id,
       finished: isFinished(currentPage, pageCount),
       updatedAt: Timestamp.now(),
     });
@@ -558,6 +570,7 @@ class Database {
     // Update book with incremented aggregates
     batch.update(bookRef, {
       currentPage,
+      currentPageUpdateId: sessionRef.id,
       finished: isFinished(currentPage, pageCount),
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
@@ -580,6 +593,7 @@ class Database {
     batch.set(bookRef, {
       authorIds: resolveAuthorIds(batch, userId, authorChips),
       currentPage,
+      currentPageUpdateId: null,
       finished: isFinished(currentPage, pageCount),
       owner: ownerRef,
       pageCount,
@@ -846,59 +860,31 @@ class Database {
     await deleteDoc(doc(db, 'users', userId, 'books', bookId));
   }
 
-  static async updateReadingSession({ userId, bookId, sessionId, timeRead, fromPage, toPage, pageCount }: UpdateReadingSessionInput): Promise<void> {
-    const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
-    const bookRef = doc(db, 'users', userId, 'books', bookId);
-
-    await runTransaction(db, async (transaction) => {
-      const sessionSnap = await transaction.get(sessionRef);
-      if (!sessionSnap.exists()) throw new Error('Session not found');
-      const oldSession = decodeReadingSession(
-        sessionSnap.id,
-        sessionSnap.data(),
-        sessionSnap.ref.path,
-      );
-      const newPagesRead = toPage - fromPage;
-      const deltaTime = timeRead - oldSession.timeRead;
-      const deltaPages = newPagesRead - oldSession.pagesRead;
-
-      transaction.update(sessionRef, {
-        timeRead,
-        fromPage,
-        toPage,
-        pagesRead: newPagesRead,
-        updatedAt: Timestamp.now(),
-      });
-      transaction.update(bookRef, {
-        currentPage: toPage,
-        finished: isFinished(toPage, pageCount),
-        pagesRead: increment(deltaPages),
-        timeRead: increment(deltaTime),
-        updatedAt: Timestamp.now(),
-      });
+  static updateReadingSession({ userId, bookId, session, bookProgress, timeRead, fromPage, toPage }: UpdateReadingSessionInput): Promise<void> {
+    // The modal can only submit a decoded session and book rendered by live
+    // listeners. Planning from that state lets the batch enter Firestore's
+    // local queue synchronously with no online transaction or cache read.
+    // Rules correlate these deltas with the server's current session; a
+    // stale cross-device edit rejects atomically on reconnect.
+    return queueReadingSessionUpdate({
+      firestore: db,
+      userId,
+      bookId,
+      sessionId: session.id,
+      previous: session,
+      book: bookProgress,
+      next: { timeRead, fromPage, toPage },
     });
   }
 
-  static async deleteReadingSession(userId: string, bookId: string, sessionId: string, title: string, pageCount: number): Promise<void> {
-    const sessionRef = doc(db, 'users', userId, 'books', bookId, 'updates', sessionId);
-    const bookRef = doc(db, 'users', userId, 'books', bookId);
-
-    await runTransaction(db, async (transaction) => {
-      const sessionSnap = await transaction.get(sessionRef);
-      if (!sessionSnap.exists()) throw new Error('Session not found');
-      const session = decodeReadingSession(
-        sessionSnap.id,
-        sessionSnap.data(),
-        sessionSnap.ref.path,
-      );
-      transaction.delete(sessionRef);
-      transaction.update(bookRef, {
-        currentPage: session.fromPage,
-        finished: isFinished(session.fromPage, pageCount),
-        pagesRead: increment(-session.pagesRead),
-        timeRead: increment(-session.timeRead),
-        updatedAt: Timestamp.now(),
-      });
+  static deleteReadingSession({ userId, bookId, session, bookProgress }: DeleteReadingSessionInput): Promise<void> {
+    return queueReadingSessionDelete({
+      firestore: db,
+      userId,
+      bookId,
+      sessionId: session.id,
+      previous: session,
+      book: bookProgress,
     });
   }
 
@@ -1062,8 +1048,8 @@ Database.updateReadingSession = reportWriteFailures(
   ({ title }) => `update the reading session for "${title}"`, Database.updateReadingSession,
 );
 Database.deleteReadingSession = reportWriteFailures(
-  'deleteReadingSession', (userId) => userId,
-  (_userId, _bookId, _sessionId, title) => `delete the reading session for "${title}"`, Database.deleteReadingSession,
+  'deleteReadingSession', ({ userId }) => userId,
+  ({ title }) => `delete the reading session for "${title}"`, Database.deleteReadingSession,
 );
 
 export { Database };

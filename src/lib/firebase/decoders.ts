@@ -224,6 +224,9 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
   const shared = {
     id,
     currentPage,
+    currentPageUpdateId: data.currentPageUpdateId === undefined || data.currentPageUpdateId === null
+      ? null
+      : nonEmptyString(data.currentPageUpdateId, `${path}.currentPageUpdateId`),
     pageCount,
     pagesRead: number(data.pagesRead ?? 0, `${path}.pagesRead`),
     timeRead: number(data.timeRead ?? 0, `${path}.timeRead`),

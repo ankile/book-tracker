@@ -8,9 +8,13 @@ import {
   collection,
   deleteField,
   deleteDoc,
+  disableNetwork,
   doc,
+  enableNetwork,
   getDoc,
+  getDocFromCache,
   getDocs,
+  increment,
   query,
   serverTimestamp,
   setDoc,
@@ -18,8 +22,13 @@ import {
   updateDoc,
   where,
   writeBatch,
+  type Firestore,
 } from 'firebase/firestore';
 import { togglQueueId } from '../src/lib/utils/toggl.ts';
+import {
+  queueReadingSessionDelete,
+  queueReadingSessionUpdate,
+} from '../src/lib/firebase/readingSessionWrites.ts';
 
 let environment: RulesTestEnvironment;
 
@@ -53,6 +62,52 @@ const profile = (uid: string, overrides: Record<string, unknown> = {}) => ({
   updatedAt: serverTimestamp(),
   ...overrides,
 });
+
+const readingBook = (overrides: Record<string, unknown> = {}) => ({
+  title: 'Reading book',
+  activeTimer: null,
+  currentPage: 20,
+  currentPageUpdateId: 'session',
+  pageCount: 100,
+  finished: false,
+  pagesRead: 20,
+  timeRead: 60,
+  updatedAt: Timestamp.now(),
+  ...overrides,
+});
+
+const legacyReadingBook = (overrides: Record<string, unknown> = {}) => {
+  const { currentPageUpdateId: _source, ...book } = readingBook(overrides);
+  return book;
+};
+
+const readingEntry = (
+  db: ReturnType<RulesTestContext['firestore']>,
+  uid: string,
+  bookId: string,
+  overrides: Record<string, unknown> = {},
+) => ({
+  owner: doc(db, 'users', uid),
+  book: doc(db, 'users', uid, 'books', bookId),
+  type: 'reading',
+  timeRead: 30,
+  fromPage: 10,
+  toPage: 20,
+  pagesRead: 10,
+  updatedAt: Timestamp.now(),
+  createdAt: Timestamp.now(),
+  ...overrides,
+});
+
+const pageCorrectionEntry = (
+  db: ReturnType<RulesTestContext['firestore']>,
+  uid: string,
+  bookId: string,
+  overrides: Record<string, unknown> = {},
+) => {
+  const { timeRead: _timeRead, ...entry } = readingEntry(db, uid, bookId);
+  return { ...entry, type: 'update', ...overrides };
+};
 
 before(async () => {
   environment = await initializeTestEnvironment({
@@ -133,6 +188,634 @@ test('profile field limits reject oversized and malformed data', async () => {
   });
   await assertFails(setDoc(doc(db, 'profiles', 'too-many-links'), tooManyLinks));
   await assertFails(setDoc(doc(db, 'profiles', 'Bad Slug'), profile('owner')));
+});
+
+test('reading and page-correction creates move the correlated book atomically', async () => {
+  const uid = 'reading-create';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'books', bookId),
+      readingBook({ currentPage: 10, currentPageUpdateId: null, pagesRead: 10, timeRead: 30 }),
+    );
+  });
+
+  const readingRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'reading');
+  const reading = writeBatch(db);
+  reading.set(readingRef, readingEntry(db, uid, bookId));
+  reading.update(bookRef, {
+    currentPage: 20,
+    currentPageUpdateId: readingRef.id,
+    finished: false,
+    pagesRead: increment(10),
+    timeRead: increment(30),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(reading.commit());
+
+  const correctionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'correction');
+  const correction = writeBatch(db);
+  correction.set(correctionRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 20,
+    toPage: 15,
+    pagesRead: -5,
+  }));
+  correction.update(bookRef, {
+    currentPage: 15,
+    currentPageUpdateId: correctionRef.id,
+    finished: false,
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(correction.commit());
+
+  const saved = (await getDoc(bookRef)).data();
+  assert.equal(saved?.currentPage, 15);
+  assert.equal(saved?.currentPageUpdateId, 'correction');
+  assert.equal(saved?.pagesRead, 20);
+  assert.equal(saved?.timeRead, 60);
+
+  const staleRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'stale-reading');
+  const stale = writeBatch(db);
+  stale.set(staleRef, readingEntry(db, uid, bookId, { fromPage: 10, toPage: 25, pagesRead: 15 }));
+  stale.update(bookRef, {
+    currentPage: 25,
+    currentPageUpdateId: staleRef.id,
+    finished: false,
+    pagesRead: increment(15),
+    timeRead: increment(30),
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(stale.commit());
+});
+
+test('session mutations pin the row and correlated aggregate invariants', async () => {
+  const uid = 'reading-invariants';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const sessionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'session');
+  const correctionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'correction');
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'correction'),
+      pageCorrectionEntry(seed, uid, bookId, {
+        fromPage: 5,
+        toPage: 10,
+        pagesRead: 5,
+      }),
+    );
+  });
+
+  const invalidUpdate = async (
+    sessionPatch: Record<string, unknown>,
+    bookPatch: Record<string, unknown> = {},
+  ) => {
+    const batch = writeBatch(db);
+    batch.update(sessionRef, {
+      timeRead: 45,
+      toPage: 25,
+      pagesRead: 15,
+      updatedAt: Timestamp.now(),
+      ...sessionPatch,
+    });
+    batch.update(bookRef, {
+      currentPage: 25,
+      finished: false,
+      pagesRead: increment(5),
+      timeRead: increment(15),
+      updatedAt: Timestamp.now(),
+      ...bookPatch,
+    });
+    await assertFails(batch.commit());
+  };
+
+  await invalidUpdate({ owner: doc(db, 'users', 'someone-else') });
+  await invalidUpdate({ book: doc(db, 'users', uid, 'books', 'other') });
+  await invalidUpdate({ type: 'update' });
+  await invalidUpdate({ createdAt: Timestamp.now() });
+  await invalidUpdate({ fromPage: 11, pagesRead: 14 });
+  await invalidUpdate({ note: 'extra field' });
+  await invalidUpdate({ timeRead: 0 }, { timeRead: increment(-30) });
+  await invalidUpdate({ toPage: 10, pagesRead: 0 }, { currentPage: 10, pagesRead: increment(-10) });
+  await invalidUpdate({}, { title: 'Unrelated rewrite' });
+  await invalidUpdate({}, { updatedAt: 'not a timestamp' });
+  await invalidUpdate({}, { finished: true });
+  await assertFails(updateDoc(bookRef, {
+    currentPage: 10,
+    currentPageUpdateId: 'correction',
+    finished: false,
+    updatedAt: Timestamp.now(),
+  }));
+
+  const correctionDelete = writeBatch(db);
+  correctionDelete.delete(correctionRef);
+  correctionDelete.update(bookRef, { currentPage: 10, finished: false, updatedAt: Timestamp.now() });
+  await assertFails(correctionDelete.commit());
+
+  const correctionUpdate = writeBatch(db);
+  correctionUpdate.update(correctionRef, { toPage: 25, pagesRead: 15, updatedAt: Timestamp.now() });
+  correctionUpdate.update(bookRef, { currentPage: 25, finished: false, updatedAt: Timestamp.now() });
+  await assertFails(correctionUpdate.commit());
+
+  const wrongDelete = writeBatch(db);
+  wrongDelete.delete(sessionRef);
+  wrongDelete.update(bookRef, {
+    currentPage: 10,
+    finished: false,
+    pagesRead: increment(-9),
+    timeRead: increment(-30),
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(wrongDelete.commit());
+});
+
+test('stale and missing session batches fail without double-applying aggregates', async () => {
+  const uid = 'reading-stale';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const writerDb = db as unknown as Firestore;
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', 'missing-book', 'updates', 'orphan'),
+      readingEntry(seed, uid, 'missing-book'),
+    );
+  });
+  const previous = { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 };
+  await assertSucceeds(queueReadingSessionUpdate({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous,
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  }));
+  await assertFails(queueReadingSessionUpdate({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous,
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 30, timeRead: 60 },
+  }));
+  await assertFails(queueReadingSessionUpdate({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'missing-session',
+    previous,
+    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 30, timeRead: 60 },
+  }));
+  await assertFails(queueReadingSessionUpdate({
+    firestore: writerDb,
+    userId: uid,
+    bookId: 'missing-book',
+    sessionId: 'orphan',
+    previous,
+    book: { currentPage: 20, currentPageUpdateId: 'orphan', pageCount: 100 },
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  }));
+
+  const savedBook = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
+  assert.equal(savedBook?.pagesRead, 25);
+  assert.equal(savedBook?.timeRead, 75);
+  assert.equal(savedBook?.currentPage, 25);
+});
+
+test('session deletion cannot drive aggregate totals negative', async () => {
+  const uid = 'reading-nonnegative';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const writerDb = db as unknown as Firestore;
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId),
+      readingBook({ pagesRead: 5, timeRead: 20 }),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+  });
+  await assertFails(queueReadingSessionDelete({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+  }));
+});
+
+test('session update and delete enter the local cache while Firestore is offline', async () => {
+  const uid = 'reading-offline';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const writerDb = db as unknown as Firestore;
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const sessionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'session');
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+  });
+  await Promise.all([getDoc(bookRef), getDoc(sessionRef)]);
+
+  await disableNetwork(db);
+  const updateCompletion = queueReadingSessionUpdate({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  });
+  const [localSession, localBook] = await Promise.all([
+    getDocFromCache(sessionRef),
+    getDocFromCache(bookRef),
+  ]);
+  assert.equal(localSession.metadata.hasPendingWrites, true);
+  assert.equal(localSession.data()?.toPage, 25);
+  assert.equal(localBook.metadata.hasPendingWrites, true);
+  assert.equal(localBook.data()?.pagesRead, 25);
+  assert.equal(localBook.data()?.timeRead, 75);
+  assert.equal(localBook.data()?.currentPage, 25);
+  assert.equal(localBook.data()?.currentPageUpdateId, 'session');
+  await enableNetwork(db);
+  await updateCompletion;
+
+  await disableNetwork(db);
+  const deleteCompletion = queueReadingSessionDelete({
+    firestore: writerDb,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 25, pagesRead: 15, timeRead: 45 },
+    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100 },
+  });
+  const [deletedSession, deletedBook] = await Promise.all([
+    getDocFromCache(sessionRef),
+    getDocFromCache(bookRef),
+  ]);
+  assert.equal(deletedSession.exists(), false);
+  assert.equal(deletedBook.metadata.hasPendingWrites, true);
+  assert.equal(deletedBook.data()?.pagesRead, 10);
+  assert.equal(deletedBook.data()?.timeRead, 30);
+  assert.equal(deletedBook.data()?.currentPage, 10);
+  assert.equal(deletedBook.data()?.currentPageUpdateId, null);
+  await enableNetwork(db);
+  await deleteCompletion;
+});
+
+test('zero-page timed reading and legacy aggregate defaults correlate safely', async () => {
+  const uid = 'reading-zero-legacy';
+  const db = environment.authenticatedContext(uid).firestore();
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(
+      doc(seed, 'users', uid, 'books', 'zero'),
+      readingBook({
+        currentPage: 10,
+        currentPageUpdateId: null,
+        pagesRead: 10,
+        timeRead: 30,
+      }),
+    );
+    const { pagesRead: _pagesRead, timeRead: _timeRead, ...legacy } = legacyReadingBook({
+      currentPage: 10,
+    });
+    await setDoc(doc(seed, 'users', uid, 'books', 'legacy'), legacy);
+    await setDoc(doc(seed, 'users', uid, 'books', 'old-client'), legacy);
+    await setDoc(
+      doc(seed, 'users', uid, 'books', 'new-old-client'),
+      readingBook({ currentPage: 10, currentPageUpdateId: null }),
+    );
+  });
+
+  const zeroBookRef = doc(db, 'users', uid, 'books', 'zero');
+  const zeroRef = doc(db, 'users', uid, 'books', 'zero', 'updates', 'zero-reading');
+  const zero = writeBatch(db);
+  zero.set(zeroRef, readingEntry(db, uid, 'zero', {
+    timeRead: 5,
+    fromPage: 10,
+    toPage: 10,
+    pagesRead: 0,
+  }));
+  zero.update(zeroBookRef, {
+    currentPage: 10,
+    currentPageUpdateId: zeroRef.id,
+    finished: false,
+    pagesRead: increment(0),
+    timeRead: increment(5),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(zero.commit());
+  const zeroSaved = (await getDoc(zeroBookRef)).data();
+  assert.equal(zeroSaved?.pagesRead, 10);
+  assert.equal(zeroSaved?.timeRead, 35);
+  assert.equal(zeroSaved?.currentPageUpdateId, 'zero-reading');
+
+  const legacyBookRef = doc(db, 'users', uid, 'books', 'legacy');
+  const legacyRef = doc(db, 'users', uid, 'books', 'legacy', 'updates', 'new-reading');
+  const legacy = writeBatch(db);
+  legacy.set(legacyRef, readingEntry(db, uid, 'legacy', {
+    timeRead: 5,
+    fromPage: 10,
+    toPage: 12,
+    pagesRead: 2,
+  }));
+  legacy.update(legacyBookRef, {
+    currentPage: 12,
+    currentPageUpdateId: legacyRef.id,
+    finished: false,
+    pagesRead: increment(2),
+    timeRead: increment(5),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(legacy.commit());
+  const legacySaved = (await getDoc(legacyBookRef)).data();
+  assert.equal(legacySaved?.pagesRead, 2);
+  assert.equal(legacySaved?.timeRead, 5);
+  assert.equal(legacySaved?.currentPageUpdateId, 'new-reading');
+
+  // A cached pre-migration client omits the source field. Permit that only
+  // while the server book itself genuinely lacks the field.
+  const oldBookRef = doc(db, 'users', uid, 'books', 'old-client');
+  const oldRef = doc(db, 'users', uid, 'books', 'old-client', 'updates', 'old-reading');
+  const oldClient = writeBatch(db);
+  oldClient.set(oldRef, readingEntry(db, uid, 'old-client', {
+    timeRead: 5,
+    fromPage: 10,
+    toPage: 11,
+    pagesRead: 1,
+  }));
+  oldClient.update(oldBookRef, {
+    currentPage: 11,
+    finished: false,
+    pagesRead: increment(1),
+    timeRead: increment(5),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(oldClient.commit());
+  assert.equal((await getDoc(oldBookRef)).data()?.currentPageUpdateId, undefined);
+
+  const incompatibleBookRef = doc(db, 'users', uid, 'books', 'new-old-client');
+  const incompatibleRef = doc(
+    db,
+    'users',
+    uid,
+    'books',
+    'new-old-client',
+    'updates',
+    'old-reading',
+  );
+  const incompatible = writeBatch(db);
+  incompatible.set(incompatibleRef, readingEntry(db, uid, 'new-old-client', {
+    timeRead: 5,
+    fromPage: 10,
+    toPage: 11,
+    pagesRead: 1,
+  }));
+  incompatible.update(incompatibleBookRef, {
+    currentPage: 11,
+    finished: false,
+    pagesRead: increment(1),
+    timeRead: increment(5),
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(incompatible.commit());
+});
+
+test('same-endpoint later correction prevents an older session from owning progress', async () => {
+  const uid = 'reading-source-identity';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId),
+      readingBook({ currentPageUpdateId: 'correction' }),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'correction'),
+      pageCorrectionEntry(seed, uid, bookId, {
+        fromPage: 15,
+        toPage: 20,
+        pagesRead: 5,
+      }),
+    );
+  });
+
+  await assertSucceeds(queueReadingSessionUpdate({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100 },
+    next: { fromPage: 10, toPage: 18, timeRead: 25 },
+  }));
+  let saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
+  assert.equal(saved?.currentPage, 20);
+  assert.equal(saved?.currentPageUpdateId, 'correction');
+
+  await assertSucceeds(queueReadingSessionDelete({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 18, pagesRead: 8, timeRead: 25 },
+    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100 },
+  }));
+  saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
+  assert.equal(saved?.currentPage, 20);
+  assert.equal(saved?.currentPageUpdateId, 'correction');
+});
+
+test('session edit/delete races reject in either order and a delete cannot repeat', async () => {
+  const uid = 'reading-ordering';
+  const db = environment.authenticatedContext(uid).firestore();
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    for (const bookId of ['edit-first', 'delete-first']) {
+      await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+      await setDoc(
+        doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+        readingEntry(seed, uid, bookId),
+      );
+    }
+  });
+  const previous = { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 };
+  const sourceBook = { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 };
+
+  await assertSucceeds(queueReadingSessionUpdate({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId: 'edit-first',
+    sessionId: 'session',
+    previous,
+    book: sourceBook,
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  }));
+  await assertFails(queueReadingSessionDelete({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId: 'edit-first',
+    sessionId: 'session',
+    previous,
+    book: sourceBook,
+  }));
+
+  await assertSucceeds(queueReadingSessionDelete({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId: 'delete-first',
+    sessionId: 'session',
+    previous,
+    book: sourceBook,
+  }));
+  await assertFails(queueReadingSessionUpdate({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId: 'delete-first',
+    sessionId: 'session',
+    previous,
+    book: sourceBook,
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  }));
+  await assertFails(queueReadingSessionDelete({
+    firestore: db as unknown as Firestore,
+    userId: uid,
+    bookId: 'delete-first',
+    sessionId: 'session',
+    previous,
+    book: sourceBook,
+  }));
+
+  const deletedBook = (await getDoc(doc(db, 'users', uid, 'books', 'delete-first'))).data();
+  assert.equal(deletedBook?.pagesRead, 10);
+  assert.equal(deletedBook?.timeRead, 30);
+  assert.equal(deletedBook?.currentPage, 10);
+  assert.equal(deletedBook?.currentPageUpdateId, null);
+});
+
+test('an offline session batch flushes successfully without priming the local cache', async () => {
+  const uid = 'reading-cache-miss';
+  const bookId = 'book';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+  });
+  const offlineDb = environment.authenticatedContext(uid).firestore();
+  await assert.rejects(
+    getDocFromCache(doc(offlineDb, 'users', uid, 'books', bookId)),
+    /cache/i,
+  );
+  await disableNetwork(offlineDb);
+  const completion = queueReadingSessionUpdate({
+    firestore: offlineDb as unknown as Firestore,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  });
+  await enableNetwork(offlineDb);
+  await completion;
+
+  const verifier = environment.authenticatedContext(uid).firestore();
+  const saved = (await getDoc(doc(verifier, 'users', uid, 'books', bookId))).data();
+  assert.equal(saved?.currentPage, 25);
+  assert.equal(saved?.currentPageUpdateId, 'session');
+  assert.equal(saved?.pagesRead, 25);
+  assert.equal(saved?.timeRead, 75);
+});
+
+test('a stale offline session write rolls its optimistic cache back after reconnect', async () => {
+  const uid = 'reading-offline-stale';
+  const bookId = 'book';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
+      readingEntry(seed, uid, bookId),
+    );
+  });
+  const staleDb = environment.authenticatedContext(uid).firestore();
+  const staleBookRef = doc(staleDb, 'users', uid, 'books', bookId);
+  const staleSessionRef = doc(staleDb, 'users', uid, 'books', bookId, 'updates', 'session');
+  await Promise.all([getDoc(staleBookRef), getDoc(staleSessionRef)]);
+  await disableNetwork(staleDb);
+
+  const winnerDb = environment.authenticatedContext(uid).firestore();
+  await assertSucceeds(queueReadingSessionUpdate({
+    firestore: winnerDb as unknown as Firestore,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 25, timeRead: 45 },
+  }));
+
+  const staleCompletion = queueReadingSessionUpdate({
+    firestore: staleDb as unknown as Firestore,
+    userId: uid,
+    bookId,
+    sessionId: 'session',
+    previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    next: { fromPage: 10, toPage: 30, timeRead: 60 },
+  });
+  const optimistic = await getDocFromCache(staleBookRef);
+  assert.equal(optimistic.metadata.hasPendingWrites, true);
+  assert.equal(optimistic.data()?.currentPage, 30);
+  assert.equal(optimistic.data()?.pagesRead, 30);
+
+  await enableNetwork(staleDb);
+  await assert.rejects(staleCompletion);
+  const [rolledBackBook, rolledBackSession] = await Promise.all([
+    getDoc(staleBookRef),
+    getDoc(staleSessionRef),
+  ]);
+  assert.equal(rolledBackBook.metadata.hasPendingWrites, false);
+  assert.equal(rolledBackBook.data()?.currentPage, 25);
+  assert.equal(rolledBackBook.data()?.currentPageUpdateId, 'session');
+  assert.equal(rolledBackBook.data()?.pagesRead, 25);
+  assert.equal(rolledBackBook.data()?.timeRead, 75);
+  assert.equal(rolledBackSession.data()?.toPage, 25);
+  assert.equal(rolledBackSession.data()?.timeRead, 45);
 });
 
 const queueItem = (overrides = {}) => ({

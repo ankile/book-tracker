@@ -5,6 +5,7 @@
   import EditSessionModal from "$lib/components/EditSessionModal.svelte";
   import { Database } from "$lib/firebase/db.ts";
   import { formatTime } from "$lib/utils/format.ts";
+  import { acceptReportedWrite } from "$lib/utils/offlineWrite.ts";
   import type { Book } from "$lib/interfaces/book.ts";
   import type { ReadingSession } from "$lib/interfaces/reading.ts";
   import type { TimestampLike } from "$lib/interfaces/common.ts";
@@ -16,11 +17,17 @@
   let open = $derived(!!book);
 
   let sessions = $state<ReadingSession[]>([]);
+  let sessionWrite = $state({ accepted: false });
+  let sessionWriteError = $state('');
   $effect(() => {
     if (book && userId) {
       const sessionsStore = Database.getReadingSessions(userId, book.id);
       const unsubscribeStore = sessionsStore.subscribe((data) => {
         sessions = data;
+        // A local snapshot confirms the accepted batch changed or removed
+        // its row; only then can another session mutation be issued.
+        sessionWrite.accepted = false;
+        sessionWriteError = '';
       });
       return unsubscribeStore;
     }
@@ -48,14 +55,31 @@
     editingSessionId = session.id;
   }
 
-  function updateSession(data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }) {
-    Database.updateReadingSession({
-      userId,
-      bookId: book.id,
-      title: book.title,
-      pageCount: book.pageCount,
-      ...data
-    });
+  function updateSession(data: { sessionId: string; timeRead: number; fromPage: number; toPage: number }): boolean {
+    const session = sessions.find((candidate) => candidate.id === data.sessionId);
+    if (session === undefined) throw new Error('The reading session is no longer loaded.');
+    sessionWriteError = '';
+    let accepted = false;
+    void acceptReportedWrite(
+      sessionWrite,
+      () => Database.updateReadingSession({
+        userId,
+        bookId: book.id,
+        title: book.title,
+        session,
+        bookProgress: book,
+        timeRead: data.timeRead,
+        fromPage: data.fromPage,
+        toPage: data.toPage,
+      }),
+      () => {
+        accepted = true;
+      },
+      (error) => {
+        sessionWriteError = error instanceof Error ? error.message : String(error);
+      },
+    );
+    return accepted;
   }
 
   function closeEditModal() {
@@ -65,7 +89,21 @@
   function deleteSession(session: ReadingSession) {
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
-      Database.deleteReadingSession(userId, book.id, session.id, book.title, book.pageCount);
+      sessionWriteError = '';
+      void acceptReportedWrite(
+        sessionWrite,
+        () => Database.deleteReadingSession({
+          userId,
+          bookId: book.id,
+          title: book.title,
+          session,
+          bookProgress: book,
+        }),
+        () => {},
+        (error) => {
+          sessionWriteError = error instanceof Error ? error.message : String(error);
+        },
+      );
     }
   }
 </script>
@@ -193,6 +231,7 @@
                 <button
                   type="button"
                   class="edit-button"
+                  disabled={sessionWrite.accepted}
                   aria-label={`Edit latest reading session for ${book.title}`}
                   onclick={() => editSession(session)}>
                   <Icon data={edit} scale={0.8} style="color: #666;" />
@@ -200,6 +239,7 @@
                 <button
                   type="button"
                   class="edit-button"
+                  disabled={sessionWrite.accepted}
                   aria-label={`Delete latest reading session for ${book.title}`}
                   onclick={() => deleteSession(session)}>
                   <Icon data={trash} scale={0.8} style="color: #d9534f;" />
@@ -225,12 +265,16 @@
       {/each}
     {/if}
   </div>
+  {#if sessionWriteError}
+    <p role="alert">{sessionWriteError}</p>
+  {/if}
 </ModalCard>
 
 {#if editingSession}
   <EditSessionModal
     session={editingSession}
     {book}
+    error={sessionWriteError}
     onupdateSession={updateSession}
     oncloseModal={closeEditModal} />
 {/if}

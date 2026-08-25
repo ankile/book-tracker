@@ -13,6 +13,10 @@ test('reading validation accepts Svelte numeric bindings and returns normalized 
     validateReading({ inputTime: 45, inputPages: 120, previousPage: 100, pageCount: 300 }),
     { valid: true, time: 45, pages: 120 },
   );
+  assert.deepEqual(
+    validateReading({ inputTime: 45, inputPages: 100, previousPage: 100, pageCount: 300 }),
+    { valid: true, time: 45, pages: 100 },
+  );
 });
 
 test('book page validation requires positive integer bounds', () => {

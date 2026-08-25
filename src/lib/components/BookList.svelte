@@ -33,10 +33,6 @@
     prefillMinutes = null;
   };
 
-  let sessionsBook = $state<Book | null>(null);
-  const showSessions = (book: Book) => (sessionsBook = book);
-  const closeSessions = () => (sessionsBook = null);
-
   // Use provided books prop if available, otherwise fetch from database.
   // The fetch lives in an $effect (not $derived) so the snapshot listener
   // is torn down when the component unmounts or userId/finished change.
@@ -48,6 +44,14 @@
     return unsubscribe;
   });
   let books = $derived(booksProp ?? fetchedBooks);
+  let sessionsBookId = $state<string | null>(null);
+  let sessionsBook = $derived(
+    sessionsBookId === null
+      ? null
+      : books.find((candidate) => candidate.id === sessionsBookId) ?? null,
+  );
+  const showSessions = (book: Book) => (sessionsBookId = book.id);
+  const closeSessions = () => (sessionsBookId = null);
 
   // Books reference authors by id; resolve them against the user's author
   // docs. undefined = still loading, during which authorIds books render
