@@ -184,10 +184,13 @@ re-run, and why the follow-up audit exists.
 
 ## Script conventions
 
-- **Traversal**: migrations and the audit iterate with `.get()` — orphaned
-  docs under deleted parents are not data to migrate. `db-snapshot.ts`
-  deliberately inverts this (`listCollections()`/`listDocuments()`) because
-  a backup must capture those orphans; don't "fix" it.
+- **Traversal**: book migrations iterate with `.get()` — orphaned book docs
+  under deleted parents are report-only, not data to migrate. User-level
+  timer lifecycle is the exception: `migrate-timer-claims.ts` and the audit
+  use `listDocuments()` because a missing user parent may still have live
+  book/timer subcollections. `db-snapshot.ts` also deliberately uses
+  `listCollections()`/`listDocuments()` because a backup must capture every
+  orphan; don't "fix" it.
 - **Batching**: always through `batcher()` — 500-op rollover, dry-run
   counting, and it **crashes if an `update()` payload touches `updatedAt`**
   (on books it drives the reading-list order; no migration may touch it).

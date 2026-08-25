@@ -31,12 +31,12 @@ function claimFromSnapshot(snapshot: DocumentSnapshot): MigratedTimerClaim | nul
 }
 
 let writes = 0;
-const users = await db.collection('users').get();
-for (const user of users.docs) {
-  const claimRef = user.ref.collection('timerLifecycle').doc('current');
+const users = await db.collection('users').listDocuments();
+for (const user of users) {
+  const claimRef = user.collection('timerLifecycle').doc('current');
   const inspect = async () => {
     const [books, claim] = await Promise.all([
-      user.ref.collection('books').get(),
+      user.collection('books').get(),
       claimRef.get(),
     ]);
     const planned = planTimerClaim(books.docs.map((book) => ({ id: book.id, data: book.data() })));
@@ -57,12 +57,10 @@ for (const user of users.docs) {
   writes += 1;
   if (!flags.apply) continue;
   await db.runTransaction(async (tx) => {
-    const [freshUser, books, claim] = await Promise.all([
-      tx.get(user.ref),
-      tx.get(user.ref.collection('books')),
+    const [books, claim] = await Promise.all([
+      tx.get(user.collection('books')),
       tx.get(claimRef),
     ]);
-    if (!freshUser.exists) throw new Error(`users/${user.id} disappeared during migration`);
     const planned = planTimerClaim(books.docs.map((book) => ({ id: book.id, data: book.data() })));
     const current = claimFromSnapshot(claim);
     if (current !== null) {
@@ -72,7 +70,7 @@ for (const user of users.docs) {
       return;
     }
     if (planned.bookPatch !== null) {
-      tx.update(user.ref.collection('books').doc(planned.bookPatch.bookId), {
+      tx.update(user.collection('books').doc(planned.bookPatch.bookId), {
         activeTimer: planned.bookPatch.activeTimer,
       });
     }

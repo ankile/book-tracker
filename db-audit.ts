@@ -2,9 +2,9 @@
 // every migration and diff the outputs: deterministic path-sorted lines,
 // one per finding, then per-class counts.
 //
-// Book/update traversal uses .get() (the migration convention — orphans
-// under deleted parents are not data to repair); the dedicated orphan
-// checks at the end use listDocuments() diffs to REPORT those orphans.
+// User traversal uses listDocuments() because a missing user parent can
+// still own live book/timer subcollections. Book/update traversal uses
+// .get(); the dedicated orphan checks report missing parent documents.
 //
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
@@ -27,7 +27,8 @@ const found = (cls: string, path: string, detail = ''): void => {
   findings.push({ cls, path, detail });
 };
 
-const users = await db.collection('users').get();
+const userProfiles = await db.collection('users').get();
+const users = await db.collection('users').listDocuments();
 
 // Info-level author bookkeeping (summary lines, not findings): orphaned
 // author docs are a legitimate steady state — deleting or editing a book
@@ -36,9 +37,9 @@ const users = await db.collection('users').get();
 let authorDocCount = 0;
 let authorOrphanCount = 0;
 
-for (const user of users.docs) {
-  const books = await user.ref.collection('books').get();
-  const lifecycle = await user.ref.collection('timerLifecycle').doc('current').get();
+for (const user of users) {
+  const books = await user.collection('books').get();
+  const lifecycle = await user.collection('timerLifecycle').doc('current').get();
   for (const finding of auditTimerClaimState(
     books.docs.map((book) => ({id: book.id, data: book.data()})),
     {exists: lifecycle.exists, data: lifecycle.data()},
@@ -49,7 +50,7 @@ for (const user of users.docs) {
   // Author entity checks: doc shape only. Ids are deterministic at
   // creation but OPAQUE afterward (rename edits name/nameLower in place),
   // so id === authorIdFor(name) is deliberately NOT an invariant.
-  const authorDocs = await user.ref.collection('authors').get();
+  const authorDocs = await user.collection('authors').get();
   const authorDocIds = new Set(authorDocs.docs.map((d) => d.id));
   const mergedTargets = new Map<string, string>();
   authorDocCount += authorDocs.size;
@@ -102,14 +103,14 @@ for (const user of users.docs) {
 
   for (const [sourceId, targetId] of mergedTargets) {
     if (!authorDocIds.has(targetId)) {
-      found('authordoc.merge-target-missing', `${user.ref.path}/authors/${sourceId}`, targetId);
+      found('authordoc.merge-target-missing', `${user.path}/authors/${sourceId}`, targetId);
       continue;
     }
     const visited = new Set<string>();
     let current = sourceId;
     while (mergedTargets.has(current)) {
       if (visited.has(current)) {
-        found('authordoc.merge-cycle', `${user.ref.path}/authors/${sourceId}`, [...visited, current].join(' -> '));
+        found('authordoc.merge-cycle', `${user.path}/authors/${sourceId}`, [...visited, current].join(' -> '));
         break;
       }
       visited.add(current);
@@ -240,14 +241,13 @@ for (const user of users.docs) {
 
 // Orphans: parents that are listable but do not exist as documents, with
 // children underneath. Report-only, never repaired (see migrate-add-owner).
-const listedUsers = await db.collection('users').listDocuments();
-const existingUsers = new Set(users.docs.map((d) => d.id));
-for (const ref of listedUsers) {
+const existingUsers = new Set(userProfiles.docs.map((d) => d.id));
+for (const ref of users) {
   if (!existingUsers.has(ref.id)) found('orphan.user', ref.path);
 }
-for (const user of users.docs) {
-  const listedBooks = await user.ref.collection('books').listDocuments();
-  const existing = new Set((await user.ref.collection('books').get()).docs.map((d) => d.id));
+for (const user of users) {
+  const listedBooks = await user.collection('books').listDocuments();
+  const existing = new Set((await user.collection('books').get()).docs.map((d) => d.id));
   for (const ref of listedBooks) {
     if (!existing.has(ref.id)) found('orphan.book', ref.path);
   }
@@ -261,7 +261,7 @@ console.log('---');
 const counts: Record<string, number> = {};
 for (const f of findings) counts[f.cls] = (counts[f.cls] ?? 0) + 1;
 for (const cls of Object.keys(counts).sort()) console.log(`${cls}: ${counts[cls]}`);
-console.log(`users: ${users.size}`);
+console.log(`users: ${userProfiles.size}`);
 console.log(`author-docs: ${authorDocCount}`);
 console.log(`author-orphans: ${authorOrphanCount}`);
 console.log(`findings: ${findings.length}`);

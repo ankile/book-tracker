@@ -10,11 +10,20 @@ const db = getFirestore(initializeApp({projectId: 'book-tracker-d8f24'}, 'progre
 const uid = `progress-migration-${Date.now()}`;
 const userRef = db.doc(`users/${uid}`);
 const migrationPath = fileURLToPath(new URL('../migrate-reading-progress-sources.ts', import.meta.url));
+const timerMigrationPath = fileURLToPath(new URL('../migrate-timer-claims.ts', import.meta.url));
+const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url));
+const phantomUid = `phantom-timer-migration-${Date.now()}`;
+const phantomUserRef = db.doc(`users/${phantomUid}`);
 
-after(() => db.recursiveDelete(userRef));
+after(async () => {
+  await Promise.all([
+    db.recursiveDelete(userRef),
+    db.recursiveDelete(phantomUserRef),
+  ]);
+});
 
-function runMigration(...args: string[]) {
-  const result = spawnSync(process.execPath, [migrationPath, ...args], {
+function runScript(scriptPath: string, ...args: string[]) {
+  const result = spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: {...process.env},
     encoding: 'utf8',
@@ -37,11 +46,43 @@ test('progress-source migration dry-runs, applies, and is idempotent in Firestor
     }),
   ]);
 
-  assert.match(runMigration(), new RegExp(`DRY users/${uid}/books/legacy`));
+  assert.match(runScript(migrationPath), new RegExp(`DRY users/${uid}/books/legacy`));
   assert.equal((await bookRef.get()).data()?.currentPageUpdateId, undefined);
 
-  assert.match(runMigration('--apply'), new RegExp(`MIGRATE users/${uid}/books/legacy`));
+  assert.match(runScript(migrationPath, '--apply'), new RegExp(`MIGRATE users/${uid}/books/legacy`));
   assert.equal((await bookRef.get()).data()?.currentPageUpdateId, 'newer-correction');
 
-  assert.match(runMigration('--apply'), /0 books migrated/);
+  assert.match(runScript(migrationPath, '--apply'), /0 books migrated/);
+
+  await db.recursiveDelete(userRef);
+});
+
+test('timer migration and audit traverse books beneath a missing user document', async () => {
+  const bookRef = phantomUserRef.collection('books').doc('legacy');
+  await bookRef.set({activeTimer: null});
+  assert.equal((await phantomUserRef.get()).exists, false);
+
+  const auditBefore = runScript(auditPath);
+  assert.match(auditBefore, new RegExp(`orphan\\.user users/${phantomUid}`));
+  assert.match(
+    auditBefore,
+    new RegExp(`timer-lifecycle\\.missing users/${phantomUid}/timerLifecycle/current`),
+  );
+
+  assert.match(runScript(timerMigrationPath), new RegExp(`DRY users/${phantomUid} timer=idle`));
+  assert.equal((await phantomUserRef.collection('timerLifecycle').doc('current').get()).exists, false);
+
+  assert.match(runScript(timerMigrationPath, '--apply'), new RegExp(`MIGRATE users/${phantomUid} timer=idle`));
+  assert.equal(
+    (await phantomUserRef.collection('timerLifecycle').doc('current').get()).data()?.state,
+    'idle',
+  );
+  assert.match(runScript(timerMigrationPath, '--apply'), /0 users migrated/);
+
+  const auditAfter = runScript(auditPath);
+  assert.match(auditAfter, new RegExp(`orphan\\.user users/${phantomUid}`));
+  assert.doesNotMatch(
+    auditAfter,
+    new RegExp(`timer-lifecycle\\.missing users/${phantomUid}/timerLifecycle/current`),
+  );
 });
