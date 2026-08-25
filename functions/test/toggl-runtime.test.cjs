@@ -136,6 +136,9 @@ function installCorrelatedStopStore(t, mode) {
   const queueRef = {
     get: async () => snapshot(item),
     delete: async () => {
+      if (mode === "final-delete-fails" || mode === "lost-ack-delete-fails") {
+        throw new Error("terminal queue cleanup failed");
+      }
       queueRef.deleted = true;
     },
     deleted: false,
@@ -224,7 +227,10 @@ function installCorrelatedStopStore(t, mode) {
         },
         set: () => {},
       });
-      throw new Error("commit acknowledgement lost");
+      if (mode === "lost-ack" || mode === "lost-ack-delete-fails") {
+        throw new Error("commit acknowledgement lost");
+      }
+      return undefined;
     }
     if (mode === "recovery-write-fails") {
       throw new Error("recovery storage unavailable");
@@ -243,6 +249,7 @@ function installCorrelatedStopStore(t, mode) {
       params: {uid: "owner", queueId},
     },
     issues,
+    item,
     queueRef,
   };
 }
@@ -330,6 +337,35 @@ test("a lost correlated-stop commit acknowledgement cleans the synced row", asyn
 
   assert.equal(store.queueRef.deleted, true);
   assert.deepEqual(store.issues, []);
+});
+
+test("a failed correlated-stop cleanup retains a finite terminal expiry", async (t) => {
+  const store = installCorrelatedStopStore(t, "final-delete-fails");
+  t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /terminal queue cleanup failed/,
+  );
+
+  assert.equal(store.item.status, "synced");
+  assert.ok(store.item.expiresAt instanceof Timestamp);
+});
+
+test("a lost acknowledgement plus failed cleanup retains terminal expiry", async (t) => {
+  const store = installCorrelatedStopStore(t, "lost-ack-delete-fails");
+  const consoleErrors = [];
+  t.mock.method(console, "error", (...args) => consoleErrors.push(args));
+  t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /commit acknowledgement lost/,
+  );
+
+  assert.equal(store.item.status, "synced");
+  assert.ok(store.item.expiresAt instanceof Timestamp);
+  assert.match(String(consoleErrors[0]?.[0]), /persist Toggl stop recovery state/);
 });
 
 test("a failed correlated-stop recovery logs and preserves the original error", async (t) => {

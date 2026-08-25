@@ -947,6 +947,7 @@ exports.syncqueue = onDocumentWritten(
         start: claimedItem.start,
         queueId: event.params.queueId,
       };
+      const syncedExpiry = queueExpiry(Timestamp.now());
       try {
         await db.runTransaction(async (tx) => {
           const [queueSnap, bookSnap, claimSnap] = await Promise.all([
@@ -967,6 +968,7 @@ exports.syncqueue = onDocumentWritten(
           tx.update(after.ref, {
             status: "synced",
             entryId,
+            expiresAt: syncedExpiry,
             error: FieldValue.delete(),
             retryRequestedAt: FieldValue.delete(),
           });
