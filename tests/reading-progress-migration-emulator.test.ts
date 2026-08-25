@@ -7,6 +7,9 @@ import {fileURLToPath} from 'node:url';
 import {initializeApp} from 'firebase-admin/app';
 import {getFirestore, Timestamp} from 'firebase-admin/firestore';
 
+// Project-id parity is required because the migration scripts hardcode the
+// production namespace. The first-line setup import has already forced every
+// Admin connection onto loopback emulators, so this cannot select production.
 const db = getFirestore(initializeApp({projectId: 'book-tracker-d8f24'}, 'progress-migration-test'));
 const uid = `progress-migration-${Date.now()}`;
 const userRef = db.doc(`users/${uid}`);

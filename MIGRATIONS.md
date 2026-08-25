@@ -156,12 +156,20 @@ cached old client can submit an offline reading batch that omits the key and is
 rejected as a whole. A rejected batch loses the reading update rather than only
 its provenance.
 
-1. After the timer rollout deploys Hosting, let cached old clients reload and
-   the overlap window pass. Use the project's chosen stale-client support
-   window; do not use the progress backfill itself to force the transition.
-   Clients offline longer than the chosen overlap window remain a known risk:
-   their old queued reading batches can still reject after the backfill. Record
-   the chosen window and this residual risk in the rollout log.
+1. After the timer rollout deploys Hosting, wait a default **7-day overlap
+   window** before backfilling. Ask users to reload or close long-running tabs:
+   any still-running old bundle, online or offline, writes the old shape. An
+   old online tab rejects immediately after the backfill; an offline client
+   rejects when its queued batch reconnects. Clients that keep the old bundle
+   beyond seven days remain a known risk, so record the actual window and this
+   residual risk in the rollout log.
+
+   Session edit/delete rewind is deliberately disabled on un-backfilled books
+   during this window. If the establishing session changes or disappears, its
+   page remains as a safe baseline. A final
+   `book.progress-source-null-baseline` can therefore be a window artifact,
+   not missing legacy history; investigate it rather than accepting it in
+   bulk.
 2. Dry-run `migrate-reading-progress-sources.ts --prod` and review every line,
    then take a fresh production snapshot immediately before writing.
 3. Apply the migration twice; the second apply must report zero books. It

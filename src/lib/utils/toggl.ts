@@ -51,6 +51,14 @@ interface TogglRetryRequestTimestamp {
   toMillis(): number;
 }
 
+export function isExpectedTogglRetryMarkerDenial(item: {
+  status: string;
+  retryRequestedAt?: TogglRetryRequestTimestamp | null;
+}, errorCode: string): boolean {
+  return errorCode === 'permission-denied' &&
+    item.status === 'pending' && item.retryRequestedAt != null;
+}
+
 export function isTogglSweepTransactionCandidate(item: {
   status: string;
   attempts: number;

@@ -311,7 +311,7 @@ node db-audit.ts --prod
 npm run build
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hosting
 
-# 5. Before backfilling progress ownership, let cached old clients reload and the overlap window pass.
+# 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
 node migrate-reading-progress-sources.ts --prod
 node db-snapshot.ts --prod
 node migrate-reading-progress-sources.ts --prod --apply

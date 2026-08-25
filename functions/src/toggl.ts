@@ -834,6 +834,14 @@ exports.syncqueue = onDocumentWritten(
         current = decodeTogglQueueDocument(data);
       } catch (error) {
         const raw = errorMessage(error);
+        // Decode failure must not re-arm TTL on a correlated stop. Raw
+        // identity is enough to preserve the only recovery handle; the row
+        // remains operator-visible even if a future decoder rejects a shape
+        // that an earlier release wrote.
+        const malformedExpiry = data.type === "stop" &&
+            data.timerClaimVersion === 1 &&
+            typeof data.bookId === "string" ?
+          FieldValue.delete() : expiresAt;
         if (quota === null || quota.windowStartedAt.toMillis() <=
             now.toMillis() - TOGGL_QUEUE_WINDOW_MS) {
           tx.set(quotaRef, {windowStartedAt: now, count: 1});
@@ -844,7 +852,7 @@ exports.syncqueue = onDocumentWritten(
           status: "error",
           attempts: MAX_QUEUE_ATTEMPTS,
           claimedAt: now,
-          expiresAt,
+          expiresAt: malformedExpiry,
           error: `Malformed queue item: ${raw}`.slice(0, 1000),
           retryRequestedAt: FieldValue.delete(),
         });

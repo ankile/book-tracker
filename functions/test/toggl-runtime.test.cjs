@@ -553,6 +553,25 @@ test("a correlated stopping claim never loses its recovery row to TTL", async (t
   assert.deepEqual(store.transactionUpdates[0].expiresAt, FieldValue.delete());
 });
 
+test("a malformed correlated stop still keeps its recovery row TTL-immune", async (t) => {
+  const item = queueItem({
+    type: "stop",
+    bookId: "book",
+    timerClaimVersion: 1,
+    entryId: 52,
+    bookTitle: 42,
+  });
+  const store = installQueueStore(t, item);
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /book title must be a non-empty string/,
+  );
+
+  assert.equal(store.transactionUpdates[0].status, "error");
+  assert.deepEqual(store.transactionUpdates[0].expiresAt, FieldValue.delete());
+});
+
 test("queue quota increments, resets, and blocks remote work", async (t) => {
   const active = installQueueStore(t, queueItem(), {
     quota: {windowStartedAt: Timestamp.now(), count: 9},

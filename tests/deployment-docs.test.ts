@@ -39,7 +39,7 @@ test('the README deploys compatible Hosting before the progress-source backfill'
     'node migrate-timer-claims.ts --prod --apply',
     'node db-audit.ts --prod',
     'firebase deploy --only hosting',
-    'let cached old clients reload and the overlap window pass',
+    '7-day old-bundle overlap window',
     'node migrate-reading-progress-sources.ts --prod',
     'node db-snapshot.ts --prod',
     'node migrate-reading-progress-sources.ts --prod --apply',
@@ -65,7 +65,11 @@ test('the general migration order links to the timer-claim exception', async () 
   assert.match(migrations, /#### Reading-progress-source rollout/);
   assert.match(
     migrations,
-    /clients offline longer than the chosen overlap window[\s\S]*queued reading batches can still reject/i,
+    /default \*\*7-day overlap\s+window\*\*[\s\S]*still-running old bundle, online or offline/i,
+  );
+  assert.match(
+    migrations,
+    /Session edit\/delete rewind is deliberately disabled on un-backfilled books[\s\S]*window artifact/i,
   );
 });
 

@@ -33,6 +33,7 @@ import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { isFinished } from '../utils/finished.ts';
 import {
+  isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
   readTogglReportedIds,
   togglQueueId,
@@ -894,22 +895,38 @@ class Database {
       const retryable = decodedItems.filter(({ item }) =>
         isTogglSweepTransactionCandidate(item)
       );
-      await Promise.all(retryable.map(({ ref }) => runTransaction(db, async (tx) => {
-        const snap = await tx.get(ref);
-        if (!snap.exists()) return;
-        const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
-        if (item === null) return;
-        if (!isTogglSweepTransactionCandidate(item)) return;
-        const { status, attempts, claimedAt, createdAt } = item;
-        const retry =
-          status === 'error' ||
-          (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
-          (status === 'processing' && claimedAt !== null && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
-        if (retry) tx.update(ref, {
-          status: 'pending',
-          retryRequestedAt: serverTimestamp(),
-        });
-      })));
+      await Promise.all(retryable.map(async ({ ref }) => {
+        let attemptedItem: ReturnType<typeof decodeLiveQueueSweepItem> = null;
+        try {
+          await runTransaction(db, async (tx) => {
+            attemptedItem = null;
+            const snap = await tx.get(ref);
+            if (!snap.exists()) return;
+            const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
+            if (item === null) return;
+            if (!isTogglSweepTransactionCandidate(item)) return;
+            const { status, claimedAt, createdAt } = item;
+            const retry =
+              status === 'error' ||
+              (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
+              (status === 'processing' && claimedAt !== null && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
+            if (!retry) return;
+            attemptedItem = item;
+            tx.update(ref, {
+              status: 'pending',
+              retryRequestedAt: serverTimestamp(),
+            });
+          });
+        } catch (error) {
+          // The marker uses request.time while the sweep uses the device
+          // clock. A fast device can ask slightly before the server's
+          // ten-minute window opens. That expected denial must not abort the
+          // rest of the sweep or show a permanent write-failure toast.
+          if (error instanceof FirebaseError && attemptedItem !== null &&
+              isExpectedTogglRetryMarkerDenial(attemptedItem, error.code)) return;
+          throw error;
+        }
+      }));
       return true;
     });
   }

@@ -10,6 +10,7 @@ import {
   timerClaimPlanIsApplied,
 } from '../timer-claim-migration.ts';
 import {
+  isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
   parseTogglReportedIds,
   readTogglReportedIds,
@@ -66,6 +67,22 @@ test('the sweep opens transactions only for retryable lifecycle rows', () => {
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 4}, now.toMillis()), true);
   assert.equal(isTogglSweepTransactionCandidate({status: 'outcome-unknown', attempts: 1}, now.toMillis()), false);
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 5}, now.toMillis()), false);
+});
+
+test('only a pending retry marker can absorb a clock-skew rule denial', () => {
+  const marker = Timestamp.now();
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'pending', retryRequestedAt: marker,
+  }, 'permission-denied'), true);
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'pending', retryRequestedAt: null,
+  }, 'permission-denied'), false);
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'error', retryRequestedAt: marker,
+  }, 'permission-denied'), false);
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'pending', retryRequestedAt: marker,
+  }, 'unavailable'), false);
 });
 
 test('timer claim helpers preserve exact local, remote, and stopping identities', () => {

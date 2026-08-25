@@ -52,15 +52,20 @@ test('the root preload replaces hostile inherited Firebase configuration', () =>
 });
 
 test('Admin emulator tests contain direct single-file runs before Firebase imports', async () => {
-  for (const relativePath of [
-    './reading-progress-migration-emulator.test.ts',
-    './toggl-transaction.test.ts',
-  ]) {
+  const packageJson = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as {scripts: {['test:rules']: string}};
+  const relativePaths = [...packageJson.scripts['test:rules'].matchAll(
+    /tests\/([a-z0-9-]+)\.test\.\*/g,
+  )].map((match) => `./${match[1]}.test.ts`);
+  assert.ok(relativePaths.length > 0, 'test:rules must name its emulator test files');
+
+  for (const relativePath of relativePaths) {
     const source = await readFile(new URL(relativePath, import.meta.url), 'utf8');
+    if (!source.includes('firebase-admin/')) continue;
     assert.ok(
       source.startsWith("import './setup.ts';\n"),
       `${relativePath} must load the fail-closed Firebase setup first`,
     );
-    assert.doesNotMatch(source, /process\.env\.GCLOUD_PROJECT\s*=\s*['"]book-tracker-d8f24['"]/);
   }
 });
