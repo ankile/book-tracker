@@ -7,6 +7,11 @@
   import { formatTime } from "$lib/utils/format.ts";
   import { acceptReportedWrite } from "$lib/utils/offlineWrite.ts";
   import { precedingProgressUpdate } from "$lib/utils/readingSessionMutation.ts";
+  import {
+    readingSessionMutationConfirmed,
+    readingSessionVersion,
+    type PendingReadingSessionMutation,
+  } from "$lib/utils/readingSessionLatch.ts";
   import type { Book } from "$lib/interfaces/book.ts";
   import type { BookUpdate, ReadingSession } from "$lib/interfaces/reading.ts";
   import type { TimestampLike } from "$lib/interfaces/common.ts";
@@ -23,15 +28,30 @@
   );
   let sessionWrite = $state({ accepted: false });
   let sessionWriteError = $state('');
+  let pendingSessionWrite = $state<PendingReadingSessionMutation | null>(null);
+  let nextSessionOperationId = 0;
+  let bookId = $derived(book.id);
+
+  function releaseSessionWrite(operationId: number) {
+    if (pendingSessionWrite?.operationId !== operationId) return;
+    pendingSessionWrite = null;
+    sessionWrite.accepted = false;
+  }
+
+  function releaseWhenSettled(completion: Promise<void> | null, operationId: number | null) {
+    if (completion === null || operationId === null) return;
+    void completion.then(() => releaseSessionWrite(operationId));
+  }
+
   $effect(() => {
-    if (book && userId) {
-      const updatesStore = Database.getBookUpdates(userId, book.id);
+    if (bookId && userId) {
+      const updatesStore = Database.getBookUpdates(userId, bookId);
       const unsubscribeStore = updatesStore.subscribe((data) => {
         updates = data;
-        // A local snapshot confirms the accepted batch changed or removed
-        // its row; only then can another session mutation be issued.
-        sessionWrite.accepted = false;
-        sessionWriteError = '';
+        if (pendingSessionWrite !== null &&
+            readingSessionMutationConfirmed(pendingSessionWrite, data)) {
+          releaseSessionWrite(pendingSessionWrite.operationId);
+        }
       });
       return unsubscribeStore;
     }
@@ -64,7 +84,8 @@
     if (session === undefined) throw new Error('The reading session is no longer loaded.');
     sessionWriteError = '';
     let accepted = false;
-    void acceptReportedWrite(
+    let operationId: number | null = null;
+    const completion = acceptReportedWrite(
       sessionWrite,
       () => Database.updateReadingSession({
         userId,
@@ -78,11 +99,19 @@
       }),
       () => {
         accepted = true;
+        operationId = ++nextSessionOperationId;
+        pendingSessionWrite = {
+          operationId,
+          kind: 'edit',
+          sessionId: session.id,
+          priorVersion: readingSessionVersion(session),
+        };
       },
       (error) => {
         sessionWriteError = error instanceof Error ? error.message : String(error);
       },
     );
+    releaseWhenSettled(completion, operationId);
     return accepted;
   }
 
@@ -94,7 +123,8 @@
     const confirmed = confirm("Are you sure you want to delete this reading session? This will update your book's progress accordingly.");
     if (confirmed) {
       sessionWriteError = '';
-      void acceptReportedWrite(
+      let operationId: number | null = null;
+      const completion = acceptReportedWrite(
         sessionWrite,
         () => Database.deleteReadingSession({
           userId,
@@ -106,11 +136,15 @@
             ? precedingProgressUpdate(updates, session)
             : null,
         }),
-        () => {},
+        () => {
+          operationId = ++nextSessionOperationId;
+          pendingSessionWrite = {operationId, kind: 'delete', sessionId: session.id};
+        },
         (error) => {
           sessionWriteError = error instanceof Error ? error.message : String(error);
         },
       );
+      releaseWhenSettled(completion, operationId);
     }
   }
 </script>

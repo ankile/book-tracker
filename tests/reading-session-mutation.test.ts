@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {acceptReportedWrite} from '../src/lib/utils/offlineWrite.ts';
+import {
+  readingSessionMutationConfirmed,
+  readingSessionVersion,
+} from '../src/lib/utils/readingSessionLatch.ts';
 import {
   planReadingSessionDelete,
   planReadingSessionUpdate,
@@ -140,4 +145,35 @@ test('progress predecessor selection is deterministic and rejects a wrong endpoi
     ),
     /does not establish/,
   );
+});
+
+test('stale snapshot echoes keep edit and delete mutation latches closed', () => {
+  const version = (seconds: number, nanoseconds = 0) => ({seconds, nanoseconds});
+  const stale = {id: 'session', updatedAt: version(1)};
+  const unrelated = {id: 'other', updatedAt: version(2)};
+  const edit = {
+    operationId: 1,
+    kind: 'edit' as const,
+    sessionId: 'session',
+    priorVersion: readingSessionVersion(stale),
+  };
+  const deletion = {operationId: 2, kind: 'delete' as const, sessionId: 'session'};
+
+  assert.equal(readingSessionMutationConfirmed(edit, [{...stale}, unrelated]), false);
+  assert.equal(readingSessionMutationConfirmed(edit, [
+    {id: 'session', updatedAt: version(1, 1)}, unrelated,
+  ]), true);
+  assert.equal(readingSessionMutationConfirmed(deletion, [{...stale}, unrelated]), false);
+  assert.equal(readingSessionMutationConfirmed(deletion, [unrelated]), true);
+
+  const latch = {accepted: true};
+  let duplicateWrites = 0;
+  if (readingSessionMutationConfirmed(deletion, [{...stale}])) latch.accepted = false;
+  assert.equal(acceptReportedWrite(
+    latch,
+    async () => { duplicateWrites += 1; },
+    () => {},
+    () => {},
+  ), null);
+  assert.equal(duplicateWrites, 0);
 });
