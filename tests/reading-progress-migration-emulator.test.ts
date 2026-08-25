@@ -59,7 +59,8 @@ test('progress-source migration dry-runs, applies, and is idempotent in Firestor
 
 test('timer migration and audit traverse books beneath a missing user document', async () => {
   const bookRef = phantomUserRef.collection('books').doc('legacy');
-  await bookRef.set({activeTimer: null});
+  const start = '2026-08-25T12:00:00.000Z';
+  await bookRef.set({activeTimer: {start}});
   assert.equal((await phantomUserRef.get()).exists, false);
 
   const auditBefore = runScript(auditPath);
@@ -69,14 +70,21 @@ test('timer migration and audit traverse books beneath a missing user document',
     new RegExp(`timer-lifecycle\\.missing users/${phantomUid}/timerLifecycle/current`),
   );
 
-  assert.match(runScript(timerMigrationPath), new RegExp(`DRY users/${phantomUid} timer=idle`));
+  assert.match(runScript(timerMigrationPath), new RegExp(`DRY users/${phantomUid} timer=local`));
   assert.equal((await phantomUserRef.collection('timerLifecycle').doc('current').get()).exists, false);
 
-  assert.match(runScript(timerMigrationPath, '--apply'), new RegExp(`MIGRATE users/${phantomUid} timer=idle`));
-  assert.equal(
-    (await phantomUserRef.collection('timerLifecycle').doc('current').get()).data()?.state,
-    'idle',
-  );
+  assert.match(runScript(timerMigrationPath, '--apply'), new RegExp(`MIGRATE users/${phantomUid} timer=local`));
+  const migratedBook = (await bookRef.get()).data();
+  const lifecycle = (await phantomUserRef.collection('timerLifecycle').doc('current').get()).data();
+  assert.equal(typeof migratedBook?.activeTimer.operationId, 'string');
+  assert.deepEqual(lifecycle, {
+    version: 1,
+    state: 'local',
+    bookId: 'legacy',
+    operationId: migratedBook?.activeTimer.operationId,
+    start,
+  });
+  assert.equal((await phantomUserRef.get()).exists, false);
   assert.match(runScript(timerMigrationPath, '--apply'), /0 users migrated/);
 
   const auditAfter = runScript(auditPath);

@@ -95,7 +95,11 @@ export function parseFlags(argv: string[]): MigrationFlags {
   for (const arg of argv) {
     if (arg === '--prod') flags.prod = true;
     else if (arg === '--apply') flags.apply = true;
-    else if (arg.startsWith('--database=')) flags.database = arg.slice('--database='.length);
+    else if (arg.startsWith('--database=')) {
+      const database = arg.slice('--database='.length);
+      if (database === '') throw new Error('database id must not be empty');
+      flags.database = database;
+    }
     else if (arg.startsWith('--')) throw new Error(`unknown flag ${arg}`);
     else flags.rest.push(arg);
   }
@@ -112,6 +116,7 @@ export async function connect({
   database,
   confirmWrite = false,
 }: ConnectOptions): Promise<{ db: Firestore }> {
+  if (database === '') throw new Error('database id must not be empty');
   let app;
   if (prod) {
     if (process.env.FIRESTORE_EMULATOR_HOST) {
@@ -130,7 +135,7 @@ export async function connect({
         privateKey: key.private_key,
       }),
     });
-    console.log(`TARGET: PRODUCTION ${PROJECT_ID}${database ? ` database=${database}` : ''}`);
+    console.log(`TARGET: PRODUCTION ${PROJECT_ID}${database !== undefined ? ` database=${database}` : ''}`);
     if (confirmWrite) {
       const rl = createInterface({ input: stdin, output: stdout });
       const answer = await rl.question(`This WRITES to production. Type the project id to continue: `);
@@ -141,10 +146,13 @@ export async function connect({
     if (!process.env.FIRESTORE_EMULATOR_HOST) {
       throw new Error('no FIRESTORE_EMULATOR_HOST set — start the emulator, or pass --prod for production');
     }
+    if (!/^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST)) {
+      throw new Error('Firestore emulator host must be loopback (127.0.0.1 or localhost)');
+    }
     app = initializeApp({ projectId: PROJECT_ID });
     console.log(`TARGET: emulator ${process.env.FIRESTORE_EMULATOR_HOST} (${PROJECT_ID})`);
   }
-  return { db: database ? getFirestore(app, database) : getFirestore(app) };
+  return { db: database !== undefined ? getFirestore(app, database) : getFirestore(app) };
 }
 
 // Batched writer with dry-run counting and 500-op rollover.

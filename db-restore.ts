@@ -35,12 +35,12 @@ interface SnapshotDump {
 }
 
 const flags = parseFlags(process.argv.slice(2));
-const [file] = flags.rest;
-if (!file) {
+if (flags.rest.length !== 1) {
   throw new Error(
-    'usage: node db-restore.ts <snapshot.json> [--prod] [--apply] [--database=<id>]',
+    'restore requires exactly one snapshot file: node db-restore.ts <snapshot.json> [--prod] [--apply] [--database=<id>]',
   );
 }
+const [file] = flags.rest;
 
 const dump: SnapshotDump = JSON.parse(readFileSync(file, 'utf8'));
 if (dump.projectId !== PROJECT_ID) {

@@ -77,6 +77,17 @@ test('connect defaults to the configured emulator without reading production cre
   assert.doesNotMatch(result.stderr, /serviceAccountKey\.json/);
 });
 
+test('connect refuses a non-loopback host presented as an emulator', () => {
+  const result = runConnect(
+    '{ prod: false }',
+    { env: { ...process.env, FIRESTORE_EMULATOR_HOST: 'firestore.googleapis.com:443' } },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /emulator host must be loopback/);
+  assert.doesNotMatch(result.stdout, /TARGET:/);
+});
+
 test('connect refuses contradictory production and emulator targets', () => {
   const result = runConnect(
     '{ prod: true }',
@@ -184,5 +195,17 @@ test('restore rejects an unknown flag before selecting a target', () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unknown flag --aply/);
+  assert.doesNotMatch(result.stdout, /DRY RUN|APPLY MODE|TARGET:/);
+});
+
+test('restore rejects extra positional arguments before selecting a target', () => {
+  const result = spawnSync(
+    process.execPath,
+    [restorePath, 'snapshot.json', 'recovered'],
+    { env: environmentWithoutEmulator(), encoding: 'utf8', timeout: 5_000 },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /requires exactly one snapshot file/);
   assert.doesNotMatch(result.stdout, /DRY RUN|APPLY MODE|TARGET:/);
 });

@@ -293,7 +293,7 @@
       return;
     }
     const confirmed = confirm(
-      'Only clear this after checking Toggl and stopping or deleting the remote timer there. Clear the capped local stop and queue now?',
+      'Only clear this after checking Toggl and stopping or deleting the remote timer there. Clear the failed local stop and queue now?',
     );
     if (!confirmed) return;
     busy = true;

@@ -101,6 +101,7 @@ test("flags parse and unknown flags crash", () => {
   const flags = parseFlags(["snapshots/x.json", "--prod", "--apply", "--database=recovered"]);
   assert.deepEqual(flags, { prod: true, apply: true, database: "recovered", rest: ["snapshots/x.json"] });
   assert.throws(() => parseFlags(["--aply"]), /unknown flag/);
+  assert.throws(() => parseFlags(["--database="]), /database id must not be empty/);
 });
 
 test("restore dry-run banners say nothing was written and give the exact apply command", () => {
