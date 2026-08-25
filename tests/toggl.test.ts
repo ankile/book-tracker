@@ -111,6 +111,29 @@ test('timer claim migration is deterministic, strict, and idempotent after a lat
   ]), /positive safe integer/);
 });
 
+test('timer claim migration rejects normalized calendar timestamps', () => {
+  for (const start of [
+    '2026-02-30T12:00:00.000Z',
+    '2025-02-29T12:00:00Z',
+    '2026-04-31T12:00:00Z',
+    '2026-01-01T24:00:00Z',
+  ]) {
+    assert.throws(
+      () => planTimerClaim([{id: 'book', data: {activeTimer: {start}}}]),
+      /must be an ISO timestamp/,
+    );
+  }
+
+  for (const start of [
+    '2024-02-29T23:59:59Z',
+    '2024-02-29T23:59:59.123456789+05:30',
+  ]) {
+    const plan = planTimerClaim([{id: 'book', data: {activeTimer: {start}}}]);
+    assert.equal(plan.claim.state, 'local');
+    if (plan.claim.state === 'local') assert.equal(plan.claim.start, start);
+  }
+});
+
 test('stored lifecycle decoder rejects malformed active and cleared claims', () => {
   const claimedAt = Timestamp.now();
   assert.deepEqual(decodeMigratedTimerClaim({

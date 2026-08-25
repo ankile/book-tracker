@@ -44,10 +44,31 @@ function text(value: unknown, label: string, maximum: number): string {
   return value;
 }
 
+const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function calendarValidIsoTimestamp(value: string): boolean {
+  const match = ISO_TIMESTAMP.exec(value);
+  if (match === null || !Number.isFinite(Date.parse(value))) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(hour, minute, second, 0);
+  return calendar.getUTCFullYear() === year &&
+    calendar.getUTCMonth() === month - 1 &&
+    calendar.getUTCDate() === day &&
+    calendar.getUTCHours() === hour &&
+    calendar.getUTCMinutes() === minute &&
+    calendar.getUTCSeconds() === second;
+}
+
 function iso(value: unknown, label: string): string {
   const result = text(value, label, 64);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(result) ||
-      !Number.isFinite(Date.parse(result))) {
+  if (!calendarValidIsoTimestamp(result)) {
     throw new TypeError(`${label} must be an ISO timestamp`);
   }
   return result;

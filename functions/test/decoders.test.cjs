@@ -120,6 +120,28 @@ test("stored Toggl configuration and timer books are decoded field by field", ()
     }),
     /entry id must be a finite number|ISO-8601/,
   );
+  for (const start of [
+    "2026-02-30T12:00:00.000Z",
+    "2025-02-29T12:00:00Z",
+    "2026-04-31T12:00:00Z",
+    "2026-01-01T24:00:00Z",
+  ]) {
+    assert.throws(
+      () => decoders.decodeBookForTimer({
+        title: "The Book",
+        activeTimer: {start},
+      }),
+      /ISO-8601/,
+    );
+  }
+  const precise = "2024-02-29T23:59:59.123456789+05:30";
+  assert.deepEqual(decoders.decodeBookForTimer({
+    title: "The Book",
+    activeTimer: {start: precise},
+  }), {
+    title: "The Book",
+    activeTimer: {start: precise},
+  });
 });
 
 test("external Toggl and Google responses are runtime checked", () => {

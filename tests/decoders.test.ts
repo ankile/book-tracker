@@ -252,6 +252,22 @@ test('book decoder rejects malformed timer lifecycle data', () => {
     }), 'users/owner/books/book'),
     /queueId/,
   );
+  for (const start of [
+    '2026-02-30T12:00:00.000Z',
+    '2025-02-29T12:00:00Z',
+    '2026-04-31T12:00:00Z',
+    '2026-01-01T24:00:00Z',
+  ]) {
+    assert.throws(
+      () => decodeBook('book', bookData({start}), 'users/owner/books/book'),
+      /ISO timestamp/,
+    );
+  }
+  const precise = '2024-02-29T23:59:59.123456789+05:30';
+  assert.deepEqual(
+    decodeBook('book', bookData({start: precise}), 'users/owner/books/book').activeTimer,
+    {start: precise},
+  );
 });
 
 const queueData = (overrides: Record<string, unknown> = {}) => ({
