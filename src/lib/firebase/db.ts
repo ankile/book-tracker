@@ -244,6 +244,7 @@ interface AddBookInput {
 
 interface UpdateBookInput extends AddBookInput {
   bookId: string;
+  pageCountClampFrom: number | null;
 }
 
 interface UpdateAuthorInput extends AuthorNameInput {
@@ -611,19 +612,39 @@ class Database {
     return batch.commit();
   }
 
-  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, isbn, metadata }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, pageCountClampFrom, isbn, metadata }: UpdateBookInput): Promise<void> {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
+    let correctionId: string | null = null;
+    if (pageCountClampFrom !== null) {
+      const correctionRef = doc(collection(db, 'users', userId, 'books', bookId, 'updates'));
+      correctionId = correctionRef.id;
+      batch.set(correctionRef, {
+        owner: doc(db, 'users', userId),
+        book: bookRef,
+        type: 'update',
+        fromPage: pageCountClampFrom,
+        toPage: currentPage,
+        pagesRead: currentPage - pageCountClampFrom,
+        updatedAt: Timestamp.now(),
+        createdAt: Timestamp.now(),
+      });
+    }
 
-    // currentPage is the book's existing value, passed in only so the
-    // finished flag tracks the (possibly edited) pageCount; the page
-    // itself is not written here.
+    // Ordinarily metadata edits do not rewrite progress. Shrinking below the
+    // rendered page creates a correlated correction row in the same batch.
+    // Its fromPage is the optimistic-concurrency claim enforced by rules, so
+    // a newer remote reading rejects the whole stale offline edit.
     batch.update(bookRef, {
       authorIds: resolveAuthorIds(batch, userId, authorChips),
       author: deleteField(),
       authors: deleteField(),
       title,
       pageCount,
+      ...(correctionId === null ? {} : {
+        currentPage,
+        currentPageUpdateId: correctionId,
+      }),
       finished: isFinished(currentPage, pageCount),
       isbn,
       ...metadata,

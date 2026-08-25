@@ -76,6 +76,14 @@ const readingBook = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const creatableBook = (overrides: Record<string, unknown> = {}) => readingBook({
+  currentPage: 0,
+  currentPageUpdateId: null,
+  pagesRead: 0,
+  timeRead: 0,
+  ...overrides,
+});
+
 const legacyReadingBook = (overrides: Record<string, unknown> = {}) => {
   const { currentPageUpdateId: _source, ...book } = readingBook(overrides);
   return book;
@@ -190,6 +198,25 @@ test('profile field limits reject oversized and malformed data', async () => {
   await assertFails(setDoc(doc(db, 'profiles', 'Bad Slug'), profile('owner')));
 });
 
+test('book creation requires complete, consistent, JS-safe page state', async () => {
+  const uid = 'book-create-page-state';
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'valid'), creatableBook()));
+
+  const invalidBooks: Record<string, Record<string, unknown>> = {
+    missing: { title: 'Missing state', activeTimer: null },
+    fractional: creatableBook({ pageCount: 100.5 }),
+    nonPositive: creatableBook({ pageCount: 0, currentPage: 0, finished: true }),
+    unsafe: creatableBook({ pageCount: Number.MAX_SAFE_INTEGER + 1 }),
+    beyondCount: creatableBook({ currentPage: 101 }),
+    wrongFinished: creatableBook({ currentPage: 100, finished: false }),
+  };
+  for (const [id, book] of Object.entries(invalidBooks)) {
+    await assertFails(setDoc(doc(books, id), book));
+  }
+});
+
 test('reading and page-correction creates move the correlated book atomically', async () => {
   const uid = 'reading-create';
   const bookId = 'book';
@@ -248,6 +275,319 @@ test('reading and page-correction creates move the correlated book atomically', 
     updatedAt: Timestamp.now(),
   });
   await assertFails(stale.commit());
+});
+
+test('an offline page-count shrink writes a correlated correction and clamps atomically', async () => {
+  const uid = 'page-count-clamp';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const priorRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'prior-reading');
+  const correctionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'page-count-clamp');
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook({
+      authorIds: ['author'],
+      currentPage: 350,
+      currentPageUpdateId: 'prior-reading',
+      pageCount: 400,
+      finished: false,
+      isbn: '',
+      coverUrl: '',
+      publisher: '',
+      publishedDate: '',
+      subjects: [],
+      fiction: null,
+    }));
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'prior-reading'),
+      pageCorrectionEntry(seed, uid, bookId, {
+        fromPage: 300,
+        toPage: 350,
+        pagesRead: 50,
+      }),
+    );
+  });
+  await getDoc(bookRef);
+  await disableNetwork(db);
+
+  const batch = writeBatch(db);
+  batch.set(correctionRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 350,
+    toPage: 320,
+    pagesRead: -30,
+  }));
+  batch.update(bookRef, {
+    authorIds: ['author'],
+    title: 'Corrected edition',
+    pageCount: 320,
+    currentPage: 320,
+    currentPageUpdateId: correctionRef.id,
+    finished: true,
+    isbn: '',
+    coverUrl: '',
+    publisher: '',
+    publishedDate: '',
+    subjects: [],
+    fiction: null,
+    updatedAt: Timestamp.now(),
+  });
+  const completion = batch.commit();
+  const [localBook, localCorrection] = await Promise.all([
+    getDocFromCache(bookRef),
+    getDocFromCache(correctionRef),
+  ]);
+  assert.equal(localBook.metadata.hasPendingWrites, true);
+  assert.equal(localBook.data()?.pageCount, 320);
+  assert.equal(localBook.data()?.currentPage, 320);
+  assert.equal(localBook.data()?.currentPageUpdateId, 'page-count-clamp');
+  assert.equal(localBook.data()?.finished, true);
+  assert.equal(localCorrection.data()?.pagesRead, -30);
+
+  await enableNetwork(db);
+  await completion;
+  const saved = (await getDoc(bookRef)).data();
+  assert.equal(saved?.pageCount, 320);
+  assert.equal(saved?.currentPage, 320);
+  assert.equal(saved?.currentPageUpdateId, 'page-count-clamp');
+  assert.equal((await getDoc(priorRef)).exists(), true);
+
+  await assertSucceeds(updateDoc(bookRef, {
+    pageCount: 500,
+    finished: false,
+    updatedAt: Timestamp.now(),
+  }));
+  assert.equal((await getDoc(bookRef)).data()?.currentPageUpdateId, 'page-count-clamp');
+  await assertSucceeds(updateDoc(bookRef, {
+    pageCount: 320,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  }));
+  assert.equal((await getDoc(bookRef)).data()?.currentPageUpdateId, 'page-count-clamp');
+
+  await assertFails(updateDoc(bookRef, {
+    pageCount: 300,
+    finished: false,
+    updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(bookRef, {
+    pageCount: 500,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(bookRef, {
+    pageCount: 0,
+    currentPage: 0,
+    currentPageUpdateId: null,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  }));
+
+  await assertSucceeds(updateDoc(bookRef, {
+    pageCount: 500,
+    finished: false,
+    updatedAt: Timestamp.now(),
+  }));
+  const extraRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'extra-field-clamp');
+  const extra = writeBatch(db);
+  extra.set(extraRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 320,
+    toPage: 300,
+    pagesRead: -20,
+  }));
+  extra.update(bookRef, {
+    pageCount: 300,
+    currentPage: 300,
+    currentPageUpdateId: extraRef.id,
+    finished: true,
+    unexpectedField: 'not editable metadata',
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(extra.commit());
+});
+
+test('a page-count clamp establishes progress provenance on a legacy book', async () => {
+  const uid = 'page-count-clamp-legacy';
+  const bookId = 'book';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const correctionRef = doc(
+    db,
+    'users',
+    uid,
+    'books',
+    bookId,
+    'updates',
+    'legacy-clamp',
+  );
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'books', bookId),
+      legacyReadingBook({ currentPage: 350, pageCount: 400, finished: false }),
+    );
+  });
+
+  const batch = writeBatch(db);
+  batch.set(correctionRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 350,
+    toPage: 320,
+    pagesRead: -30,
+  }));
+  batch.update(bookRef, {
+    pageCount: 320,
+    currentPage: 320,
+    currentPageUpdateId: correctionRef.id,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(batch.commit());
+  const saved = (await getDoc(bookRef)).data();
+  assert.equal(saved?.currentPage, 320);
+  assert.equal(saved?.currentPageUpdateId, 'legacy-clamp');
+});
+
+test('a stale offline page-count clamp rejects and rolls back after a newer reading', async () => {
+  const uid = 'page-count-clamp-stale';
+  const bookId = 'book';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook({
+      currentPage: 350,
+      currentPageUpdateId: 'prior-reading',
+      pageCount: 400,
+      finished: false,
+      pagesRead: 350,
+      timeRead: 60,
+    }));
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'prior-reading'),
+      pageCorrectionEntry(seed, uid, bookId, {
+        fromPage: 300,
+        toPage: 350,
+        pagesRead: 50,
+      }),
+    );
+  });
+
+  const staleDb = environment.authenticatedContext(uid).firestore();
+  const staleBookRef = doc(staleDb, 'users', uid, 'books', bookId);
+  const staleCorrectionRef = doc(
+    staleDb,
+    'users',
+    uid,
+    'books',
+    bookId,
+    'updates',
+    'stale-clamp',
+  );
+  await getDoc(staleBookRef);
+  await disableNetwork(staleDb);
+
+  const stale = writeBatch(staleDb);
+  stale.set(staleCorrectionRef, pageCorrectionEntry(staleDb, uid, bookId, {
+    fromPage: 350,
+    toPage: 320,
+    pagesRead: -30,
+  }));
+  stale.update(staleBookRef, {
+    title: 'Stale metadata title',
+    pageCount: 320,
+    currentPage: 320,
+    currentPageUpdateId: staleCorrectionRef.id,
+    finished: true,
+    updatedAt: Timestamp.now(),
+  });
+  const staleCompletion = stale.commit();
+  assert.equal((await getDocFromCache(staleBookRef)).data()?.currentPage, 320);
+  assert.equal((await getDocFromCache(staleCorrectionRef)).exists(), true);
+
+  const winnerDb = environment.authenticatedContext(uid).firestore();
+  const winnerBookRef = doc(winnerDb, 'users', uid, 'books', bookId);
+  const winnerRef = doc(winnerDb, 'users', uid, 'books', bookId, 'updates', 'winner-reading');
+  const winner = writeBatch(winnerDb);
+  winner.set(winnerRef, readingEntry(winnerDb, uid, bookId, {
+    fromPage: 350,
+    toPage: 360,
+    pagesRead: 10,
+  }));
+  winner.update(winnerBookRef, {
+    currentPage: 360,
+    currentPageUpdateId: winnerRef.id,
+    finished: false,
+    pagesRead: increment(10),
+    timeRead: increment(30),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(winner.commit());
+
+  await enableNetwork(staleDb);
+  await assert.rejects(staleCompletion);
+  const [rolledBackBook, rolledBackCorrection] = await Promise.all([
+    getDoc(staleBookRef),
+    getDoc(staleCorrectionRef),
+  ]);
+  assert.equal(rolledBackBook.data()?.title, 'Reading book');
+  assert.equal(rolledBackBook.data()?.pageCount, 400);
+  assert.equal(rolledBackBook.data()?.currentPage, 360);
+  assert.equal(rolledBackBook.data()?.currentPageUpdateId, 'winner-reading');
+  assert.equal(rolledBackBook.data()?.pagesRead, 360);
+  assert.equal(rolledBackCorrection.exists(), false);
+});
+
+test('a stale ordinary metadata edit preserves concurrent reading progress', async () => {
+  const uid = 'page-count-metadata-race';
+  const bookId = 'book';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'books', bookId),
+      readingBook({
+        currentPage: 350,
+        currentPageUpdateId: 'prior-reading',
+        pageCount: 400,
+        pagesRead: 350,
+      }),
+    );
+  });
+
+  const staleDb = environment.authenticatedContext(uid).firestore();
+  const staleBookRef = doc(staleDb, 'users', uid, 'books', bookId);
+  await getDoc(staleBookRef);
+  await disableNetwork(staleDb);
+  const staleCompletion = updateDoc(staleBookRef, {
+    title: 'Offline metadata title',
+    pageCount: 390,
+    finished: false,
+    updatedAt: Timestamp.now(),
+  });
+  assert.equal((await getDocFromCache(staleBookRef)).data()?.pageCount, 390);
+
+  const winnerDb = environment.authenticatedContext(uid).firestore();
+  const winnerBookRef = doc(winnerDb, 'users', uid, 'books', bookId);
+  const winnerRef = doc(winnerDb, 'users', uid, 'books', bookId, 'updates', 'winner-reading');
+  const winner = writeBatch(winnerDb);
+  winner.set(winnerRef, readingEntry(winnerDb, uid, bookId, {
+    fromPage: 350,
+    toPage: 360,
+    pagesRead: 10,
+  }));
+  winner.update(winnerBookRef, {
+    currentPage: 360,
+    currentPageUpdateId: winnerRef.id,
+    finished: false,
+    pagesRead: increment(10),
+    timeRead: increment(30),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(winner.commit());
+
+  await enableNetwork(staleDb);
+  await staleCompletion;
+  const saved = (await getDoc(staleBookRef)).data();
+  assert.equal(saved?.title, 'Offline metadata title');
+  assert.equal(saved?.pageCount, 390);
+  assert.equal(saved?.currentPage, 360);
+  assert.equal(saved?.currentPageUpdateId, 'winner-reading');
+  assert.equal(saved?.pagesRead, 360);
 });
 
 test('session mutations pin the row and correlated aggregate invariants', async () => {
@@ -1131,7 +1471,7 @@ test('book owners cannot forge or erase server-owned Toggl start claims', async 
   const uid = 'timer-owner';
   const db = environment.authenticatedContext(uid).firestore();
   const ref = doc(db, 'users', uid, 'books', 'book');
-  await assertSucceeds(setDoc(ref, {title: 'Book', activeTimer: null}));
+  await assertSucceeds(setDoc(ref, creatableBook()));
   await assertSucceeds(updateDoc(ref, {
     activeTimer: {start: '2026-08-24T12:00:00.000Z'},
   }));

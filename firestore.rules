@@ -9,10 +9,12 @@ service cloud.firestore {
       allow create: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validInitialBookTimer()
+                    && validBookPageState(request.resource.data)
                     && request.resource.data.get('currentPageUpdateId', null) == null;
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validBookTimerTransition()
+                    && validBookPageStateTransition()
                     && validBookProgressSourceTransition(userId, bookId);
       // A local timer has no remote side effect. The UI explicitly warns
       // that its unsaved interval will be lost. Server-backed and uncertain
@@ -74,9 +76,13 @@ service cloud.firestore {
                   ])))
              && entry.fromPage is int
              && entry.fromPage >= 0
+             && entry.fromPage <= 9007199254740991
              && entry.toPage is int
              && entry.toPage >= 0
+             && entry.toPage <= 9007199254740991
              && entry.pagesRead is int
+             && entry.pagesRead >= -9007199254740991
+             && entry.pagesRead <= 9007199254740991
              && entry.pagesRead == entry.toPage - entry.fromPage
              && entry.updatedAt is timestamp
              && entry.createdAt is timestamp;
@@ -103,9 +109,13 @@ service cloud.firestore {
              && after.fromPage == before.fromPage
              && after.fromPage is int
              && after.fromPage >= 0
+             && after.fromPage <= 9007199254740991
              && after.toPage is int
              && after.toPage > after.fromPage
+             && after.toPage <= 9007199254740991
              && after.pagesRead is int
+             && after.pagesRead >= 0
+             && after.pagesRead <= 9007199254740991
              && after.pagesRead == after.toPage - after.fromPage
              && after.timeRead is int
              && after.timeRead > 0
@@ -133,7 +143,9 @@ service cloud.firestore {
                  || (!before.keys().hasAny(['currentPageUpdateId'])
                      && (after.get('currentPageUpdateId', null) == null
                          || after.currentPageUpdateId == updateId)))
-             && validCorrelatedBook(before, after);
+             && (validCorrelatedBook(before, after)
+                 || (entry.type == 'update'
+                     && validPageCountClampBook(before, after, entry)));
     }
 
     function validChangedBookUpdate(userId, bookId, updateId) {
@@ -183,12 +195,37 @@ service cloud.firestore {
              && timeRead >= 0
              && after.currentPage is int
              && after.currentPage >= 0
+             && after.currentPage <= 9007199254740991
              && after.pageCount is int
+             && after.pageCount > 0
+             && after.pageCount <= 9007199254740991
              && after.currentPage <= after.pageCount
              && after.get('finished', after.currentPage == after.pageCount)
                 == (after.currentPage == after.pageCount)
              && (after.get('currentPageUpdateId', null) == null
                  || after.currentPageUpdateId is string)
+             && after.updatedAt is timestamp;
+    }
+
+    // Editing metadata may shrink pageCount below the rendered currentPage.
+    // The client records that clamp as a page-correction row, and the common
+    // create checks above pin entry.fromPage to the server's current page.
+    // That makes an offline stale clamp reject atomically after a newer read.
+    function validPageCountClampBook(before, after, entry) {
+      return after.diff(before).affectedKeys().hasOnly([
+               'authorIds', 'author', 'authors', 'title', 'pageCount',
+               'currentPage', 'currentPageUpdateId', 'finished', 'isbn',
+               'coverUrl', 'publisher', 'publishedDate', 'subjects',
+               'fiction', 'updatedAt'
+             ])
+             && after.pageCount is int
+             && after.pageCount > 0
+             && after.pageCount <= 9007199254740991
+             && after.pageCount < before.pageCount
+             && before.currentPage > after.pageCount
+             && after.currentPage == after.pageCount
+             && entry.toPage == after.pageCount
+             && after.finished == true
              && after.updatedAt is timestamp;
     }
 
@@ -227,6 +264,30 @@ service cloud.firestore {
              // is absent; explicit-null new books require a source on their
              // first progress write.
              || (!beforeHasSource && beforeSource == null && afterSource == null);
+    }
+
+    // Unrelated edits remain possible on old partial documents. Creating or
+    // changing page state, however, must leave one complete, JS-safe state.
+    function validBookPageStateTransition() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+               'currentPage', 'pageCount', 'finished'
+             ])
+             || validBookPageState(request.resource.data);
+    }
+
+    function validBookPageState(book) {
+      return book.keys().hasAll([
+               'currentPage', 'pageCount', 'finished', 'updatedAt'
+             ])
+             && book.currentPage is int
+             && book.currentPage >= 0
+             && book.currentPage <= 9007199254740991
+             && book.pageCount is int
+             && book.pageCount > 0
+             && book.pageCount <= 9007199254740991
+             && book.currentPage <= book.pageCount
+             && book.finished == (book.currentPage == book.pageCount)
+             && book.updatedAt is timestamp;
     }
 
     function validBookTitle() {

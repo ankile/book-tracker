@@ -92,9 +92,80 @@ test('removing an unresolved chip and selecting a replacement enables the update
     title: 'Book',
     pageCount: 100,
     currentPage: 5,
+    pageCountClampFrom: null,
     isbn: '',
     metadata: EMPTY_METADATA,
-  } }]);
+} }]);
+});
+
+function preparePageCountEdit(book: Book, pageCount: number | null | undefined) {
+  return prepareBookWrite({
+    userId: 'user',
+    book,
+    authorChips: [{ id: 'author', name: 'Author' }],
+    title: book.title,
+    pageCount,
+    currentPage: book.currentPage,
+    isbn: book.isbn,
+    metadata: EMPTY_METADATA,
+  });
+}
+
+test('shrinking below an inflated current page prepares an atomic page correction', () => {
+  const book = {
+    ...baseBook,
+    authorIds: ['author'],
+    currentPage: 350,
+    currentPageUpdateId: 'prior-reading',
+    pageCount: 400,
+    finished: false,
+  } as Book;
+  const result = preparePageCountEdit(book, 320);
+  assert.ok(result.valid);
+  assert.equal(result.write.kind, 'update');
+  assert.equal(result.write.input.pageCount, 320);
+  assert.equal(result.write.input.currentPage, 320);
+  assert.equal(result.write.input.pageCountClampFrom, 350);
+});
+
+test('shrinking a finished book prepares the same explicit correction', () => {
+  const book = {
+    ...baseBook,
+    authorIds: ['author'],
+    currentPage: 350,
+    currentPageUpdateId: 'prior-reading',
+    pageCount: 350,
+    finished: true,
+  } as Book;
+  const result = preparePageCountEdit(book, 320);
+  assert.ok(result.valid);
+  assert.equal(result.write.kind, 'update');
+  assert.equal(result.write.input.currentPage, 320);
+  assert.equal(result.write.input.pageCountClampFrom, 350);
+});
+
+test('unchanged, growing, and non-clamping page counts preserve progress', () => {
+  for (const pageCount of [100, 200, 50]) {
+    const result = preparePageCountEdit({
+      ...baseBook,
+      authorIds: ['author'],
+      currentPageUpdateId: 'prior-reading',
+    } as Book, pageCount);
+    assert.ok(result.valid);
+    assert.equal(result.write.kind, 'update');
+    assert.equal(result.write.input.currentPage, 5);
+    assert.equal(result.write.input.pageCountClampFrom, null);
+  }
+});
+
+test('page-count edits still reject missing, non-positive, and fractional counts', () => {
+  for (const pageCount of [null, undefined, 0, -1, 100.5]) {
+    assert.equal(preparePageCountEdit(baseBook, pageCount).valid, false);
+  }
+  assert.equal(preparePageCountEdit({
+    ...baseBook,
+    currentPage: 5.5,
+  } as Book, 5).valid, false);
 });
 
 test('a concurrently repaired author with the same id is no longer blocked', () => {

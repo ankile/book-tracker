@@ -13,9 +13,14 @@ interface BookWriteInput {
   metadata: BookMetadata;
 }
 
+interface UpdateBookWriteInput extends BookWriteInput {
+  bookId: string;
+  pageCountClampFrom: number | null;
+}
+
 export type PreparedBookWrite =
   | { kind: 'add'; input: BookWriteInput }
-  | { kind: 'update'; input: BookWriteInput & { bookId: string } };
+  | { kind: 'update'; input: UpdateBookWriteInput };
 
 export type PreparedBookWriteResult =
   | { valid: true; write: PreparedBookWrite }
@@ -23,7 +28,7 @@ export type PreparedBookWriteResult =
 
 export interface BookWriter {
   addBook(input: BookWriteInput): Promise<void>;
-  updateBook(input: BookWriteInput & { bookId: string }): Promise<void>;
+  updateBook(input: UpdateBookWriteInput): Promise<void>;
 }
 
 export type BookDeletionPolicy =
@@ -90,10 +95,21 @@ export function prepareBookWrite({
 
   const titleResult = validateBookTitle(title);
   if (!titleResult.valid) return titleResult;
-  const pages = validateBookPages({
-    pageCount,
-    currentPage: book?.currentPage ?? currentPage,
-  });
+  const pageCountResult = book === null
+    ? null
+    : validateBookPages({ pageCount, currentPage: 0 });
+  if (pageCountResult !== null && !pageCountResult.valid) return pageCountResult;
+  const storedPageResult = book === null
+    ? null
+    : validateBookPages({
+      pageCount: Number.MAX_SAFE_INTEGER,
+      currentPage: book.currentPage,
+    });
+  if (storedPageResult !== null && !storedPageResult.valid) return storedPageResult;
+  const editCurrentPage = book === null || pageCountResult === null
+    ? currentPage
+    : Math.min(book.currentPage, pageCountResult.pageCount);
+  const pages = validateBookPages({ pageCount, currentPage: editCurrentPage });
   if (!pages.valid) return pages;
 
   const input: BookWriteInput = {
@@ -101,13 +117,25 @@ export function prepareBookWrite({
     authorChips,
     title: titleResult.title,
     pageCount: pages.pageCount,
-    currentPage: book?.currentPage ?? pages.currentPage,
+    currentPage: pages.currentPage,
     isbn,
     metadata,
   };
   return book === null
     ? { valid: true, write: { kind: 'add', input } }
-    : { valid: true, write: { kind: 'update', input: { ...input, bookId: book.id } } };
+    : {
+      valid: true,
+      write: {
+        kind: 'update',
+        input: {
+          ...input,
+          bookId: book.id,
+          pageCountClampFrom: pages.currentPage < book.currentPage
+            ? book.currentPage
+            : null,
+        },
+      },
+    };
 }
 
 export function executeBookWrite(writer: BookWriter, write: PreparedBookWrite): Promise<void> {

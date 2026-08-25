@@ -380,6 +380,17 @@ test('queue decoder rejects malformed lifecycle metadata', () => {
 });
 
 test('update decoder enforces the pagesRead arithmetic invariant', () => {
+  const correction = decodeBookUpdate('page-count-clamp', {
+    owner,
+    book: bookRef,
+    type: 'update',
+    fromPage: 350,
+    toPage: 320,
+    pagesRead: -30,
+    createdAt,
+    updatedAt,
+  }, 'users/owner/books/book/updates/page-count-clamp');
+  assert.equal(correction.pagesRead, -30);
   assert.throws(
     () => decodeBookUpdate('update', {
       owner,
