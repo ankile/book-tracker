@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
+import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {deleteApp, initializeApp} from 'firebase-admin/app';
@@ -48,4 +49,18 @@ test('the root preload replaces hostile inherited Firebase configuration', () =>
 
   assert.equal(result.status, 0, result.stderr);
   assertedEnvironment(JSON.parse(result.stdout) as NodeJS.ProcessEnv);
+});
+
+test('Admin emulator tests contain direct single-file runs before Firebase imports', async () => {
+  for (const relativePath of [
+    './reading-progress-migration-emulator.test.ts',
+    './toggl-transaction.test.ts',
+  ]) {
+    const source = await readFile(new URL(relativePath, import.meta.url), 'utf8');
+    assert.ok(
+      source.startsWith("import './setup.ts';\n"),
+      `${relativePath} must load the fail-closed Firebase setup first`,
+    );
+    assert.doesNotMatch(source, /process\.env\.GCLOUD_PROJECT\s*=\s*['"]book-tracker-d8f24['"]/);
+  }
 });

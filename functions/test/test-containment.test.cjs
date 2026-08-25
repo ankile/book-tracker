@@ -6,7 +6,7 @@ const {
 
 const assert = require("node:assert/strict");
 const {spawnSync} = require("node:child_process");
-const {existsSync} = require("node:fs");
+const {existsSync, readFileSync, readdirSync} = require("node:fs");
 const {join} = require("node:path");
 const test = require("node:test");
 const {getApp} = require("firebase-admin/app");
@@ -85,4 +85,17 @@ test("the preload replaces a hostile environment before bundle initialization", 
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.signal, null);
+});
+
+test("every Functions test self-loads the containment setup", () => {
+  const testDirectory = __dirname;
+  for (const name of readdirSync(testDirectory)) {
+    if (!name.endsWith(".test.cjs")) continue;
+    const source = readFileSync(join(testDirectory, name), "utf8");
+    assert.match(
+      source,
+      /require\("\.\/setup\.cjs"\)/,
+      `${name} must load setup.cjs for direct single-file runs`,
+    );
+  }
 });

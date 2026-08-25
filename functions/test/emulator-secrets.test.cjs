@@ -1,3 +1,5 @@
+require("./setup.cjs");
+
 const assert = require("node:assert/strict");
 const {
   mkdtempSync,

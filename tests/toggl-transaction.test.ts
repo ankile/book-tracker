@@ -1,8 +1,8 @@
+import './setup.ts';
+
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test, { after } from 'node:test';
-
-process.env.GCLOUD_PROJECT = 'book-tracker-rules-test';
 
 const functionsRequire = createRequire(new URL('../functions/package.json', import.meta.url));
 const { getFirestore, Timestamp } = functionsRequire('firebase-admin/firestore') as {
