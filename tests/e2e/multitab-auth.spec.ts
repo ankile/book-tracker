@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
-import type { User } from 'firebase/auth';
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
 
 const PROJECT_ID = 'book-tracker-d8f24';
@@ -88,28 +87,21 @@ test('a live book and author listener survives reloading the original tab', asyn
     await expect(first.getByText(initialTitle, { exact: true })).toBeVisible();
     await expect(first.getByText(`${initialAuthor}:`, { exact: true })).toBeVisible();
 
-    await first.evaluate(async ({ appAuthPath, firebaseAuthPath }) => {
-      const [{ auth }, { indexedDBLocalPersistence, onAuthStateChanged, setPersistence }] = await Promise.all([
-        import(appAuthPath),
-        import(firebaseAuthPath),
-      ]);
-      const state = globalThis as typeof globalThis & { __e2eAuthStates?: Array<string | null> };
-      state.__e2eAuthStates = [];
-      onAuthStateChanged(auth, (user: User | null) => state.__e2eAuthStates?.push(user?.uid ?? null));
-      await setPersistence(auth, indexedDBLocalPersistence);
-    }, {
-      appAuthPath: '/src/lib/firebase/auth.ts',
-      firebaseAuthPath: '/node_modules/.vite/deps/firebase_auth.js',
-    });
+    // An already-running pre-hotfix tab has completed its startup setter and
+    // listens to this same browserLocal/localStorage record. Keeping this tab
+    // alive while the second (new-client) tab initializes exercises the mixed
+    // rollout boundary: the new client must not migrate or remove that record.
+    const authStorageKey = await first.evaluate(() => (
+      Object.keys(localStorage).find((key) => key.startsWith('firebase:authUser:')) ?? null
+    ));
+    expect(authStorageKey).not.toBeNull();
 
     const second = await context.newPage();
     capturePermissionErrors(second, permissionErrors);
     await second.goto('/');
     await expect(second.getByText(initialTitle, { exact: true })).toBeVisible();
     await expect(second.getByText(`${initialAuthor}:`, { exact: true })).toBeVisible();
-    expect(await first.evaluate(() => (
-      globalThis as typeof globalThis & { __e2eAuthStates?: Array<string | null> }
-    ).__e2eAuthStates)).not.toContain(null);
+    expect(await first.evaluate((key) => localStorage.getItem(key), authStorageKey as string)).not.toBeNull();
 
     // Reload the original Firestore primary while another same-origin tab is
     // alive. A startup setPersistence call can transiently remove the shared
@@ -117,6 +109,7 @@ test('a live book and author listener survives reloading the original tab', asyn
     // credentials and permanently rejects their onSnapshot listeners.
     await first.reload();
     await expect(first.getByText(initialTitle, { exact: true })).toBeVisible();
+    expect(await first.evaluate((key) => localStorage.getItem(key), authStorageKey as string)).not.toBeNull();
 
     await db.runTransaction(async (transaction) => {
       transaction.update(bookRef, { title: updatedTitle, updatedAt: FieldValue.serverTimestamp() });

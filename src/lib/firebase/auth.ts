@@ -2,8 +2,10 @@ import { writable } from 'svelte/store';
 import type { Readable } from 'svelte/store';
 import type { User } from 'firebase/auth';
 import {
+  browserLocalPersistence,
   connectAuthEmulator,
   getAuth,
+  initializeAuth,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -13,11 +15,17 @@ import { app } from './index.ts';
 import { browser } from '$app/environment';
 import { clearErrors } from '../stores/errors.ts';
 
-// getAuth's browser default is already persistent local auth. Do not call
-// setPersistence during module startup: that operation temporarily removes the
-// shared user and can make a Firestore multi-tab primary reject another tab's
-// listeners during reload.
-export const auth = getAuth(app);
+// Pin the browser to the existing localStorage backend at initialization. Do
+// not call setPersistence during module startup: that operation temporarily
+// removes the shared user and can make a Firestore multi-tab primary reject
+// another tab's listeners during reload. Pinning also avoids migrating an
+// existing production session while an older bundle is still open in a tab.
+export const auth = browser
+  ? initializeAuth(app, {
+      persistence: browserLocalPersistence,
+      popupRedirectResolver: undefined,
+    })
+  : getAuth(app);
 
 // Migration-rehearsal hook, paired with the one in db.ts.
 if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
