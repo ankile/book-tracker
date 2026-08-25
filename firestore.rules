@@ -629,7 +629,11 @@ service cloud.firestore {
     // uses, and never after the fifth claim. The timestamp makes a retry of
     // an unchanged pending status emit a production Firestore event. The
     // server-owned per-user quota bounds all claim attempts to ten per hour;
-    // terminal rows expire through the server-owned TTL field.
+    // terminal rows expire through the server-owned TTL field. Atomic timer
+    // stops deliberately bypass the rules-side quota so an offline client
+    // can always release its local timer claim. Retry writes do too: the
+    // server claim transaction remains the authoritative quota gate and
+    // leaves over-quota rows pending for a later Eventarc delivery.
     match /users/{userId}/togglQueue/{queueId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
@@ -640,7 +644,6 @@ service cloud.firestore {
                         : togglQueueQuotaAvailable(userId));
       allow update: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
-                    && togglQueueQuotaAvailable(userId)
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasOnly(['status', 'retryRequestedAt'])
                     && request.resource.data.diff(resource.data).affectedKeys()

@@ -243,7 +243,10 @@ test('a stale queue worker cannot clear a newer timer lifecycle', async (t) => {
   }), /no longer matches/);
   assert.equal((await bookRef.get()).data()?.activeTimer.state, 'stopping');
   assert.equal((await lifecycleRef.get()).data()?.entryId, 999);
-  assert.equal((await queueRef.get()).exists, true);
+  const failedQueue = (await queueRef.get()).data();
+  assert.equal(failedQueue?.status, 'error');
+  assert.equal(failedQueue?.entryId, 451);
+  assert.match(failedQueue?.error, /no longer matches/);
 });
 
 test('checked recovery clears capped failures but refuses live processing work', async () => {
@@ -255,21 +258,29 @@ test('checked recovery clears capped failures but refuses live processing work',
   const bookRef = userRef.collection('books').doc(bookId);
   const queueRef = userRef.collection('togglQueue').doc(queueId);
   const context = {auth: {uid, token: {}}};
-  const queue = (status: 'error' | 'processing', claimedAt: import('firebase-admin/firestore').Timestamp) => ({
+  const queue = (
+    status: 'error' | 'processing',
+    claimedAt: import('firebase-admin/firestore').Timestamp,
+    attempts = 5,
+  ) => ({
     type: 'stop', bookId, timerClaimVersion: 1, bookTitle: 'Book',
     entryId: 501, start, stop: '2026-08-24T16:20:00.000Z',
-    status, createdAt: claimedAt, attempts: 5, claimedAt,
+    status, createdAt: claimedAt, attempts, claimedAt,
     ...(status === 'error' ? {error: 'retry cap reached'} : {}),
   });
-  const seed = async (status: 'error' | 'processing', claimedAt: import('firebase-admin/firestore').Timestamp) => {
+  const seed = async (
+    status: 'error' | 'processing',
+    claimedAt: import('firebase-admin/firestore').Timestamp,
+    attempts = 5,
+  ) => {
     await Promise.all([
       bookRef.set({title: 'Book', activeTimer: timer}),
       lifecycleRef.set(claim),
-      queueRef.set(queue(status, claimedAt)),
+      queueRef.set(queue(status, claimedAt, attempts)),
     ]);
   };
 
-  await seed('error', Timestamp.now());
+  await seed('error', Timestamp.now(), 1);
   assert.deepEqual(
     await deployed.toggl.clearstopping.run({bookId}, context),
     {cleared: true},

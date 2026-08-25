@@ -1362,6 +1362,30 @@ test('owners can retry only stale or failed queue states below the cap', async (
   }));
 });
 
+test('an owner can request a valid queue retry while the server quota is full', async () => {
+  const uid = 'queue-retry-full-quota';
+  const oldClaim = Timestamp.fromMillis(Date.now() - 7 * 60 * 60 * 1000);
+  await seedToggl(uid, {windowStartedAt: Timestamp.now(), count: 10});
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'togglQueue', 'failed-stop'),
+      queueItem({
+        status: 'error',
+        createdAt: oldClaim,
+        attempts: 1,
+        claimedAt: oldClaim,
+        error: 'confirmed failure',
+      }),
+    );
+  });
+
+  const db = environment.authenticatedContext(uid).firestore();
+  await assertSucceeds(updateDoc(
+    doc(db, 'users', uid, 'togglQueue', 'failed-stop'),
+    {status: 'pending', retryRequestedAt: serverTimestamp()},
+  ));
+});
+
 test('queue retries cannot change payload or server lifecycle fields', async () => {
   const oldClaim = Timestamp.fromMillis(Date.now() - 7 * 60 * 60 * 1000);
   const expiresAt = Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000);
@@ -1431,22 +1455,6 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     retryRequestedAt: serverTimestamp(),
     expiresAt: Timestamp.fromMillis(expiresAt.toMillis() + 1),
   }));
-  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
-    await setDoc(
-      doc(context.firestore(), 'users', 'queue-immutable', 'functionQuotas', 'togglQueue'),
-      {windowStartedAt: Timestamp.now(), count: 10},
-    );
-  });
-  await assertFails(updateDoc(ref, {
-    status: 'pending',
-    retryRequestedAt: serverTimestamp(),
-  }));
-  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
-    await setDoc(
-      doc(context.firestore(), 'users', 'queue-immutable', 'functionQuotas', 'togglQueue'),
-      {windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000), count: 10},
-    );
-  });
   await assertSucceeds(updateDoc(ref, {
     status: 'pending',
     retryRequestedAt: serverTimestamp(),

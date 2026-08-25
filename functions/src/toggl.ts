@@ -624,8 +624,13 @@ exports.clearstopping = functions
           "The Toggl stop is processing. Wait for it to finish.",
         );
       }
-      if (!(queue.status === "synced" || staleCappedProcessing ||
-          (queue.status === "error" && queue.attempts >= MAX_QUEUE_ATTEMPTS))) {
+      // A stop PUT never uses outcome-unknown: every non-2xx response is a
+      // confirmed failure, while a thrown request is also safe to inspect in
+      // Toggl before choosing this explicit recovery path. Do not make the
+      // user reopen the app until a deterministic failure reaches the retry
+      // cap; the confirmation checkbox is the safety boundary here.
+      if (!(queue.status === "synced" || queue.status === "error" ||
+          staleCappedProcessing)) {
         throw new functions.https.HttpsError(
           "failed-precondition",
           "The Toggl stop is still retryable. Reconnect and let it finish.",
@@ -925,31 +930,53 @@ exports.syncqueue = onDocumentWritten(
         start: claimedItem.start,
         queueId: event.params.queueId,
       };
-      await db.runTransaction(async (tx) => {
-        const [queueSnap, bookSnap, claimSnap] = await Promise.all([
-          tx.get(after.ref),
-          tx.get(bookRef),
-          tx.get(claimRef),
-        ]);
-        if (!queueSnap.exists || !bookSnap.exists || !claimSnap.exists) {
-          throw new Error("Toggl stop queue lost its correlated timer state.");
-        }
-        const timer = decodeActiveTimerFromBook(bookSnap.data());
-        const lifecycle = decodeTimerClaim(claimSnap.data());
-        if (!timerMatchesClaim(queueBookId, timer, expectedClaim) ||
-            lifecycle.state === "idle" ||
-            !timerMatchesClaim(queueBookId, timer, lifecycle)) {
-          throw new Error("Toggl stop queue no longer matches the active timer claim.");
-        }
-        tx.update(after.ref, {
-          status: "synced",
+      try {
+        await db.runTransaction(async (tx) => {
+          const [queueSnap, bookSnap, claimSnap] = await Promise.all([
+            tx.get(after.ref),
+            tx.get(bookRef),
+            tx.get(claimRef),
+          ]);
+          if (!queueSnap.exists || !bookSnap.exists || !claimSnap.exists) {
+            throw new Error("Toggl stop queue lost its correlated timer state.");
+          }
+          const timer = decodeActiveTimerFromBook(bookSnap.data());
+          const lifecycle = decodeTimerClaim(claimSnap.data());
+          if (!timerMatchesClaim(queueBookId, timer, expectedClaim) ||
+              lifecycle.state === "idle" ||
+              !timerMatchesClaim(queueBookId, timer, lifecycle)) {
+            throw new Error("Toggl stop queue no longer matches the active timer claim.");
+          }
+          tx.update(after.ref, {
+            status: "synced",
+            entryId,
+            error: FieldValue.delete(),
+            retryRequestedAt: FieldValue.delete(),
+          });
+          tx.update(bookRef, {activeTimer: null});
+          tx.set(claimRef, {version: 1, state: "idle", cleared: lifecycle});
+        });
+      } catch (error) {
+        // The remote PUT has already succeeded, so an automatic retry could
+        // repeat a completed write. Preserve the known entry id and move the
+        // queue to an explicit recovery state before Eventarc redelivers it.
+        const raw = errorMessage(error);
+        await after.ref.update({
+          status: "error",
           entryId,
-          error: FieldValue.delete(),
+          error: raw.slice(0, 1000),
           retryRequestedAt: FieldValue.delete(),
         });
-        tx.update(bookRef, {activeTimer: null});
-        tx.set(claimRef, {version: 1, state: "idle", cleared: lifecycle});
-      });
+        const title = claimedItem.bookTitle;
+        await logIssue({
+          level: "error",
+          event: "toggl.sync_failed",
+          message: (title.length > 0 ? raw.replaceAll(title, "<title>") : raw)
+            .slice(0, 1000),
+          uid: event.params.uid,
+        });
+        throw error;
+      }
     } else {
       await after.ref.update({
         status: "synced",
