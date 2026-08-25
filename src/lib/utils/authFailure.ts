@@ -3,7 +3,7 @@ import { FirebaseError } from 'firebase/app';
 export type AuthOperation = 'sign_in' | 'sign_up';
 
 export interface AuthFailureIssue {
-  level: 'warn';
+  level: 'warn' | 'error';
   event: `auth.${AuthOperation}_failed`;
   message: string;
   code: string;
@@ -34,6 +34,7 @@ const AUTH_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
   'auth/operation-not-allowed': 'This authentication method is not available.',
   'auth/password-does-not-meet-requirements': 'The password does not meet the account requirements.',
   'auth/too-many-requests': 'Too many attempts. Please wait and try again.',
+  'auth/user-disabled': 'This account has been disabled. Contact the administrator for help.',
   'auth/user-not-found': 'The email address or password is incorrect.',
   'auth/weak-password': 'Choose a stronger password and try again.',
   'auth/wrong-password': 'The email address or password is incorrect.',
@@ -44,7 +45,16 @@ export function describeAuthFailure(
   operation: AuthOperation,
 ): AuthFailureDescription {
   if (!(error instanceof FirebaseError)) {
-    return { userMessage: GENERIC_AUTH_FAILURE, issue: null };
+    return {
+      userMessage: GENERIC_AUTH_FAILURE,
+      issue: {
+        level: 'error',
+        event: `auth.${operation}_failed`,
+        message: 'Authentication request failed outside Firebase.',
+        code: 'non-firebase-error',
+        detail: null,
+      },
+    };
   }
 
   return {

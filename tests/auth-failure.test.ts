@@ -33,6 +33,13 @@ test('sign-up failures use the sign-up issue event', () => {
 test('password input and policy failures have actionable copy', () => {
   assert.equal(
     describeAuthFailure(
+      new FirebaseError('auth/user-disabled', 'unsafe raw text'),
+      'sign_in',
+    ).userMessage,
+    'This account has been disabled. Contact the administrator for help.',
+  );
+  assert.equal(
+    describeAuthFailure(
       new FirebaseError('auth/missing-password', 'unsafe raw text'),
       'sign_in',
     ).userMessage,
@@ -55,8 +62,15 @@ test('unexpected Errors use generic copy without exposing their message', () => 
 
   assert.deepEqual(failure, {
     userMessage: 'Something went wrong. Please try again.',
-    issue: null,
+    issue: {
+      level: 'error',
+      event: 'auth.sign_in_failed',
+      message: 'Authentication request failed outside Firebase.',
+      code: 'non-firebase-error',
+      detail: null,
+    },
   });
+  assert.doesNotMatch(JSON.stringify(failure), /Secret1/);
 });
 
 test('unknown Firebase codes use generic copy and fixed telemetry', () => {
@@ -74,7 +88,13 @@ test('non-Error throws receive a generic visible message', () => {
   for (const error of [null, undefined, 'failed', { password: 'do not display' }]) {
     assert.deepEqual(describeAuthFailure(error, 'sign_in'), {
       userMessage: 'Something went wrong. Please try again.',
-      issue: null,
+      issue: {
+        level: 'error',
+        event: 'auth.sign_in_failed',
+        message: 'Authentication request failed outside Firebase.',
+        code: 'non-firebase-error',
+        detail: null,
+      },
     });
   }
 });
