@@ -45,11 +45,20 @@ export function writeTogglReportedIds(
   }
 }
 
+const TOGGL_RETRY_REQUEST_STALE_MS = 10 * 60 * 1000;
+
+interface TogglRetryRequestTimestamp {
+  toMillis(): number;
+}
+
 export function isTogglSweepTransactionCandidate(item: {
   status: string;
   attempts: number;
-  retryRequestedAt?: unknown | null;
-}): boolean {
+  retryRequestedAt?: TogglRetryRequestTimestamp | null;
+}, now = Date.now()): boolean {
+  const freshRetryRequest = item.status === 'pending' &&
+    item.retryRequestedAt != null &&
+    item.retryRequestedAt.toMillis() >= now - TOGGL_RETRY_REQUEST_STALE_MS;
   return item.status !== 'outcome-unknown' && item.attempts < 5 &&
-    !(item.status === 'pending' && item.retryRequestedAt != null);
+    !freshRetryRequest;
 }

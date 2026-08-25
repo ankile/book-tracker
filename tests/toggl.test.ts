@@ -49,13 +49,23 @@ test('corrupt Toggl report dedup state resets without blocking the sweep', () =>
 });
 
 test('the sweep opens transactions only for retryable lifecycle rows', () => {
-  assert.equal(isTogglSweepTransactionCandidate({status: 'pending', attempts: 0}), true);
+  const now = Timestamp.fromMillis(1_800_000);
+  assert.equal(isTogglSweepTransactionCandidate({status: 'pending', attempts: 0}, now.toMillis()), true);
   assert.equal(isTogglSweepTransactionCandidate({
-    status: 'pending', attempts: 0, retryRequestedAt: Timestamp.now(),
-  }), false);
-  assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 4}), true);
-  assert.equal(isTogglSweepTransactionCandidate({status: 'outcome-unknown', attempts: 1}), false);
-  assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 5}), false);
+    status: 'pending', attempts: 0,
+    retryRequestedAt: Timestamp.fromMillis(now.toMillis() - 60_000),
+  }, now.toMillis()), false);
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0,
+    retryRequestedAt: Timestamp.fromMillis(now.toMillis() - 10 * 60_000),
+  }, now.toMillis()), false);
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0,
+    retryRequestedAt: Timestamp.fromMillis(now.toMillis() - 10 * 60_000 - 1),
+  }, now.toMillis()), true);
+  assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 4}, now.toMillis()), true);
+  assert.equal(isTogglSweepTransactionCandidate({status: 'outcome-unknown', attempts: 1}, now.toMillis()), false);
+  assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 5}, now.toMillis()), false);
 });
 
 test('timer claim helpers preserve exact local, remote, and stopping identities', () => {

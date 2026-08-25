@@ -1451,6 +1451,8 @@ test('owners can retry only stale or failed queue states below the cap', async (
   const oldClaim = Timestamp.fromMillis(now - 7 * 60 * 60 * 1000);
   const freshClaim = Timestamp.fromMillis(now - 60 * 1000);
   const oldCreate = Timestamp.fromMillis(now - 20 * 60 * 1000);
+  const staleRetryRequest = Timestamp.fromMillis(now - 11 * 60 * 1000);
+  const freshRetryRequest = Timestamp.fromMillis(now - 60 * 1000);
   const expiresAt = Timestamp.fromMillis(now + 90 * 24 * 60 * 60 * 1000);
   const docs = {
     error: queueItem({
@@ -1474,6 +1476,14 @@ test('owners can retry only stale or failed queue states below the cap', async (
       claimedAt: freshClaim,
     }),
     stalePending: queueItem({createdAt: oldCreate}),
+    staleRetryMarker: queueItem({
+      createdAt: oldCreate,
+      retryRequestedAt: staleRetryRequest,
+    }),
+    freshRetryMarker: queueItem({
+      createdAt: oldCreate,
+      retryRequestedAt: freshRetryRequest,
+    }),
     cappedError: queueItem({
       status: 'error',
       createdAt: oldCreate,
@@ -1516,6 +1526,8 @@ test('owners can retry only stale or failed queue states below the cap', async (
   await assertSucceeds(updateDoc(ref('error'), retry()));
   await assertSucceeds(updateDoc(ref('staleProcessing'), retry()));
   await assertSucceeds(updateDoc(ref('stalePending'), retry()));
+  await assertSucceeds(updateDoc(ref('staleRetryMarker'), retry()));
+  await assertFails(updateDoc(ref('freshRetryMarker'), retry()));
   await assertFails(updateDoc(ref('freshProcessing'), retry()));
   await assertFails(updateDoc(ref('cappedError'), retry()));
   await assertFails(updateDoc(ref('synced'), retry()));

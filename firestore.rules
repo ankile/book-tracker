@@ -650,8 +650,8 @@ service cloud.firestore {
     // server claim transaction remains the authoritative quota gate and
     // leaves over-quota rows pending for a later Eventarc delivery. This
     // quota bounds remote calls, not the one client write and Eventarc
-    // delivery needed to request a retry; the outstanding marker prevents
-    // one row from amplifying those deliveries without bound.
+    // delivery needed to request a retry; the outstanding marker limits a
+    // stuck row to one fresh delivery request per ten-minute window.
     match /users/{userId}/togglQueue/{queueId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
@@ -666,7 +666,7 @@ service cloud.firestore {
                          .hasOnly(['status', 'retryRequestedAt'])
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasAll(['retryRequestedAt'])
-                    && !resource.data.keys().hasAny(['retryRequestedAt'])
+                    && togglRetryMarkerOpen()
                     && request.resource.data.status == 'pending'
                     && validRetryTogglQueueItem()
                     && resource.data.get('attempts', 0) < 5
@@ -788,6 +788,17 @@ service cloud.firestore {
                  && resource.data.claimedAt is timestamp
                  && resource.data.claimedAt
                     < request.time - duration.value(21600, 's'));
+    }
+
+    // A pending retry marker suppresses duplicate Eventarc deliveries during
+    // the normal lost-event recovery window. If no function claims it, let a
+    // later sweep refresh the timestamp so the unchanged pending row emits a
+    // new write event. The strict boundary matches the client sweep.
+    function togglRetryMarkerOpen() {
+      return !resource.data.keys().hasAny(['retryRequestedAt'])
+             || (resource.data.retryRequestedAt is timestamp
+                 && resource.data.retryRequestedAt
+                    < request.time - duration.value(600, 's'));
     }
 
     function togglConfigured(userId) {
