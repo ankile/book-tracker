@@ -106,7 +106,7 @@ interface QueueClaimToken {
 // local timer. Only the exact worker claim that performed that PUT may mark
 // the row failed: a lost commit acknowledgement can leave it synced, and a
 // stale Eventarc delivery can observe a later processing claim.
-export async function markCorrelatedStopFailure(
+async function markCorrelatedStopFailure(
   queueRef: DocumentReference,
   token: QueueClaimToken,
   entryId: number,
