@@ -134,10 +134,17 @@ order because the lifecycle document serializes every timer start:
    user fail closed because `timerLifecycle/current` is missing. Let old
    in-flight start invocations drain before continuing; they use the prior
    all-books transaction and the migration will capture their final state.
-3. Run `migrate-timer-claims.ts --prod`, review it, apply it, then apply it
-   again. The second apply must report zero users. Run the audit before moving
-   on. A malformed timer, malformed existing lifecycle document, conflicting
-   claim, or multiple active books aborts the migration for a human decision.
+3. Dry-run both `migrate-timer-claims.ts --prod` and
+   `migrate-reading-progress-sources.ts --prod`, then take the production
+   snapshot. Apply each migration twice; the second applies must report zero
+   users and zero books. Run the audit before moving on. The progress-source
+   migration assigns each legacy book the newest deterministic reading or
+   page-correction row whose endpoint matches `currentPage`, without touching
+   `updatedAt`; books with no such row receive an explicit null baseline.
+   Transactions re-read each book and its updates so concurrent progress wins.
+   A malformed timer, malformed existing lifecycle document, conflicting
+   claim, multiple active books, or invalid existing progress source aborts
+   the migration for a human decision.
 4. Deploy Hosting last. Cached old clients remain unable to write an
    uncorrelated timer, while unrelated book edits still work.
 
@@ -145,6 +152,11 @@ The migration writes a persistent `users/<uid>/timerLifecycle/current`
 document. Idle state is explicit, and every clear records the exact prior
 claim. That identity makes a stale offline clear reject if the same book has
 started a newer timer. Do not delete idle lifecycle documents.
+
+Cached old clients can still omit `currentPageUpdateId` on a new book so their
+unrelated offline writes are not rejected during rollout. Keep the progress
+migration cheap and idempotent, re-run it with the follow-up audit after the
+overlap window, and do not remove it from the repository.
 
 ### 4. Production run
 

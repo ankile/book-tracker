@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   planReadingSessionDelete,
   planReadingSessionUpdate,
+  precedingProgressUpdate,
 } from '../src/lib/utils/readingSessionMutation.ts';
 
 const session = {
@@ -70,6 +71,7 @@ test('deleting the exact current-page source rolls progress back and clears owne
       session,
       { currentPage: 20, currentPageUpdateId: 'session', pageCount: 40 },
       'session',
+      null,
     ),
     {
       deltaPages: -10,
@@ -85,6 +87,7 @@ test('deleting a historical session preserves later book progress', () => {
       session,
       { currentPage: 35, currentPageUpdateId: 'later', pageCount: 40 },
       'session',
+      null,
     ),
     { deltaPages: -10, deltaTime: -30, progress: null },
   );
@@ -96,7 +99,45 @@ test('deleting a session that shares a later correction endpoint preserves progr
       session,
       { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 40 },
       'session',
+      null,
     ),
     { deltaPages: -10, deltaTime: -30, progress: null },
+  );
+});
+
+test('deleting the progress owner hands ownership to the newest matching survivor', () => {
+  const timestamp = (millis: number) => ({toMillis: () => millis});
+  const previous = precedingProgressUpdate([
+    {id: 'older-reading', toPage: 10, createdAt: timestamp(1)},
+    {id: 'newer-correction', toPage: 10, createdAt: timestamp(2)},
+    {id: 'unrelated', toPage: 9, createdAt: timestamp(3)},
+    {id: 'session', toPage: 20, createdAt: timestamp(4)},
+  ], {id: 'session', fromPage: 10});
+  assert.equal(previous?.id, 'newer-correction');
+  assert.deepEqual(
+    planReadingSessionDelete(
+      session,
+      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40},
+      'session',
+      previous,
+    ).progress,
+    {currentPage: 10, currentPageUpdateId: 'newer-correction', finished: false},
+  );
+});
+
+test('progress predecessor selection is deterministic and rejects a wrong endpoint', () => {
+  const createdAt = {toMillis: () => 1};
+  assert.equal(precedingProgressUpdate([
+    {id: 'a', toPage: 10, createdAt},
+    {id: 'b', toPage: 10, createdAt},
+  ], {id: 'session', fromPage: 10})?.id, 'b');
+  assert.throws(
+    () => planReadingSessionDelete(
+      session,
+      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40},
+      'session',
+      {id: 'wrong', toPage: 9},
+    ),
+    /does not establish/,
   );
 });

@@ -33,9 +33,12 @@ test('the README preserves the timer-claim rollout order', async () => {
     'firebase deploy --only functions',
     'let old in-flight invocations drain',
     'node migrate-timer-claims.ts --prod',
+    'node migrate-reading-progress-sources.ts --prod',
     'node db-snapshot.ts --prod',
     'node migrate-timer-claims.ts --prod --apply',
     'node migrate-timer-claims.ts --prod --apply',
+    'node migrate-reading-progress-sources.ts --prod --apply',
+    'node migrate-reading-progress-sources.ts --prod --apply',
     'node db-audit.ts --prod',
     'firebase deploy --only hosting',
   ]);
@@ -43,6 +46,11 @@ test('the README preserves the timer-claim rollout order', async () => {
     deployment.match(/node migrate-timer-claims\.ts --prod --apply/g)?.length,
     2,
     'the rollout must apply twice to prove idempotency',
+  );
+  assert.equal(
+    deployment.match(/node migrate-reading-progress-sources\.ts --prod --apply/g)?.length,
+    2,
+    'the progress migration must apply twice to prove idempotency',
   );
 });
 

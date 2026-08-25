@@ -302,9 +302,12 @@ npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functi
 
 # 3. Review, snapshot, apply, and prove the migration is idempotent.
 node migrate-timer-claims.ts --prod
+node migrate-reading-progress-sources.ts --prod
 node db-snapshot.ts --prod
 node migrate-timer-claims.ts --prod --apply
 node migrate-timer-claims.ts --prod --apply
+node migrate-reading-progress-sources.ts --prod --apply
+node migrate-reading-progress-sources.ts --prod --apply
 node db-audit.ts --prod
 
 # 4. Expose the claim-aware client only after the migration is clean.
@@ -313,8 +316,9 @@ npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only hostin
 ```
 
 Review every migration line, then take the snapshot immediately before the
-first apply. The second apply must report zero users, and the audit must contain
-no `timer-lifecycle.*` findings. After this one-time rollout has completed
+first apply. The second applies must report zero users and zero books, and the
+audit must contain no `timer-lifecycle.*` or `book.progress-source-*` findings.
+After this one-time rollout has completed
 successfully, routine full deployments can use the standard `firebase deploy`
 command.
 

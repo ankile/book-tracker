@@ -6,8 +6,9 @@
   import { Database } from "$lib/firebase/db.ts";
   import { formatTime } from "$lib/utils/format.ts";
   import { acceptReportedWrite } from "$lib/utils/offlineWrite.ts";
+  import { precedingProgressUpdate } from "$lib/utils/readingSessionMutation.ts";
   import type { Book } from "$lib/interfaces/book.ts";
-  import type { ReadingSession } from "$lib/interfaces/reading.ts";
+  import type { BookUpdate, ReadingSession } from "$lib/interfaces/reading.ts";
   import type { TimestampLike } from "$lib/interfaces/common.ts";
 
   let {
@@ -16,14 +17,17 @@
 
   let open = $derived(!!book);
 
-  let sessions = $state<ReadingSession[]>([]);
+  let updates = $state<BookUpdate[]>([]);
+  let sessions = $derived(
+    updates.filter((update): update is ReadingSession => update.type === 'reading')
+  );
   let sessionWrite = $state({ accepted: false });
   let sessionWriteError = $state('');
   $effect(() => {
     if (book && userId) {
-      const sessionsStore = Database.getReadingSessions(userId, book.id);
-      const unsubscribeStore = sessionsStore.subscribe((data) => {
-        sessions = data;
+      const updatesStore = Database.getBookUpdates(userId, book.id);
+      const unsubscribeStore = updatesStore.subscribe((data) => {
+        updates = data;
         // A local snapshot confirms the accepted batch changed or removed
         // its row; only then can another session mutation be issued.
         sessionWrite.accepted = false;
@@ -98,6 +102,9 @@
           title: book.title,
           session,
           bookProgress: book,
+          previousProgressUpdate: book.currentPageUpdateId === session.id
+            ? precedingProgressUpdate(updates, session)
+            : null,
         }),
         () => {},
         (error) => {

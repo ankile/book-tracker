@@ -105,7 +105,7 @@ const booksStores = new Map<string, Readable<Book[]>>();
 const allBooksStores = new Map<string, Readable<Book[] | undefined>>();
 const authorsStores = new Map<string, Readable<Author[] | undefined>>();
 const profileStores = new Map<string, Readable<Profile | null | undefined>>();
-const readingSessionsStores = new Map<string, Readable<ReadingSession[]>>();
+const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
 
 type StoreStart<T> = (set: (value: T) => void) => Unsubscriber;
@@ -289,6 +289,7 @@ interface DeleteReadingSessionInput {
   bookId: string;
   session: ReadingSession;
   bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
+  previousProgressUpdate: Pick<BookUpdate, 'id' | 'toPage'> | null;
   title: string;
 }
 
@@ -957,7 +958,13 @@ class Database {
     });
   }
 
-  static deleteReadingSession({ userId, bookId, session, bookProgress }: DeleteReadingSessionInput): Promise<void> {
+  static deleteReadingSession({
+    userId,
+    bookId,
+    session,
+    bookProgress,
+    previousProgressUpdate,
+  }: DeleteReadingSessionInput): Promise<void> {
     return queueReadingSessionDelete({
       firestore: db,
       userId,
@@ -965,33 +972,33 @@ class Database {
       sessionId: session.id,
       previous: session,
       book: bookProgress,
+      previousProgressUpdate,
     });
   }
 
-  static getReadingSessions(userId: string, bookId: string): Readable<ReadingSession[]> {
-    return cachedStore(readingSessionsStores, `${userId}:${bookId}`, [], (set) => {
+  static getBookUpdates(userId: string, bookId: string): Readable<BookUpdate[]> {
+    return cachedStore(bookUpdatesStores, `${userId}:${bookId}`, [], (set) => {
       const q = query(
         collection(db, 'users', userId, 'books', bookId, 'updates')
       );
 
       return onSnapshot(q, (snapshot) => {
-        const sessions = snapshot.docs.flatMap((sessionDoc) => {
-          const update = decodeStored(
+        const updates = snapshot.docs.map((updateDoc) =>
+          decodeStored(
             () => decodeBookUpdate(
-              sessionDoc.id,
-              sessionDoc.data(),
-              sessionDoc.ref.path,
+              updateDoc.id,
+              updateDoc.data(),
+              updateDoc.ref.path,
             ),
-          );
-          return update.type === 'reading' ? [update] : [];
-        });
+          )
+        );
         // Sort by createdAt descending on the client side
-        sessions.sort((a, b) => {
+        updates.sort((a, b) => {
           const aTime = a.createdAt?.toMillis?.() || 0;
           const bTime = b.createdAt?.toMillis?.() || 0;
-          return bTime - aTime;
+          return bTime - aTime || b.id.localeCompare(a.id);
         });
-        set(sessions);
+        set(updates);
       }, listenError('load reading sessions'));
     });
   }

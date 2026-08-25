@@ -138,7 +138,7 @@ for (const user of users.docs) {
     const b = book.data();
     const p = book.ref.path;
 
-    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction']) {
+    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction']) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
     }
     // ISBN-derived metadata shapes (see utils/bookMetadata.ts); the string
@@ -200,6 +200,26 @@ for (const user of users.docs) {
     }
 
     const updates = await book.ref.collection('updates').get();
+    if (b.currentPageUpdateId !== undefined && b.currentPageUpdateId !== null &&
+        (typeof b.currentPageUpdateId !== 'string' || b.currentPageUpdateId === '')) {
+      found('book.progress-source-bad-shape', p, JSON.stringify(b.currentPageUpdateId));
+    } else if (typeof b.currentPageUpdateId === 'string') {
+      const source = updates.docs.find((update) => update.id === b.currentPageUpdateId);
+      if (source === undefined) {
+        found('book.progress-source-missing', p, b.currentPageUpdateId);
+      } else if (source.data().toPage !== b.currentPage) {
+        found(
+          'book.progress-source-page-mismatch',
+          p,
+          `${b.currentPageUpdateId}:${String(source.data().toPage)} != ${String(b.currentPage)}`,
+        );
+      }
+    } else if (b.currentPageUpdateId === null) {
+      const matching = updates.docs.filter((update) => update.data().toPage === b.currentPage);
+      if (matching.length > 0) {
+        found('book.progress-source-unclaimed', p, matching.map((update) => update.id).sort().join(','));
+      }
+    }
     for (const update of updates.docs) {
       const u = update.data();
       const up = update.ref.path;

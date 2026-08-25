@@ -183,12 +183,24 @@ service cloud.firestore {
              && after.get('timeRead', 0) == before.get('timeRead', 0) - entry.timeRead
              && ((before.get('currentPageUpdateId', null) == updateId
                   && after.currentPage == entry.fromPage
-                  && after.get('currentPageUpdateId', null) == null)
+                  && (after.get('currentPageUpdateId', null) == null
+                      || validSurvivingProgressSource(
+                           userId, bookId, updateId,
+                           after.get('currentPageUpdateId', null), after.currentPage
+                         )))
                  || (before.get('currentPageUpdateId', null) != updateId
                      && after.currentPage == before.currentPage
                      && after.get('currentPageUpdateId', null)
                         == before.get('currentPageUpdateId', null)))
              && validCorrelatedBook(before, after);
+    }
+
+    function validSurvivingProgressSource(userId, bookId, deletedId, sourceId, page) {
+      return sourceId is string
+             && sourceId != deletedId
+             && existsAfter(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(sourceId))
+             && getAfter(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(sourceId)).data.toPage
+                == page;
     }
 
     function validCorrelatedBook(before, after) {
@@ -264,10 +276,13 @@ service cloud.firestore {
                          && getAfter(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(afterSource)).data
                             != get(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(afterSource)).data)))
              || (beforeSource is string
-                 && afterSource == null
                  && !existsAfter(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(beforeSource))
                  && get(/databases/$(database)/documents/users/$(userId)/books/$(bookId)/updates/$(beforeSource)).data.fromPage
-                    == afterPage)
+                    == afterPage
+                 && (afterSource == null
+                     || validSurvivingProgressSource(
+                          userId, bookId, beforeSource, afterSource, afterPage
+                        )))
              // Old cached clients know nothing about the source field. Keep
              // them working only for genuinely legacy books where the field
              // is absent; explicit-null new books require a source on their

@@ -48,10 +48,10 @@ export type ActiveTimer =
 interface BookBase extends BookMetadata {
   id: string;
   currentPage: number;
-  // The update-row id that most recently set currentPage. Missing/null is a
-  // documented legacy state: progress can be displayed but no historical
-  // session can safely claim ownership of it.
-  currentPageUpdateId?: string | null;
+  // The update-row id that most recently set currentPage. The decoder maps
+  // unmigrated stored books to null; application code always handles the
+  // field explicitly.
+  currentPageUpdateId: string | null;
   pageCount: number;
   pagesRead: number;
   timeRead: number;

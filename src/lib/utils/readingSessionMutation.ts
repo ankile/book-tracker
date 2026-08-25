@@ -9,8 +9,14 @@ export interface ReadingSessionValues {
 
 export interface ReadingAggregateBook {
   currentPage: number;
-  currentPageUpdateId?: string | null;
+  currentPageUpdateId: string | null;
   pageCount: number;
+}
+
+export interface ReadingProgressUpdate {
+  id: string;
+  toPage: number;
+  createdAt: { toMillis(): number };
 }
 
 export interface ReadingAggregateMutation {
@@ -51,17 +57,38 @@ export function planReadingSessionDelete(
   session: ReadingSessionValues,
   book: ReadingAggregateBook,
   sessionId: string,
+  previousProgressUpdate: Pick<ReadingProgressUpdate, 'id' | 'toPage'> | null,
 ): ReadingAggregateMutation {
   const affectsProgress = book.currentPageUpdateId === sessionId;
+  if (affectsProgress && previousProgressUpdate !== null &&
+      previousProgressUpdate.toPage !== session.fromPage) {
+    throw new Error('The preceding update does not establish the restored page.');
+  }
   return {
     deltaPages: -session.pagesRead,
     deltaTime: -session.timeRead,
     progress: affectsProgress
       ? {
         currentPage: session.fromPage,
-        currentPageUpdateId: null,
+        currentPageUpdateId: previousProgressUpdate?.id ?? null,
         finished: isFinished(session.fromPage, book.pageCount),
       }
       : null,
   };
+}
+
+// Client timestamps do not define server write order, especially offline.
+// The source id proves the deleted row won progress ownership; among the
+// surviving rows that establish its fromPage, timestamps and ids provide a
+// stable choice for the new owner.
+export function precedingProgressUpdate(
+  updates: readonly ReadingProgressUpdate[],
+  deleted: Pick<ReadingProgressUpdate, 'id'> & Pick<ReadingSessionValues, 'fromPage'>,
+): ReadingProgressUpdate | null {
+  return updates
+    .filter((update) => update.id !== deleted.id && update.toPage === deleted.fromPage)
+    .toSorted((left, right) =>
+      right.createdAt.toMillis() - left.createdAt.toMillis() ||
+      right.id.localeCompare(left.id)
+    )[0] ?? null;
 }

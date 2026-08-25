@@ -761,6 +761,7 @@ test('session deletion cannot drive aggregate totals negative', async () => {
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
     book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    previousProgressUpdate: null,
   }));
 });
 
@@ -777,6 +778,13 @@ test('session update and delete enter the local cache while Firestore is offline
     await setDoc(
       doc(seed, 'users', uid, 'books', bookId, 'updates', 'session'),
       readingEntry(seed, uid, bookId),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', bookId, 'updates', 'prior'),
+      readingEntry(seed, uid, bookId, {
+        fromPage: 0, toPage: 10, pagesRead: 10,
+        createdAt: Timestamp.fromMillis(Date.now() - 1_000),
+      }),
     );
   });
   await Promise.all([getDoc(bookRef), getDoc(sessionRef)]);
@@ -813,6 +821,7 @@ test('session update and delete enter the local cache while Firestore is offline
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 25, pagesRead: 15, timeRead: 45 },
     book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100 },
+    previousProgressUpdate: {id: 'prior', toPage: 10},
   });
   const [deletedSession, deletedBook] = await Promise.all([
     getDocFromCache(sessionRef),
@@ -823,9 +832,111 @@ test('session update and delete enter the local cache while Firestore is offline
   assert.equal(deletedBook.data()?.pagesRead, 10);
   assert.equal(deletedBook.data()?.timeRead, 30);
   assert.equal(deletedBook.data()?.currentPage, 10);
-  assert.equal(deletedBook.data()?.currentPageUpdateId, null);
+  assert.equal(deletedBook.data()?.currentPageUpdateId, 'prior');
   await enableNetwork(db);
   await deleteCompletion;
+});
+
+test('deleting progress owners hands off to surviving reading and correction rows', async () => {
+  const uid = 'reading-delete-handoff';
+  const db = environment.authenticatedContext(uid).firestore();
+  const writerDb = db as unknown as Firestore;
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    for (const [bookId, priorType] of [['reading-prior', 'reading'], ['correction-prior', 'update']] as const) {
+      await setDoc(
+        doc(seed, 'users', uid, 'books', bookId),
+        readingBook({currentPageUpdateId: 'latest'}),
+      );
+      const prior = priorType === 'reading'
+        ? readingEntry(seed, uid, bookId, {fromPage: 0, toPage: 10, pagesRead: 10})
+        : pageCorrectionEntry(seed, uid, bookId, {fromPage: 5, toPage: 10, pagesRead: 5});
+      await setDoc(doc(seed, 'users', uid, 'books', bookId, 'updates', 'prior'), prior);
+      await setDoc(
+        doc(seed, 'users', uid, 'books', bookId, 'updates', 'latest'),
+        readingEntry(seed, uid, bookId),
+      );
+    }
+  });
+
+  for (const bookId of ['reading-prior', 'correction-prior']) {
+    await assertSucceeds(queueReadingSessionDelete({
+      firestore: writerDb,
+      userId: uid,
+      bookId,
+      sessionId: 'latest',
+      previous: {fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30},
+      book: {currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100},
+      previousProgressUpdate: {id: 'prior', toPage: 10},
+    }));
+    const saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
+    assert.equal(saved?.currentPage, 10);
+    assert.equal(saved?.currentPageUpdateId, 'prior');
+    assert.equal(saved?.pagesRead, 10);
+    assert.equal(saved?.timeRead, 30);
+  }
+
+  await assertSucceeds(queueReadingSessionDelete({
+    firestore: writerDb,
+    userId: uid,
+    bookId: 'reading-prior',
+    sessionId: 'prior',
+    previous: {fromPage: 0, toPage: 10, pagesRead: 10, timeRead: 30},
+    book: {currentPage: 10, currentPageUpdateId: 'prior', pageCount: 100},
+    previousProgressUpdate: null,
+  }));
+  const emptied = (await getDoc(doc(db, 'users', uid, 'books', 'reading-prior'))).data();
+  assert.equal(emptied?.currentPage, 0);
+  assert.equal(emptied?.currentPageUpdateId, null);
+  assert.equal(emptied?.pagesRead, 0);
+  assert.equal(emptied?.timeRead, 0);
+});
+
+test('session deletion rejects missing, wrong-page, and cross-book progress predecessors', async () => {
+  const uid = 'reading-delete-invalid-predecessor';
+  const db = environment.authenticatedContext(uid).firestore();
+  const writerDb = db as unknown as Firestore;
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seed = context.firestore();
+    for (const bookId of ['missing', 'wrong-page', 'cross-book', 'other']) {
+      await setDoc(
+        doc(seed, 'users', uid, 'books', bookId),
+        readingBook({currentPageUpdateId: bookId === 'other' ? 'predecessor' : 'latest'}),
+      );
+      if (bookId !== 'other') {
+        await setDoc(
+          doc(seed, 'users', uid, 'books', bookId, 'updates', 'latest'),
+          readingEntry(seed, uid, bookId),
+        );
+      }
+    }
+    await setDoc(
+      doc(seed, 'users', uid, 'books', 'wrong-page', 'updates', 'predecessor'),
+      readingEntry(seed, uid, 'wrong-page', {fromPage: 0, toPage: 9, pagesRead: 9}),
+    );
+    await setDoc(
+      doc(seed, 'users', uid, 'books', 'other', 'updates', 'predecessor'),
+      readingEntry(seed, uid, 'other', {fromPage: 0, toPage: 10, pagesRead: 10}),
+    );
+  });
+
+  for (const bookId of ['missing', 'wrong-page', 'cross-book']) {
+    await assertFails(queueReadingSessionDelete({
+      firestore: writerDb,
+      userId: uid,
+      bookId,
+      sessionId: 'latest',
+      previous: {fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30},
+      book: {currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100},
+      // The local candidate claims the right endpoint; rules verify the
+      // actual same-book row exists and agrees.
+      previousProgressUpdate: {id: 'predecessor', toPage: 10},
+    }));
+    assert.equal(
+      (await getDoc(doc(db, 'users', uid, 'books', bookId))).data()?.currentPageUpdateId,
+      'latest',
+    );
+  }
 });
 
 test('zero-page timed reading and legacy aggregate defaults correlate safely', async () => {
@@ -991,6 +1102,7 @@ test('same-endpoint later correction prevents an older session from owning progr
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 18, pagesRead: 8, timeRead: 25 },
     book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100 },
+    previousProgressUpdate: null,
   }));
   saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
   assert.equal(saved?.currentPage, 20);
@@ -1029,6 +1141,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     sessionId: 'session',
     previous,
     book: sourceBook,
+    previousProgressUpdate: null,
   }));
 
   await assertSucceeds(queueReadingSessionDelete({
@@ -1038,6 +1151,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     sessionId: 'session',
     previous,
     book: sourceBook,
+    previousProgressUpdate: null,
   }));
   await assertFails(queueReadingSessionUpdate({
     firestore: db as unknown as Firestore,
@@ -1055,6 +1169,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     sessionId: 'session',
     previous,
     book: sourceBook,
+    previousProgressUpdate: null,
   }));
 
   const deletedBook = (await getDoc(doc(db, 'users', uid, 'books', 'delete-first'))).data();

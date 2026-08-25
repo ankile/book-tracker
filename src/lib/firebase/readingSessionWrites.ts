@@ -10,6 +10,7 @@ import {
   planReadingSessionUpdate,
   type ReadingAggregateBook,
   type ReadingSessionValues,
+  type ReadingProgressUpdate,
 } from '../utils/readingSessionMutation.ts';
 
 interface ReadingSessionWriteBase {
@@ -19,6 +20,10 @@ interface ReadingSessionWriteBase {
   sessionId: string;
   previous: ReadingSessionValues;
   book: ReadingAggregateBook;
+}
+
+interface ReadingSessionDeleteWrite extends ReadingSessionWriteBase {
+  previousProgressUpdate: Pick<ReadingProgressUpdate, 'id' | 'toPage'> | null;
 }
 
 interface ReadingSessionUpdateWrite extends ReadingSessionWriteBase {
@@ -62,10 +67,16 @@ export function queueReadingSessionDelete({
   sessionId,
   previous,
   book,
-}: ReadingSessionWriteBase): Promise<void> {
+  previousProgressUpdate,
+}: ReadingSessionDeleteWrite): Promise<void> {
   const sessionRef = doc(firestore, 'users', userId, 'books', bookId, 'updates', sessionId);
   const bookRef = doc(firestore, 'users', userId, 'books', bookId);
-  const mutation = planReadingSessionDelete(previous, book, sessionId);
+  const mutation = planReadingSessionDelete(
+    previous,
+    book,
+    sessionId,
+    previousProgressUpdate,
+  );
   const batch = writeBatch(firestore);
   batch.delete(sessionRef);
   batch.update(bookRef, {
