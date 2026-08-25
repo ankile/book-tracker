@@ -133,6 +133,29 @@ test("payload carries only aggregate numbers — no titles, no book objects", ()
   }
 });
 
+test("profile aggregate author count retains unresolved raw identities", () => {
+  const payload = buildProfilePayload([
+    {
+      finished: true,
+      timeRead: 30,
+      pagesRead: 20,
+      pageCount: 20,
+      authorIds: ['known', 'dangling'],
+      createdAt: ts('2026-01-01T12:00:00Z'),
+    },
+    {
+      finished: true,
+      timeRead: 30,
+      pagesRead: 20,
+      pageCount: 20,
+      authorIds: ['dangling'],
+      createdAt: ts('2026-02-01T12:00:00Z'),
+    },
+  ]);
+
+  assert.equal(payload.stats.authors, 2);
+});
+
 test("payload years are per finish year, newest first", () => {
   const { years } = buildProfilePayload(books);
   assert.deepEqual(years, [

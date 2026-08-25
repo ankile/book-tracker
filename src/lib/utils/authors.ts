@@ -99,6 +99,51 @@ export function canonicalAuthorIds(
   return canonical;
 }
 
+// Read-only identity projection. Legacy fields remain authoritative, valid
+// merge redirects canonicalize, and an unresolvable reference keeps its raw
+// id. Keeping that id is important for book counts and aggregate analytics:
+// a corrupt reference must not crash the page or make a referenced author
+// look safe to delete. Mutation paths deliberately keep using the strict
+// canonicalAuthorIds/editable-chip boundary instead.
+export function effectiveBookAuthorIds(book: AuthorshipBookView): string[] {
+  if (book.author !== undefined || book.authors !== undefined) {
+    return (book.authors ?? []).map((author) => author.id);
+  }
+  if (book.authorIds === undefined) {
+    throw new Error('Book has neither legacy authorship nor authorIds.');
+  }
+  return [...book.authorIds];
+}
+
+export function readableBookAuthorIds(
+  book: AuthorshipBookView,
+  authorMap: ReadonlyMap<string, Author>,
+): string[] {
+  const result: string[] = [];
+  for (const id of effectiveBookAuthorIds(book)) {
+    const source = authorMap.get(id);
+    const resolution = source === undefined
+      ? { ok: false as const }
+      : inspectAuthorRedirect(source, authorMap);
+    const readableId = resolution.ok ? resolution.author.id : id;
+    if (!result.includes(readableId)) result.push(readableId);
+  }
+  return result;
+}
+
+export function bookAuthorReferenceCounts(
+  books: readonly AuthorshipBookView[],
+  authorMap: ReadonlyMap<string, Author>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const book of books) {
+    for (const id of readableBookAuthorIds(book, authorMap)) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
 // The regular join stays deliberately strict so corrupt authorship cannot be
 // rendered as if it were valid. The edit modal is the repair boundary: it
 // needs to open even when a referenced author is missing or has a broken

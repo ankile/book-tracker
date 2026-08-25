@@ -3,7 +3,15 @@
   import { Database } from '$lib/firebase/db.ts';
   import ModalCard from '$lib/components/ModalCard.svelte';
   import Input from '$lib/components/Input.svelte';
-  import { AUTHOR_KINDS, canonicalAuthorIds, selectableAuthors, splitPersonName, joinPersonName } from '$lib/utils/authors.ts';
+  import {
+    AUTHOR_KINDS,
+    bookAuthorReferenceCounts,
+    canonicalAuthorIds,
+    effectiveBookAuthorIds,
+    selectableAuthors,
+    splitPersonName,
+    joinPersonName,
+  } from '$lib/utils/authors.ts';
   import type { Author, AuthorKind } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
 
@@ -30,25 +38,11 @@
   const authors = $derived(selectableAuthors(authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
   const authorMap = $derived(new Map((authorList ?? []).map((author) => [author.id, author])));
 
-  // Books still carrying legacy fields reference authors through their
-  // embedded {id, name} entries; those references count too — delete
-  // safety and merge completeness depend on stragglers counting.
-  function effectiveIds(book: Book): string[] {
-    if (book.author !== undefined || book.authors !== undefined) {
-      return (book.authors ?? []).map((a) => a.id);
-    }
-    return book.authorIds;
-  }
-
-  const bookCounts = $derived.by(() => {
-    const counts = new Map<string, number>();
-    for (const book of allBooks ?? []) {
-      for (const id of canonicalAuthorIds(effectiveIds(book), authorMap)) {
-        counts.set(id, (counts.get(id) ?? 0) + 1);
-      }
-    }
-    return counts;
-  });
+  // Read-only counts keep an unresolvable raw id instead of taking down the
+  // management page. This is fail-safe for deletion: a referenced active id
+  // still has a non-zero count even if another redirect in the library is
+  // corrupt. Merge submission below remains strict.
+  const bookCounts = $derived(bookAuthorReferenceCounts(allBooks ?? [], authorMap));
 
   let editAuthor = $state<Author | null>(null);
   let editName = $state('');
@@ -102,7 +96,7 @@
     const books = allBooks
       .map((book) => ({
         id: book.id,
-        authorIds: canonicalAuthorIds(effectiveIds(book), authorMap),
+        authorIds: canonicalAuthorIds(effectiveBookAuthorIds(book), authorMap),
       }))
       .filter((book) => book.authorIds.includes(source.id));
     const confirmed = confirm(

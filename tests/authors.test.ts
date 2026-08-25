@@ -8,7 +8,10 @@ import {
   joinPersonName,
   resolveChip,
   canonicalAuthorIds,
+  bookAuthorReferenceCounts,
   editableBookAuthorChips,
+  effectiveBookAuthorIds,
+  readableBookAuthorIds,
   repairableBookAuthors,
   selectableAuthors,
   bookAuthors,
@@ -134,6 +137,72 @@ test('bookAuthors rejects corrupt normalized joins', () => {
     () => bookAuthors({}, new Map()),
     /neither legacy authorship nor authorIds/,
   );
+});
+
+test('read-only author ids canonicalize healthy redirects and retain raw corrupt ids', () => {
+  const target: Author = {
+    id: 'target', name: 'Target', nameLower: 'target', kind: 'person', familyName: 'Target',
+  };
+  const source: Author = {
+    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
+    retirement: { reason: 'merged', targetId: 'target' },
+  };
+  const broken: Author = {
+    id: 'broken', name: 'Broken', nameLower: 'broken', kind: 'person', familyName: 'Broken',
+    retirement: { reason: 'merged', targetId: 'absent-target' },
+  };
+  const first: Author = {
+    id: 'first', name: 'First', nameLower: 'first', kind: 'person', familyName: 'First',
+    retirement: { reason: 'merged', targetId: 'second' },
+  };
+  const second: Author = {
+    id: 'second', name: 'Second', nameLower: 'second', kind: 'person', familyName: 'Second',
+    retirement: { reason: 'merged', targetId: 'first' },
+  };
+  const authorMap = new Map([target, source, broken, first, second].map(
+    (author) => [author.id, author],
+  ));
+
+  assert.deepEqual(
+    readableBookAuthorIds(
+      { authorIds: ['source', 'target', 'missing', 'broken', 'first'] },
+      authorMap,
+    ),
+    ['target', 'missing', 'broken', 'first'],
+  );
+  assert.deepEqual(
+    effectiveBookAuthorIds({ author: 'Legacy Name', authorIds: ['stale'] }),
+    [],
+  );
+  assert.deepEqual(
+    effectiveBookAuthorIds({
+      authors: [{ id: 'embedded', name: 'Embedded Name' }],
+      authorIds: ['stale'],
+    }),
+    ['embedded'],
+  );
+});
+
+test('book reference counts preserve dangling raw ids for delete safety', () => {
+  const target: Author = {
+    id: 'target', name: 'Target', nameLower: 'target', kind: 'person', familyName: 'Target',
+  };
+  const source: Author = {
+    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
+    retirement: { reason: 'merged', targetId: 'target' },
+  };
+  const counts = bookAuthorReferenceCounts([
+    { authorIds: ['source', 'missing'] },
+    { authorIds: ['target', 'missing', 'missing'] },
+    { authors: [{ id: 'embedded-missing', name: 'Remembered' }] },
+    { author: 'Identity-free Legacy Name', authorIds: ['stale'] },
+  ], new Map([target, source].map((author) => [author.id, author])));
+
+  assert.deepEqual([...counts], [
+    ['target', 2],
+    ['missing', 2],
+    ['embedded-missing', 1],
+  ]);
 });
 
 test('editableBookAuthorChips exposes a missing author as a removable repair chip', () => {
@@ -304,6 +373,30 @@ test('repairableBookAuthors keeps corrupt rows renderable with an explicit marke
     name: '[Unresolved author] missing',
     kind: 'placeholder',
   }]);
+});
+
+test('repairableBookAuthors marks broken and cyclic redirects instead of crashing display', () => {
+  const broken: Author = {
+    id: 'broken', name: 'Broken Author', nameLower: 'broken author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'missing-target' },
+  };
+  const first: Author = {
+    id: 'first', name: 'First Author', nameLower: 'first author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'second' },
+  };
+  const second: Author = {
+    id: 'second', name: 'Second Author', nameLower: 'second author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'first' },
+  };
+  const authorMap = new Map([broken, first, second].map((author) => [author.id, author]));
+
+  assert.deepEqual(
+    repairableBookAuthors({ authorIds: ['broken', 'first'] }, authorMap),
+    [
+      { id: 'broken', name: '[Unresolved author] Broken Author', kind: 'placeholder' },
+      { id: 'first', name: '[Unresolved author] First Author', kind: 'placeholder' },
+    ],
+  );
 });
 
 test('repairableBookAuthors keeps legacy string authorship authoritative', () => {

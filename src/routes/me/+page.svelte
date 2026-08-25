@@ -17,7 +17,11 @@
   import { togglSaveToken } from '$lib/firebase/functions.ts';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.ts';
   import { countIsbnProblems } from '$lib/utils/metadataHealth.ts';
-  import { canonicalAuthorIds, selectableAuthors } from '$lib/utils/authors.ts';
+  import {
+    effectiveBookAuthorIds,
+    readableBookAuthorIds,
+    selectableAuthors,
+  } from '$lib/utils/authors.ts';
   import {
     computeStats,
     computeBooksByYear,
@@ -81,12 +85,14 @@
   const analyticsBooks = $derived.by(() => {
     const authorMap = new Map((authorList ?? []).map((author) => [author.id, author]));
     return (allBooks ?? []).map((book) => {
-      const ids = book.author !== undefined || book.authors !== undefined
-        ? (book.authors ?? []).map((author) => author.id)
-        : book.authorIds;
       return {
         ...book,
-        authorIds: authorList === undefined ? ids : canonicalAuthorIds(ids, authorMap),
+        // Aggregate counts retain a raw dangling id instead of undercounting;
+        // named analytics such as the leaderboard omit it because there is no
+        // selectable author row to supply a name.
+        authorIds: authorList === undefined
+          ? effectiveBookAuthorIds(book)
+          : readableBookAuthorIds(book, authorMap),
       };
     });
   });

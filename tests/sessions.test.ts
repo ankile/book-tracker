@@ -234,7 +234,7 @@ test("authorLeaderboard ranks by hours and credits co-authors fully", () => {
   assert.equal(rows[1].minutes, 300);
 });
 
-test("authorLeaderboard tolerates books arriving before author documents", () => {
+test("authorLeaderboard omits unresolved raw ids while retaining named analytics", () => {
   const books = [
     { id: "a", finished: true, authorIds: ["loaded", "still-loading"], pagesRead: 100, timeRead: 300 },
   ];

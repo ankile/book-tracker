@@ -7,9 +7,10 @@ import {
   prepareBookWrite,
   type BookWriter,
 } from '../src/lib/utils/bookForm.ts';
-import type { AuthorChip } from '../src/lib/interfaces/author.ts';
+import type { Author, AuthorChip } from '../src/lib/interfaces/author.ts';
 import type { Book } from '../src/lib/interfaces/book.ts';
 import { EMPTY_METADATA } from '../src/lib/utils/bookMetadata.ts';
+import { editableBookAuthorChips } from '../src/lib/utils/authors.ts';
 
 const baseBook = {
   id: 'book',
@@ -44,6 +45,32 @@ test('book form blocks writes while an unresolved repair chip remains', () => {
     valid: false,
     message: 'Remove each unresolved author and select or create a replacement before saving.',
   });
+});
+
+test('edit seeding exposes missing, broken, and cyclic ids as write-blocking repair chips', () => {
+  const broken: Author = {
+    id: 'broken', name: 'Broken Author', nameLower: 'broken author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'missing-target' },
+  };
+  const first: Author = {
+    id: 'first', name: 'First Author', nameLower: 'first author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'second' },
+  };
+  const second: Author = {
+    id: 'second', name: 'Second Author', nameLower: 'second author', kind: 'person', familyName: 'Author',
+    retirement: { reason: 'merged', targetId: 'first' },
+  };
+  const seeded = editableBookAuthorChips(
+    { authorIds: ['missing', 'broken', 'first'] },
+    [broken, first, second],
+  );
+
+  assert.deepEqual(seeded.chips, [
+    { id: 'missing', name: '[Unresolved author] missing', unresolved: true },
+    { id: 'broken', name: '[Unresolved author] Broken Author', unresolved: true },
+    { id: 'first', name: '[Unresolved author] First Author', unresolved: true },
+  ]);
+  assert.equal(prepare(seeded.chips).valid, false);
 });
 
 test('removing an unresolved chip and selecting a replacement enables the update', async () => {
