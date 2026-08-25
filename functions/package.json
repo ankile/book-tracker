@@ -1,7 +1,7 @@
 {
   "name": "functions",
   "scripts": {
-    "test": "npm run lint && npm run build && node --test test/*.test.cjs",
+    "test": "npm run lint && npm run build && node --require ./test/setup.cjs --test test/*.test.cjs",
     "lint": "eslint \"src/**/*\"",
     "clean": "node -e \"require('node:fs').rmSync('lib', {recursive: true, force: true})\"",
     "build": "npm run clean && tsc",

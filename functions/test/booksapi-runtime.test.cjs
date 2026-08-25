@@ -1,8 +1,9 @@
+require("./setup.cjs");
+
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {getFirestore} = require("firebase-admin/firestore");
 
-process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
 process.env.FUNCTIONS_CONFIG_EXPORT = JSON.stringify({
   booksapi: {url: "https://books.example/volumes", key: "secret"},
 });

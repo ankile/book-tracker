@@ -1,10 +1,10 @@
+require("./setup.cjs");
+
 const assert = require("node:assert/strict");
 const {readFileSync} = require("node:fs");
 const {join} = require("node:path");
 const test = require("node:test");
 const {getFirestore} = require("firebase-admin/firestore");
-
-process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
 
 const functions = require("../lib");
 const db = getFirestore();

@@ -1,8 +1,8 @@
+require("./setup.cjs");
+
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {getFirestore, Timestamp} = require("firebase-admin/firestore");
-
-process.env.GCLOUD_PROJECT = "book-tracker-d8f24";
 
 const decoders = require("../lib/decoders");
 const deployed = require("../lib");
