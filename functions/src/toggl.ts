@@ -851,11 +851,18 @@ exports.syncqueue = onDocumentWritten(
         return {status: "malformed", error: raw};
       }
       if (current.status !== "pending") return null;
+      // A correlated v1 stop row is the only client recovery handle while
+      // its book and lifecycle remain in `stopping`. Never let Firestore TTL
+      // delete that handle. Successful stops delete the row explicitly, and
+      // confirmed recovery does the same after clearing the claim.
+      const retainedExpiry = current.type === "stop" &&
+          current.timerClaimVersion === 1 && current.bookId !== undefined ?
+        FieldValue.delete() : expiresAt;
       if (current.attempts >= MAX_QUEUE_ATTEMPTS) {
         tx.update(after.ref, {
           status: "error",
           claimedAt: current.claimedAt ?? now,
-          expiresAt,
+          expiresAt: retainedExpiry,
           error: "Queue retry limit reached.",
           retryRequestedAt: FieldValue.delete(),
         });
@@ -872,7 +879,7 @@ exports.syncqueue = onDocumentWritten(
       tx.update(after.ref, {
         status: "processing",
         claimedAt: now,
-        expiresAt,
+        expiresAt: retainedExpiry,
         attempts: current.attempts + 1,
         error: FieldValue.delete(),
         retryRequestedAt: FieldValue.delete(),
@@ -969,17 +976,46 @@ exports.syncqueue = onDocumentWritten(
       } catch (error) {
         // The remote PUT has already succeeded, so an automatic retry could
         // repeat a completed write. Preserve the known entry id and move the
-        // queue to an explicit recovery state before Eventarc redelivers it.
+        // queue to an owner-visible retry state before Eventarc redelivers it.
         const raw = errorMessage(error);
-        await markCorrelatedStopFailure(after.ref, claim.token, entryId, raw);
         const title = claimedItem.bookTitle;
-        await logIssue({
+        const issue = {
           level: "error",
           event: "toggl.sync_failed",
           message: (title.length > 0 ? raw.replaceAll(title, "<title>") : raw)
             .slice(0, 1000),
           uid: event.params.uid,
-        });
+        } as const;
+        try {
+          const marked = await markCorrelatedStopFailure(
+            after.ref,
+            claim.token,
+            entryId,
+            raw,
+          );
+          if (!marked) {
+            // A lost commit acknowledgement can make the correlation
+            // transaction throw even though it committed the synced row.
+            // Confirm that exact terminal result before treating the stop as
+            // successful; a newer worker or different entry still fails.
+            const live = await after.ref.get();
+            const value = live.data();
+            if (live.exists && value?.status === "synced" &&
+                value.entryId === entryId) {
+              await after.ref.delete();
+              return;
+            }
+          }
+        } catch (recoveryError) {
+          // Recovery storage failure must not replace the correlation error
+          // or suppress its durable operator signal.
+          console.error("Failed to persist Toggl stop recovery state.", recoveryError);
+        }
+        try {
+          await logIssue(issue);
+        } catch (loggingError) {
+          console.error("Failed to persist Toggl sync failure issue.", loggingError);
+        }
         throw error;
       }
     } else {

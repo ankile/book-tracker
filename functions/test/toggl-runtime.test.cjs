@@ -2,7 +2,7 @@ require("./setup.cjs");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
 
 const deployed = require("../lib");
 const db = getFirestore();
@@ -123,6 +123,130 @@ function installQueueStore(t, item, {quota} = {}) {
   };
 }
 
+function installCorrelatedStopStore(t, mode) {
+  const start = "2026-08-24T12:00:00Z";
+  const queueId = `book_${start}`;
+  const item = queueItem({
+    type: "stop",
+    bookId: "book",
+    timerClaimVersion: 1,
+    entryId: 52,
+    start,
+  });
+  const queueRef = {
+    get: async () => snapshot(item),
+    delete: async () => {
+      queueRef.deleted = true;
+    },
+    deleted: false,
+  };
+  const bookRef = {};
+  const claimRef = {};
+  const quotaRef = {};
+  const userRef = {
+    get: async () => snapshot({
+      toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
+    }),
+  };
+  const issues = [];
+  let transactionNumber = 0;
+  t.mock.method(db, "doc", (path) => {
+    if (path === "users/owner") return userRef;
+    if (path === "users/owner/functionQuotas/togglQueue") return quotaRef;
+    if (path === "users/owner/books/book") return bookRef;
+    if (path === "users/owner/timerLifecycle/current") return claimRef;
+    throw new Error(`Unexpected document path ${path}`);
+  });
+  t.mock.method(db, "collection", (path) => {
+    assert.equal(path, "logEvents");
+    return {add: async (issue) => issues.push(issue)};
+  });
+  t.mock.method(db, "runTransaction", async (handler) => {
+    transactionNumber += 1;
+    if (transactionNumber === 1) {
+      return handler({
+        get: async (ref) => {
+          if (ref === queueRef) return snapshot(item);
+          assert.equal(ref, quotaRef);
+          return snapshot(undefined, false);
+        },
+        set: () => {},
+        update: (ref, patch) => {
+          if (ref === queueRef) Object.assign(item, patch);
+        },
+      });
+    }
+    if (transactionNumber === 2) {
+      if (mode === "recovery-write-fails") {
+        return handler({
+          get: async (ref) => {
+            if (ref === queueRef) return snapshot(item);
+            if (ref === bookRef) {
+              return snapshot({
+                title: "The Book",
+                activeTimer: {state: "stopping", entryId: 52, start, queueId},
+              });
+            }
+            assert.equal(ref, claimRef);
+            return snapshot({
+              version: 1,
+              state: "remote",
+              bookId: "other-book",
+              entryId: 999,
+              start,
+            });
+          },
+          update: () => {},
+          set: () => {},
+        });
+      }
+      await handler({
+        get: async (ref) => {
+          if (ref === queueRef) return snapshot(item);
+          if (ref === bookRef) {
+            return snapshot({
+              title: "The Book",
+              activeTimer: {state: "stopping", entryId: 52, start, queueId},
+            });
+          }
+          assert.equal(ref, claimRef);
+          return snapshot({
+            version: 1,
+            state: "stopping",
+            bookId: "book",
+            entryId: 52,
+            start,
+            queueId,
+          });
+        },
+        update: (ref, patch) => {
+          if (ref === queueRef) Object.assign(item, patch);
+        },
+        set: () => {},
+      });
+      throw new Error("commit acknowledgement lost");
+    }
+    if (mode === "recovery-write-fails") {
+      throw new Error("recovery storage unavailable");
+    }
+    return handler({
+      get: async (ref) => {
+        assert.equal(ref, queueRef);
+        return snapshot(item);
+      },
+      update: () => {},
+    });
+  });
+  return {
+    event: {
+      data: {after: {exists: true, data: () => item, ref: queueRef}},
+      params: {uid: "owner", queueId},
+    },
+    issues,
+    queueRef,
+  };
+}
+
 test("queued creates pass through outcome-unknown before synced", async (t) => {
   const store = installQueueStore(t, queueItem());
   let fetchCalls = 0;
@@ -196,6 +320,33 @@ test("the Functions emulator syncs a queued stop without outbound fetch", async 
   assert.equal(store.queueUpdates.at(-1).status, "synced");
   assert.equal(store.queueUpdates.at(-1).entryId, 52);
   assert.equal(store.queueDeleted, true);
+});
+
+test("a lost correlated-stop commit acknowledgement cleans the synced row", async (t) => {
+  const store = installCorrelatedStopStore(t, "lost-ack");
+  t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.equal(store.queueRef.deleted, true);
+  assert.deepEqual(store.issues, []);
+});
+
+test("a failed correlated-stop recovery logs and preserves the original error", async (t) => {
+  const store = installCorrelatedStopStore(t, "recovery-write-fails");
+  const consoleErrors = [];
+  t.mock.method(console, "error", (...args) => consoleErrors.push(args));
+  t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
+
+  await assert.rejects(
+    deployed.toggl.syncqueue.run(store.event),
+    /no longer matches the active timer claim/,
+  );
+
+  assert.equal(store.issues.length, 1);
+  assert.equal(store.issues[0].event, "toggl.sync_failed");
+  assert.match(store.issues[0].message, /no longer matches/);
+  assert.match(String(consoleErrors[0]?.[0]), /persist Toggl stop recovery state/);
 });
 
 test("a successful create with an invalid response stays outcome-unknown", async (t) => {
@@ -347,6 +498,23 @@ test("the fifth claimed queue item becomes terminal without fetch", async (t) =>
   assert.equal(store.transactionUpdates[0].status, "error");
   assert.match(store.transactionUpdates[0].error, /retry limit/);
   assert.equal(store.queueUpdates.length, 0);
+});
+
+test("a correlated stopping claim never loses its recovery row to TTL", async (t) => {
+  const item = queueItem({
+    type: "stop",
+    bookId: "book",
+    timerClaimVersion: 1,
+    entryId: 52,
+    attempts: 5,
+    claimedAt: Timestamp.now(),
+  });
+  const store = installQueueStore(t, item);
+
+  await deployed.toggl.syncqueue.run(store.event);
+
+  assert.equal(store.transactionUpdates[0].status, "error");
+  assert.deepEqual(store.transactionUpdates[0].expiresAt, FieldValue.delete());
 });
 
 test("queue quota increments, resets, and blocks remote work", async (t) => {
