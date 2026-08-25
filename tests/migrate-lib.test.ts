@@ -22,7 +22,7 @@ import {
 } from "../db-restore-messages.ts";
 
 // Creating refs and batches needs an app but no network or credentials.
-const app = initializeApp({ projectId: "book-tracker-d8f24" }, "migrate-lib-test");
+const app = initializeApp({ projectId: "book-tracker-test" }, "migrate-lib-test");
 const db = getFirestore(app);
 
 test("codec round-trips every Firestore field type", () => {
