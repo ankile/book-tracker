@@ -12,8 +12,12 @@ service cloud.firestore {
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validBookTimerTransition();
+      // A local timer has no remote side effect. The UI explicitly warns
+      // that its unsaved interval will be lost. Server-backed and uncertain
+      // Toggl lifecycle states must be cleared through their stop/resolve path.
       allow delete: if request.auth != null && userId == request.auth.uid
-                    && resource.data.get('activeTimer', null) == null;
+                    && (resource.data.get('activeTimer', null) == null
+                        || validLocalTimer(resource.data.activeTimer));
 
       // Writes are validated so a client cannot forge owner — which the
       // collectionGroup rule below trusts for cross-book stats reads — nor

@@ -13,7 +13,7 @@
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
-  import { executeBookWrite, prepareBookWrite } from "../utils/bookForm.ts";
+  import { bookDeletionPolicy, executeBookWrite, prepareBookWrite } from "../utils/bookForm.ts";
 
   let {
     open, userId, book = null, onclose,
@@ -48,6 +48,7 @@
   let metadata = $state<BookMetadata>({ ...EMPTY_METADATA });
 
   let isEditMode = $derived(!!book);
+  let deletionPolicy = $derived(book === null ? null : bookDeletionPolicy(book.activeTimer));
   let isLookingUp = $state(false);
   let lookupError = $state("");
   const unresolvedAuthorCount = $derived(authorChips.filter(
@@ -122,12 +123,20 @@
 
   function handleDelete() {
     if (book === null) throw new Error('Cannot delete a book before it is loaded.');
-    const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.`);
+    const policy = bookDeletionPolicy(book.activeTimer);
+    if (!policy.allowed) {
+      lookupError = policy.guidance;
+      return;
+    }
+    const warning = policy.confirmationWarning === null
+      ? ''
+      : ` ${policy.confirmationWarning}`;
+    const confirmed = confirm(`Are you sure you want to delete "${book.title}"? This will delete all reading sessions for this book.${warning}`);
     if (confirmed) {
       // Not awaited: offline, the promise only resolves after reconnect,
       // but the local cache removes the book from the list instantly. A
       // flush-time rejection surfaces via the global error banner.
-      Database.deleteBook(userId, book.id, book.title);
+      void Database.deleteBook(userId, book.id, book.title);
       onclose();
     }
   }
@@ -311,6 +320,19 @@
 
   .delete-button:hover {
     color: #c9302c;
+  }
+
+  .delete-button:disabled,
+  .delete-button:disabled:hover {
+    color: #6c757d;
+    cursor: not-allowed;
+    text-decoration: none;
+  }
+
+  .delete-note {
+    color: #6c757d;
+    font-size: 0.85rem;
+    margin-top: 0.4rem;
   }
 
   .isbn-container {
@@ -507,8 +529,20 @@
   {/if}
 
   {#if isEditMode}
-    <button type="button" class="delete-button" onclick={handleDelete}>
+    <button
+      type="button"
+      class="delete-button"
+      onclick={handleDelete}
+      disabled={deletionPolicy !== null && !deletionPolicy.allowed}
+      aria-describedby={deletionPolicy !== null && !deletionPolicy.allowed
+        ? 'delete-book-guidance'
+        : undefined}>
       Delete this book
     </button>
+    {#if deletionPolicy !== null && !deletionPolicy.allowed}
+      <div id="delete-book-guidance" class="delete-note">
+        {deletionPolicy.guidance}
+      </div>
+    {/if}
   {/if}
 </ModalCard>

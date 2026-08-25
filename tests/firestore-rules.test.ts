@@ -489,6 +489,78 @@ test('book owners can clear server timers only in explicit terminal paths', asyn
   await assertSucceeds(deleteDoc(ref));
 });
 
+test('book deletion allows no timer or a local timer but denies every remote lifecycle', async () => {
+  const uid = 'timer-delete';
+  const db = environment.authenticatedContext(uid).firestore();
+  const ref = doc(db, 'users', uid, 'books', 'book');
+  const claimedAt = Timestamp.now();
+  const states: Array<{name: string; timer: unknown; allowed: boolean}> = [
+    {name: 'none', timer: null, allowed: true},
+    {
+      name: 'local',
+      timer: {start: '2026-08-24T12:00:00.000Z'},
+      allowed: true,
+    },
+    {
+      name: 'remote',
+      timer: {entryId: 42, start: '2026-08-24T12:00:00.000Z'},
+      allowed: false,
+    },
+    {
+      name: 'starting',
+      timer: {
+        state: 'starting',
+        operationId: 'operation',
+        start: '2026-08-24T12:00:00.000Z',
+        claimedAt,
+      },
+      allowed: false,
+    },
+    {
+      name: 'outcome-unknown',
+      timer: {
+        state: 'outcome-unknown',
+        operationId: 'operation',
+        start: '2026-08-24T12:00:00.000Z',
+        claimedAt,
+        error: 'Check Toggl.',
+      },
+      allowed: false,
+    },
+    {
+      name: 'malformed',
+      timer: {start: 42},
+      allowed: false,
+    },
+  ];
+
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+      title: 'Owner only',
+      activeTimer: null,
+    });
+  });
+  const stranger = environment.authenticatedContext('timer-delete-stranger').firestore();
+  await assertFails(deleteDoc(doc(stranger, 'users', uid, 'books', 'book')));
+  assert.equal((await getDoc(ref)).exists(), true);
+
+  for (const state of states) {
+    await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+        title: `Book ${state.name}`,
+        activeTimer: state.timer,
+      });
+    });
+    if (state.allowed) {
+      await assertSucceeds(deleteDoc(ref));
+      assert.equal((await getDoc(ref)).exists(), false);
+    } else {
+      await assertFails(deleteDoc(ref));
+      assert.equal((await getDoc(ref)).exists(), true);
+    }
+  }
+});
+
 test('function quota documents are inaccessible to their owner', async () => {
   const uid = 'quota-owner';
   const db = environment.authenticatedContext(uid).firestore();
@@ -564,6 +636,12 @@ test('offline timer stop and queue creation are accepted or rejected atomically'
   }));
   await assertSucceeds(valid.commit());
   assert.equal((await getDoc(bookRef)).data()?.activeTimer, null);
+  await assertSucceeds(deleteDoc(bookRef));
+  assert.equal((await getDoc(bookRef)).exists(), false);
+  assert.equal(
+    (await getDoc(doc(db, 'users', uid, 'togglQueue', remoteQueueId))).exists(),
+    true,
+  );
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await deleteDoc(doc(
       context.firestore(),
