@@ -33,6 +33,10 @@ test('book page validation requires positive integer bounds', () => {
     validateBookPages({ pageCount: Number.MAX_SAFE_INTEGER + 1, currentPage: 1 }).valid,
     false,
   );
+  assert.equal(
+    validateBookPages({ pageCount: '9007199254740992', currentPage: 1 }).valid,
+    false,
+  );
 });
 
 test('book title validation trims and bounds persisted queue descriptions', () => {
