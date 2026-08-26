@@ -361,21 +361,29 @@ successfully, routine full deployments can use the standard `firebase deploy`
 command, but must run `npm run build` first so Hosting and `publicweb` receive
 the same generated shell.
 
-For every production release, copy a UTC timestamp immediately before the
-Functions deployment. After every target is live, run the deployment integrity
-check with that timestamp:
+For every production release, record the exact commit approved for deployment.
+Push that commit before changing Firebase. After every selected target is live,
+run the deployment integrity check with the reviewed commit:
 
 ```bash
-node -e "console.log(new Date().toISOString())"
-# Copy the printed value before deploying Functions.
-npm run verify:deployment -- --deployed-after=<copied-UTC-timestamp>
+git rev-parse HEAD
+npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
 ```
 
-The check reads the live Google APIs and fails unless Firestore runs the exact
-local rules, the Function names and generations match `deployment-target.json`,
-every Function was updated after the copied boundary, and Hosting serves the
-local `_app/version.json`. Pass `--account=<gcloud-account>` when the active
-gcloud account is not the release account. Unknown or misspelled options fail.
+The command reruns the full validation and production build. It then requires
+the reviewed commit to equal both `HEAD` and `origin/master`, rejects unreviewed
+deploy inputs, and reads expected artifacts from that commit rather than the
+working tree. The live checks cover rules, composite indexes, TTL policies,
+Function release labels and security-sensitive configuration, invoker IAM,
+Gen 2 traffic, the active Hosting version's complete file manifest and serving
+configuration, every reviewed file on both production origins, and the profile
+and sitemap rewrites. Pass `--account=<gcloud-account>` when the active gcloud
+account is not the release account. Unknown or misspelled options fail.
+
+`deployment-target.json` and `functions/src/release.ts` share one release ID.
+Change that ID whenever Function code or configuration changes, then deploy all
+Functions. A Hosting-only release leaves the Function release ID unchanged and
+deploys only `functions:publicweb,hosting` as described below.
 
 ### Deploy Hosting and Profile Renderer
 

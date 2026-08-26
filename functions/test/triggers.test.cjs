@@ -5,9 +5,56 @@ const {readFileSync} = require("node:fs");
 const {join} = require("node:path");
 const test = require("node:test");
 const {getFirestore} = require("firebase-admin/firestore");
+const firebaseFunctions = require("firebase-functions/v1");
 
 const functions = require("../lib");
 const db = getFirestore();
+const deploymentTarget = JSON.parse(readFileSync(
+  join(__dirname, "..", "..", "deployment-target.json"),
+  "utf8",
+));
+
+const exportedFunctions = new Map([
+  ["admin-overview", functions.admin.overview],
+  ["booksapi-lookupisbn", functions.booksapi.lookupisbn],
+  ["createUserDocument", functions.createUserDocument],
+  ["deleteUserDocument", functions.deleteUserDocument],
+  ["deletebookupdates", functions.deletebookupdates],
+  ["publicweb", functions.publicweb],
+  ["toggl-clearstopping", functions.toggl.clearstopping],
+  ["toggl-savetoken", functions.toggl.savetoken],
+  ["toggl-start", functions.toggl.start],
+  ["toggl-stop", functions.toggl.stop],
+  ["toggl-syncqueue", functions.toggl.syncqueue],
+]);
+
+function endpointEventFilters(endpoint) {
+  const trigger = endpoint.eventTrigger;
+  if (trigger === undefined) return [];
+  const filters = Object.entries(trigger.eventFilters ?? {}).map(
+    ([attribute, rawValue]) => ({
+      attribute,
+      value: attribute === "resource" ?
+        `projects/${deploymentTarget.projectId}` : rawValue,
+    }),
+  );
+  for (const [attribute, value] of
+    Object.entries(trigger.eventFilterPathPatterns ?? {})) {
+    filters.push({attribute, value, operator: "match-path-pattern"});
+  }
+  return filters.sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
+function manifestEventFilters(event) {
+  return [...event.filters].sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
+function resolvedOption(value, defaultValue) {
+  return value === null || value === firebaseFunctions.RESET_VALUE ?
+    defaultValue : value;
+}
 
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
@@ -29,23 +76,40 @@ test("preserves the deployed function export names", () => {
     "syncqueue",
   ]);
 
-  const deploymentTarget = JSON.parse(readFileSync(
-    join(__dirname, "..", "..", "deployment-target.json"),
-    "utf8",
-  ));
-  assert.equal(deploymentTarget.region, "europe-west1");
-  assert.deepEqual(deploymentTarget.functions, [
-    {name: "admin-overview", generation: "GEN_1"},
-    {name: "booksapi-lookupisbn", generation: "GEN_1"},
-    {name: "createUserDocument", generation: "GEN_1"},
-    {name: "deleteUserDocument", generation: "GEN_1"},
-    {name: "deletebookupdates", generation: "GEN_2"},
-    {name: "publicweb", generation: "GEN_2"},
-    {name: "toggl-clearstopping", generation: "GEN_1"},
-    {name: "toggl-savetoken", generation: "GEN_1"},
-    {name: "toggl-start", generation: "GEN_1"},
-    {name: "toggl-stop", generation: "GEN_1"},
-    {name: "toggl-syncqueue", generation: "GEN_2"},
+  assert.equal(deploymentTarget.releaseId, "security-2026-08-26-01");
+  assert.deepEqual(deploymentTarget.hostingOrigins, [
+    "https://book-tracker-d8f24.web.app",
+    "https://book.ankile.com",
+  ]);
+  assert.deepEqual(deploymentTarget.functions.map(({name, generation, region}) => ({
+    name,
+    generation,
+    region,
+  })), [
+    {name: "admin-overview", generation: "GEN_1", region: "europe-west1"},
+    {name: "booksapi-lookupisbn", generation: "GEN_1", region: "europe-west1"},
+    {name: "createUserDocument", generation: "GEN_1", region: "europe-west1"},
+    {name: "deleteUserDocument", generation: "GEN_1", region: "europe-west1"},
+    {name: "deletebookupdates", generation: "GEN_2", region: "europe-west1"},
+    {name: "publicweb", generation: "GEN_2", region: "europe-west1"},
+    {name: "toggl-clearstopping", generation: "GEN_1", region: "europe-west1"},
+    {name: "toggl-savetoken", generation: "GEN_1", region: "europe-west1"},
+    {name: "toggl-start", generation: "GEN_1", region: "europe-west1"},
+    {name: "toggl-stop", generation: "GEN_1", region: "europe-west1"},
+    {name: "toggl-syncqueue", generation: "GEN_2", region: "europe-west1"},
+  ]);
+  assert.deepEqual(deploymentTarget.functions.map(({name, access}) => ({name, access})), [
+    {name: "admin-overview", access: "callable"},
+    {name: "booksapi-lookupisbn", access: "callable"},
+    {name: "createUserDocument", access: "event"},
+    {name: "deleteUserDocument", access: "event"},
+    {name: "deletebookupdates", access: "event"},
+    {name: "publicweb", access: "http"},
+    {name: "toggl-clearstopping", access: "callable"},
+    {name: "toggl-savetoken", access: "callable"},
+    {name: "toggl-start", access: "callable"},
+    {name: "toggl-stop", access: "callable"},
+    {name: "toggl-syncqueue", access: "event"},
   ]);
 });
 
@@ -87,6 +151,127 @@ test("keeps every function in europe-west1 on its required generation", () => {
   assert.equal(functions.publicweb.__endpoint.platform, "gcfv2");
   assert.deepEqual(functions.publicweb.__endpoint.region, ["europe-west1"]);
   assert.notEqual(functions.publicweb.__endpoint.httpsTrigger, undefined);
+
+  for (const deployedFunction of [...gen1Functions, ...gen2Functions, functions.publicweb]) {
+    assert.equal(
+      deployedFunction.__endpoint.labels["book-tracker-release"],
+      deploymentTarget.releaseId,
+    );
+  }
+});
+
+test("binds every production function declaration to exported metadata", () => {
+  assert.deepEqual(
+    [...exportedFunctions.keys()].sort(),
+    deploymentTarget.functions.map(({name}) => name).sort(),
+  );
+
+  for (const target of deploymentTarget.functions) {
+    const deployedFunction = exportedFunctions.get(target.name);
+    const endpoint = deployedFunction.__endpoint;
+    const generation = endpoint.platform === "gcfv2" ? "GEN_2" : "GEN_1";
+    const access = endpoint.eventTrigger !== undefined ? "event" :
+      endpoint.callableTrigger !== undefined ? "callable" : "http";
+    const defaultServiceAccount = generation === "GEN_2" ?
+      `${deploymentTarget.projectNumber}-compute@developer.gserviceaccount.com` :
+      `${deploymentTarget.projectId}@appspot.gserviceaccount.com`;
+    const defaultMaxInstances = generation === "GEN_2" ? 20 :
+      access === "event" ? 3000 : null;
+
+    assert.equal(generation, target.generation, `${target.name} generation`);
+    assert.deepEqual(endpoint.region, [target.region], `${target.name} region`);
+    assert.equal(access, target.access, `${target.name} access`);
+    assert.equal(
+      resolvedOption(endpoint.timeoutSeconds, 60),
+      target.timeoutSeconds,
+      `${target.name} timeout`,
+    );
+    assert.equal(
+      resolvedOption(endpoint.maxInstances, defaultMaxInstances),
+      target.maxInstances,
+      `${target.name} max instances`,
+    );
+    assert.equal(
+      resolvedOption(endpoint.serviceAccountEmail, defaultServiceAccount),
+      target.serviceAccount,
+      `${target.name} service account`,
+    );
+    assert.deepEqual(
+      (endpoint.secretEnvironmentVariables ?? []).map(({key}) => key).sort(),
+      target.secrets.map(({key}) => key).sort(),
+      `${target.name} secrets`,
+    );
+    assert.equal(
+      target.publicInvoker,
+      access === "callable" || access === "http",
+      `${target.name} public transport`,
+    );
+    assert.deepEqual(
+      target.invokers,
+      access === "event" ? [] : [
+        `${generation === "GEN_2" ? "roles/run.invoker" :
+          "roles/cloudfunctions.invoker"}:allUsers`,
+      ],
+      `${target.name} invoker IAM`,
+    );
+    assert.equal(
+      endpoint.labels["book-tracker-release"],
+      deploymentTarget.releaseId,
+      `${target.name} release`,
+    );
+
+    if (target.event === null) {
+      assert.equal(endpoint.eventTrigger, undefined, `${target.name} event`);
+    } else {
+      assert.equal(
+        endpoint.eventTrigger.eventType,
+        target.event.type,
+        `${target.name} event type`,
+      );
+      assert.equal(
+        endpoint.eventTrigger.retry,
+        target.event.retry,
+        `${target.name} retry`,
+      );
+      assert.deepEqual(
+        endpointEventFilters(endpoint),
+        manifestEventFilters(target.event),
+        `${target.name} event filters`,
+      );
+    }
+  }
+});
+
+test("public web responses expose the deployed release id", async () => {
+  const response = {
+    body: undefined,
+    headers: {},
+    statusCode: undefined,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    set(name, value) {
+      this.headers[name] = value;
+      return this;
+    },
+    send(body) {
+      this.body = body;
+      return this;
+    },
+  };
+
+  await functions.publicweb(
+    {method: "GET", path: "/not-a-public-route"},
+    response,
+  );
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(
+    response.headers["X-Book-Tracker-Release"],
+    deploymentTarget.releaseId,
+  );
+  assert.match(response.body, /This profile was not found/);
 });
 
 test("preserves the Firestore and Authentication event contracts", () => {

@@ -3,6 +3,7 @@ import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
+import {releaseLabels} from "./release";
 
 initializeApp();
 const db = getFirestore();
@@ -27,6 +28,7 @@ exports.deletebookupdates = onDocumentDeleted(
     document: "users/{userId}/books/{bookId}",
     region: "europe-west1",
     timeoutSeconds: 300,
+    labels: releaseLabels(),
   },
   async (event) => {
     if (!event.data) return;
@@ -36,6 +38,7 @@ exports.deletebookupdates = onDocumentDeleted(
 // Create a user document when a new user signs up
 exports.createUserDocument = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .auth.user()
   .onCreate(async (user) => {
     const userRef = db.collection("users").doc(user.uid);
@@ -59,6 +62,7 @@ exports.createUserDocument = functions
 
 exports.deleteUserDocument = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .auth.user()
   .onDelete(async (user) => {
     // Account deletion must immediately remove both the public document and

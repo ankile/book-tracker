@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
+import { access, readFile, readdir } from 'node:fs/promises';
+import { relative, sep } from 'node:path';
 import test from 'node:test';
+import {fileURLToPath} from 'node:url';
 
 const publicIndexUrl = new URL('../public/index.html', import.meta.url);
 const publicServiceWorkerUrl = new URL('../public/service-worker.js', import.meta.url);
 const publicVersionUrl = new URL('../public/_app/version.json', import.meta.url);
 const profileShellUrl = new URL('../functions/assets/profile-shell.html', import.meta.url);
+const hostingManifestUrl = new URL('../hosting-artifacts.json', import.meta.url);
+const publicRootUrl = new URL('../public/', import.meta.url);
 
 function immutableAssetPaths(source: string): string[] {
   return [...source.matchAll(/\/_app\/immutable\/[^"'`\\\s)]+/g)]
@@ -18,9 +22,26 @@ function sha256(source: string): string {
   return createHash('sha256').update(source).digest('hex');
 }
 
+async function builtHostingFiles(directory: URL): Promise<string[]> {
+  const entries = await readdir(directory, {withFileTypes: true});
+  const files = await Promise.all(entries.map(async (entry) => {
+    const url = new URL(entry.isDirectory() ? `${entry.name}/` : entry.name, directory);
+    if (entry.isDirectory()) return builtHostingFiles(url);
+    if (entry.name === '.DS_Store') return [];
+    return [fileURLToPath(url)];
+  }));
+  return files.flat();
+}
+
 function trackedFile(path: string): string {
   const result = spawnSync('git', ['show', `HEAD:${path}`], { encoding: 'utf8' });
   assert.equal(result.status, 0, `could not read tracked ${path}: ${result.stderr}`);
+  return result.stdout;
+}
+
+function indexedFile(path: string): string {
+  const result = spawnSync('git', ['show', `:${path}`], { encoding: 'utf8' });
+  assert.equal(result.status, 0, `could not read staged ${path}: ${result.stderr}`);
   return result.stdout;
 }
 
@@ -52,10 +73,6 @@ const trackedVersion = versionName(
 );
 const verificationBuild = spawnSync('npm', ['run', 'build'], {
   encoding: 'utf8',
-  env: {
-    ...process.env,
-    BOOK_TRACKER_BUILD_VERSION: trackedVersion,
-  },
 });
 assert.equal(
   verificationBuild.status,
@@ -107,4 +124,30 @@ test('built deploy entrypoints reference emitted assets', async () => {
     assertReferencesCurrentAssets('public/service-worker.js', serviceWorker),
     assertReferencesCurrentAssets('functions/assets/profile-shell.html', profileShell),
   ]);
+});
+
+test('Hosting manifest binds every generated deployment file', async () => {
+  const builtManifest = await readFile(hostingManifestUrl, 'utf8');
+  assert.equal(
+    sha256(indexedFile('hosting-artifacts.json')),
+    sha256(builtManifest),
+    'hosting-artifacts.json is stale; run npm run build and stage the generated manifest',
+  );
+  const parsed: unknown = JSON.parse(builtManifest);
+  assert.equal(typeof parsed, 'object');
+  assert.notEqual(parsed, null);
+  assert.equal(Array.isArray(parsed), false);
+  const manifest = parsed as {version?: unknown; files?: unknown};
+  assert.equal(manifest.version, 1);
+  assert.equal(typeof manifest.files, 'object');
+  assert.notEqual(manifest.files, null);
+  assert.equal(Array.isArray(manifest.files), false);
+
+  const actual = Object.fromEntries(await Promise.all(
+    (await builtHostingFiles(publicRootUrl)).map(async (path) => [
+      relative(fileURLToPath(publicRootUrl), path).split(sep).join('/'),
+      createHash('sha256').update(await readFile(path)).digest('hex'),
+    ] as const),
+  ));
+  assert.deepEqual(manifest.files, actual);
 });

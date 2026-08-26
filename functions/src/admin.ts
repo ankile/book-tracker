@@ -6,6 +6,7 @@ import {
   IssueIdentity,
   mapIssueDocuments,
 } from "./adminIssues";
+import {releaseLabels} from "./release";
 
 const db = getFirestore();
 
@@ -97,6 +98,7 @@ function adminCallable(
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
+    .runWith({labels: releaseLabels()})
     .https.onCall(async (data: unknown, context) => {
       await requireAdmin(context);
       decodeEmptyCallableRequest(data, invalidArgument);

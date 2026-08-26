@@ -152,8 +152,20 @@ test('one remaining queue slot defers and later recovers the other claim', async
   ]);
 
   let fetchCalls = 0;
+  let blockDuplicateFetch = false;
+  let announceDuplicateFetch!: () => void;
+  let finishDuplicateFetch!: (response: Response) => void;
+  const duplicateFetchStarted = new Promise<void>((resolve) => {
+    announceDuplicateFetch = resolve;
+  });
   t.mock.method(globalThis, 'fetch', async () => {
     fetchCalls += 1;
+    if (blockDuplicateFetch) {
+      announceDuplicateFetch();
+      return new Promise<Response>((resolve) => {
+        finishDuplicateFetch = resolve;
+      });
+    }
     return new Response(JSON.stringify({id: 200 + fetchCalls}), {status: 200});
   });
   const firstResults = await Promise.allSettled([
@@ -183,16 +195,22 @@ test('one remaining queue slot defers and later recovers the other claim', async
     count: 10,
   });
   const retried = await remaining.docs[0].ref.get();
-  await Promise.all([
-    deployed.toggl.syncqueue.run({
-      data: {after: retried},
-      params: {uid, queueId: retried.id},
-    }),
-    deployed.toggl.syncqueue.run({
-      data: {after: retried},
-      params: {uid, queueId: retried.id},
-    }),
-  ]);
+  blockDuplicateFetch = true;
+  const firstRetry = deployed.toggl.syncqueue.run({
+    data: {after: retried},
+    params: {uid, queueId: retried.id},
+  });
+  await duplicateFetchStarted;
+  const duplicateRetry = deployed.toggl.syncqueue.run({
+    data: {after: retried},
+    params: {uid, queueId: retried.id},
+  });
+  await duplicateRetry;
+  finishDuplicateFetch(new Response(
+    JSON.stringify({id: 200 + fetchCalls}),
+    {status: 200},
+  ));
+  await firstRetry;
 
   assert.equal(fetchCalls, 2);
   assert.equal((await quotaRef.get()).data()?.count, 1);

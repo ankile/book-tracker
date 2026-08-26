@@ -12,6 +12,7 @@ import {
   renderProfileDocument,
   renderSitemap,
 } from "./publicProfileRenderer";
+import {RELEASE_HEADER, RELEASE_ID, releaseLabels} from "./release";
 
 const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
 
@@ -168,6 +169,7 @@ export const publicweb = onRequest(
   {
     region: "europe-west1",
     timeoutSeconds: 30,
+    labels: releaseLabels(),
   },
   async (request, response) => {
     const result = await resolvePublicWebRequest(
@@ -176,6 +178,7 @@ export const publicweb = onRequest(
       profileShell(),
     );
     response.status(result.status);
+    response.set(RELEASE_HEADER, RELEASE_ID);
     for (const [name, value] of Object.entries(result.headers)) {
       response.set(name, value);
     }

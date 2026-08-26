@@ -30,6 +30,7 @@ import {
   TogglQueuePayload,
   TimerClaim,
 } from "./decoders";
+import {releaseLabels} from "./release";
 
 const db = getFirestore();
 
@@ -272,6 +273,7 @@ function timerMatchesClaim(
 
 exports.savetoken = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
@@ -313,6 +315,7 @@ exports.savetoken = functions
 
 exports.start = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
@@ -486,6 +489,7 @@ async function transitionStartClaim(
 
 exports.stop = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
@@ -578,6 +582,7 @@ exports.stop = functions
 
 exports.clearstopping = functions
   .region("europe-west1")
+  .runWith({labels: releaseLabels()})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
@@ -795,6 +800,7 @@ exports.syncqueue = onDocumentWritten(
     region: "europe-west1",
     timeoutSeconds: 120,
     maxInstances: 5,
+    labels: releaseLabels(),
     // Also retries malformed quota documents until an operator repairs them;
     // the pending queue row stays intact instead of being discarded.
     retry: true,

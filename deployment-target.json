@@ -1,18 +1,200 @@
 {
   "projectId": "book-tracker-d8f24",
-  "hostingOrigin": "https://book-tracker-d8f24.web.app",
-  "region": "europe-west1",
+  "projectNumber": "440931185227",
+  "releaseId": "security-2026-08-26-01",
+  "hostingSite": "book-tracker-d8f24",
+  "hostingOrigins": [
+    "https://book-tracker-d8f24.web.app",
+    "https://book.ankile.com"
+  ],
+  "allowedGeneratedHostingFiles": [
+    "__/firebase/init.js",
+    "__/firebase/init.json"
+  ],
+  "allowedUntrackedPrefixes": ["ideas/"],
   "functions": [
-    {"name": "admin-overview", "generation": "GEN_1"},
-    {"name": "booksapi-lookupisbn", "generation": "GEN_1"},
-    {"name": "createUserDocument", "generation": "GEN_1"},
-    {"name": "deleteUserDocument", "generation": "GEN_1"},
-    {"name": "deletebookupdates", "generation": "GEN_2"},
-    {"name": "publicweb", "generation": "GEN_2"},
-    {"name": "toggl-clearstopping", "generation": "GEN_1"},
-    {"name": "toggl-savetoken", "generation": "GEN_1"},
-    {"name": "toggl-start", "generation": "GEN_1"},
-    {"name": "toggl-stop", "generation": "GEN_1"},
-    {"name": "toggl-syncqueue", "generation": "GEN_2"}
+    {
+      "name": "admin-overview",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "admin.overview",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "booksapi-lookupisbn",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "booksapi.lookupisbn",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [{
+        "key": "FUNCTIONS_CONFIG_EXPORT",
+        "projectId": "440931185227",
+        "secret": "FUNCTIONS_CONFIG_EXPORT",
+        "version": "2"
+      }],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "createUserDocument",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "createUserDocument",
+      "access": "event",
+      "timeoutSeconds": 60,
+      "maxInstances": 3000,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": false,
+      "invokers": [],
+      "event": {
+        "type": "providers/firebase.auth/eventTypes/user.create",
+        "retry": false,
+        "filters": [{"attribute": "resource", "value": "projects/book-tracker-d8f24"}]
+      }
+    },
+    {
+      "name": "deleteUserDocument",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "deleteUserDocument",
+      "access": "event",
+      "timeoutSeconds": 60,
+      "maxInstances": 3000,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": false,
+      "invokers": [],
+      "event": {
+        "type": "providers/firebase.auth/eventTypes/user.delete",
+        "retry": false,
+        "filters": [{"attribute": "resource", "value": "projects/book-tracker-d8f24"}]
+      }
+    },
+    {
+      "name": "deletebookupdates",
+      "generation": "GEN_2",
+      "region": "europe-west1",
+      "entryPoint": "deletebookupdates",
+      "access": "event",
+      "timeoutSeconds": 300,
+      "maxInstances": 20,
+      "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": false,
+      "invokers": [],
+      "event": {
+        "type": "google.cloud.firestore.document.v1.deleted",
+        "retry": false,
+        "filters": [
+          {"attribute": "database", "value": "(default)"},
+          {"attribute": "document", "value": "users/{userId}/books/{bookId}", "operator": "match-path-pattern"},
+          {"attribute": "namespace", "value": "(default)"}
+        ]
+      }
+    },
+    {
+      "name": "publicweb",
+      "generation": "GEN_2",
+      "region": "europe-west1",
+      "entryPoint": "publicweb",
+      "access": "http",
+      "timeoutSeconds": 30,
+      "maxInstances": 20,
+      "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/run.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "toggl-clearstopping",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "toggl.clearstopping",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "toggl-savetoken",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "toggl.savetoken",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "toggl-start",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "toggl.start",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "toggl-stop",
+      "generation": "GEN_1",
+      "region": "europe-west1",
+      "entryPoint": "toggl.stop",
+      "access": "callable",
+      "timeoutSeconds": 60,
+      "maxInstances": null,
+      "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": true,
+      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "event": null
+    },
+    {
+      "name": "toggl-syncqueue",
+      "generation": "GEN_2",
+      "region": "europe-west1",
+      "entryPoint": "toggl.syncqueue",
+      "access": "event",
+      "timeoutSeconds": 120,
+      "maxInstances": 5,
+      "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
+      "secrets": [],
+      "publicInvoker": false,
+      "invokers": [],
+      "event": {
+        "type": "google.cloud.firestore.document.v1.written",
+        "retry": true,
+        "filters": [
+          {"attribute": "database", "value": "(default)"},
+          {"attribute": "document", "value": "users/{uid}/togglQueue/{queueId}", "operator": "match-path-pattern"},
+          {"attribute": "namespace", "value": "(default)"}
+        ]
+      }
+    }
   ]
 }
