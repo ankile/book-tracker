@@ -366,6 +366,8 @@ Push that commit before changing Firebase. After every selected target is live,
 run the deployment integrity check with the reviewed commit:
 
 ```bash
+gcloud services enable cloudasset.googleapis.com \
+  --project=book-tracker-d8f24
 git rev-parse HEAD
 npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
 ```
@@ -377,14 +379,23 @@ GitHub repository. It rejects ignored dotenv and local-secret deploy inputs
 and reads expected artifacts from the reviewed commit rather than the working
 tree. The live checks cover Firestore and Storage rules, indexes and TTL
 policies, Firebase Authentication domains/providers, every Function source
-archive, runtime and security configuration, complete Function and Cloud Run
-IAM policies, ancestor and custom IAM, runtime identity keys, Secret Manager,
-source buckets, Artifact Registry, Eventarc, the project-wide Cloud Run service
-inventory, Gen 2 images/traffic and Hosting-pinned revisions, all Hosting
+archive at its immutable Storage generation, runtime and security configuration,
+complete Function and Cloud Run IAM policies, ancestor and custom IAM, every
+project service account and user-managed key, Secret Manager, every Storage
+bucket plus its IAM and ACL surfaces, Artifact Registry, all Firebase Rules
+releases, complete Eventarc transports and IAM, Pub/Sub topics/subscriptions and
+IAM, the Cloud Asset project-wide Cloud Run service inventory, Gen 2 Cloud Build
+and image provenance/traffic, Hosting-pinned revisions, all Hosting
 sites/domains/channels, control-plane gzip hashes, bytes from every production
 origin, and the profile and sitemap rewrites. Pass
 `--account=<gcloud-account>` when the active gcloud account is not the release
 account. Unknown or misspelled options fail.
+
+Cloud Asset is the authoritative non-regional Cloud Run inventory. Do not
+replace it with the global Cloud Run list or accept that API's `unreachable`
+regions: either creates a blind spot in which an unreviewed service can remain
+deployed. Allow Cloud Asset inventory changes to propagate before the final
+verification.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
 Change that ID for every release. Deploy all Functions so every deployed source

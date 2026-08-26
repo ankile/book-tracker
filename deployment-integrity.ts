@@ -54,6 +54,18 @@ interface SecretSecurity extends IamResource {
 interface StorageBucketSecurity extends IamResource {
   publicAccessPrevention: string;
   uniformBucketLevelAccess: boolean;
+  bucketAcl: Record<string, unknown>[];
+  defaultObjectAcl: Record<string, unknown>[];
+  objectAclsSha256: string;
+  configurationSha256: string;
+}
+
+interface EventarcTriggerSecurity extends IamResource {
+  configuration: Record<string, unknown>;
+}
+
+interface PubsubResourceSecurity extends IamResource {
+  configuration: Record<string, unknown>;
 }
 
 interface SecurityTarget {
@@ -66,12 +78,15 @@ interface SecurityTarget {
   secrets: SecretSecurity[];
   artifactRepositories: IamResource[];
   storageBuckets: StorageBucketSecurity[];
-  runUnreachableRegions: string[];
+  eventarcTriggers: EventarcTriggerSecurity[];
+  pubsubTopics: PubsubResourceSecurity[];
+  pubsubSubscriptions: PubsubResourceSecurity[];
+  authProviders: Record<string, unknown>;
+  firebaseRulesReleases: string[];
 }
 
 interface ObservedSecurity extends Omit<SecurityTarget, 'gitOrigin' | 'storageRulesRelease'> {
   runServices: string[];
-  eventarcTriggers: Record<string, unknown>[];
 }
 
 export interface ExpectedFunction {
@@ -124,6 +139,10 @@ export interface ObservedFunction extends ExpectedFunction {
   runTrafficStatuses: Record<string, unknown>[] | null;
   configuredImage: string | null;
   revisionImage: string | null;
+  buildId: string | null;
+  buildSource: string | null;
+  imageBuildId: string | null;
+  imageSource: string | null;
 }
 
 interface ExpectedIndex {
@@ -300,7 +319,8 @@ function normalizedIamBindings(policy: Record<string, unknown>): IamBinding[] {
     const members = array(binding.members ?? []).map(string).sort();
     for (const member of members) {
       assert.equal(
-        member.startsWith('group:') || member.startsWith('domain:'),
+        member.startsWith('group:') || member.startsWith('domain:') ||
+          member.startsWith('principal://') || member.startsWith('principalSet://'),
         false,
         `mutable IAM principal is not reviewable: ${member}`,
       );
@@ -564,10 +584,28 @@ async function functionSourceFiles(
   region: string,
   name: string,
   generation: Generation,
+  storageSource: Record<string, unknown> | null,
 ): Promise<Record<string, string>> {
+  if (generation === 'GEN_2') {
+    assert.ok(storageSource !== null);
+    const source = storageSource;
+    const bucket = string(source.bucket);
+    const object = string(source.object);
+    const objectGeneration = string(source.generation);
+    const response = await fetchWithRetry(
+      fetch_,
+      `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${
+        encodeURIComponent(object)}?alt=media&generation=${encodeURIComponent(objectGeneration)}`,
+      {headers: authenticatedHeaders(accessToken, projectId)},
+      [200],
+      'immutable Gen 2 Function source archive download',
+    );
+    return sourceArchiveFiles(new Uint8Array(await response.arrayBuffer()));
+  }
+  assert.equal(storageSource, null);
   const generated = await json(
     fetch_,
-    `https://cloudfunctions.googleapis.com/${generation === 'GEN_2' ? 'v2' : 'v1'}/projects/${projectId}/locations/${region}/functions/${name}:generateDownloadUrl`,
+    `https://cloudfunctions.googleapis.com/v1/projects/${projectId}/locations/${region}/functions/${name}:generateDownloadUrl`,
     accessToken,
     projectId,
     {method: 'POST', body: '{}'},
@@ -579,6 +617,96 @@ async function functionSourceFiles(
     fetch_, downloadUrl.toString(), undefined, [200], 'Function source archive download',
   );
   return sourceArchiveFiles(new Uint8Array(await response.arrayBuffer()));
+}
+
+function buildIdFromName(value: unknown, projectNumber: string, region: string): string {
+  const prefix = `projects/${projectNumber}/locations/${region}/builds/`;
+  const name = string(value);
+  assert.equal(name.startsWith(prefix), true);
+  const buildId = name.slice(prefix.length);
+  assert.match(buildId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  return buildId;
+}
+
+async function functionBuild(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  region: string,
+  buildName: unknown,
+  storageSource: Record<string, unknown>,
+): Promise<{buildId: string; buildSource: string; startTime: string; finishTime: string}> {
+  const buildId = buildIdFromName(buildName, target.projectNumber, region);
+  const build = await json(
+    fetch_, `https://cloudbuild.googleapis.com/v1/${string(buildName)}`,
+    accessToken, target.projectId,
+  );
+  assert.equal(build.name, buildName);
+  assert.equal(build.id, buildId);
+  assert.equal(build.status, 'SUCCESS');
+  const startTime = string(build.startTime);
+  const finishTime = string(build.finishTime);
+  assert.equal(Date.parse(startTime) < Date.parse(finishTime), true);
+  assert.deepEqual(build.secrets ?? [], []);
+  assert.deepEqual(build.availableSecrets ?? {}, {});
+  const steps = array(build.steps).map(record);
+  assert.ok(steps.length > 0);
+  for (const step of steps) assert.equal(step.status, 'SUCCESS');
+  const buildSource = `gs://${string(storageSource.bucket)}/${string(storageSource.object)}#${
+    string(storageSource.generation)}`;
+  const fetchStep = steps.find((step) => step.id === 'fetch');
+  assert.ok(fetchStep !== undefined);
+  assert.ok(array(fetchStep.args).map(string).includes(
+    `--location=gs://${string(storageSource.bucket)}/${string(storageSource.object)}`,
+  ));
+  return {buildId, buildSource, startTime, finishTime};
+}
+
+async function imageProvenance(
+  fetch_: FetchLike,
+  projectId: string,
+  accessToken: string,
+  image: string,
+  buildWindow: {startTime: string; finishTime: string},
+): Promise<{imageBuildId: string; imageSource: string}> {
+  const match = image.match(
+    /^([a-z0-9-]+-docker\.pkg\.dev)\/([^/]+)\/([^/]+)\/(.+)@(sha256:[0-9a-f]{64})$/,
+  );
+  assert.ok(match !== null);
+  const [, host, imageProject, repository, packageName, digest] = match;
+  assert.equal(imageProject, projectId);
+  const base = `https://${host}/v2/${imageProject}/${repository}/${packageName}`;
+  const metadataName = `projects/${imageProject}/locations/${host.slice(
+    0, -'-docker.pkg.dev'.length)}/repositories/${repository}/dockerImages/${
+    encodeURIComponent(packageName)}%40${digest}`;
+  const [manifest, metadata] = await Promise.all([
+    json(fetch_, `${base}/manifests/${digest}`, accessToken, projectId),
+    json(fetch_, `https://artifactregistry.googleapis.com/v1/${metadataName}`,
+      accessToken, projectId),
+  ]);
+  assert.equal(metadata.uri, image);
+  assert.deepEqual(array(metadata.tags).map(string).sort(), ['latest', 'version_1']);
+  const uploadTime = Date.parse(string(metadata.uploadTime));
+  const updateTime = Date.parse(string(metadata.updateTime));
+  assert.equal(uploadTime >= Date.parse(buildWindow.startTime), true);
+  assert.equal(uploadTime <= Date.parse(buildWindow.finishTime), true);
+  assert.equal(updateTime >= uploadTime, true);
+  assert.equal(updateTime <= Date.parse(buildWindow.finishTime), true);
+  assert.equal(manifest.schemaVersion, 2);
+  const config = record(manifest.config);
+  const configDigest = string(config.digest);
+  assert.match(configDigest, /^sha256:[0-9a-f]{64}$/);
+  const response = await fetchWithRetry(
+    fetch_, `${base}/blobs/${configDigest}`,
+    {headers: authenticatedHeaders(accessToken, projectId)},
+    [200], 'immutable Function image configuration download',
+  );
+  const imageConfig = record(await response.json());
+  const labels = stringRecord(record(imageConfig.config).Labels);
+  return {
+    imageBuildId: string(labels['google.build-id']),
+    imageSource: string(labels['google.source']),
+  };
 }
 
 async function functionIam(
@@ -845,22 +973,31 @@ async function deployedFunctions(
       entryPoint: string(build.entryPoint),
       event,
     };
-    if (generation === 'GEN_2') {
-      const source = record(record(build.source).storageSource);
+    const storageSource = generation === 'GEN_2' ?
+      record(record(build.source).storageSource) : null;
+    if (storageSource !== null) {
+      const source = storageSource;
       const resolved = record(record(build.sourceProvenance).resolvedStorageSource);
       assert.deepEqual(source, resolved);
       assert.match(string(source.bucket), /^[a-z0-9][a-z0-9._-]+$/);
       assert.match(string(source.object), /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$)).+$/);
       assert.match(string(source.generation), /^[1-9][0-9]*$/);
     }
-    const [sourceFiles, functionIam_, run] = await Promise.all([
+    const [sourceFiles, functionIam_, run, buildSecurity] = await Promise.all([
       functionSourceFiles(
         fetch_, target.projectId, accessToken, resource.region, resource.name, generation,
+        storageSource,
       ),
       functionIam(fetch_, target.projectId, accessToken, resource.region, resource.name),
       generation === 'GEN_1' ? Promise.resolve(null) :
         runSecurity(fetch_, target.projectId, accessToken, resource.region, resource.name),
+      generation === 'GEN_1' ? Promise.resolve(null) : functionBuild(
+        fetch_, target, accessToken, resource.region, build.build, storageSource!,
+      ),
     ]);
+    const provenance = run === null ? null : await imageProvenance(
+      fetch_, target.projectId, accessToken, run.revisionImage, buildSecurity!,
+    );
     return {
       ...resource,
       generation,
@@ -921,6 +1058,10 @@ async function deployedFunctions(
       runTrafficStatuses: run?.trafficStatuses ?? null,
       configuredImage: run?.configuredImage ?? null,
       revisionImage: run?.revisionImage ?? null,
+      buildId: buildSecurity?.buildId ?? null,
+      buildSource: buildSecurity?.buildSource ?? null,
+      imageBuildId: provenance?.imageBuildId ?? null,
+      imageSource: provenance?.imageSource ?? null,
     };
   }));
 }
@@ -1337,22 +1478,107 @@ async function deployedHosting(
 }
 
 function normalizedAuthConfig(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'signIn', 'notification', 'quota', 'monitoring', 'multiTenant',
+    'authorizedDomains', 'subtype', 'client', 'mfa', 'blockingFunctions',
+    'smsRegionConfig', 'mobileLinksConfig', 'defaultHostingSite', 'recaptchaConfig',
+    'emailPrivacyConfig', 'passwordPolicyConfig', 'autodeleteAnonymousUsers',
+  ].includes(key)));
   const signIn = record(value.signIn ?? {});
+  const client = record(value.client ?? {});
   return {
     authorizedDomains: array(value.authorizedDomains ?? []).map(string).sort(),
     signIn: Object.fromEntries(Object.entries(signIn)
       .filter(([key]) => key !== 'hashConfig')
       .sort(([left], [right]) => left.localeCompare(right))),
+    signInHashConfigSha256: sha256Canonical(signIn.hashConfig ?? {}),
+    notificationSha256: sha256Canonical(value.notification ?? {}),
+    quota: record(value.quota ?? {}),
     mfa: record(value.mfa ?? {}),
     multiTenant: record(value.multiTenant ?? {}),
     client: {
-      permissions: record(record(value.client ?? {}).permissions ?? {}),
-      firebaseSubdomain: nullableString(record(value.client ?? {}).firebaseSubdomain),
+      permissions: record(client.permissions ?? {}),
+      firebaseSubdomain: nullableString(client.firebaseSubdomain),
+      apiKeySha256: sha256Canonical(client.apiKey ?? null),
     },
     blockingFunctions: record(value.blockingFunctions ?? {}),
     monitoring: record(value.monitoring ?? {}),
     smsRegionConfig: record(value.smsRegionConfig ?? {}),
+    mobileLinksConfig: record(value.mobileLinksConfig ?? {}),
+    defaultHostingSite: nullableString(value.defaultHostingSite),
+    subtype: nullableString(value.subtype),
+    recaptchaConfig: record(value.recaptchaConfig ?? {}),
+    emailPrivacyConfig: record(value.emailPrivacyConfig ?? {}),
+    passwordPolicyConfig: record(value.passwordPolicyConfig ?? {}),
+    autodeleteAnonymousUsers: value.autodeleteAnonymousUsers === undefined ? null :
+      boolean(value.autodeleteAnonymousUsers),
   };
+}
+
+function normalizedAuthProviderInventory(
+  inventories: Record<string, Record<string, unknown>[]>,
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(inventories).sort(([left], [right]) =>
+    left.localeCompare(right)).map(([name, values]) => [name, {
+    names: values.map((value) => string(value.name)).sort(),
+    sha256: sha256Canonical(sortedCanonical(values)),
+  }]));
+}
+
+function normalizedAcl(values: unknown): Record<string, unknown>[] {
+  return sortedCanonical(array(values ?? []).map((value) => {
+    const acl = record(value);
+    return {
+      entity: string(acl.entity),
+      role: string(acl.role),
+      ...(acl.projectTeam === undefined ? {} : {projectTeam: record(acl.projectTeam)}),
+    };
+  }));
+}
+
+function storageBucketConfiguration(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    autoclass: record(value.autoclass ?? {}),
+    billing: record(value.billing ?? {}),
+    cors: sortedCanonical(array(value.cors ?? []).map(record)),
+    customPlacementConfig: record(value.customPlacementConfig ?? {}),
+    defaultEventBasedHold: value.defaultEventBasedHold === true,
+    encryption: record(value.encryption ?? {}),
+    hierarchicalNamespace: record(value.hierarchicalNamespace ?? {}),
+    ipFilter: record(value.ipFilter ?? {}),
+    lifecycle: record(value.lifecycle ?? {}),
+    location: string(value.location),
+    locationType: string(value.locationType),
+    logging: record(value.logging ?? {}),
+    objectRetention: record(value.objectRetention ?? {}),
+    retentionPolicy: record(value.retentionPolicy ?? {}),
+    rpo: nullableString(value.rpo),
+    softDeletePolicy: record(value.softDeletePolicy ?? {}),
+    storageClass: string(value.storageClass),
+    versioning: record(value.versioning ?? {}),
+    website: record(value.website ?? {}),
+  };
+}
+
+async function identityTenants(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+): Promise<Record<string, unknown>[]> {
+  const url = `https://identitytoolkit.googleapis.com/v2/projects/${target.projectId}/tenants`;
+  const response = await fetchWithRetry(fetch_, url, {
+    headers: authenticatedHeaders(accessToken, target.projectId),
+  }, [200, 400], 'Identity Platform tenant inventory');
+  const body = record(await response.json());
+  if (response.status === 400) {
+    const error = record(body.error);
+    assert.equal(error.status, 'INVALID_ARGUMENT');
+    assert.equal(error.message, 'INVALID_PROJECT_ID');
+    return [];
+  }
+  assert.deepEqual(body.unreachable ?? [], []);
+  assert.ok(body.nextPageToken === undefined || string(body.nextPageToken).trim() === '');
+  return array(body.tenants ?? []).map(record);
 }
 
 async function iamAt(
@@ -1371,36 +1597,8 @@ async function iamAt(
   ));
 }
 
-async function deployedSecurity(
-  fetch_: FetchLike,
-  target: DeploymentTarget,
-  accessToken: string,
-  ancestorIamPolicies: IamResource[],
-): Promise<ObservedSecurity> {
-  const runServicesPromise = (async () => {
-    const base = `https://run.googleapis.com/v2/projects/${target.projectId}/locations/-/services`;
-    const services: string[] = [];
-    const unreachable = new Set<string>();
-    let pageToken: string | undefined;
-    for (let page = 0; page < MAX_API_PAGES; page += 1) {
-      const url = pageToken === undefined ? base :
-        `${base}?pageToken=${encodeURIComponent(pageToken)}`;
-      const response = await json(fetch_, url, accessToken, target.projectId);
-      for (const value of array(response.services ?? [])) services.push(string(record(value).name));
-      for (const region of array(response.unreachable ?? [])) unreachable.add(string(region));
-      const next = response.nextPageToken;
-      if (next === undefined || string(next).trim() === '') {
-        return {services: services.sort(), unreachable: [...unreachable].sort()};
-      }
-      pageToken = string(next);
-    }
-    assert.fail(`${base} exceeded ${MAX_API_PAGES} pages`);
-  })();
-  const eventarcPromise = listApi(
-    fetch_,
-    `https://eventarc.googleapis.com/v1/projects/${target.projectId}/locations/-/triggers`,
-    'triggers', accessToken, target.projectId,
-  ).then((values) => sortedCanonical(values.map((value) => ({
+function normalizedEventarcTrigger(value: Record<string, unknown>): Record<string, unknown> {
+  return {
     destination: record(value.destination),
     eventFilters: normalizeFilters(array(value.eventFilters).map((filterValue) => {
       const filter = record(filterValue);
@@ -1410,17 +1608,126 @@ async function deployedSecurity(
         ...(filter.operator === undefined ? {} : {operator: string(filter.operator)}),
       };
     })),
+    transport: record(value.transport),
     labels: record(value.labels ?? {}),
     serviceAccount: string(value.serviceAccount),
-  }))));
+    channel: nullableString(value.channel),
+    eventDataContentType: nullableString(value.eventDataContentType),
+    conditions: record(value.conditions ?? {}),
+  };
+}
+
+function normalizedPubsubTopic(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    labels: record(value.labels ?? {}),
+    messageStoragePolicy: record(value.messageStoragePolicy ?? {}),
+    schemaSettings: record(value.schemaSettings ?? {}),
+    ingestionDataSourceSettings: record(value.ingestionDataSourceSettings ?? {}),
+    kmsKeyName: nullableString(value.kmsKeyName),
+    messageRetentionDuration: nullableString(value.messageRetentionDuration),
+    messageTransforms: sortedCanonical(array(value.messageTransforms ?? []).map(record)),
+    state: nullableString(value.state),
+  };
+}
+
+function normalizedPubsubSubscription(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    topic: string(value.topic),
+    pushConfig: record(value.pushConfig ?? {}),
+    bigQueryConfig: record(value.bigQueryConfig ?? {}),
+    cloudStorageConfig: record(value.cloudStorageConfig ?? {}),
+    ackDeadlineSeconds: number(value.ackDeadlineSeconds),
+    retainAckedMessages: value.retainAckedMessages === true,
+    messageRetentionDuration: nullableString(value.messageRetentionDuration),
+    labels: record(value.labels ?? {}),
+    enableMessageOrdering: value.enableMessageOrdering === true,
+    expirationPolicy: record(value.expirationPolicy ?? {}),
+    filter: nullableString(value.filter),
+    deadLetterPolicy: record(value.deadLetterPolicy ?? {}),
+    retryPolicy: record(value.retryPolicy ?? {}),
+    detached: value.detached === true,
+    enableExactlyOnceDelivery: value.enableExactlyOnceDelivery === true,
+    state: nullableString(value.state),
+  };
+}
+
+async function securedResources(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  values: Record<string, unknown>[],
+  normalize: (value: Record<string, unknown>) => Record<string, unknown>,
+  iamUrl: (name: string) => string,
+): Promise<PubsubResourceSecurity[]> {
+  return Promise.all(values.map(async (value) => {
+    const name = string(value.name);
+    return {
+      name,
+      iam: await iamAt(fetch_, iamUrl(name), target, accessToken),
+      configuration: normalize(value),
+    };
+  }));
+}
+
+async function deployedSecurity(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  ancestorIamPolicies: IamResource[],
+): Promise<ObservedSecurity> {
+  const runServicesPromise = listApi(
+    fetch_,
+    `https://cloudasset.googleapis.com/v1/projects/${target.projectId}:searchAllResources?assetTypes=run.googleapis.com%2FService`,
+    'results', accessToken, target.projectId,
+  ).then((values) => values.map((value) => {
+    const prefix = '//run.googleapis.com/';
+    const name = string(value.name);
+    assert.equal(name.startsWith(prefix), true);
+    return name.slice(prefix.length);
+  }).sort());
+  const eventarcValuesPromise = listApi(
+    fetch_, `https://eventarc.googleapis.com/v1/projects/${target.projectId}/locations/-/triggers`,
+    'triggers', accessToken, target.projectId,
+  );
+  const eventarcPromise = eventarcValuesPromise.then(async (values) =>
+    sortedCanonical(await Promise.all(values.map(async (value) => {
+      const name = string(value.name);
+      return {
+        name,
+        iam: await iamAt(
+          fetch_, `https://eventarc.googleapis.com/v1/${name}:getIamPolicy`, target, accessToken,
+        ),
+        configuration: normalizedEventarcTrigger(value),
+      };
+    }))));
   const authPromise = json(
     fetch_,
     `https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/config`,
     accessToken, target.projectId,
   ).then(normalizedAuthConfig);
+  const firebaseRulesReleasesPromise = listApi(
+    fetch_, `https://firebaserules.googleapis.com/v1/projects/${target.projectId}/releases`,
+    'releases', accessToken, target.projectId,
+  ).then((releases) => releases.map((release) => {
+    const prefix = `projects/${target.projectId}/releases/`;
+    const name = string(release.name);
+    assert.equal(name.startsWith(prefix), true);
+    return name.slice(prefix.length);
+  }).sort());
+  const authProvidersPromise = Promise.all([
+    [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/defaultSupportedIdpConfigs`, 'defaultSupportedIdpConfigs'],
+    [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/oauthIdpConfigs`, 'oauthIdpConfigs'],
+    [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/inboundSamlConfigs`, 'inboundSamlConfigs'],
+  ].map(async ([url, field]) => [field, await listApi(
+    fetch_, url,
+    field, accessToken, target.projectId,
+  )] as const)).then(async (entries) => normalizedAuthProviderInventory({
+    ...Object.fromEntries(entries),
+    tenants: await identityTenants(fetch_, target, accessToken),
+  }));
   const customRolesPromise = listApi(
     fetch_,
-    `https://iam.googleapis.com/v1/projects/${target.projectId}/roles?showDeleted=true`,
+    `https://iam.googleapis.com/v1/projects/${target.projectId}/roles?showDeleted=true&view=FULL`,
     'roles', accessToken, target.projectId,
   ).then((roles) => sortedCanonical(roles.map((role) => {
     const normalized = {
@@ -1433,14 +1740,21 @@ async function deployedSecurity(
     };
     return normalized;
   })));
-  const serviceAccountsPromise = Promise.all(target.security.serviceAccounts.map(async (expected) => {
-    const base = `https://iam.googleapis.com/v1/projects/${target.projectId}/serviceAccounts/${encodeURIComponent(expected.name)}`;
+  const serviceAccountListPromise = listApi(
+    fetch_, `https://iam.googleapis.com/v1/projects/${target.projectId}/serviceAccounts`,
+    'accounts', accessToken, target.projectId,
+  );
+  const serviceAccountsPromise = serviceAccountListPromise.then(async (accounts) => {
+    const names = accounts.map((account) => string(account.email)).sort();
+    assert.deepEqual(names, target.security.serviceAccounts.map(({name}) => name).sort());
+    return Promise.all(names.map(async (name) => {
+    const base = `https://iam.googleapis.com/v1/projects/${target.projectId}/serviceAccounts/${encodeURIComponent(name)}`;
     const [iam, keys] = await Promise.all([
       iamAt(fetch_, `${base}:getIamPolicy`, target, accessToken, 'POST'),
       listApi(fetch_, `${base}/keys`, 'keys', accessToken, target.projectId),
     ]);
     const userManagedKeys = sortedCanonical(keys.filter((key) =>
-      key.keyOrigin === 'USER_PROVIDED').map((key) => ({
+      key.keyType === 'USER_MANAGED').map((key) => ({
       name: string(key.name),
       keyOrigin: string(key.keyOrigin),
       keyType: string(key.keyType),
@@ -1448,8 +1762,9 @@ async function deployedSecurity(
       validAfterTime: string(key.validAfterTime),
       validBeforeTime: string(key.validBeforeTime),
     })));
-    return {name: expected.name, iam, userManagedKeys};
-  }));
+    return {name, iam, userManagedKeys};
+    }));
+  });
   const secretListPromise = listApi(
     fetch_, `https://secretmanager.googleapis.com/v1/projects/${target.projectId}/secrets`,
     'secrets', accessToken, target.projectId,
@@ -1490,13 +1805,27 @@ async function deployedSecurity(
       return {name, iam};
     },
   ));
+  const pubsubTopicsPromise = listApi(
+    fetch_, `https://pubsub.googleapis.com/v1/projects/${target.projectId}/topics`,
+    'topics', accessToken, target.projectId,
+  ).then((values) => securedResources(
+    fetch_, target, accessToken, values, normalizedPubsubTopic,
+    (name) => `https://pubsub.googleapis.com/v1/${name}:getIamPolicy`,
+  )).then(sortedCanonical);
+  const pubsubSubscriptionsPromise = listApi(
+    fetch_, `https://pubsub.googleapis.com/v1/projects/${target.projectId}/subscriptions`,
+    'subscriptions', accessToken, target.projectId,
+  ).then((values) => securedResources(
+    fetch_, target, accessToken, values, normalizedPubsubSubscription,
+    (name) => `https://pubsub.googleapis.com/v1/${name}:getIamPolicy`,
+  )).then(sortedCanonical);
   const bucketsPromise = listApi(
-    fetch_, `https://storage.googleapis.com/storage/v1/b?project=${target.projectId}`,
+    fetch_, `https://storage.googleapis.com/storage/v1/b?project=${target.projectId}&projection=full`,
     'items', accessToken, target.projectId,
   ).then(async (buckets) => {
     const byName = new Map(buckets.map((bucket) => [string(bucket.name), bucket]));
     const expectedNames = target.security.storageBuckets.map(({name}) => name).sort();
-    for (const name of expectedNames) assert.equal(byName.has(name), true);
+    assert.deepEqual([...byName.keys()].sort(), expectedNames);
     return Promise.all(expectedNames.map(async (name) => {
         const bucket = byName.get(name)!;
         const iam = await iamAt(
@@ -1504,19 +1833,37 @@ async function deployedSecurity(
           accessToken,
         );
         const configuration = record(bucket.iamConfiguration ?? {});
+        const uniformBucketLevelAccess =
+          record(configuration.uniformBucketLevelAccess ?? {}).enabled === true;
+        const objectAcls = uniformBucketLevelAccess ? [] : await listApi(
+          fetch_,
+          `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(name)}/o?projection=full&versions=true`,
+          'items', accessToken, target.projectId,
+        ).then((objects) => sortedCanonical(objects.map((object) => ({
+          name: string(object.name),
+          generation: string(object.generation),
+          acl: normalizedAcl(object.acl),
+        }))));
         return {
           name,
           iam,
           publicAccessPrevention: nullableString(configuration.publicAccessPrevention) ?? 'inherited',
-          uniformBucketLevelAccess:
-            record(configuration.uniformBucketLevelAccess ?? {}).enabled === true,
+          uniformBucketLevelAccess,
+          bucketAcl: uniformBucketLevelAccess ? [] : normalizedAcl(bucket.acl),
+          defaultObjectAcl: uniformBucketLevelAccess ? [] : normalizedAcl(bucket.defaultObjectAcl),
+          objectAclsSha256: sha256Canonical(objectAcls),
+          configurationSha256: sha256Canonical(storageBucketConfiguration(bucket)),
         };
       }));
   });
-  const [runInventory, eventarcTriggers, authConfig, customRoles, serviceAccounts,
-    secrets, artifactRepositories, storageBuckets] = await Promise.all([
-    runServicesPromise, eventarcPromise, authPromise, customRolesPromise,
-    serviceAccountsPromise, secretsPromise, repositoriesPromise, bucketsPromise,
+  const [runServices, eventarcTriggers, authConfig, authProviders, firebaseRulesReleases,
+    customRoles, serviceAccounts,
+    secrets, artifactRepositories, pubsubTopics, pubsubSubscriptions, storageBuckets] =
+    await Promise.all([
+      runServicesPromise, eventarcPromise, authPromise, authProvidersPromise,
+      firebaseRulesReleasesPromise, customRolesPromise,
+      serviceAccountsPromise, secretsPromise, repositoriesPromise, pubsubTopicsPromise,
+      pubsubSubscriptionsPromise, bucketsPromise,
   ]);
   return {
     authConfig,
@@ -1526,9 +1873,12 @@ async function deployedSecurity(
     secrets: sortedCanonical(secrets),
     artifactRepositories: sortedCanonical(artifactRepositories),
     storageBuckets: sortedCanonical(storageBuckets),
-    runServices: runInventory.services,
-    runUnreachableRegions: runInventory.unreachable,
+    runServices,
     eventarcTriggers,
+    pubsubTopics,
+    pubsubSubscriptions,
+    authProviders,
+    firebaseRulesReleases,
   };
 }
 
@@ -1752,16 +2102,26 @@ export function deploymentProblems(
   if (canonical(observed.security.authConfig) !== canonical(expectedSecurity.authConfig)) {
     problems.push('Firebase Authentication security does not match the reviewed commit');
   }
+  if (canonical(observed.security.authProviders) !== canonical(expectedSecurity.authProviders)) {
+    problems.push('Firebase Authentication providers or tenants do not match the reviewed commit');
+  }
+  if (canonical(observed.security.firebaseRulesReleases) !==
+      canonical(expectedSecurity.firebaseRulesReleases)) {
+    problems.push('Firebase Rules releases do not match the reviewed commit');
+  }
   if (canonical(observed.security.runServices) !== canonical(expectedRunServices(expected.target))) {
     problems.push('Cloud Run services do not match the reviewed Functions');
   }
-  if (canonical(observed.security.runUnreachableRegions) !==
-      canonical(expectedSecurity.runUnreachableRegions)) {
-    problems.push('Cloud Run region coverage does not match the reviewed target');
-  }
   if (canonical(observed.security.eventarcTriggers) !==
-      canonical(expectedEventarcTriggers(expected.target))) {
+      canonical(expectedSecurity.eventarcTriggers)) {
     problems.push('Eventarc triggers do not match the reviewed Functions');
+  }
+  if (canonical(observed.security.pubsubTopics) !== canonical(expectedSecurity.pubsubTopics)) {
+    problems.push('Pub/Sub topics or authorization do not match the reviewed commit');
+  }
+  if (canonical(observed.security.pubsubSubscriptions) !==
+      canonical(expectedSecurity.pubsubSubscriptions)) {
+    problems.push('Pub/Sub subscriptions or delivery settings do not match the reviewed commit');
   }
 
   const allHostingFiles = {
@@ -1838,6 +2198,12 @@ export function deploymentProblems(
           observedFunction.revisionImage === null ||
           !observedFunction.revisionImage.startsWith(`${imagePrefix}@sha256:`)) {
         problems.push(`Cloud Run container image does not match the reviewed Function: ${key}`);
+      }
+      if (observedFunction.buildId === null ||
+          observedFunction.buildId !== observedFunction.imageBuildId ||
+          observedFunction.buildSource === null ||
+          observedFunction.buildSource !== observedFunction.imageSource) {
+        problems.push(`Cloud Run image provenance does not match the immutable Function build: ${key}`);
       }
       const pinnedTag = observed.hosting.pinnedTags[key];
       const traffic = observedFunction.runTraffic ?? [];
@@ -1998,7 +2364,8 @@ function securityTarget(
   assertExactKeys(security, [
     'gitOrigin', 'storageRulesRelease', 'authConfig', 'ancestorIamPolicies',
     'customRoles', 'serviceAccounts', 'secrets', 'artifactRepositories', 'storageBuckets',
-    'runUnreachableRegions',
+    'eventarcTriggers', 'pubsubTopics', 'pubsubSubscriptions', 'authProviders',
+    'firebaseRulesReleases',
   ]);
   const serviceAccounts = array(security.serviceAccounts).map((value_) => {
     const account = record(value_);
@@ -2009,7 +2376,9 @@ function securityTarget(
     };
   });
   const requiredAccounts = [...new Set(functions.map(({serviceAccount}) => serviceAccount))].sort();
-  assert.deepEqual(serviceAccounts.map(({name}) => name).sort(), requiredAccounts);
+  for (const required of requiredAccounts) {
+    assert.equal(serviceAccounts.some(({name}) => name === required), true);
+  }
   const secrets = array(security.secrets).map((value_) => {
     const secret = record(value_);
     assertExactKeys(secret, ['name', 'iam', 'versions']);
@@ -2037,13 +2406,23 @@ function securityTarget(
     const bucket = record(value_);
     assertExactKeys(bucket, [
       'name', 'iam', 'publicAccessPrevention', 'uniformBucketLevelAccess',
+      'bucketAcl', 'defaultObjectAcl', 'objectAclsSha256',
+      'configurationSha256',
     ]);
     return {
       ...targetIamResource({name: bucket.name, iam: bucket.iam}),
       publicAccessPrevention: string(bucket.publicAccessPrevention),
       uniformBucketLevelAccess: boolean(bucket.uniformBucketLevelAccess),
+      bucketAcl: sortedCanonical(array(bucket.bucketAcl).map(record)),
+      defaultObjectAcl: sortedCanonical(array(bucket.defaultObjectAcl).map(record)),
+      objectAclsSha256: string(bucket.objectAclsSha256),
+      configurationSha256: string(bucket.configurationSha256),
     };
   });
+  for (const bucket of storageBuckets) {
+    assert.match(bucket.objectAclsSha256, /^[0-9a-f]{64}$/);
+    assert.match(bucket.configurationSha256, /^[0-9a-f]{64}$/);
+  }
   assert.ok(storageBuckets.length > 0);
   const customRoles = sortedCanonical(array(security.customRoles).map(record));
   for (const role of customRoles) {
@@ -2056,17 +2435,38 @@ function securityTarget(
   assert.match(gitOrigin, /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/);
   const storageRulesRelease = string(security.storageRulesRelease);
   assert.match(storageRulesRelease, /^[a-z0-9][a-z0-9.-]+$/);
+  const targetSecuredResources = (values: unknown): PubsubResourceSecurity[] =>
+    sortedCanonical(array(values).map((value_) => {
+      const resource = record(value_);
+      assertExactKeys(resource, ['name', 'iam', 'configuration']);
+      return {
+        ...targetIamResource({name: resource.name, iam: resource.iam}),
+        configuration: record(resource.configuration),
+      };
+    }));
+  const eventarcTriggers = targetSecuredResources(security.eventarcTriggers);
+  const reviewedEventDestinations = eventarcTriggers.map(({configuration}) =>
+    canonical(record(configuration.destination))).sort();
+  const expectedEventDestinations = expectedEventarcTriggers({
+    projectId,
+    functions,
+  } as DeploymentTarget).map(({destination}) => canonical(destination)).sort();
+  assert.deepEqual(reviewedEventDestinations, expectedEventDestinations);
   return {
     gitOrigin,
     storageRulesRelease,
-    authConfig: normalizedAuthConfig(record(security.authConfig)),
+    authConfig: record(security.authConfig),
     ancestorIamPolicies: sortedCanonical(array(security.ancestorIamPolicies).map(targetIamResource)),
     customRoles,
     serviceAccounts: sortedCanonical(serviceAccounts),
     secrets: sortedCanonical(secrets),
     artifactRepositories: sortedCanonical(repositories),
     storageBuckets: sortedCanonical(storageBuckets),
-    runUnreachableRegions: array(security.runUnreachableRegions).map(string).sort(),
+    eventarcTriggers,
+    pubsubTopics: targetSecuredResources(security.pubsubTopics),
+    pubsubSubscriptions: targetSecuredResources(security.pubsubSubscriptions),
+    authProviders: record(security.authProviders),
+    firebaseRulesReleases: array(security.firebaseRulesReleases).map(string).sort(),
   };
 }
 
@@ -2121,6 +2521,12 @@ function deploymentTarget(value: unknown): DeploymentTarget {
   assert.match(policyHash, /^[0-9a-f]{64}$/);
   const firebaseConfig = stringRecord(target.firebaseConfig);
   assert.equal(firebaseConfig.projectId, projectId);
+  const security = securityTarget(target.security, functions, projectId);
+  const bucketNames = security.storageBuckets.map(({name}) => name);
+  assert.equal(bucketNames.includes(security.storageRulesRelease), true);
+  if (bucketNames.includes(firebaseConfig.storageBucket)) {
+    assert.equal(firebaseConfig.storageBucket, security.storageRulesRelease);
+  }
   assert.equal(hostingSite, projectId);
   assert.match(projectId, /^[a-z][a-z0-9-]{4,29}$/);
   assert.match(string(target.projectNumber), /^[0-9]+$/);
@@ -2136,7 +2542,7 @@ function deploymentTarget(value: unknown): DeploymentTarget {
     allowedUntrackedPrefixes: prefixes,
     ancestorResources: resources,
     ancestorIamPolicySha256: policyHash,
-    security: securityTarget(target.security, functions, projectId),
+    security,
     firebaseConfig,
     functions,
   };
@@ -2244,10 +2650,15 @@ export function reviewedTreeProblems(
   ).trim();
   const remote = remoteLine.split(/\s+/)[0] ?? '';
   const origin = gitText(runGit, ['remote', 'get-url', 'origin']).trim();
+  const localConfig = gitText(runGit, ['config', '--local', '--list', '-z'])
+    .split('\0').filter(Boolean);
+  const urlRewrites = localConfig.filter((entry) =>
+    /^url\..*\.insteadof\n/i.test(entry));
   if (head !== reviewedCommit) problems.push('HEAD is not the reviewed commit');
   if (pushed !== reviewedCommit) problems.push('origin/master is not the reviewed commit');
   if (remote !== reviewedCommit) problems.push('Remote master is not the reviewed commit');
   if (origin !== target.security.gitOrigin) problems.push('Git origin is not the reviewed repository');
+  if (urlRewrites.length > 0) problems.push('Repository-local Git URL rewrite can spoof origin');
   const status = gitText(
     runGit,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],

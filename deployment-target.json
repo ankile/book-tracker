@@ -33,13 +33,40 @@
         "localhost"
       ],
       "signIn": {"email": {"enabled": true, "passwordRequired": true}},
+      "signInHashConfigSha256": "6b77bb4a2a203960d912fdc47cf834da2d626d9fd07a37a64a969b64974c0ba5",
+      "notificationSha256": "014c69cb1e17619118141ca0207a8c206dbfe45f2ee0105b9c71a3180f90bba6",
+      "quota": {},
       "mfa": {"state": "DISABLED"},
       "multiTenant": {},
-      "client": {"permissions": {}, "firebaseSubdomain": "book-tracker-d8f24"},
+      "client": {
+        "permissions": {},
+        "firebaseSubdomain": "book-tracker-d8f24",
+        "apiKeySha256": "9241f2e3d5273ac303c19b4fc86da69f17b94481f87a7f61887d8668c076c45b"
+      },
       "blockingFunctions": {},
       "monitoring": {"requestLogging": {}},
-      "smsRegionConfig": {}
+      "smsRegionConfig": {},
+      "mobileLinksConfig": {},
+      "defaultHostingSite": "book-tracker-d8f24",
+      "subtype": "FIREBASE_AUTH",
+      "recaptchaConfig": {},
+      "emailPrivacyConfig": {},
+      "passwordPolicyConfig": {},
+      "autodeleteAnonymousUsers": null
     },
+    "authProviders": {
+      "defaultSupportedIdpConfigs": {
+        "names": ["projects/440931185227/defaultSupportedIdpConfigs/google.com"],
+        "sha256": "2370c7aa775c893d4d9b23cdd37170d0fa68f44260f878816c746a5b17fca964"
+      },
+      "inboundSamlConfigs": {"names": [], "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"},
+      "oauthIdpConfigs": {"names": [], "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"},
+      "tenants": {"names": [], "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"}
+    },
+    "firebaseRulesReleases": [
+      "cloud.firestore",
+      "firebase.storage/book-tracker-d8f24.appspot.com"
+    ],
     "ancestorIamPolicies": [{
       "name": "projects/book-tracker-d8f24",
       "iam": [
@@ -73,7 +100,32 @@
     "customRoles": [],
     "serviceAccounts": [
       {"name":"440931185227-compute@developer.gserviceaccount.com","iam":[],"userManagedKeys":[]},
-      {"name":"book-tracker-d8f24@appspot.gserviceaccount.com","iam":[],"userManagedKeys":[]}
+      {"name":"book-tracker-d8f24@appspot.gserviceaccount.com","iam":[],"userManagedKeys":[]},
+      {
+        "name":"firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com",
+        "iam":[],
+        "userManagedKeys":[{
+          "name":"projects/book-tracker-d8f24/serviceAccounts/firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com/keys/7267efd595651e52ea9a52e90338e103be409cf6",
+          "keyOrigin":"GOOGLE_PROVIDED",
+          "keyType":"USER_MANAGED",
+          "disabled":false,
+          "validAfterTime":"2025-11-27T02:10:09Z",
+          "validBeforeTime":"9999-12-31T23:59:59Z"
+        }]
+      },
+      {"name":"furniture-diffusion@book-tracker-d8f24.iam.gserviceaccount.com","iam":[],"userManagedKeys":[]},
+      {
+        "name":"vision-api@book-tracker-d8f24.iam.gserviceaccount.com",
+        "iam":[],
+        "userManagedKeys":[{
+          "name":"projects/book-tracker-d8f24/serviceAccounts/vision-api@book-tracker-d8f24.iam.gserviceaccount.com/keys/61e8cb4880ee1f674bf1dc3c9c0fad883389077c",
+          "keyOrigin":"GOOGLE_PROVIDED",
+          "keyType":"USER_MANAGED",
+          "disabled":false,
+          "validAfterTime":"2025-03-27T16:03:22Z",
+          "validBeforeTime":"9999-12-31T23:59:59Z"
+        }]
+      }
     ],
     "secrets": [{
       "name": "FUNCTIONS_CONFIG_EXPORT",
@@ -93,7 +145,65 @@
           {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]}
         ],
         "publicAccessPrevention":"inherited",
-        "uniformBucketLevelAccess":false
+        "uniformBucketLevelAccess":false,
+        "bucketAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "defaultObjectAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"15a4048fde274794a099900f90a14d494efe2a9c6e816f1f08b6ef5001fa629c"
+      },
+      {
+        "name":"book-tracker-export",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"enforced","uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"581414f2dda639c9ad6ec50fc98f27318a20fd6026a2419b5c77d0153edc1a2e"
+      },
+      {
+        "name":"book-tracker-export-2",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"enforced","uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"451595bff4920be9514aaa4b609bf61ebf81fdec4edc956bd7fb447d5939d1ba"
+      },
+      {
+        "name":"eu.artifacts.book-tracker-d8f24.appspot.com",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited","uniformBucketLevelAccess":false,
+        "bucketAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "defaultObjectAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "objectAclsSha256":"98cf883ae3378bf62f72eb87867a6aea7ceea662fd58d73c43a1db46a14a6e0a",
+        "configurationSha256":"15a4048fde274794a099900f90a14d494efe2a9c6e816f1f08b6ef5001fa629c"
       },
       {
         "name":"gcf-sources-440931185227-europe-west1",
@@ -104,7 +214,23 @@
           {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
         ],
         "publicAccessPrevention":"inherited",
-        "uniformBucketLevelAccess":true
+        "uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"cc3f09223a87c978815a5ca81c88e30a0acf685b6bc53fd31f5bc66d6ffb9f38"
+      },
+      {
+        "name":"gcf-sources-440931185227-us-central1",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited","uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"9b06125d36e261cb129b31d44f2b99425f9df88fb9af5bf40fcd5d87b6e68eb8"
       },
       {
         "name":"gcf-v2-sources-440931185227-europe-west1",
@@ -115,15 +241,175 @@
           {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
         ],
         "publicAccessPrevention":"inherited",
-        "uniformBucketLevelAccess":true
+        "uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"bfc7512d1fe9336429ce84a645d7969ec71b3a2e08bb239a14bb2417776618ff"
+      },
+      {
+        "name":"gcf-v2-uploads-440931185227.europe-west1.cloudfunctions.appspot.com",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited","uniformBucketLevelAccess":true,
+        "bucketAcl":[],"defaultObjectAcl":[],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"b92eb90d5b3482eeb817fc6cda9820770349d4e936504e2b539f88cc84e31848"
+      },
+      {
+        "name":"staging.book-tracker-d8f24.appspot.com",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited","uniformBucketLevelAccess":false,
+        "bucketAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "defaultObjectAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "objectAclsSha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "configurationSha256":"1952799169b381d5930d5b8574fc7e807d9b32460e625ba972c93ec7c21adbd7"
+      },
+      {
+        "name":"us.artifacts.book-tracker-d8f24.appspot.com",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited","uniformBucketLevelAccess":false,
+        "bucketAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "defaultObjectAcl":[
+          {"entity":"project-editors-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"editors"}},
+          {"entity":"project-owners-440931185227","role":"OWNER","projectTeam":{"projectNumber":"440931185227","team":"owners"}},
+          {"entity":"project-viewers-440931185227","role":"READER","projectTeam":{"projectNumber":"440931185227","team":"viewers"}}
+        ],
+        "objectAclsSha256":"96dd01502cf300eae54dbd5c02e44fd529ddbdf77e3471b93e7bb32bef792c31",
+        "configurationSha256":"aedd2535da918219f1390b9b662589829bff59ca0f69e226595ac0629af9b2fa"
       }
     ],
-    "runUnreachableRegions": [
-      "europe-west15",
-      "me-central2",
-      "us-central2",
-      "us-east7",
-      "us-west8"
+    "eventarcTriggers": [
+      {
+        "name":"projects/book-tracker-d8f24/locations/eur3/triggers/deletebookupdates-572608",
+        "iam":[],
+        "configuration":{
+          "destination":{"cloudFunction":"projects/book-tracker-d8f24/locations/europe-west1/functions/deletebookupdates"},
+          "eventFilters":[
+            {"attribute":"database","value":"(default)"},
+            {"attribute":"document","value":"users/{userId}/books/{bookId}","operator":"match-path-pattern"},
+            {"attribute":"namespace","value":"(default)"},
+            {"attribute":"type","value":"google.cloud.firestore.document.v1.deleted"}
+          ],
+          "transport":{"pubsub":{
+            "topic":"projects/book-tracker-d8f24/topics/eventarc-eur3-deletebookupdates-572608-555",
+            "subscription":"projects/book-tracker-d8f24/subscriptions/eventarc-eur3-deletebookupdates-572608-sub-317"
+          }},
+          "labels":{"goog-managed-by":"cloudfunctions"},
+          "serviceAccount":"440931185227-compute@developer.gserviceaccount.com",
+          "channel":null,
+          "eventDataContentType":"application/protobuf",
+          "conditions":{}
+        }
+      },
+      {
+        "name":"projects/book-tracker-d8f24/locations/eur3/triggers/toggl-syncqueue-738373",
+        "iam":[],
+        "configuration":{
+          "destination":{"cloudFunction":"projects/book-tracker-d8f24/locations/europe-west1/functions/toggl-syncqueue"},
+          "eventFilters":[
+            {"attribute":"database","value":"(default)"},
+            {"attribute":"document","value":"users/{uid}/togglQueue/{queueId}","operator":"match-path-pattern"},
+            {"attribute":"namespace","value":"(default)"},
+            {"attribute":"type","value":"google.cloud.firestore.document.v1.written"}
+          ],
+          "transport":{"pubsub":{
+            "topic":"projects/book-tracker-d8f24/topics/eventarc-eur3-toggl-syncqueue-738373-707",
+            "subscription":"projects/book-tracker-d8f24/subscriptions/eventarc-eur3-toggl-syncqueue-738373-sub-876"
+          }},
+          "labels":{"goog-managed-by":"cloudfunctions"},
+          "serviceAccount":"440931185227-compute@developer.gserviceaccount.com",
+          "channel":null,
+          "eventDataContentType":"application/protobuf",
+          "conditions":{}
+        }
+      }
+    ],
+    "pubsubTopics": [
+      {
+        "name":"projects/book-tracker-d8f24/topics/eventarc-eur3-deletebookupdates-572608-555",
+        "iam":[],
+        "configuration":{
+          "labels":{"goog-drz-eventarc-location":"eur3","goog-drz-eventarc-uuid":"42ad7976-0a5b-45bd-b337-6bbfe44c11d0","goog-eventarc":""},
+          "messageStoragePolicy":{"allowedPersistenceRegions":["europe-west1","europe-west4"]},
+          "schemaSettings":{},"ingestionDataSourceSettings":{},"kmsKeyName":null,
+          "messageRetentionDuration":null,"messageTransforms":[],"state":null
+        }
+      },
+      {
+        "name":"projects/book-tracker-d8f24/topics/eventarc-eur3-toggl-syncqueue-738373-707",
+        "iam":[],
+        "configuration":{
+          "labels":{"goog-drz-eventarc-location":"eur3","goog-drz-eventarc-uuid":"1380ff8d-4f5d-415a-b38d-00d74bd4d37a","goog-eventarc":""},
+          "messageStoragePolicy":{"allowedPersistenceRegions":["europe-west1","europe-west4"]},
+          "schemaSettings":{},"ingestionDataSourceSettings":{},"kmsKeyName":null,
+          "messageRetentionDuration":null,"messageTransforms":[],"state":null
+        }
+      },
+      {
+        "name":"projects/book-tracker-d8f24/topics/habitify-log",
+        "iam":[],
+        "configuration":{"labels":{},"messageStoragePolicy":{},"schemaSettings":{},"ingestionDataSourceSettings":{},"kmsKeyName":null,"messageRetentionDuration":null,"messageTransforms":[],"state":null}
+      }
+    ],
+    "pubsubSubscriptions": [
+      {
+        "name":"projects/book-tracker-d8f24/subscriptions/eventarc-eur3-deletebookupdates-572608-sub-317",
+        "iam":[],
+        "configuration":{
+          "topic":"projects/book-tracker-d8f24/topics/eventarc-eur3-deletebookupdates-572608-555",
+          "pushConfig":{
+            "pushEndpoint":"https://deletebookupdates-juiumzbyrq-ew.a.run.app?__GCP_CloudEventsMode=CE_PUBSUB_BINDING",
+            "attributes":{"x-goog-version":"v1"},
+            "oidcToken":{"serviceAccountEmail":"440931185227-compute@developer.gserviceaccount.com","audience":"https://deletebookupdates-juiumzbyrq-ew.a.run.app"}
+          },
+          "bigQueryConfig":{},"cloudStorageConfig":{},"ackDeadlineSeconds":600,
+          "retainAckedMessages":false,"messageRetentionDuration":"86400s",
+          "labels":{"goog-drz-eventarc-location":"eur3","goog-drz-eventarc-uuid":"42ad7976-0a5b-45bd-b337-6bbfe44c11d0","goog-eventarc":""},
+          "enableMessageOrdering":false,"expirationPolicy":{},"filter":null,"deadLetterPolicy":{},
+          "retryPolicy":{"minimumBackoff":"10s","maximumBackoff":"600s"},
+          "detached":false,"enableExactlyOnceDelivery":false,"state":"ACTIVE"
+        }
+      },
+      {
+        "name":"projects/book-tracker-d8f24/subscriptions/eventarc-eur3-toggl-syncqueue-738373-sub-876",
+        "iam":[],
+        "configuration":{
+          "topic":"projects/book-tracker-d8f24/topics/eventarc-eur3-toggl-syncqueue-738373-707",
+          "pushConfig":{
+            "pushEndpoint":"https://toggl-syncqueue-juiumzbyrq-ew.a.run.app?__GCP_CloudEventsMode=CE_PUBSUB_BINDING",
+            "attributes":{"x-goog-version":"v1"},
+            "oidcToken":{"serviceAccountEmail":"440931185227-compute@developer.gserviceaccount.com","audience":"https://toggl-syncqueue-juiumzbyrq-ew.a.run.app"}
+          },
+          "bigQueryConfig":{},"cloudStorageConfig":{},"ackDeadlineSeconds":600,
+          "retainAckedMessages":false,"messageRetentionDuration":"86400s",
+          "labels":{"goog-drz-eventarc-location":"eur3","goog-drz-eventarc-uuid":"1380ff8d-4f5d-415a-b38d-00d74bd4d37a","goog-eventarc":""},
+          "enableMessageOrdering":false,"expirationPolicy":{},"filter":null,"deadLetterPolicy":{},
+          "retryPolicy":{"minimumBackoff":"10s","maximumBackoff":"600s"},
+          "detached":false,"enableExactlyOnceDelivery":false,"state":"ACTIVE"
+        }
+      }
     ]
   },
   "firebaseConfig": {

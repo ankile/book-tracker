@@ -225,6 +225,10 @@ Record and push the reviewed 40-character commit SHA before the Functions step.
 After the compatible Functions, migrations, renderer, and Hosting release are
 complete, run
 `npm run verify:deployment -- --commit=<reviewed-40-character-SHA>`.
+The project must have `cloudasset.googleapis.com` enabled before this check;
+the verifier uses Cloud Asset rather than a regionally incomplete Cloud Run
+wildcard response. Wait for the deployed services to appear in Cloud Asset
+before treating an inventory mismatch as a release failure.
 Do not mark the rollout complete if it reports a mutable or unpushed tree,
 stale Firestore configuration, a Function release or configuration mismatch,
 unexpected invoker access, split Gen 2 traffic, stale Hosting files, or a stale
