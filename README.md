@@ -366,22 +366,27 @@ and push it before changing Firebase. A release that changes a Gen 2 Function
 uses two reviewed commits. The deployment commit leaves each Gen 2
 `runtimeAttestation` and `security.runInventoryCheckpoint` as `null`. After that
 commit is reviewed, pushed, and live, remove the obsolete credentials and other
-stale resources described below, then capture the immutable runtime evidence:
+stale resources described below. Freeze every Cloud Run service, job, and worker
+pool mutation. Record a UTC checkpoint before any live attestation read, wait at
+least ten minutes for Cloud Asset and Admin Activity to converge, then capture
+the immutable runtime evidence against that earlier checkpoint:
 
 ```bash
 git rev-parse HEAD
 npm run validate
-node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture > /tmp/book-tracker-runtime-attestation.json
+RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Keep Cloud Run frozen and wait at least ten minutes.
+node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT" > /tmp/book-tracker-runtime-attestation.json
 ```
 
 Capture succeeds only when every check other than the deliberately pending
-runtime attestations and inventory checkpoint passes. Merge its
+runtime attestations passes. It rejects every Cloud Run mutation at or after
+the supplied checkpoint. Merge its
 `runtimeAttestation` values and `runInventoryCheckpoint` into
 `deployment-target.json`; do not copy the temporary capture into the repository. The next
 commit must change only `deployment-target.json`, and every attestation's
 `deploymentCommit` must name its parent deployment commit. Review and push this
-target-only attestation commit. Make no Cloud Run changes after the captured
-checkpoint, wait at least ten minutes, and run the final gate:
+target-only attestation commit. Keep Cloud Run frozen and run the final gate:
 
 ```bash
 npm run verify:deployment -- --commit=<attestation-40-character-SHA>
@@ -401,8 +406,9 @@ project service account and the absence of user-managed keys, Secret Manager,
 every Storage bucket plus its IAM and ACL surfaces, the exact Artifact Registry
 repository inventory/configuration/IAM, all Firebase Rules
 releases, complete Eventarc transports and IAM, Pub/Sub topics/subscriptions and
-conditional IAM, the project-wide Cloud Run wildcard inventory, Cloud Asset's
-cross-region inventory, direct proof for every initially unreachable region,
+conditional IAM, the project-wide Cloud Run services, jobs, and worker-pools
+inventories, Cloud Asset's cross-region inventory, direct proof for every
+initially unreachable region,
 and a mutation-free Admin Activity interval after the reviewed inventory
 checkpoint. It also checks the Gen 2 Cloud Build recipe, output digest,
 in-image source provenance, the immutable revision and service execution
@@ -414,11 +420,13 @@ origin, and the profile and sitemap rewrites. Pass
 account. Unknown or misspelled options fail.
 
 The verifier does not accept Cloud Run's `unreachable` list or a location-policy
-denial as proof that no older service exists. It directly queries each listed
-region, requires an exact Cloud Asset service inventory, and rejects every Cloud
-Run Admin Activity entry after the reviewed checkpoint. A direct service must
-also have converged into Cloud Asset. Freeze Cloud Run mutations between capture
-and final verification; any mutation requires a fresh capture and checkpoint.
+denial as proof that no older executable resource exists. It directly queries
+each listed region, requires exact Cloud Asset service, job, and worker-pool
+inventories, and rejects every Cloud Run Admin Activity entry at or after the
+reviewed checkpoint. A directly visible resource must also have converged into
+Cloud Asset. Freeze Cloud Run before recording the checkpoint and keep it frozen
+through final verification. Any mutation requires a new checkpoint, quiescence
+interval, capture, and target-only attestation commit.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
 Change that ID for every release. Deploy all Functions so every deployed source

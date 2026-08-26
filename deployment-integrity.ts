@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {dirname} from 'node:path';
+import {existsSync} from 'node:fs';
+import {dirname, posix} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {gunzipSync} from 'node:zlib';
 import {unzipSync} from 'fflate';
@@ -115,6 +116,8 @@ interface ObservedSecurity extends Omit<
   'gitOrigin' | 'storageRulesRelease' | 'runInventoryCheckpoint'
 > {
   runServices: string[];
+  runJobs: string[];
+  runWorkerPools: string[];
 }
 
 export interface ExpectedFunction {
@@ -175,6 +178,7 @@ export interface ObservedFunction extends ExpectedFunction {
   imageSource: string | null;
   imageSourceFiles: Record<string, string> | null;
   imageRuntimeAttestation: Omit<RuntimeAttestation, 'deploymentCommit'> | null;
+  firebaseFunctionsHash: string | null;
 }
 
 interface ExpectedIndex {
@@ -502,12 +506,16 @@ function tarEntries(content: Uint8Array): TarEntry[] {
 
 function runtimePath(value: string): string {
   const path = `/${value.replace(/^\.\//, '').replace(/^\//, '').replace(/\/$/, '')}`;
-  assert.match(path, /^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]*$/);
+  assert.match(path, /^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]+$/);
+  assert.equal(posix.normalize(path), path, 'noncanonical runtime path: ' + value);
   return path;
 }
 
-function runtimeFiles(layers: TarEntry[][]): RuntimeFile[] {
-  const files = new Map<string, RuntimeFile>();
+function runtimeFilesystem(layers: TarEntry[][]): {
+  files: RuntimeFile[];
+  bodies: Map<string, Uint8Array>;
+} {
+  const files = new Map<string, {file: RuntimeFile; body?: Uint8Array}>();
   const remove = (path: string): void => {
     for (const existing of [...files.keys()]) {
       if (existing === path || existing.startsWith(`${path}/`)) files.delete(existing);
@@ -533,15 +541,25 @@ function runtimeFiles(layers: TarEntry[][]): RuntimeFile[] {
       if (name === '.wh..wh..opq' || name.startsWith('.wh.')) continue;
       const shared = {path, mode: entry.mode, uid: entry.uid, gid: entry.gid};
       let file: RuntimeFile;
+      let body: Uint8Array | undefined;
       if (entry.type === 0 || entry.type === 48) {
         file = {...shared, type: 'file', sha256: sha256(entry.body)};
-      } else if (entry.type === 49 || entry.type === 50) {
+        body = entry.body;
+      } else if (entry.type === 49) {
         assert.match(entry.linkName, /^[^\0\r\n]+$/);
+        const linkName = runtimePath(entry.linkName);
+        const target = files.get(linkName);
+        assert.ok(target?.body !== undefined, 'hardlink target is not a file: ' + linkName);
         file = {
           ...shared,
-          type: entry.type === 49 ? 'hardlink' : 'symlink',
-          linkName: entry.linkName,
+          type: 'hardlink',
+          linkName,
+          sha256: sha256(target.body),
         };
+        body = target.body;
+      } else if (entry.type === 50) {
+        assert.match(entry.linkName, /^[^\0\r\n]+$/);
+        file = {...shared, type: 'symlink', linkName: entry.linkName};
       } else if (entry.type === 51 || entry.type === 52) {
         file = {
           ...shared,
@@ -556,14 +574,18 @@ function runtimeFiles(layers: TarEntry[][]): RuntimeFile[] {
       } else {
         assert.fail(`unsupported runtime tar entry type ${entry.type}: ${path}`);
       }
-      const previous = files.get(path);
+      const previous = files.get(path)?.file;
       if (file.type !== 'directory' || (previous !== undefined && previous.type !== 'directory')) {
         remove(path);
       }
-      files.set(path, file);
+      files.set(path, {file, ...(body === undefined ? {} : {body})});
     }
   }
-  return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+  const sorted = [...files.values()].map(({file}) => file).sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const bodies = new Map([...files.entries()].flatMap(([path, value]) =>
+    value.body === undefined ? [] : [[path, value.body] as const]));
+  return {files: sorted, bodies};
 }
 
 function imageExecutionConfig(value: unknown): Record<string, unknown> {
@@ -1179,7 +1201,6 @@ async function imageProvenance(
   const diffIds = array(rootfs.diff_ids).map(string);
   assert.equal(diffIds.length, array(manifest.layers).length);
   const labels = stringRecord(record(imageConfig.config).Labels);
-  let sourceTar: Uint8Array | undefined;
   const runtimeLayers: TarEntry[][] = [];
   for (const [index, layerValue] of array(manifest.layers).entries()) {
     const layer = record(layerValue);
@@ -1203,16 +1224,11 @@ async function imageProvenance(
       'Function image layer does not match its rootfs diff ID');
     const entries = tarEntries(expandedLayer);
     runtimeLayers.push(entries);
-    for (const entry of entries) {
-      if (entry.path === '/layers/google.utils.archive-source/src/.wh.source-code.tar.gz') {
-        sourceTar = undefined;
-      }
-      if (entry.path === '/layers/google.utils.archive-source/src/source-code.tar.gz') {
-        assert.ok(entry.type === 0 || entry.type === 48);
-        sourceTar = entry.body;
-      }
-    }
   }
+  const runtime = runtimeFilesystem(runtimeLayers);
+  const sourceTar = runtime.bodies.get(
+    '/layers/google.utils.archive-source/src/source-code.tar.gz',
+  );
   assert.ok(sourceTar !== undefined, 'Function image has no archived build input');
   return {
     imageBuildId: string(labels['google.build-id']),
@@ -1221,7 +1237,7 @@ async function imageProvenance(
     imageRuntimeAttestation: {
       imageDigest: digest,
       executionConfig: imageExecutionConfig(imageConfig.config),
-      files: runtimeFiles(runtimeLayers),
+      files: runtime.files,
     },
   };
 }
@@ -1311,6 +1327,9 @@ function normalizedRunTemplate(value: Record<string, unknown>): Record<string, u
   ].includes(key)), 'Cloud Run revision template contains an unknown execution field');
   return {
     revision: string(value.revision),
+    labels: record(value.labels ?? {}),
+    annotations: record(value.annotations ?? {}),
+    client: nullableString(value.client),
     serviceAccount: string(value.serviceAccount),
     timeout: string(value.timeout),
     maxInstanceRequestConcurrency: number(value.maxInstanceRequestConcurrency),
@@ -1362,6 +1381,9 @@ function normalizeRunConfiguration(
     };
   });
   return {
+    labels: record(value.labels ?? {}),
+    annotations: record(value.annotations ?? {}),
+    launchStage: nullableString(value.launchStage),
     ingress: string(value.ingress),
     customAudiences: array(value.customAudiences ?? []).map(string).sort(),
     binaryAuthorization: record(value.binaryAuthorization ?? {}),
@@ -1369,6 +1391,9 @@ function normalizeRunConfiguration(
     scaling: record(value.scaling ?? {}),
     template: {
       revision: string(template.revision),
+      labels: record(template.labels ?? {}),
+      annotations: record(template.annotations ?? {}),
+      client: nullableString(template.client),
       serviceAccount: string(template.serviceAccount),
       timeout: string(template.timeout),
       maxInstanceRequestConcurrency: number(template.maxInstanceRequestConcurrency),
@@ -1398,6 +1423,8 @@ async function runSecurity(
   name: string,
   entryPoint: string,
   storageSource: Record<string, unknown>,
+  functionHash: string,
+  event: FunctionEvent | null,
 ): Promise<{
   iam: IamBinding[];
   invokerIamDisabled: boolean;
@@ -1436,6 +1463,29 @@ async function runSecurity(
     service.name,
     `projects/${projectId}/locations/${region}/services/${name}`,
   );
+  const serviceLabels = {
+    'firebase-functions-hash': functionHash,
+    'goog-cloudfunctions-runtime': 'nodejs22',
+    'goog-drz-cloudfunctions-id': name,
+    'goog-drz-cloudfunctions-location': region,
+    'goog-managed-by': 'cloudfunctions',
+  };
+  const templateLabels = {
+    'firebase-functions-hash': functionHash,
+    'goog-drz-cloudfunctions-id': name,
+    'goog-drz-cloudfunctions-location': region,
+  };
+  const triggerType = event?.type ?? 'HTTP_TRIGGER';
+  assert.deepEqual(record(service.labels), serviceLabels);
+  assert.deepEqual(record(service.annotations), {
+    'cloudfunctions.googleapis.com/function-id': name,
+  });
+  assert.equal(service.launchStage, 'GA');
+  assert.deepEqual(record(record(service.template).labels), templateLabels);
+  assert.deepEqual(record(record(service.template).annotations), {
+    'cloudfunctions.googleapis.com/trigger-type': triggerType,
+  });
+  assert.equal(record(service.template).client, 'cli-firebase');
   const disabled = service.invokerIamDisabled;
   assert.ok(disabled === undefined || typeof disabled === 'boolean');
   const latestReadyRevision = revisionName(
@@ -1455,13 +1505,19 @@ async function runSecurity(
     'observedGeneration', 'logUri', 'satisfiesPzs', 'sessionAffinity',
     'encryptionKeyRevocationAction', 'encryptionKeyShutdownDuration', 'nodeSelector',
     'gpuZonalRedundancyDisabled', 'creator', 'etag', 'baseImageUri', 'buildInfo',
-    'healthCheckDisabled', 'serviceMesh',
+    'healthCheckDisabled', 'serviceMesh', 'client',
   ].includes(key)), 'Cloud Run revision response contains an unknown field');
   assert.equal(
     revision.name,
     `projects/${projectId}/locations/${region}/services/${name}/revisions/${latestReadyRevision}`,
   );
   assert.equal(revision.service, name);
+  assert.deepEqual(record(revision.labels), serviceLabels);
+  assert.deepEqual(record(revision.annotations), {
+    'cloudfunctions.googleapis.com/trigger-type': triggerType,
+  });
+  assert.equal(revision.launchStage, 'GA');
+  assert.equal(revision.client, 'cli-firebase');
   const serviceTemplate = normalizedRunTemplate(record(service.template));
   const revisionTemplate = normalizedRunTemplate({
     revision: latestReadyRevision,
@@ -1481,6 +1537,9 @@ async function runSecurity(
     gpuZonalRedundancyDisabled: revision.gpuZonalRedundancyDisabled,
     nodeSelector: revision.nodeSelector,
     healthCheckDisabled: revision.healthCheckDisabled,
+    labels: templateLabels,
+    annotations: revision.annotations,
+    client: revision.client,
   });
   const configuredContainers = array(record(service.template).containers).map(record);
   const revisionContainers = array(revision.containers).map(record);
@@ -1499,7 +1558,8 @@ async function runSecurity(
       string(storageSource.generation)}`,
   });
   const comparableTemplate = (template: Record<string, unknown>): Record<string, unknown> => ({
-    ...Object.fromEntries(Object.entries(template).filter(([key]) => key !== 'revision')),
+    ...Object.fromEntries(Object.entries(template)
+      .filter(([key]) => key !== 'revision' && key !== 'labels')),
     containers: array(template.containers).map((containerValue) => {
       const container = record(containerValue);
       return Object.fromEntries(Object.entries(container)
@@ -1616,6 +1676,11 @@ async function deployedFunctions(
     };
     const access: FunctionAccess = event !== null ? 'event' :
       labels['deployment-callable'] === 'true' ? 'callable' : 'http';
+    const firebaseFunctionsHash = generation === 'GEN_2' ?
+      string(labels['firebase-functions-hash']) : null;
+    if (firebaseFunctionsHash !== null) {
+      assert.match(firebaseFunctionsHash, /^[0-9a-f]{40}$/);
+    }
     const secrets = array(service.secretEnvironmentVariables ?? [])
       .map((secretValue) => {
         const secret = record(secretValue);
@@ -1652,7 +1717,7 @@ async function deployedFunctions(
       generation === 'GEN_1' ? Promise.resolve(null) :
         runSecurity(
           fetch_, target.projectId, accessToken, resource.region, resource.name,
-          environmentFunction.entryPoint, storageSource!,
+          environmentFunction.entryPoint, storageSource!, firebaseFunctionsHash!, event,
         ),
       generation === 'GEN_1' ? Promise.resolve(null) : functionBuild(
         fetch_, target, accessToken, resource.region, build.build, storageSource!,
@@ -1730,6 +1795,7 @@ async function deployedFunctions(
       imageSource: provenance?.imageSource ?? null,
       imageSourceFiles: provenance?.imageSourceFiles ?? null,
       imageRuntimeAttestation: provenance?.imageRuntimeAttestation ?? null,
+      firebaseFunctionsHash,
     };
   }));
 }
@@ -2490,13 +2556,96 @@ async function runServiceInventory(
   return assetNames;
 }
 
+async function emptyRunResourceInventory(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  regions: string[],
+  collection: 'jobs' | 'workerPools',
+  assetType: 'run.googleapis.com/Job' | 'run.googleapis.com/WorkerPool',
+): Promise<string[]> {
+  const directlyVisible: string[] = [];
+  for (const region of regions) {
+    const baseUrl = 'https://run.googleapis.com/v2/projects/' + target.projectId +
+      '/locations/' + region + '/' + collection + '?pageSize=1000';
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_API_PAGES; page += 1) {
+      const url = pageToken === undefined ? baseUrl :
+        baseUrl + '&pageToken=' + encodeURIComponent(pageToken);
+      const response = await fetchWithRetry(
+        fetch_, url, {headers: authenticatedHeaders(accessToken, target.projectId)},
+        [200, 403], 'Cloud Run ' + collection + ' inventory for region ' + region,
+      );
+      const body = record(await response.json());
+      if (response.status === 403) {
+        const error = record(body.error);
+        assert.equal(error.status, 'PERMISSION_DENIED');
+        const details = array(error.details).map(record);
+        assert.equal(details.some((detail) =>
+          detail['@type'] === 'type.googleapis.com/google.rpc.ErrorInfo' &&
+          detail.reason === 'LOCATION_POLICY_VIOLATED' &&
+          record(detail.metadata).location === region), true,
+        'Cloud Run ' + collection + ' region is unreadable without location-policy proof');
+        break;
+      }
+      assert.deepEqual(body.unreachable ?? [], []);
+      directlyVisible.push(...array(body[collection] ?? []).map((value) =>
+        string(record(value).name)));
+      const next = body.nextPageToken;
+      if (next === undefined || string(next).trim() === '') break;
+      assert.ok(page + 1 < MAX_API_PAGES,
+        'Cloud Run ' + collection + ' inventory exceeded the maximum pages');
+      pageToken = string(next);
+    }
+  }
+  directlyVisible.sort();
+  assert.equal(new Set(directlyVisible).size, directlyVisible.length,
+    'duplicate direct Cloud Run ' + collection + ' inventory entry');
+  const assets = await listApi(
+    fetch_,
+    'https://cloudasset.googleapis.com/v1/projects/' + target.projectId +
+      ':searchAllResources?assetTypes=' + encodeURIComponent(assetType) + '&pageSize=500',
+    'results', accessToken, target.projectId,
+  );
+  const prefix = '//run.googleapis.com/';
+  const assetNames = assets.map((asset) => {
+    const name = string(asset.name);
+    assert.equal(name.startsWith(prefix), true);
+    return name.slice(prefix.length);
+  }).sort();
+  assert.equal(new Set(assetNames).size, assetNames.length,
+    'duplicate Cloud Asset Run ' + collection + ' inventory entry');
+  for (const name of directlyVisible) {
+    assert.equal(assetNames.includes(name), true,
+      'Cloud Asset has not converged on directly visible Run resource ' + name);
+  }
+  return assetNames;
+}
+
 async function deployedSecurity(
   fetch_: FetchLike,
   target: DeploymentTarget,
   accessToken: string,
   ancestorIamPolicies: IamResource[],
 ): Promise<ObservedSecurity> {
+  const runLocations = (await listApi(
+    fetch_, 'https://run.googleapis.com/v1/projects/' + target.projectId +
+      '/locations?pageSize=100',
+    'locations', accessToken, target.projectId,
+  )).map((location) => string(location.locationId)).sort();
+  assert.equal(runLocations.length > 0, true, 'Cloud Run location inventory is empty');
+  assert.equal(new Set(runLocations).size, runLocations.length,
+    'duplicate Cloud Run location inventory entry');
+  for (const region of runLocations) {
+    assert.match(region, /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/);
+  }
   const runServicesPromise = runServiceInventory(fetch_, target, accessToken);
+  const runJobsPromise = emptyRunResourceInventory(
+    fetch_, target, accessToken, runLocations, 'jobs', 'run.googleapis.com/Job',
+  );
+  const runWorkerPoolsPromise = emptyRunResourceInventory(
+    fetch_, target, accessToken, runLocations, 'workerPools', 'run.googleapis.com/WorkerPool',
+  );
   const eventarcValuesPromise = listApi(
     fetch_, `https://eventarc.googleapis.com/v1/projects/${target.projectId}/locations/-/triggers`,
     'triggers', accessToken, target.projectId,
@@ -2675,11 +2824,13 @@ async function deployedSecurity(
         };
       }));
   });
-  const [runServices, eventarcTriggers, authConfig, authProviders, firebaseRulesReleases,
+  const [runServices, runJobs, runWorkerPools,
+    eventarcTriggers, authConfig, authProviders, firebaseRulesReleases,
     customRoles, serviceAccounts,
     secrets, artifactRepositories, pubsubTopics, pubsubSubscriptions, storageBuckets] =
     await Promise.all([
-      runServicesPromise, eventarcPromise, authPromise, authProvidersPromise,
+      runServicesPromise, runJobsPromise, runWorkerPoolsPromise,
+      eventarcPromise, authPromise, authProvidersPromise,
       firebaseRulesReleasesPromise, customRolesPromise,
       serviceAccountsPromise, secretsPromise, repositoriesPromise, pubsubTopicsPromise,
       pubsubSubscriptionsPromise, bucketsPromise,
@@ -2693,6 +2844,8 @@ async function deployedSecurity(
     artifactRepositories: sortedCanonical(artifactRepositories),
     storageBuckets: sortedCanonical(storageBuckets),
     runServices,
+    runJobs,
+    runWorkerPools,
     eventarcTriggers,
     pubsubTopics,
     pubsubSubscriptions,
@@ -2734,6 +2887,7 @@ function expectedRunConfiguration(
   target: DeploymentTarget,
   function_: ExpectedFunction,
   revision: string,
+  functionHash: string,
 ): Record<string, unknown> {
   const imagePackage = [target.projectId, function_.region, function_.name]
     .map((part) => part.replaceAll('-', '--')).join('__');
@@ -2753,6 +2907,15 @@ function expectedRunConfiguration(
   }).map(([name, value]) => ({name, value})).sort((left, right) =>
     left.name.localeCompare(right.name));
   return {
+    labels: {
+      'firebase-functions-hash': functionHash,
+      'goog-cloudfunctions-runtime': 'nodejs22',
+      'goog-drz-cloudfunctions-id': function_.name,
+      'goog-drz-cloudfunctions-location': function_.region,
+      'goog-managed-by': 'cloudfunctions',
+    },
+    annotations: {'cloudfunctions.googleapis.com/function-id': function_.name},
+    launchStage: 'GA',
     ingress: 'INGRESS_TRAFFIC_ALL',
     customAudiences: [
       `https://${function_.region}-${target.projectId}.cloudfunctions.net/${function_.name}`,
@@ -2762,6 +2925,15 @@ function expectedRunConfiguration(
     scaling: function_.maxInstances === null ? {} : {maxInstanceCount: function_.maxInstances},
     template: {
       revision,
+      labels: {
+        'firebase-functions-hash': functionHash,
+        'goog-drz-cloudfunctions-id': function_.name,
+        'goog-drz-cloudfunctions-location': function_.region,
+      },
+      annotations: {
+        'cloudfunctions.googleapis.com/trigger-type': function_.event?.type ?? 'HTTP_TRIGGER',
+      },
+      client: 'cli-firebase',
       serviceAccount: function_.serviceAccount,
       timeout: `${function_.timeoutSeconds}s`,
       maxInstanceRequestConcurrency: 80,
@@ -2947,6 +3119,12 @@ export function deploymentProblems(
   if (canonical(observed.security.runServices) !== canonical(expectedRunServices(expected.target))) {
     problems.push('Cloud Run services do not match the reviewed Functions');
   }
+  if (observed.security.runJobs.length > 0) {
+    problems.push('Unreviewed Cloud Run jobs exist');
+  }
+  if (observed.security.runWorkerPools.length > 0) {
+    problems.push('Unreviewed Cloud Run worker pools exist');
+  }
   if (expectedSecurity.runInventoryCheckpoint === null) {
     problems.push('Cloud Run inventory checkpoint is pending');
   }
@@ -3022,7 +3200,12 @@ export function deploymentProblems(
           observedFunction.runLatestCreatedRevision !== observedFunction.revision) {
         problems.push(`Cloud Run latest revision does not match Function: ${key}`);
       } else if (canonical(observedFunction.runConfiguration) !== canonical(
-        expectedRunConfiguration(expected.target, expectedFunction, observedFunction.revision),
+        expectedRunConfiguration(
+          expected.target,
+          expectedFunction,
+          observedFunction.revision,
+          observedFunction.firebaseFunctionsHash!,
+        ),
       )) {
         problems.push(`Cloud Run configuration mismatch: ${key}`);
       }
@@ -3150,7 +3333,8 @@ function runtimeFile(value: unknown): RuntimeFile {
   ].includes(type));
   const common = ['path', 'type', 'mode', 'uid', 'gid'];
   const extra = type === 'file' ? ['sha256'] :
-    type === 'symlink' || type === 'hardlink' ? ['linkName'] :
+    type === 'hardlink' ? ['linkName', 'sha256'] :
+      type === 'symlink' ? ['linkName'] :
       type === 'character' || type === 'block' ? ['deviceMajor', 'deviceMinor'] : [];
   assertExactKeys(file, [...common, ...extra]);
   const result = {
@@ -3165,6 +3349,9 @@ function runtimeFile(value: unknown): RuntimeFile {
     ...(file.deviceMinor === undefined ? {} : {deviceMinor: number(file.deviceMinor)}),
   };
   assert.match(result.path, /^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]*$/);
+  assert.notEqual(result.path, '/');
+  assert.equal(posix.normalize(result.path), result.path);
+  if (result.type === 'hardlink') assert.equal(runtimePath(result.linkName!), result.linkName);
   assert.ok(Number.isSafeInteger(result.mode) && result.mode >= 0);
   assert.ok(Number.isSafeInteger(result.uid) && result.uid >= 0);
   assert.ok(Number.isSafeInteger(result.gid) && result.gid >= 0);
@@ -3179,7 +3366,8 @@ function runtimeAttestation(value: unknown): RuntimeAttestation | null {
     'deploymentCommit', 'imageDigest', 'executionConfig', 'files',
   ]);
   const files = array(attestation.files).map(runtimeFile);
-  assert.deepEqual(files.map(({path}) => path), files.map(({path}) => path).sort(),
+  assert.deepEqual(files.map(({path}) => path), files.map(({path}) => path).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0),
     'runtime attestation paths must be sorted');
   assert.equal(new Set(files.map(({path}) => path)).size, files.length,
     'runtime attestation paths must be unique');
@@ -3575,6 +3763,7 @@ export function reviewedTreeProblems(
   reviewedCommit: string,
   target: DeploymentTarget,
   runGit: GitRunner,
+  graftFileExists = false,
 ): string[] {
   const problems: string[] = [];
   const head = gitText(runGit, ['rev-parse', 'HEAD']).trim();
@@ -3598,6 +3787,7 @@ export function reviewedTreeProblems(
   if (origin !== target.security.gitOrigin) problems.push('Git origin is not the reviewed repository');
   if (urlRewrites.length > 0) problems.push('Git URL rewrite can spoof origin');
   if (replacements.length > 0) problems.push('Git replacement refs can spoof reviewed objects');
+  if (graftFileExists) problems.push('Git graft file can spoof reviewed ancestry');
   const gen2Functions = target.functions.filter(({generation}) => generation === 'GEN_2');
   const attestations = gen2Functions.flatMap(({runtimeAttestation}) =>
     runtimeAttestation === null ? [] : [runtimeAttestation]);
@@ -3607,7 +3797,11 @@ export function reviewedTreeProblems(
     } else {
       const deploymentCommits = [...new Set(attestations.map(({deploymentCommit}) =>
         deploymentCommit))];
-      const parent = gitText(runGit, ['rev-parse', `${reviewedCommit}^`]).trim();
+      const rawCommit = gitText(runGit, ['cat-file', 'commit', reviewedCommit]);
+      const parents = rawCommit.split(/\r?\n/).filter((line) => line.startsWith('parent '));
+      assert.equal(parents.length, 1, 'runtime attestation commit must have one raw parent');
+      const parent = parents[0].slice('parent '.length);
+      assert.match(parent, /^[0-9a-f]{40}$/);
       const changed = gitText(runGit, [
         'diff-tree', '--no-commit-id', '--name-only', '-r', parent, reviewedCommit,
       ]).split(/\r?\n/).filter(Boolean).sort();
@@ -3670,7 +3864,7 @@ export function reviewedTreeProblems(
 }
 
 export function parseOptions(arguments_: string[]): Map<string, string> {
-  const allowed = new Set(['account', 'commit', 'mode', 'project']);
+  const allowed = new Set(['account', 'checkpoint', 'commit', 'mode', 'project']);
   const parsed = new Map<string, string>();
   for (const argument of arguments_) {
     assert.ok(argument.startsWith('--'), `invalid argument: ${argument}`);
@@ -3691,7 +3885,7 @@ export interface CliDependencies {
   runGit: GitRunner;
   fetch: FetchLike;
   accessToken(account?: string): string;
-  now?(): Date;
+  graftFileExists?(): boolean;
   stdout(message: string): void;
   stderr(message: string): void;
 }
@@ -3707,21 +3901,36 @@ export async function runCli(
   const expected = readExpectedDeployment(reviewedCommit!, dependencies.runGit);
   const mode = options.get('mode') ?? 'verify';
   assert.ok(mode === 'verify' || mode === 'capture', 'invalid --mode');
+  const checkpoint = options.get('checkpoint');
+  if (mode === 'capture') {
+    assert.notEqual(checkpoint, undefined, 'capture requires --checkpoint');
+    assert.match(checkpoint!,
+      /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/);
+    assert.ok(Date.now() - Date.parse(checkpoint!) >= RUN_INVENTORY_QUIESCENCE_MS,
+      'capture checkpoint has not been quiescent for ten minutes');
+  } else {
+    assert.equal(checkpoint, undefined, '--checkpoint is only valid in capture mode');
+  }
   const project = options.get('project');
   if (project !== undefined) assert.equal(project, expected.target.projectId);
   const treeProblems = reviewedTreeProblems(
     reviewedCommit!, expected.target, dependencies.runGit,
+    dependencies.graftFileExists?.() ?? false,
   );
   if (treeProblems.length > 0) {
     for (const problem of treeProblems) dependencies.stderr(`${problem}\n`);
     return 1;
   }
+  const liveExpected = structuredClone(expected);
+  if (mode === 'capture') {
+    liveExpected.target.security.runInventoryCheckpoint = checkpoint!;
+  }
   const observed = await readObservedDeployment(
     dependencies.fetch,
-    expected,
+    liveExpected,
     dependencies.accessToken(options.get('account')),
   );
-  const problems = deploymentProblems(expected, observed);
+  const problems = deploymentProblems(liveExpected, observed);
   if (mode === 'capture') {
     assert.equal(expected.target.security.runInventoryCheckpoint, null,
       'capture requires a pending Run inventory checkpoint');
@@ -3729,7 +3938,6 @@ export async function runCli(
     assert.equal(gen2.every(({runtimeAttestation}) => runtimeAttestation === null), true,
       'capture requires pending Gen 2 runtime attestations');
     const allowed = new Set([
-      'Cloud Run inventory checkpoint is pending',
       ...gen2.map((function_) =>
         'Cloud Run runtime image attestation is pending: ' + functionKey(function_)),
     ]);
@@ -3740,7 +3948,6 @@ export async function runCli(
     }
     const observedByKey = new Map(observed.functions.map((function_) =>
       [functionKey(function_), function_]));
-    const checkpoint = (dependencies.now?.() ?? new Date()).toISOString();
     const functions = gen2.map((function_) => {
       const key = functionKey(function_);
       const runtimeAttestation = observedByKey.get(key)?.imageRuntimeAttestation;
@@ -3774,13 +3981,18 @@ export async function runProductionCli(arguments_: string[]): Promise<number> {
   const runGit: GitRunner = (gitArguments) => execFileSync(
     'git', ['-C', root, ...gitArguments], {
       encoding: 'buffer',
-      env: {...process.env, GIT_NO_REPLACE_OBJECTS: '1'},
+      env: {
+        ...process.env,
+        GIT_GRAFT_FILE: '/dev/null',
+        GIT_NO_REPLACE_OBJECTS: '1',
+      },
     },
   );
   return runCli(arguments_, {
     root,
     runGit,
     fetch: fetch as FetchLike,
+    graftFileExists: () => existsSync(root + '/.git/info/grafts'),
     accessToken: (account) => {
       const tokenArguments = ['auth', 'print-access-token'];
       if (account !== undefined) tokenArguments.push(`--account=${account}`);

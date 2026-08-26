@@ -226,23 +226,26 @@ step. That commit must leave the Gen 2 `runtimeAttestation` values and
 `security.runInventoryCheckpoint` pending as `null`. After the compatible
 Functions, migrations, renderer, and Hosting release are complete, remove the
 stale resources and user-managed keys below. Run `npm run validate`, then
-capture the live immutable image evidence with
-`node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture`.
+freeze every Cloud Run service, job, and worker-pool mutation. Record
+`RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")` before any live
+attestation read and wait at least ten minutes. Capture the live immutable image
+evidence with
+`node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT"`.
 Merge the emitted values into `deployment-target.json`. The resulting
 attestation commit must change only that file and must name its parent deployment
-commit in every attestation. Review and push it, freeze all Cloud Run mutations,
-wait at least ten minutes from the captured checkpoint, and run
+commit in every attestation. Review and push it, keep Cloud Run frozen, and run
 `npm run verify:deployment -- --commit=<attestation-40-character-SHA>`.
 
 The verifier rechecks every region that Cloud Run's wildcard response reports as
 unreachable, but a `LOCATION_POLICY_VIOLATED` response is not proof that no old
-service exists. It also requires Cloud Asset's exact cross-region Run inventory,
-requires directly visible services to have converged there, and rejects any Run
-Admin Activity after the reviewed checkpoint. It binds each Gen 2 revision to
+executable resource exists. It requires Cloud Asset's exact cross-region Run
+service, job, and worker-pool inventories, requires directly visible resources
+to have converged there, and rejects any Run Admin Activity at or after the
+reviewed checkpoint. It binds each Gen 2 revision to
 the exact service/revision command, arguments, environment, probes, mounts and
 other execution settings, plus the effective OCI filesystem and execution
-configuration. Any Run mutation after capture requires a fresh target-only
-attestation commit and another quiescence interval.
+configuration. Any Run mutation after the checkpoint requires a new checkpoint,
+quiescence interval, capture, and target-only attestation commit.
 Do not mark the rollout complete if it reports a mutable or unpushed tree,
 stale Firestore configuration, a Function release or configuration mismatch,
 unexpected invoker access, split Gen 2 traffic, stale Hosting files, or a stale

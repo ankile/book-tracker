@@ -119,11 +119,19 @@ test('the strict-TypeScript rollback runbook preserves compatible release stages
   assert.match(rollback, /Do not use `db-restore\.ts`\s+for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
   assert.match(
     rollback,
-    /--mode=capture[\s\S]*attestation commit must change only that file[\s\S]*wait at least ten minutes[\s\S]*verify:deployment -- --commit=<attestation-40-character-SHA>/,
+    /--mode=capture[\s\S]*attestation commit must change only that file[\s\S]*verify:deployment -- --commit=<attestation-40-character-SHA>/,
   );
+  assertOrdered(rollback, [
+    'freeze every Cloud Run service, job, and worker-pool mutation',
+    'RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
+    'wait at least ten minutes',
+    '--mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT"',
+    'attestation commit must change only that file',
+    'verify:deployment -- --commit=<attestation-40-character-SHA>',
+  ]);
   assert.match(
     rollback,
-    /Cloud Asset's exact cross-region Run inventory[\s\S]*Admin Activity[\s\S]*effective OCI filesystem and execution[\s\S]*configuration/i,
+    /Cloud Asset's exact cross-region Run[\s\S]*service, job, and worker-pool inventories[\s\S]*Admin Activity[\s\S]*effective OCI filesystem and execution[\s\S]*configuration/i,
   );
   assert.match(
     rollback,

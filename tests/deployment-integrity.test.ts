@@ -31,6 +31,7 @@ const INDEX = '<!doctype html><title>reviewed</title>\n';
 const GENERATED = 'generated firebase config';
 const PROFILE_PROBE = '<!doctype html><title>Profile not found</title>\n';
 const FUNCTION_PACKAGE = '{"name":"dummy-functions"}\n';
+const FIREBASE_FUNCTIONS_HASH = 'f'.repeat(40);
 const FIREBASE_JSON = {
   hosting: {
     site: 'test-project',
@@ -149,9 +150,18 @@ const FUNCTION_ARCHIVE = zipSync({
   'package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
 });
 
-function tarArchive(files: Record<string, Uint8Array>): Uint8Array {
+function tarArchive(
+  files: Record<string, Uint8Array>,
+  hardlinks: Record<string, string> = {},
+): Uint8Array {
   const chunks: Uint8Array[] = [];
-  for (const [path, body] of Object.entries(files)) {
+  const entries = [
+    ...Object.entries(files).map(([path, body]) => ({path, body, linkName: null})),
+    ...Object.entries(hardlinks).map(([path, linkName]) => ({
+      path, body: new Uint8Array(), linkName,
+    })),
+  ];
+  for (const {path, body, linkName} of entries) {
     const header = new Uint8Array(512);
     const write = (offset: number, length: number, value: string): void => {
       const encoded = new TextEncoder().encode(value);
@@ -167,7 +177,8 @@ function tarArchive(files: Record<string, Uint8Array>): Uint8Array {
     octal(124, 12, body.byteLength);
     octal(136, 12, 0);
     header.fill(32, 148, 156);
-    header[156] = 48;
+    header[156] = linkName === null ? 48 : 49;
+    if (linkName !== null) write(157, 100, linkName);
     write(257, 6, 'ustar\0');
     write(263, 2, '00');
     const checksum = header.reduce((sum, value) => sum + value, 0);
@@ -189,6 +200,8 @@ const IMAGE_SOURCE_TAR = gzipSync(tarArchive({
 }));
 const IMAGE_LAYER_EXPANDED = tarArchive({
   '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+  '/workspace/LICENSE': new TextEncoder().encode('dummy license\n'),
+  '/workspace/index.js': new TextEncoder().encode('export {};\n'),
   '/workspace/package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
 });
 const IMAGE_LAYER = gzipSync(IMAGE_LAYER_EXPANDED);
@@ -231,6 +244,22 @@ const IMAGE_RUNTIME_FILES = [
     uid: 0,
     gid: 0,
     sha256: hash(IMAGE_SOURCE_TAR),
+  },
+  {
+    path: '/workspace/LICENSE',
+    type: 'file' as const,
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    sha256: hash('dummy license\n'),
+  },
+  {
+    path: '/workspace/index.js',
+    type: 'file' as const,
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    sha256: hash('export {};\n'),
   },
   {
     path: '/workspace/package.json',
@@ -433,9 +462,19 @@ const currentFunction: ObservedFunction = {
   imageSource: null,
   imageSourceFiles: null,
   imageRuntimeAttestation: null,
+  firebaseFunctionsHash: null,
 };
 
 const RUN_CONFIGURATION = {
+  labels: {
+    'firebase-functions-hash': FIREBASE_FUNCTIONS_HASH,
+    'goog-cloudfunctions-runtime': 'nodejs22',
+    'goog-drz-cloudfunctions-id': 'publicweb',
+    'goog-drz-cloudfunctions-location': 'europe-west1',
+    'goog-managed-by': 'cloudfunctions',
+  },
+  annotations: {'cloudfunctions.googleapis.com/function-id': 'publicweb'},
+  launchStage: 'GA',
   ingress: 'INGRESS_TRAFFIC_ALL',
   customAudiences: ['https://europe-west1-test-project.cloudfunctions.net/publicweb'],
   binaryAuthorization: {},
@@ -443,6 +482,13 @@ const RUN_CONFIGURATION = {
   scaling: {maxInstanceCount: 20},
   template: {
     revision: 'publicweb-00001-test',
+    labels: {
+      'firebase-functions-hash': FIREBASE_FUNCTIONS_HASH,
+      'goog-drz-cloudfunctions-id': 'publicweb',
+      'goog-drz-cloudfunctions-location': 'europe-west1',
+    },
+    annotations: {'cloudfunctions.googleapis.com/trigger-type': 'HTTP_TRIGGER'},
+    client: 'cli-firebase',
     serviceAccount: '123456789-compute@developer.gserviceaccount.com',
     timeout: '30s',
     maxInstanceRequestConcurrency: 80,
@@ -496,6 +542,9 @@ const RUN_CONFIGURATION = {
 
 const RUN_SERVICE_API = {
   name: 'projects/test-project/locations/europe-west1/services/publicweb',
+  labels: RUN_CONFIGURATION.labels,
+  annotations: RUN_CONFIGURATION.annotations,
+  launchStage: 'GA',
   invokerIamDisabled: false,
   latestReadyRevision:
     'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
@@ -507,6 +556,9 @@ const RUN_SERVICE_API = {
   scaling: {maxInstanceCount: 20},
   template: {
     revision: 'publicweb-00001-test',
+    labels: RUN_CONFIGURATION.template.labels,
+    annotations: RUN_CONFIGURATION.template.annotations,
+    client: 'cli-firebase',
     serviceAccount: '123456789-compute@developer.gserviceaccount.com',
     timeout: '30s',
     maxInstanceRequestConcurrency: 80,
@@ -553,6 +605,10 @@ const RUN_SERVICE_API = {
 const RUN_REVISION_API = {
   name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
   service: 'publicweb',
+  labels: RUN_CONFIGURATION.labels,
+  annotations: RUN_CONFIGURATION.template.annotations,
+  launchStage: 'GA',
+  client: 'cli-firebase',
   scaling: {maxInstanceCount: 20},
   timeout: '30s',
   maxInstanceRequestConcurrency: 80,
@@ -625,6 +681,7 @@ const currentGen2Function: ObservedFunction = {
     executionConfig: IMAGE_CONFIG.config,
     files: IMAGE_RUNTIME_FILES,
   },
+  firebaseFunctionsHash: FIREBASE_FUNCTIONS_HASH,
 };
 
 function currentObserved(): ObservedDeployment {
@@ -641,6 +698,8 @@ function currentObserved(): ObservedDeployment {
       runServices: [
         'projects/test-project/locations/europe-west1/services/publicweb',
       ],
+      runJobs: [],
+      runWorkerPools: [],
     },
     hosting: {
       files: {'https://test-project.web.app': {
@@ -952,7 +1011,10 @@ function apiFixture(
             uri: 'https://publicweb-dummy-ew.a.run.app',
             service: 'projects/test-project/locations/europe-west1/services/publicweb',
           },
-          labels: {'book-tracker-release': 'reviewed-release'},
+          labels: {
+            'book-tracker-release': 'reviewed-release',
+            'firebase-functions-hash': FIREBASE_FUNCTIONS_HASH,
+          },
         }],
         nextPageToken: '',
       }},
@@ -1132,10 +1194,55 @@ function apiFixture(
       }], unreachable: []}},
     ],
     [
+      'https://run.googleapis.com/v1/projects/test-project/locations?pageSize=100',
+      {json: {locations: [
+        {locationId: 'europe-west1'},
+        {locationId: 'me-central2'},
+      ]}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/jobs?pageSize=1000',
+      {json: {jobs: []}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/workerPools?pageSize=1000',
+      {json: {workerPools: []}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/me-central2/jobs?pageSize=1000',
+      {status: 403, json: {error: {
+        status: 'PERMISSION_DENIED',
+        details: [{
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'LOCATION_POLICY_VIOLATED',
+          metadata: {location: 'me-central2'},
+        }],
+      }}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/me-central2/workerPools?pageSize=1000',
+      {status: 403, json: {error: {
+        status: 'PERMISSION_DENIED',
+        details: [{
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'LOCATION_POLICY_VIOLATED',
+          metadata: {location: 'me-central2'},
+        }],
+      }}},
+    ],
+    [
       'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService&pageSize=500',
       {json: {results: [{
         name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
       }]}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FJob&pageSize=500',
+      {json: {results: []}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FWorkerPool&pageSize=500',
+      {json: {results: []}},
     ],
     [
       'https://eventarc.googleapis.com/v1/projects/test-project/locations/-/triggers',
@@ -1447,6 +1554,12 @@ test('reads live APIs, stops on an empty page token, and withholds credentials f
     fixture.calls.filter((call) => call.url.includes('/locations/-/functions')).length,
     1,
   );
+  assert.equal(fixture.calls.some(({url}) =>
+    url.includes('/locations/-/jobs') || url.includes('/locations/-/workerPools')), false);
+  assert.equal(fixture.calls.some(({url}) =>
+    url === 'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/jobs?pageSize=1000'), true);
+  assert.equal(fixture.calls.some(({url}) =>
+    url === 'https://run.googleapis.com/v2/projects/test-project/locations/me-central2/workerPools?pageSize=1000'), true);
   for (const call of fixture.calls) {
     assert.ok(call.signal instanceof AbortSignal);
     if (call.url.startsWith('https://test-project.web.app') ||
@@ -1551,6 +1664,29 @@ test('rejects matching malicious Cloud Run startup overrides in the service and 
   assert.equal(deploymentProblems(expected, observed).includes(
     'Cloud Run configuration mismatch: europe-west1/publicweb',
   ), true);
+});
+
+test('rejects matching execution-affecting Cloud Run annotations', async () => {
+  const service = structuredClone(RUN_SERVICE_API);
+  const revision = structuredClone(RUN_REVISION_API);
+  Object.assign(service.template.annotations, {
+    'run.googleapis.com/cloudsql-instances': 'attacker-project:region:database',
+  });
+  revision.annotations = structuredClone(service.template.annotations);
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb',
+      {json: service},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+      {json: revision},
+    ],
+  ]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /cloudsql-instances/,
+  );
 });
 
 test('rejects Cloud Run execution settings that differ between service and immutable revision', async () => {
@@ -1716,6 +1852,39 @@ test('rejects a direct Run service until Cloud Asset inventory has converged', a
     readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
     /Cloud Asset has not converged/,
   );
+});
+
+test('rejects executable Cloud Run jobs and worker pools outside the Function inventory', async () => {
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/jobs?pageSize=1000',
+      {json: {jobs: [{
+        name: 'projects/test-project/locations/europe-west1/jobs/backdoor',
+      }]}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/workerPools?pageSize=1000',
+      {json: {workerPools: [{
+        name: 'projects/test-project/locations/europe-west1/workerPools/backdoor',
+      }]}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FJob&pageSize=500',
+      {json: {results: [{
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/jobs/backdoor',
+      }]}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FWorkerPool&pageSize=500',
+      {json: {results: [{
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/workerPools/backdoor',
+      }]}},
+    ],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  const problems = deploymentProblems(expected, observed);
+  assert.equal(problems.includes('Unreviewed Cloud Run jobs exist'), true);
+  assert.equal(problems.includes('Unreviewed Cloud Run worker pools exist'), true);
 });
 
 test('keeps deployment blocked until a reviewed Run inventory checkpoint exists', async () => {
@@ -1899,6 +2068,60 @@ test('applies opaque OCI whiteouts before comparing the effective runtime filesy
   assert.equal(deploymentProblems(expected, observed).includes(
     'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
   ), true);
+});
+
+test('reads build provenance only from the effective OCI filesystem', async () => {
+  const removeArchivedSource = tarArchive({
+    '/layers/google.utils.archive-source/src/.wh.source-code.tar.gz': new Uint8Array(),
+  });
+  const fixture = runtimeImageFixture([IMAGE_LAYER_EXPANDED, removeArchivedSource]);
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /Function image has no archived build input/,
+  );
+});
+
+test('preserves hardlink inode bytes when a later layer replaces the link target', async () => {
+  const malicious = new TextEncoder().encode('stealSecrets();\n');
+  const firstLayer = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/tmp/payload': malicious,
+  }, {
+    '/workspace/lib/index.js': '/tmp/payload',
+  });
+  const secondLayer = tarArchive({
+    '/tmp/payload': new TextEncoder().encode('benign();\n'),
+  });
+  const fixture = runtimeImageFixture([firstLayer, secondLayer]);
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  const publicweb = observed.functions.find(({name}) => name === 'publicweb')!;
+  const hardlink = publicweb.imageRuntimeAttestation!.files.find(
+    ({path}) => path === '/workspace/lib/index.js',
+  );
+  assert.deepEqual(hardlink, {
+    path: '/workspace/lib/index.js',
+    type: 'hardlink',
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    linkName: '/tmp/payload',
+    sha256: hash(malicious),
+  });
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
+  ), true);
+});
+
+test('rejects noncanonical OCI paths instead of attesting aliases', async () => {
+  const aliasedLayer = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/workspace/./attacker.js': new TextEncoder().encode('stealSecrets();\n'),
+  });
+  const fixture = runtimeImageFixture([aliasedLayer]);
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /noncanonical runtime path/,
+  );
 });
 
 test('rejects a managed Function build with an unreviewed patch step', async () => {
@@ -2478,6 +2701,9 @@ function gitFixture(
     ['config --list --show-origin -z', Buffer.from(
       localConfig === '' ? '' : `${configOrigin}\0${localConfig}`,
     )],
+    ['cat-file commit ' + COMMIT, Buffer.from(
+      'tree ' + 'd'.repeat(40) + '\nparent ' + 'b'.repeat(40) + '\n\nreview\n',
+    )],
     ['replace -l', Buffer.from('')],
     ['status --porcelain=v1 -z --untracked-files=all', Buffer.from(status)],
     [
@@ -2614,6 +2840,31 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
   assert.deepEqual(reviewedTreeProblems(COMMIT, target, replacementGit), [
     'Git replacement refs can spoof reviewed objects',
   ]);
+  assert.deepEqual(reviewedTreeProblems(COMMIT, target, gitFixture(), true), [
+    'Git graft file can spoof reviewed ancestry',
+  ]);
+  const rawParent = 'c'.repeat(40);
+  const parentTarget = structuredClone(target);
+  parentTarget.security.runInventoryCheckpoint = null;
+  for (const function_ of parentTarget.functions) {
+    if (function_.generation === 'GEN_2') function_.runtimeAttestation = null;
+  }
+  const forgedTraversal: GitRunner = (arguments_) => {
+    const command = arguments_.join(' ');
+    if (command === 'cat-file commit ' + COMMIT) {
+      return Buffer.from('tree ' + 'd'.repeat(40) + '\nparent ' + rawParent + '\n\nreview\n');
+    }
+    if (command === 'show ' + rawParent + ':deployment-target.json') {
+      return Buffer.from(JSON.stringify(parentTarget));
+    }
+    if (command === 'diff-tree --no-commit-id --name-only -r ' + rawParent + ' ' + COMMIT) {
+      return Buffer.from('deployment-target.json\n');
+    }
+    return base(arguments_);
+  };
+  assert.deepEqual(reviewedTreeProblems(COMMIT, target, forgedTraversal), [
+    'Runtime attestation commit is not a target-only child of the deployment',
+  ]);
   const alteredTarget = structuredClone(target);
   alteredTarget.releaseId = 'attacker-approved-release';
   assert.deepEqual(reviewedTreeProblems(COMMIT, alteredTarget, gitFixture()), [
@@ -2641,13 +2892,17 @@ test('capture mode emits target-only runtime attestations after all other checks
   const output: string[] = [];
   const errors: string[] = [];
   const result = await runCli(
-    ['--commit=' + COMMIT, '--project=test-project', '--mode=capture'],
+    [
+      '--commit=' + COMMIT,
+      '--project=test-project',
+      '--mode=capture',
+      '--checkpoint=2026-01-02T03:04:05Z',
+    ],
     {
       root: process.cwd(),
       runGit,
       fetch: fixture.fetch,
       accessToken: () => 'dummy-token',
-      now: () => new Date('2026-01-02T03:04:05Z'),
       stdout: (message) => output.push(message),
       stderr: (message) => errors.push(message),
     },
@@ -2655,7 +2910,7 @@ test('capture mode emits target-only runtime attestations after all other checks
   assert.equal(result, 0);
   assert.deepEqual(errors, []);
   assert.deepEqual(JSON.parse(output.join('')), {
-    security: {runInventoryCheckpoint: '2026-01-02T03:04:05.000Z'},
+    security: {runInventoryCheckpoint: '2026-01-02T03:04:05Z'},
     functions: [{
       name: 'publicweb',
       region: 'europe-west1',
@@ -2667,6 +2922,33 @@ test('capture mode emits target-only runtime attestations after all other checks
       },
     }],
   });
+
+  const mutationFixture = apiFixture(new Map(), [{
+    timestamp: '2026-01-02T03:05:00Z',
+    protoPayload: {
+      serviceName: 'run.googleapis.com',
+      methodName: 'google.cloud.run.v2.Services.CreateService',
+    },
+  }]);
+  await assert.rejects(
+    runCli(
+      [
+        '--commit=' + COMMIT,
+        '--project=test-project',
+        '--mode=capture',
+        '--checkpoint=2026-01-02T03:04:05Z',
+      ],
+      {
+        root: process.cwd(),
+        runGit,
+        fetch: mutationFixture.fetch,
+        accessToken: () => 'dummy-token',
+        stdout: () => assert.fail('capture with an in-window mutation must not emit'),
+        stderr: () => assert.fail('API verification failure must throw closed'),
+      },
+    ),
+    /Cloud Run changed after the reviewed inventory checkpoint/,
+  );
 });
 
 test('runCli returns distinct success and dirty-tree failure codes', async () => {
