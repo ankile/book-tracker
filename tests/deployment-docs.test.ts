@@ -122,10 +122,13 @@ test('the strict-TypeScript rollback runbook preserves compatible release stages
     /--mode=capture[\s\S]*attestation commit must change only that file[\s\S]*verify:deployment -- --commit=<attestation-40-character-SHA>/,
   );
   assertOrdered(rollback, [
+    'enable `cloudasset.googleapis.com` with the release account',
+    'gcloud asset search-all-resources',
     'freeze every Cloud Run service, job, and worker-pool mutation',
     'RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
     'wait at least ten minutes',
     '--mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT"',
+    'Capture waits another ten minutes after all live reads',
     'attestation commit must change only that file',
     'verify:deployment -- --commit=<attestation-40-character-SHA>',
   ]);

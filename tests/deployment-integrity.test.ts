@@ -8,6 +8,7 @@ import test from 'node:test';
 import {gzipSync} from 'node:zlib';
 import {zipSync} from 'fflate';
 import {
+  assertNoRunMutations,
   deploymentProblems,
   fetchWithRetry,
   parseOptions,
@@ -153,15 +154,19 @@ const FUNCTION_ARCHIVE = zipSync({
 function tarArchive(
   files: Record<string, Uint8Array>,
   hardlinks: Record<string, string> = {},
+  symlinks: Record<string, string> = {},
 ): Uint8Array {
   const chunks: Uint8Array[] = [];
   const entries = [
-    ...Object.entries(files).map(([path, body]) => ({path, body, linkName: null})),
+    ...Object.entries(files).map(([path, body]) => ({path, body, linkName: null, type: 48})),
     ...Object.entries(hardlinks).map(([path, linkName]) => ({
-      path, body: new Uint8Array(), linkName,
+      path, body: new Uint8Array(), linkName, type: 49,
+    })),
+    ...Object.entries(symlinks).map(([path, linkName]) => ({
+      path, body: new Uint8Array(), linkName, type: 50,
     })),
   ];
-  for (const {path, body, linkName} of entries) {
+  for (const {path, body, linkName, type} of entries) {
     const header = new Uint8Array(512);
     const write = (offset: number, length: number, value: string): void => {
       const encoded = new TextEncoder().encode(value);
@@ -177,7 +182,7 @@ function tarArchive(
     octal(124, 12, body.byteLength);
     octal(136, 12, 0);
     header.fill(32, 148, 156);
-    header[156] = linkName === null ? 48 : 49;
+    header[156] = type;
     if (linkName !== null) write(157, 100, linkName);
     write(257, 6, 'ustar\0');
     write(263, 2, '00');
@@ -457,7 +462,6 @@ const currentFunction: ObservedFunction = {
   revisionImage: null,
   buildId: null,
   buildSource: null,
-  buildImageDigest: null,
   imageBuildId: null,
   imageSource: null,
   imageSourceFiles: null,
@@ -475,6 +479,21 @@ const RUN_CONFIGURATION = {
   },
   annotations: {'cloudfunctions.googleapis.com/function-id': 'publicweb'},
   launchStage: 'GA',
+  client: 'cli-firebase',
+  clientVersion: null,
+  urls: ['cloudfunctions', 'numeric-run', 'stable-run'],
+  sshEnabled: false,
+  buildConfig: {
+    name: 'projects/123456789/locations/europe-west1/builds/11111111-1111-1111-1111-111111111111',
+    sourceLocation:
+      'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+    functionTarget: 'publicweb',
+    imageUri:
+      'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
+    baseImage: 'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22',
+    enableAutomaticUpdates: true,
+    environmentVariables: {GOOGLE_NODE_RUN_SCRIPTS: ''},
+  },
   ingress: 'INGRESS_TRAFFIC_ALL',
   customAudiences: ['https://europe-west1-test-project.cloudfunctions.net/publicweb'],
   binaryAuthorization: {},
@@ -489,6 +508,7 @@ const RUN_CONFIGURATION = {
     },
     annotations: {'cloudfunctions.googleapis.com/trigger-type': 'HTTP_TRIGGER'},
     client: 'cli-firebase',
+    baseImageUri: null,
     serviceAccount: '123456789-compute@developer.gserviceaccount.com',
     timeout: '30s',
     maxInstanceRequestConcurrency: 80,
@@ -545,6 +565,25 @@ const RUN_SERVICE_API = {
   labels: RUN_CONFIGURATION.labels,
   annotations: RUN_CONFIGURATION.annotations,
   launchStage: 'GA',
+  client: 'cli-firebase',
+  uri: 'https://publicweb-abcdefghij-ew.a.run.app',
+  urls: [
+    'https://publicweb-123456789.europe-west1.run.app',
+    'https://europe-west1-test-project.cloudfunctions.net/publicweb',
+    'https://publicweb-abcdefghij-ew.a.run.app',
+  ],
+  sshEnabled: false,
+  buildConfig: {
+    name: 'projects/123456789/locations/europe-west1/builds/11111111-1111-1111-1111-111111111111',
+    sourceLocation:
+      'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+    functionTarget: 'publicweb',
+    imageUri:
+      'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
+    baseImage: 'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22',
+    enableAutomaticUpdates: true,
+    environmentVariables: {GOOGLE_NODE_RUN_SCRIPTS: ''},
+  },
   invokerIamDisabled: false,
   latestReadyRevision:
     'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
@@ -672,7 +711,6 @@ const currentGen2Function: ObservedFunction = {
     `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
   buildId: '11111111-1111-1111-1111-111111111111',
   buildSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
-  buildImageDigest: IMAGE_DIGEST,
   imageBuildId: '11111111-1111-1111-1111-111111111111',
   imageSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
   imageSourceFiles: FUNCTION_FILES,
@@ -1128,8 +1166,13 @@ function apiFixture(
         textPayload: `Step #2 - "build": *** Images (${IMAGE_DIGEST}):`,
         timestamp: '2026-01-01T00:00:30Z',
       }, {
-        insertId: 'audit-build-create',
+        insertId: 'audit-build-create-first',
         logName: 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity',
+        operation: {
+          first: true,
+          id: 'operations/build/test-project/mock-operation',
+          producer: 'cloudbuild.googleapis.com',
+        },
         resource: {type: 'build', labels: {
           build_id: '11111111-1111-1111-1111-111111111111',
           build_trigger_id: '', project_id: 'test-project',
@@ -1139,6 +1182,32 @@ function apiFixture(
         protoPayload: {
           serviceName: 'cloudbuild.googleapis.com',
           methodName: 'google.devtools.cloudbuild.v1.CloudBuild.CreateBuild',
+          resourceName: 'projects/test-project/builds',
+          status: {},
+          authenticationInfo: {
+            principalEmail: 'service-123456789@gcf-admin-robot.iam.gserviceaccount.com',
+          },
+          authorizationInfo: [{permission: 'cloudbuild.builds.create', granted: true}],
+        },
+      }, {
+        insertId: 'audit-build-create-last',
+        logName: 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity',
+        operation: {
+          id: 'operations/build/test-project/mock-operation',
+          last: true,
+          producer: 'cloudbuild.googleapis.com',
+        },
+        resource: {type: 'build', labels: {
+          build_id: '11111111-1111-1111-1111-111111111111',
+          build_trigger_id: '', project_id: 'test-project',
+        }},
+        severity: 'NOTICE',
+        timestamp: '2026-01-01T00:01:01Z',
+        protoPayload: {
+          serviceName: 'cloudbuild.googleapis.com',
+          methodName: 'google.devtools.cloudbuild.v1.CloudBuild.CreateBuild',
+          resourceName: 'projects/test-project/builds',
+          status: {},
           authenticationInfo: {
             principalEmail: 'service-123456789@gcf-admin-robot.iam.gserviceaccount.com',
           },
@@ -1689,6 +1758,53 @@ test('rejects matching execution-affecting Cloud Run annotations', async () => {
   );
 });
 
+test('rejects altered Cloud Run build, SSH, and URL configuration', async () => {
+  const service = structuredClone(RUN_SERVICE_API);
+  service.sshEnabled = true;
+  service.buildConfig.baseImage =
+    'europe-west1-docker.pkg.dev/attacker-project/runtime/hostile';
+  const fixture = apiFixture(new Map([[
+    'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb',
+    {json: service},
+  ]]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run configuration mismatch: europe-west1/publicweb',
+  ), true);
+
+  const hostileUrl = structuredClone(RUN_SERVICE_API);
+  hostileUrl.urls = [...hostileUrl.urls, 'https://attacker.example.test/publicweb'];
+  const urlFixture = apiFixture(new Map([[
+    'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb',
+    {json: hostileUrl},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(urlFixture.fetch, expected, 'dummy-token'),
+  );
+});
+
+test('rejects a matching template-level automatic base image override', async () => {
+  const service = structuredClone(RUN_SERVICE_API) as Record<string, unknown>;
+  const revision = structuredClone(RUN_REVISION_API) as Record<string, unknown>;
+  (service.template as Record<string, unknown>).baseImageUri =
+    'europe-west1-docker.pkg.dev/attacker-project/runtime/hostile';
+  revision.baseImageUri = 'europe-west1-docker.pkg.dev/attacker-project/runtime/hostile';
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb',
+      {json: service},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+      {json: revision},
+    ],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run configuration mismatch: europe-west1/publicweb',
+  ), true);
+});
+
 test('rejects Cloud Run execution settings that differ between service and immutable revision', async () => {
   const revision = structuredClone(RUN_REVISION_API);
   revision.containers[0].env = revision.containers[0].env.map((entry) =>
@@ -1834,8 +1950,10 @@ test('rejects a Run inventory checkpoint when audit logs contain a later mutatio
     },
   }]);
   await assert.rejects(
-    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
-    /Cloud Run changed after the reviewed inventory checkpoint/,
+    assertNoRunMutations(
+      fixture.fetch, expected.target, 'dummy-token', '2026-01-02T00:00:00Z',
+    ),
+    /Cloud Run changed between the reviewed checkpoint and inventory cutoff/,
   );
 });
 
@@ -1918,7 +2036,8 @@ test('inventories Eventarc, Storage rules, Auth, identities, secrets, and build 
   assert.equal(loggingCall?.method, 'POST');
   const loggingBody = JSON.parse(loggingCall?.body ?? '') as {filter: string};
   assert.match(loggingBody.filter, /11111111-1111-1111-1111-111111111111/);
-  assert.match(loggingBody.filter, /Step #2/);
+  assert.match(loggingBody.filter, /cloudaudit\.googleapis\.com%2Factivity/);
+  assert.doesNotMatch(loggingBody.filter, /logs\/cloudbuild|Step #2/);
 });
 
 test('rejects an overwritten Gen 2 source generation and a same-package replacement image', async () => {
@@ -1996,34 +2115,52 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
   const imageObserved = await readObservedDeployment(imageFixture.fetch, expected, 'dummy-token');
   assert.equal(deploymentProblems(expected, imageObserved).includes(
     'Cloud Run image provenance does not match the immutable Function build: europe-west1/publicweb',
-  ), true);
+  ), false);
   assert.equal(deploymentProblems(expected, imageObserved).includes(
     'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
   ), true);
+});
 
-  const overwrittenDuringBuild: FetchLike = async (url, init) => {
-    const original = await imageFixture.fetch(url, init);
+test('does not depend on expired Cloud Build output logs', async () => {
+  const fixture = apiFixture();
+  const fetch: FetchLike = async (url, init) => {
+    const original = await fixture.fetch(url, init);
     if (url !== 'https://logging.googleapis.com/v2/entries:list') return original;
     const request = JSON.parse(init!.body!) as {filter: string};
-    if (!request.filter.includes('logs/cloudbuild')) return original;
+    if (!request.filter.includes('CloudBuild.CreateBuild')) return original;
+    assert.doesNotMatch(request.filter, /logs\/cloudbuild|Step #2/);
+    assert.match(request.filter, /timestamp>="2025-12-31T23:50:00\.000Z"/);
+    assert.match(request.filter, /timestamp<="2026-01-01T00:11:00\.000Z"/);
     const body = structuredClone(await original.json()) as {
       entries: Array<Record<string, unknown>>;
     };
-    const output = body.entries.find((entry) =>
-      entry.logName === 'projects/test-project/logs/cloudbuild')!;
-    output.textPayload = `Step #2 - "build": *** Images (${attackerDigest}):`;
+    body.entries = body.entries.filter((entry) =>
+      entry.logName === 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity');
     return response({json: body});
   };
-  const raceObserved = await readObservedDeployment(
-    overwrittenDuringBuild, expected, 'dummy-token',
-  );
-  const raceProblems = deploymentProblems(expected, raceObserved);
-  assert.equal(raceProblems.includes(
-    'Cloud Run image provenance does not match the immutable Function build: europe-west1/publicweb',
-  ), false);
-  assert.equal(raceProblems.includes(
-    'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
-  ), true);
+  const observed = await readObservedDeployment(fetch, expected, 'dummy-token');
+  assert.deepEqual(deploymentProblems(expected, observed), []);
+});
+
+test('accepts a managed build without the optional faster-tarball variable', async () => {
+  const fixture = apiFixture();
+  const buildUrl =
+    'https://cloudbuild.googleapis.com/v1/projects/123456789/locations/europe-west1/builds/11111111-1111-1111-1111-111111111111';
+  const fetch: FetchLike = async (url, init) => {
+    const original = await fixture.fetch(url, init);
+    if (url !== buildUrl) return original;
+    const build = structuredClone(await original.json()) as {
+      steps: Array<{id: string; args: string[]}>;
+    };
+    const preBuild = build.steps.find((step) => step.id === 'pre-buildpack')!;
+    preBuild.args = preBuild.args.map((argument) => argument.replace(
+      ',X_GOOGLE_FASTER_LANGUAGE_TARBALL_INSTALLATION',
+      '',
+    ));
+    return response({json: build});
+  };
+  const observed = await readObservedDeployment(fetch, expected, 'dummy-token');
+  assert.deepEqual(deploymentProblems(expected, observed), []);
 });
 
 test('rejects a malicious executable layer even when source and build provenance match', async () => {
@@ -2110,6 +2247,23 @@ test('preserves hardlink inode bytes when a later layer replaces the link target
   assert.equal(deploymentProblems(expected, observed).includes(
     'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
   ), true);
+});
+
+test('rejects files materialized beneath a symlinked runtime directory', async () => {
+  const firstLayer = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/workspace/index.js': new TextEncoder().encode('reviewed();\n'),
+  }, {}, {
+    '/app': '/workspace',
+  });
+  const secondLayer = tarArchive({
+    '/app/index.js': new TextEncoder().encode('stealSecrets();\n'),
+  });
+  const fixture = runtimeImageFixture([firstLayer, secondLayer]);
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /runtime path traverses a symlinked directory/,
+  );
 });
 
 test('rejects noncanonical OCI paths instead of attesting aliases', async () => {
@@ -2828,6 +2982,15 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
       COMMIT,
       target,
       gitFixture('', COMMIT, COMMIT, COMMIT, '', '', target.security.gitOrigin,
+        'http.https://github.com/.proxy\nhttps://attacker.example.test\0'),
+    ),
+    ['Git transport or exclude configuration can spoof reviewed state'],
+  );
+  assert.deepEqual(
+    reviewedTreeProblems(
+      COMMIT,
+      target,
+      gitFixture('', COMMIT, COMMIT, COMMIT, '', '', target.security.gitOrigin,
         'url.ssh://attacker.example/.pushinsteadof\nhttps://github.com/\0',
         'file:/Users/test/.gitconfig'),
     ),
@@ -2842,6 +3005,9 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
   ]);
   assert.deepEqual(reviewedTreeProblems(COMMIT, target, gitFixture(), true), [
     'Git graft file can spoof reviewed ancestry',
+  ]);
+  assert.deepEqual(reviewedTreeProblems(COMMIT, target, gitFixture(), false, true), [
+    'Git info exclude can hide unreviewed files',
   ]);
   const rawParent = 'c'.repeat(40);
   const parentTarget = structuredClone(target);
@@ -2903,6 +3069,7 @@ test('capture mode emits target-only runtime attestations after all other checks
       runGit,
       fetch: fixture.fetch,
       accessToken: () => 'dummy-token',
+      settleRunAudit: async () => {},
       stdout: (message) => output.push(message),
       stderr: (message) => errors.push(message),
     },
@@ -2923,13 +3090,8 @@ test('capture mode emits target-only runtime attestations after all other checks
     }],
   });
 
-  const mutationFixture = apiFixture(new Map(), [{
-    timestamp: '2026-01-02T03:05:00Z',
-    protoPayload: {
-      serviceName: 'run.googleapis.com',
-      methodName: 'google.cloud.run.v2.Services.CreateService',
-    },
-  }]);
+  const delayedMutations: Record<string, unknown>[] = [];
+  const mutationFixture = apiFixture(new Map(), delayedMutations);
   await assert.rejects(
     runCli(
       [
@@ -2943,11 +3105,20 @@ test('capture mode emits target-only runtime attestations after all other checks
         runGit,
         fetch: mutationFixture.fetch,
         accessToken: () => 'dummy-token',
+        settleRunAudit: async () => {
+          delayedMutations.push({
+            timestamp: '2026-01-02T03:05:00Z',
+            protoPayload: {
+              serviceName: 'run.googleapis.com',
+              methodName: 'google.cloud.run.v2.Services.CreateService',
+            },
+          });
+        },
         stdout: () => assert.fail('capture with an in-window mutation must not emit'),
         stderr: () => assert.fail('API verification failure must throw closed'),
       },
     ),
-    /Cloud Run changed after the reviewed inventory checkpoint/,
+    /Cloud Run changed between the reviewed checkpoint and inventory cutoff/,
   );
 });
 
@@ -2962,6 +3133,7 @@ test('runCli returns distinct success and dirty-tree failure codes', async () =>
       runGit: gitFixture(),
       fetch: fixture.fetch,
       accessToken: () => 'dummy-token',
+      settleRunAudit: async () => {},
       stdout: (message) => output.push(message),
       stderr: (message) => errors.push(message),
     },
@@ -2977,6 +3149,7 @@ test('runCli returns distinct success and dirty-tree failure codes', async () =>
       runGit: gitFixture(' M firestore.rules\0'),
       fetch: async () => assert.fail('dirty tree must fail before fetch'),
       accessToken: () => assert.fail('dirty tree must fail before credentials'),
+      settleRunAudit: async () => assert.fail('dirty tree must fail before audit settling'),
       stdout: (message) => output.push(message),
       stderr: (message) => errors.push(message),
     },

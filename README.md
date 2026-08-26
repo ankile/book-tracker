@@ -374,10 +374,18 @@ the immutable runtime evidence against that earlier checkpoint:
 ```bash
 git rev-parse HEAD
 npm run validate
+gcloud services enable cloudasset.googleapis.com --project=book-tracker-d8f24 --account=<release-account>
+gcloud asset search-all-resources --scope=projects/book-tracker-d8f24 --asset-types=run.googleapis.com/Service,run.googleapis.com/Job,run.googleapis.com/WorkerPool --account=<release-account> --format='value(name)'
 RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Keep Cloud Run frozen and wait at least ten minutes.
 node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT" > /tmp/book-tracker-runtime-attestation.json
 ```
+
+The Cloud Asset preflight must list exactly the reviewed Function-backed Run
+services and no jobs or worker pools. A disabled API, permission error, or
+different inventory blocks capture. Capture waits another ten minutes after all
+live reads before its final Admin Activity query, so mutations that arrive late
+in Logging still fail the gate.
 
 Capture succeeds only when every check other than the deliberately pending
 runtime attestations passes. It rejects every Cloud Run mutation at or after

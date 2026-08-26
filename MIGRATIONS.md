@@ -226,11 +226,17 @@ step. That commit must leave the Gen 2 `runtimeAttestation` values and
 `security.runInventoryCheckpoint` pending as `null`. After the compatible
 Functions, migrations, renderer, and Hosting release are complete, remove the
 stale resources and user-managed keys below. Run `npm run validate`, then
+enable `cloudasset.googleapis.com` with the release account and run
+`gcloud asset search-all-resources --scope=projects/book-tracker-d8f24 --asset-types=run.googleapis.com/Service,run.googleapis.com/Job,run.googleapis.com/WorkerPool`.
+The preflight must return exactly the reviewed Function-backed services and no
+jobs or worker pools. Then
 freeze every Cloud Run service, job, and worker-pool mutation. Record
 `RUN_INVENTORY_CHECKPOINT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")` before any live
 attestation read and wait at least ten minutes. Capture the live immutable image
 evidence with
 `node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture --checkpoint="$RUN_INVENTORY_CHECKPOINT"`.
+Capture waits another ten minutes after all live reads before its final Admin
+Activity query.
 Merge the emitted values into `deployment-target.json`. The resulting
 attestation commit must change only that file and must name its parent deployment
 commit in every attestation. Review and push it, keep Cloud Run frozen, and run
