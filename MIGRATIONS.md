@@ -225,10 +225,10 @@ Record and push the reviewed 40-character commit SHA before the Functions step.
 After the compatible Functions, migrations, renderer, and Hosting release are
 complete, run
 `npm run verify:deployment -- --commit=<reviewed-40-character-SHA>`.
-The project must have `cloudasset.googleapis.com` enabled before this check;
-the verifier uses Cloud Asset rather than a regionally incomplete Cloud Run
-wildcard response. Wait for the deployed services to appear in Cloud Asset
-before treating an inventory mismatch as a release failure.
+The verifier rechecks every region that Cloud Run's wildcard response reports as
+unreachable. It accepts only a direct service inventory or an explicit
+`LOCATION_POLICY_VIOLATED` response proving that the project cannot deploy in
+that region; do not waive a different regional error.
 Do not mark the rollout complete if it reports a mutable or unpushed tree,
 stale Firestore configuration, a Function release or configuration mismatch,
 unexpected invoker access, split Gen 2 traffic, stale Hosting files, or a stale
@@ -236,7 +236,10 @@ profile or sitemap rewrite.
 
 Before that final verification, remove old Hosting preview channels and their
 separate `fh-*` Cloud Run tags, restore the reviewed Firebase Authentication
-authorized-domain list, and delete the generated `functions/.secret.local`.
+authorized-domain list, delete the generated `functions/.secret.local`, and
+delete every user-managed service-account key after confirming the release
+account's OAuth login. The verifier rejects a target that approves a standing
+key and rejects any key still present in production.
 These are release gates: preview-channel deletion alone does not remove a
 tagged, directly reachable Cloud Run revision.
 

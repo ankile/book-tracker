@@ -366,8 +366,6 @@ Push that commit before changing Firebase. After every selected target is live,
 run the deployment integrity check with the reviewed commit:
 
 ```bash
-gcloud services enable cloudasset.googleapis.com \
-  --project=book-tracker-d8f24
 git rev-parse HEAD
 npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
 ```
@@ -378,24 +376,26 @@ reviewed commit to equal `HEAD`, the local tracking ref, and the current remote
 GitHub repository. It rejects ignored dotenv and local-secret deploy inputs
 and reads expected artifacts from the reviewed commit rather than the working
 tree. The live checks cover Firestore and Storage rules, indexes and TTL
-policies, Firebase Authentication domains/providers, every Function source
-archive at its immutable Storage generation, runtime and security configuration,
+policies, Firebase Authentication domains/providers, every Gen 2 Function source
+archive at its immutable Storage generation, every Gen 1 deployed source version,
+runtime and security configuration,
 complete Function and Cloud Run IAM policies, ancestor and custom IAM, every
-project service account and user-managed key, Secret Manager, every Storage
-bucket plus its IAM and ACL surfaces, Artifact Registry, all Firebase Rules
+project service account and the absence of user-managed keys, Secret Manager,
+every Storage bucket plus its IAM and ACL surfaces, the exact Artifact Registry
+repository inventory/configuration/IAM, all Firebase Rules
 releases, complete Eventarc transports and IAM, Pub/Sub topics/subscriptions and
-IAM, the Cloud Asset project-wide Cloud Run service inventory, Gen 2 Cloud Build
-and image provenance/traffic, Hosting-pinned revisions, all Hosting
+conditional IAM, the project-wide Cloud Run wildcard inventory plus direct proof
+for every initially unreachable region, the Gen 2 Cloud Build recipe, output
+digest, in-image source provenance, and traffic, Hosting-pinned revisions, all Hosting
 sites/domains/channels, control-plane gzip hashes, bytes from every production
 origin, and the profile and sitemap rewrites. Pass
 `--account=<gcloud-account>` when the active gcloud account is not the release
 account. Unknown or misspelled options fail.
 
-Cloud Asset is the authoritative non-regional Cloud Run inventory. Do not
-replace it with the global Cloud Run list or accept that API's `unreachable`
-regions: either creates a blind spot in which an unreviewed service can remain
-deployed. Allow Cloud Asset inventory changes to propagate before the final
-verification.
+The verifier does not accept Cloud Run's `unreachable` list. It directly queries
+each listed region and either inventories its services or requires the API's
+explicit `LOCATION_POLICY_VIOLATED` proof that the project cannot deploy there.
+This avoids both a regional blind spot and an eventually consistent inventory.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
 Change that ID for every release. Deploy all Functions so every deployed source
@@ -409,8 +409,10 @@ active Hosting release, and restore Firebase Authentication authorized domains
 to the exact list in `deployment-target.json`. A deleted Hosting preview
 channel does not delete its Cloud Run tag. Also remove the generated
 `functions/.secret.local`; `npm --prefix functions run serve` recreates it from
-the tracked dummy emulator fixture when needed. The integrity check fails until
-all four surfaces match the reviewed target.
+the tracked dummy emulator fixture when needed. Delete all user-managed service-
+account keys after confirming the release account's OAuth login works; standing
+keys are never valid reviewed production state. The integrity check fails until
+all five surfaces match the reviewed target.
 
 ### Deploy Hosting and Profile Renderer
 

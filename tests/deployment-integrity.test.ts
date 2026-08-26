@@ -95,7 +95,7 @@ const ACTIVE_HOSTING_CONFIG = {
   ],
 };
 
-function hash(value: string): string {
+function hash(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
@@ -120,6 +120,20 @@ const EMPTY_BUCKET_CONFIGURATION = {
   logging: {}, objectRetention: {}, retentionPolicy: {}, rpo: null,
   softDeletePolicy: {}, storageClass: 'STANDARD', versioning: {}, website: {},
 };
+const ARTIFACT_REPOSITORY_CONFIGURATION = {
+  format: 'DOCKER',
+  description: null,
+  labels: {},
+  mode: 'STANDARD_REPOSITORY',
+  cleanupPolicies: {},
+  cleanupPolicyDryRun: false,
+  kmsKeyName: null,
+  dockerConfig: {},
+  mavenConfig: {},
+  virtualRepositoryConfig: {},
+  remoteRepositoryConfig: {},
+  vulnerabilityScanningConfig: {enablementState: null},
+};
 
 function artifact(value: string): {sha256: string; hostingHash: string} {
   return {
@@ -134,6 +148,69 @@ const FUNCTION_FILES = {'package.json': hash(FUNCTION_PACKAGE)};
 const FUNCTION_ARCHIVE = zipSync({
   'package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
 });
+
+function tarArchive(files: Record<string, Uint8Array>): Uint8Array {
+  const chunks: Uint8Array[] = [];
+  for (const [path, body] of Object.entries(files)) {
+    const header = new Uint8Array(512);
+    const write = (offset: number, length: number, value: string): void => {
+      const encoded = new TextEncoder().encode(value);
+      assert.ok(encoded.byteLength <= length);
+      header.set(encoded, offset);
+    };
+    const octal = (offset: number, length: number, value: number): void =>
+      write(offset, length, `${value.toString(8).padStart(length - 1, '0')}\0`);
+    write(0, 100, path);
+    octal(100, 8, 0o644);
+    octal(108, 8, 0);
+    octal(116, 8, 0);
+    octal(124, 12, body.byteLength);
+    octal(136, 12, 0);
+    header.fill(32, 148, 156);
+    header[156] = 48;
+    write(257, 6, 'ustar\0');
+    write(263, 2, '00');
+    const checksum = header.reduce((sum, value) => sum + value, 0);
+    write(148, 8, `${checksum.toString(8).padStart(6, '0')}\0 `);
+    chunks.push(header, body, new Uint8Array((512 - body.byteLength % 512) % 512));
+  }
+  chunks.push(new Uint8Array(1024));
+  const output = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+const IMAGE_SOURCE_TAR = gzipSync(tarArchive({
+  './package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
+}));
+const IMAGE_LAYER = gzipSync(tarArchive({
+  '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+}));
+const IMAGE_LAYER_DIGEST = `sha256:${hash(IMAGE_LAYER)}`;
+const IMAGE_CONFIG = {
+  config: {Labels: {
+    'google.build-id': '11111111-1111-1111-1111-111111111111',
+    'google.source':
+      'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+  }},
+};
+const IMAGE_CONFIG_BYTES = new TextEncoder().encode(JSON.stringify(IMAGE_CONFIG));
+const IMAGE_CONFIG_DIGEST = `sha256:${hash(IMAGE_CONFIG_BYTES)}`;
+const IMAGE_MANIFEST = {
+  schemaVersion: 2,
+  config: {digest: IMAGE_CONFIG_DIGEST},
+  layers: [{
+    mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
+    size: IMAGE_LAYER.byteLength,
+    digest: IMAGE_LAYER_DIGEST,
+  }],
+};
+const IMAGE_MANIFEST_BYTES = new TextEncoder().encode(JSON.stringify(IMAGE_MANIFEST));
+const IMAGE_DIGEST = `sha256:${hash(IMAGE_MANIFEST_BYTES)}`;
 const AUTH_API = {
   authorizedDomains: ['test-project.firebaseapp.com', 'test-project.web.app'],
   signIn: {email: {enabled: true, passwordRequired: true}},
@@ -143,6 +220,7 @@ const AUTH_API = {
   blockingFunctions: {},
   monitoring: {requestLogging: {}},
   smsRegionConfig: {},
+  subtype: 'FIREBASE_AUTH',
 };
 const AUTH_TARGET = {
   ...AUTH_API,
@@ -152,7 +230,7 @@ const AUTH_TARGET = {
   client: {...AUTH_API.client, apiKeySha256: hash('null')},
   mobileLinksConfig: {},
   defaultHostingSite: null,
-  subtype: null,
+  subtype: 'FIREBASE_AUTH',
   recaptchaConfig: {},
   emailPrivacyConfig: {},
   passwordPolicyConfig: {},
@@ -237,6 +315,7 @@ const target: DeploymentTarget = {
     artifactRepositories: [{
       name: 'projects/test-project/locations/europe-west1/repositories/gcf-artifacts',
       iam: [],
+      configuration: ARTIFACT_REPOSITORY_CONFIGURATION,
     }],
     storageBuckets: [{
       name: 'test-project.firebasestorage.app',
@@ -311,8 +390,10 @@ const currentFunction: ObservedFunction = {
   revisionImage: null,
   buildId: null,
   buildSource: null,
+  buildImageDigest: null,
   imageBuildId: null,
   imageSource: null,
+  imageSourceFiles: null,
 };
 
 const RUN_CONFIGURATION = {
@@ -463,11 +544,13 @@ const currentGen2Function: ObservedFunction = {
   }],
   configuredImage: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
   revisionImage:
-    'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@sha256:' + '1'.repeat(64),
+    `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
   buildId: '11111111-1111-1111-1111-111111111111',
   buildSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+  buildImageDigest: IMAGE_DIGEST,
   imageBuildId: '11111111-1111-1111-1111-111111111111',
   imageSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+  imageSourceFiles: FUNCTION_FILES,
 };
 
 function currentObserved(): ObservedDeployment {
@@ -659,6 +742,8 @@ function response(reply: MockReply): FetchResponse {
   const status = reply.status ?? 200;
   const body = typeof reply.body === 'string' ?
     new TextEncoder().encode(reply.body) : (reply.body ?? new Uint8Array());
+  const exactBody = new Uint8Array(body.byteLength);
+  exactBody.set(body);
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -666,13 +751,19 @@ function response(reply: MockReply): FetchResponse {
       get: (name) => reply.headers?.[name.toLowerCase()] ?? null,
     },
     json: async () => reply.json,
-    arrayBuffer: async () => body.slice().buffer,
+    arrayBuffer: async () => exactBody.buffer,
   };
 }
 
 function apiFixture(overrides = new Map<string, MockReply>()): {
   fetch: FetchLike;
-  calls: Array<{url: string; authorization?: string; signal?: AbortSignal}>;
+  calls: Array<{
+    url: string;
+    authorization?: string;
+    signal?: AbortSignal;
+    method?: string;
+    body?: string;
+  }>;
 } {
   const ruleset = 'projects/test-project/rulesets/current';
   const replies = new Map<string, MockReply>([
@@ -714,6 +805,7 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
             automaticUpdatePolicy: {},
           },
           serviceConfig: {
+            revision: '7',
             timeoutSeconds: 60,
             serviceAccountEmail: 'test-project@appspot.gserviceaccount.com',
             environmentVariables: {
@@ -816,12 +908,104 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
         status: 'SUCCESS',
         startTime: '2026-01-01T00:00:00Z',
         finishTime: '2026-01-01T00:01:00Z',
+        sourceProvenance: {},
         steps: [{
-          id: 'fetch',
-          status: 'SUCCESS',
-          args: ['--location=gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip'],
+          id: 'fetch', status: 'SUCCESS',
+          name: 'europe-west1-docker.pkg.dev/serverless-runtimes/utilities/gcs-fetcher:base_test',
+          args: [
+            '--type=ZipArchive',
+            '--location=gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip',
+            '--dest_dir=/workspace',
+            '--timeout_gcs=false',
+          ],
+        }, {
+          id: 'pre-buildpack', status: 'SUCCESS', entrypoint: '/bin/shim',
+          name: 'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/builder/nodejs:nodejs_test',
+          args: [
+            '--phase=pre',
+            '--app_image_unique=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
+            '--app_image_stable=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:latest',
+            '--cache_image_unique=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb/cache:11111111-1111-1111-1111-111111111111',
+            '--cache_image_stable=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb/cache:latest',
+            '--env_var_names=BUILDER_OUTPUT,GOOGLE_RUNTIME,GOOGLE_LABEL_BUILDER_VERSION,GOOGLE_LABEL_BUILDER_IMAGE,GOOGLE_LABEL_RUN_IMAGE,GOOGLE_LABEL_SOURCE,GOOGLE_USE_SERVERLESS_RUNTIMES_TARBALLS,X_GOOGLE_FASTER_LANGUAGE_TARBALL_INSTALLATION,GOOGLE_RUNTIME_IMAGE_REGION,GOOGLE_RUNTIME_VERSION,X_GOOGLE_SKIP_RUNTIME_LAUNCH,GOOGLE_BUILD_ENV,GOOGLE_BUILD_UNIVERSE,GOOGLE_TPC_TARBALL_PROJECT,GOOGLE_TPC_HOSTNAME,GOOGLE_FUNCTION_TARGET,GOOGLE_FUNCTION_SIGNATURE_TYPE,X_GOOGLE_TARGET_PLATFORM,GOOGLE_LABEL_BUILD_ID,GOOGLE_LABEL_BASE_IMAGE,GOOGLE_LABEL_FUNCTION_TARGET,X_GOOGLE_SET_NODE_HEAP_SIZE,GOOGLE_NODE_RUN_SCRIPTS',
+            '--experimental_skip_retag_cache',
+          ],
+          env: [
+            'GOOGLE_RUNTIME=nodejs22',
+            'GOOGLE_LABEL_SOURCE=gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+            'GOOGLE_LABEL_BUILD_ID=11111111-1111-1111-1111-111111111111',
+            'GOOGLE_FUNCTION_TARGET=publicweb',
+            'GOOGLE_FUNCTION_SIGNATURE_TYPE=http',
+            'X_GOOGLE_TARGET_PLATFORM=gcf',
+            'GOOGLE_LABEL_BUILDER_IMAGE=europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/builder/nodejs:nodejs_test',
+            'GOOGLE_LABEL_RUN_IMAGE=europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/scratch/nodejs22:nodejs22_test',
+            'GOOGLE_LABEL_BASE_IMAGE=europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22',
+          ],
+        }, {
+          id: 'build', status: 'SUCCESS', entrypoint: '/cnb/lifecycle/creator',
+          name: 'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/builder/nodejs:nodejs_test',
+          args: [
+            '--tag=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:latest',
+            'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
+          ],
+          env: [
+            'CNB_RUN_IMAGE=europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/scratch/nodejs22:nodejs22_test',
+          ],
         }],
+        options: {
+          env: [
+            'CNB_APP_DIR=/workspace', 'CNB_ANALYZED_PATH=/layers/analyzed.toml',
+            'CNB_BUILDPACKS_DIR=/cnb/buildpacks', 'CNB_GROUP_PATH=/layers/group.toml',
+            'CNB_LAYERS_DIR=/layers', 'CNB_PLAN_PATH=/layers/plan.toml',
+            'CNB_PLATFORM_DIR=/platform', 'CNB_PLATFORM_API=0.11', 'CNB_NO_COLOR=true',
+            'CNB_USER_ID=33', 'CNB_GROUP_ID=33',
+            'CNB_CACHE_IMAGE=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb/cache:latest',
+            'CNB_PREVIOUS_IMAGE=europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:latest',
+          ],
+          logStreamingOption: 'STREAM_OFF', logging: 'CLOUD_LOGGING_ONLY', pool: {},
+          volumes: [{name: 'layers', path: '/layers'}, {name: 'platform', path: '/platform'}],
+        },
+        substitutions: {},
+        tags: [
+          'p-gcf', 'r-nodejs22', 'v-nodejs22_test', 'b-nodejs_test', 't-function',
+          'bt-LIFECYCLE', 'service_publicweb',
+        ],
+        timeout: '1800s',
+        queueTtl: '360s',
       }},
+    ],
+    [
+      'https://logging.googleapis.com/v2/entries:list',
+      {json: {entries: [{
+        insertId: '11111111-1111-1111-1111-111111111111-145',
+        labels: {build_step: 'Step #2 - "build"'},
+        logName: 'projects/test-project/logs/cloudbuild',
+        receiveTimestamp: '2026-01-01T00:00:31Z',
+        resource: {type: 'build', labels: {
+          build_id: '11111111-1111-1111-1111-111111111111',
+          build_trigger_id: '', project_id: 'test-project',
+        }},
+        severity: 'INFO',
+        textPayload: `Step #2 - "build": *** Images (${IMAGE_DIGEST}):`,
+        timestamp: '2026-01-01T00:00:30Z',
+      }, {
+        insertId: 'audit-build-create',
+        logName: 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity',
+        resource: {type: 'build', labels: {
+          build_id: '11111111-1111-1111-1111-111111111111',
+          build_trigger_id: '', project_id: 'test-project',
+        }},
+        severity: 'NOTICE',
+        timestamp: '2025-12-31T23:59:59Z',
+        protoPayload: {
+          serviceName: 'cloudbuild.googleapis.com',
+          methodName: 'google.devtools.cloudbuild.v1.CloudBuild.CreateBuild',
+          authenticationInfo: {
+            principalEmail: 'service-123456789@gcf-admin-robot.iam.gserviceaccount.com',
+          },
+          authorizationInfo: [{permission: 'cloudbuild.builds.create', granted: true}],
+        },
+      }]}},
     ],
     [
       'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb:getIamPolicy?options.requestedPolicyVersion=3',
@@ -837,31 +1021,30 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
         name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
         containers: [{
           name: 'worker',
-          image: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@sha256:' +
-            '1'.repeat(64),
+          image: `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
         }],
       }},
     ],
     [
-      'https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/sha256:' + '1'.repeat(64),
-      {json: {schemaVersion: 2, config: {digest: 'sha256:' + '2'.repeat(64)}}},
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/${IMAGE_DIGEST}`,
+      {body: IMAGE_MANIFEST_BYTES},
     ],
     [
-      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts/dockerImages/test--project__europe--west1__publicweb%40sha256:' + '1'.repeat(64),
+      `https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts/dockerImages/test--project__europe--west1__publicweb%40${IMAGE_DIGEST}`,
       {json: {
-        uri: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@sha256:' + '1'.repeat(64),
+        uri: `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
         tags: ['latest', 'version_1'],
         uploadTime: '2026-01-01T00:00:30Z',
         updateTime: '2026-01-01T00:00:31Z',
       }},
     ],
     [
-      'https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/sha256:' + '2'.repeat(64),
-      {json: {config: {Labels: {
-        'google.build-id': '11111111-1111-1111-1111-111111111111',
-        'google.source':
-          'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
-      }}}},
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/${IMAGE_CONFIG_DIGEST}`,
+      {body: IMAGE_CONFIG_BYTES},
+    ],
+    [
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/${IMAGE_LAYER_DIGEST}`,
+      {body: IMAGE_LAYER},
     ],
     [
       'https://cloudresourcemanager.googleapis.com/v3/projects/test-project',
@@ -872,10 +1055,10 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
       {json: {bindings: []}},
     ],
     [
-      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService',
-      {json: {results: [{
-        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
-      }]}},
+      'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+      {json: {services: [{
+        name: 'projects/test-project/locations/europe-west1/services/publicweb',
+      }], unreachable: []}},
     ],
     [
       'https://eventarc.googleapis.com/v1/projects/test-project/locations/-/triggers',
@@ -933,7 +1116,7 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
       {json: {secrets: [{name: 'projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT'}]}},
     ],
     [
-      'https://secretmanager.googleapis.com/v1/projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT:getIamPolicy',
+      'https://secretmanager.googleapis.com/v1/projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT:getIamPolicy?options.requestedPolicyVersion=3',
       {json: {bindings: target.security.secrets[0].iam}},
     ],
     [
@@ -954,10 +1137,11 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
       {json: {
         name: 'projects/test-project/locations/europe-west1/repositories/gcf-artifacts',
         format: 'DOCKER',
+        mode: 'STANDARD_REPOSITORY',
       }},
     ],
     [
-      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy',
+      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy?options.requestedPolicyVersion=3',
       {json: {bindings: []}},
     ],
     [
@@ -1071,12 +1255,20 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
     ],
     ...overrides,
   ]);
-  const calls: Array<{url: string; authorization?: string; signal?: AbortSignal}> = [];
+  const calls: Array<{
+    url: string;
+    authorization?: string;
+    signal?: AbortSignal;
+    method?: string;
+    body?: string;
+  }> = [];
   const fetch: FetchLike = async (url, init) => {
     calls.push({
       url,
       authorization: init?.headers?.Authorization,
       signal: init?.signal,
+      method: init?.method,
+      body: init?.body,
     });
     assert.equal(replies.has(url), true, `unexpected URL ${url}`);
     return response(replies.get(url)!);
@@ -1180,7 +1372,79 @@ test('uses the generation-matched source API and inventories standalone Run serv
   assert.ok(fixture.calls.some(({url}) => url ===
     'https://storage.googleapis.com/storage/v1/b/gcf-v2-sources-123456789-europe-west1/o/publicweb%2Ffunction-source.zip?alt=media&generation=123'));
   assert.ok(fixture.calls.some(({url}) => url ===
-    'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService'));
+    'https://run.googleapis.com/v2/projects/test-project/locations/-/services'));
+  const gen1Download = fixture.calls.find(({url}) => url ===
+    'https://cloudfunctions.googleapis.com/v1/projects/test-project/locations/europe-west1/functions/booksapi-lookupisbn:generateDownloadUrl');
+  assert.equal(gen1Download?.method, 'POST');
+  assert.deepEqual(JSON.parse(gen1Download?.body ?? ''), {versionId: '7'});
+  assert.equal(fixture.calls.some(({url}) =>
+    url === 'https://identitytoolkit.googleapis.com/v2/projects/test-project/tenants'), false);
+});
+
+test('rechecks every unreachable Run region and exposes a hidden service', async () => {
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+      {json: {services: [{
+        name: 'projects/test-project/locations/europe-west1/services/publicweb',
+      }], unreachable: ['us-central1']}},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/us-central1/services',
+      {json: {services: [{
+        name: 'projects/test-project/locations/us-central1/services/backdoor',
+      }], unreachable: []}},
+    ],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run services do not match the reviewed Functions',
+  ), true);
+});
+
+test('accepts an unreachable Run region only with a location-policy proof', async () => {
+  const restricted = 'us-central2';
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+      {json: {services: [{
+        name: 'projects/test-project/locations/europe-west1/services/publicweb',
+      }], unreachable: [restricted]}},
+    ],
+    [
+      `https://run.googleapis.com/v2/projects/test-project/locations/${restricted}/services`,
+      {status: 403, json: {error: {
+        status: 'PERMISSION_DENIED',
+        details: [{
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'LOCATION_POLICY_VIOLATED',
+          metadata: {location: restricted},
+        }],
+      }}},
+    ],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.deepEqual(deploymentProblems(expected, observed), []);
+
+  const unproven = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+      {json: {services: [{
+        name: 'projects/test-project/locations/europe-west1/services/publicweb',
+      }], unreachable: [restricted]}},
+    ],
+    [
+      `https://run.googleapis.com/v2/projects/test-project/locations/${restricted}/services`,
+      {status: 403, json: {error: {
+        status: 'PERMISSION_DENIED',
+        details: [],
+      }}},
+    ],
+  ]));
+  await assert.rejects(
+    readObservedDeployment(unproven.fetch, expected, 'dummy-token'),
+    /location-policy proof/,
+  );
 });
 
 test('inventories Eventarc, Storage rules, Auth, identities, secrets, and build resources', async () => {
@@ -1194,11 +1458,17 @@ test('inventories Eventarc, Storage rules, Auth, identities, secrets, and build 
     'https://identitytoolkit.googleapis.com/admin/v2/projects/test-project/config',
     'https://iam.googleapis.com/v1/projects/test-project/serviceAccounts/test-project%40appspot.gserviceaccount.com:getIamPolicy',
     'https://iam.googleapis.com/v1/projects/test-project/serviceAccounts/test-project%40appspot.gserviceaccount.com/keys',
-    'https://secretmanager.googleapis.com/v1/projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT:getIamPolicy',
+    'https://secretmanager.googleapis.com/v1/projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT:getIamPolicy?options.requestedPolicyVersion=3',
     'https://secretmanager.googleapis.com/v1/projects/test-project/secrets/FUNCTIONS_CONFIG_EXPORT/versions',
-    'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy',
+    'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy?options.requestedPolicyVersion=3',
     'https://storage.googleapis.com/storage/v1/b?project=test-project&projection=full',
   ]) assert.equal(called.has(url), true, `missing security inventory call: ${url}`);
+  const loggingCall = fixture.calls.find(({url}) =>
+    url === 'https://logging.googleapis.com/v2/entries:list');
+  assert.equal(loggingCall?.method, 'POST');
+  const loggingBody = JSON.parse(loggingCall?.body ?? '') as {filter: string};
+  assert.match(loggingBody.filter, /11111111-1111-1111-1111-111111111111/);
+  assert.match(loggingBody.filter, /Step #2/);
 });
 
 test('rejects an overwritten Gen 2 source generation and a same-package replacement image', async () => {
@@ -1214,12 +1484,31 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
     'Function source does not match the reviewed commit: europe-west1/publicweb',
   ), true);
 
+  const attackerSourceTar = gzipSync(tarArchive({
+    './package.json': new TextEncoder().encode('{"name":"attacker"}\n'),
+  }));
+  const attackerLayer = gzipSync(tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': attackerSourceTar,
+  }));
+  const attackerLayerDigest = `sha256:${hash(attackerLayer)}`;
+  const attackerManifest = {
+    schemaVersion: 2,
+    config: {digest: IMAGE_CONFIG_DIGEST},
+    layers: [{
+      mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
+      size: attackerLayer.byteLength,
+      digest: attackerLayerDigest,
+    }],
+  };
+  const attackerManifestBytes = new TextEncoder().encode(JSON.stringify(attackerManifest));
+  const attackerDigest = `sha256:${hash(attackerManifestBytes)}`;
+  const attackerImage =
+    `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${attackerDigest}`;
   const replacedRevision = {
     name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
     containers: [{
       name: 'worker',
-      image: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@sha256:' +
-        '3'.repeat(64),
+      image: attackerImage,
     }],
   };
   const imageFixture = apiFixture(new Map([
@@ -1228,31 +1517,91 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
       {json: replacedRevision},
     ],
     [
-      'https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/sha256:' + '3'.repeat(64),
-      {json: {schemaVersion: 2, config: {digest: 'sha256:' + '4'.repeat(64)}}},
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/${attackerDigest}`,
+      {body: attackerManifestBytes},
     ],
     [
-      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts/dockerImages/test--project__europe--west1__publicweb%40sha256:' + '3'.repeat(64),
+      `https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts/dockerImages/test--project__europe--west1__publicweb%40${attackerDigest}`,
       {json: {
-        uri: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@sha256:' + '3'.repeat(64),
+        uri: attackerImage,
         tags: ['latest', 'version_1'],
         uploadTime: '2026-01-01T00:00:30Z',
         updateTime: '2026-01-01T00:00:31Z',
       }},
     ],
     [
-      'https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/sha256:' + '4'.repeat(64),
-      {json: {config: {Labels: {
-        'google.build-id': 'attacker-build',
-        'google.source':
-          'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
-      }}}},
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/${attackerLayerDigest}`,
+      {body: attackerLayer},
     ],
   ]));
   const imageObserved = await readObservedDeployment(imageFixture.fetch, expected, 'dummy-token');
   assert.equal(deploymentProblems(expected, imageObserved).includes(
     'Cloud Run image provenance does not match the immutable Function build: europe-west1/publicweb',
   ), true);
+  assert.equal(deploymentProblems(expected, imageObserved).includes(
+    'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
+  ), true);
+
+  const overwrittenDuringBuild: FetchLike = async (url, init) => {
+    const original = await imageFixture.fetch(url, init);
+    if (url !== 'https://logging.googleapis.com/v2/entries:list') return original;
+    const body = structuredClone(await original.json()) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    const output = body.entries.find((entry) =>
+      entry.logName === 'projects/test-project/logs/cloudbuild')!;
+    output.textPayload = `Step #2 - "build": *** Images (${attackerDigest}):`;
+    return response({json: body});
+  };
+  const raceObserved = await readObservedDeployment(
+    overwrittenDuringBuild, expected, 'dummy-token',
+  );
+  const raceProblems = deploymentProblems(expected, raceObserved);
+  assert.equal(raceProblems.includes(
+    'Cloud Run image provenance does not match the immutable Function build: europe-west1/publicweb',
+  ), false);
+  assert.equal(raceProblems.includes(
+    'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
+  ), true);
+});
+
+test('rejects a managed Function build with an unreviewed patch step', async () => {
+  const fixture = apiFixture();
+  const buildUrl =
+    'https://cloudbuild.googleapis.com/v1/projects/123456789/locations/europe-west1/builds/11111111-1111-1111-1111-111111111111';
+  const fetch: FetchLike = async (url, init) => {
+    const original = await fixture.fetch(url, init);
+    if (url !== buildUrl) return original;
+    const build = structuredClone(await original.json()) as {
+      steps: Array<Record<string, unknown>>;
+    };
+    build.steps.splice(2, 0, {
+      id: 'patch-reviewed-source',
+      name: 'europe-west1-docker.pkg.dev/serverless-runtimes/utilities/attacker:test',
+      status: 'SUCCESS',
+      args: ['overwrite', '/workspace/lib/index.js'],
+    });
+    return response({json: build});
+  };
+  await assert.rejects(
+    readObservedDeployment(fetch, expected, 'dummy-token'),
+    /pre-buildpack/,
+  );
+});
+
+test('rehashes content-addressed image responses instead of trusting registry paths', async () => {
+  const tamperedManifest = new TextEncoder().encode(JSON.stringify({
+    ...IMAGE_MANIFEST,
+    attackerField: true,
+  }));
+  const fixture = apiFixture(new Map([[
+    `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/${IMAGE_DIGEST}`,
+    {body: tamperedManifest},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /manifest does not match its digest/,
+  );
 });
 
 test('detects ordinary user-managed keys on non-runtime service accounts', async () => {
@@ -1295,7 +1644,38 @@ test('detects ordinary user-managed keys on non-runtime service accounts', async
   ), true);
 });
 
+test('rejects an extra Artifact Registry repository before trusting its IAM', async () => {
+  const fixture = apiFixture(new Map([[
+    'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/-/repositories',
+    {json: {repositories: [{
+      name: 'projects/test-project/locations/europe-west1/repositories/gcf-artifacts',
+    }, {
+      name: 'projects/test-project/locations/us-central1/repositories/attacker',
+    }]}},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /attacker/,
+  );
+});
+
 test('rejects unreviewed buckets, public object ACLs, Auth controls, providers, and rules releases', async () => {
+  const unknownBucketField = apiFixture(new Map([[
+    'https://storage.googleapis.com/storage/v1/b?project=test-project&projection=full',
+    {json: {items: [{
+      name: 'test-project.firebasestorage.app',
+      location: 'EUROPE-WEST1', locationType: 'region', storageClass: 'STANDARD',
+      exposureMode: 'PUBLIC',
+      iamConfiguration: {
+        publicAccessPrevention: 'inherited', uniformBucketLevelAccess: {enabled: false},
+      },
+    }]}},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(unknownBucketField.fetch, expected, 'dummy-token'),
+    /unknown field/,
+  );
+
   const extraBucket = apiFixture(new Map([[
     'https://storage.googleapis.com/storage/v1/b?project=test-project&projection=full',
     {json: {items: [
@@ -1372,6 +1752,34 @@ test('rejects unreviewed buckets, public object ACLs, Auth controls, providers, 
   ), true);
 });
 
+test('lists tenants strictly when the Auth config identifies Identity Platform', async () => {
+  const identityExpected = structuredClone(expected);
+  identityExpected.target.security.authConfig = {
+    ...identityExpected.target.security.authConfig,
+    subtype: 'IDENTITY_PLATFORM',
+    multiTenant: {allowTenants: true},
+  };
+  const tenant = {name: 'projects/test-project/tenants/reviewed', disabled: false};
+  identityExpected.target.security.authProviders.tenants = {
+    names: [tenant.name],
+    sha256: canonicalHash([tenant]),
+  };
+  const fixture = apiFixture(new Map([
+    [
+      'https://identitytoolkit.googleapis.com/admin/v2/projects/test-project/config',
+      {json: {...AUTH_API, subtype: 'IDENTITY_PLATFORM', multiTenant: {allowTenants: true}}},
+    ],
+    [
+      'https://identitytoolkit.googleapis.com/v2/projects/test-project/tenants',
+      {json: {tenants: [tenant]}},
+    ],
+  ]));
+  const observed = await readObservedDeployment(
+    fixture.fetch, identityExpected, 'dummy-token',
+  );
+  assert.deepEqual(deploymentProblems(identityExpected, observed), []);
+});
+
 test('rejects resource IAM, key, rule, Auth, Run, and Eventarc drift from API mocks', async () => {
   const fixture = apiFixture(new Map([
     [
@@ -1382,11 +1790,11 @@ test('rejects resource IAM, key, rule, Auth, Run, and Eventarc drift from API mo
       }]}}},
     ],
     [
-      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService',
-      {json: {results: [
-        {name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb'},
-        {name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/backdoor'},
-      ]}},
+      'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+      {json: {services: [
+        {name: 'projects/test-project/locations/europe-west1/services/publicweb'},
+        {name: 'projects/test-project/locations/europe-west1/services/backdoor'},
+      ], unreachable: []}},
     ],
     [
       'https://eventarc.googleapis.com/v1/projects/test-project/locations/-/triggers',
@@ -1401,7 +1809,7 @@ test('rejects resource IAM, key, rule, Auth, Run, and Eventarc drift from API mo
       }]}},
     ],
     [
-      'https://eventarc.googleapis.com/v1/projects/test-project/locations/europe-west1/triggers/attacker:getIamPolicy',
+      'https://eventarc.googleapis.com/v1/projects/test-project/locations/europe-west1/triggers/attacker:getIamPolicy?options.requestedPolicyVersion=3',
       {json: {bindings: []}},
     ],
     [
@@ -1437,7 +1845,7 @@ test('rejects resource IAM, key, rule, Auth, Run, and Eventarc drift from API mo
       }]}},
     ],
     [
-      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy',
+      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts:getIamPolicy?options.requestedPolicyVersion=3',
       {json: {bindings: [{role: 'roles/artifactregistry.writer', members: [
         'user:attacker@example.test',
       ]}]}},
@@ -1506,7 +1914,7 @@ test('detects Eventarc transport replacement and Pub/Sub publisher authorization
       }]}},
     ],
     [
-      `https://eventarc.googleapis.com/v1/${triggerName}:getIamPolicy`,
+      `https://eventarc.googleapis.com/v1/${triggerName}:getIamPolicy?options.requestedPolicyVersion=3`,
       {json: {bindings: []}},
     ],
     [
@@ -1514,9 +1922,13 @@ test('detects Eventarc transport replacement and Pub/Sub publisher authorization
       {json: {topics: [{name: 'projects/test-project/topics/reviewed'}]}},
     ],
     [
-      'https://pubsub.googleapis.com/v1/projects/test-project/topics/reviewed:getIamPolicy',
+      'https://pubsub.googleapis.com/v1/projects/test-project/topics/reviewed:getIamPolicy?options.requestedPolicyVersion=3',
       {json: {bindings: [{
-        role: 'roles/pubsub.publisher', members: ['user:attacker@example.test'],
+        role: 'roles/pubsub.publisher', members: ['allAuthenticatedUsers'],
+        condition: {
+          title: 'temporary-backdoor',
+          expression: 'request.time < timestamp("2030-01-01T00:00:00Z")',
+        },
       }]}},
     ],
   ]));
@@ -1684,6 +2096,7 @@ function gitFixture(
   ignoredSecret = '',
   originUrl = 'https://github.com/example/test-project.git',
   localConfig = '',
+  configOrigin = 'file:.git/config',
 ): GitRunner {
   const files = new Map<string, Buffer>([
     [`show ${COMMIT}:deployment-target.json`, Buffer.from(JSON.stringify(target))],
@@ -1708,7 +2121,9 @@ function gitFixture(
       `${remote}\trefs/heads/master\n`,
     )],
     ['remote get-url origin', Buffer.from(`${originUrl}\n`)],
-    ['config --local --list -z', Buffer.from(localConfig)],
+    ['config --list --show-origin -z', Buffer.from(
+      localConfig === '' ? '' : `${configOrigin}\0${localConfig}`,
+    )],
     ['status --porcelain=v1 -z --untracked-files=all', Buffer.from(status)],
     [
       'ls-files --others --ignored --exclude-standard -z -- :(glob)functions/.env*',
@@ -1731,11 +2146,47 @@ test('reads every expected artifact from the reviewed commit', () => {
 });
 
 test('rejects target manifests that make deployment checks vacuous', () => {
+  const approvedKey = structuredClone(target);
+  approvedKey.security.serviceAccounts[0].userManagedKeys = [{
+    name: 'projects/test-project/serviceAccounts/runtime/keys/standing-key',
+  }];
+  const exposedStorageAlias = structuredClone(target);
+  exposedStorageAlias.security.storageRulesRelease = 'test-project.appspot.com';
+  exposedStorageAlias.security.storageBuckets[0].name = 'test-project.appspot.com';
+  exposedStorageAlias.security.storageBuckets.push({
+    ...structuredClone(exposedStorageAlias.security.storageBuckets[0]),
+    name: 'test-project.firebasestorage.app',
+  });
+  const inconsistentEventarc = structuredClone(target);
+  inconsistentEventarc.functions[1] = {
+    ...inconsistentEventarc.functions[1],
+    access: 'event',
+    event: {type: 'example.event', retry: false, filters: []},
+  };
+  inconsistentEventarc.security.eventarcTriggers = [{
+    name: 'projects/test-project/locations/europe-west1/triggers/publicweb',
+    iam: [],
+    configuration: {
+      destination: {
+        cloudFunction: 'projects/test-project/locations/europe-west1/functions/publicweb',
+      },
+      eventFilters: [{attribute: 'type', value: 'attacker.event'}],
+      transport: {pubsub: {topic: 'projects/test-project/topics/reviewed'}},
+      labels: {'goog-managed-by': 'cloudfunctions'},
+      serviceAccount: '123456789-compute@developer.gserviceaccount.com',
+      channel: null,
+      eventDataContentType: 'application/json',
+      conditions: {},
+    },
+  }];
   const invalidTargets: unknown[] = [
     {...target, hostingOrigins: []},
     {...target, functions: []},
     {...target, allowedUntrackedPrefixes: ['']},
     {...target, generatedHostingFiles: {}},
+    approvedKey,
+    exposedStorageAlias,
+    inconsistentEventarc,
   ];
   for (const invalid of invalidTargets) {
     const base = gitFixture();
@@ -1789,7 +2240,17 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
       gitFixture('', COMMIT, COMMIT, COMMIT, '', '', target.security.gitOrigin,
         'url.https://attacker.example/.insteadof\nhttps://github.com/\0'),
     ),
-    ['Repository-local Git URL rewrite can spoof origin'],
+    ['Git URL rewrite can spoof origin'],
+  );
+  assert.deepEqual(
+    reviewedTreeProblems(
+      COMMIT,
+      target,
+      gitFixture('', COMMIT, COMMIT, COMMIT, '', '', target.security.gitOrigin,
+        'url.ssh://attacker.example/.pushinsteadof\nhttps://github.com/\0',
+        'file:/Users/test/.gitconfig'),
+    ),
+    ['Git URL rewrite can spoof origin'],
   );
 });
 

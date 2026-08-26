@@ -3,6 +3,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {gunzipSync} from 'node:zlib';
 import {unzipSync} from 'fflate';
 
 type Generation = 'GEN_1' | 'GEN_2';
@@ -47,6 +48,10 @@ interface ServiceAccountSecurity extends IamResource {
   userManagedKeys: Record<string, unknown>[];
 }
 
+interface ArtifactRepositorySecurity extends IamResource {
+  configuration: Record<string, unknown>;
+}
+
 interface SecretSecurity extends IamResource {
   versions: Array<{version: string; state: string}>;
 }
@@ -76,7 +81,7 @@ interface SecurityTarget {
   customRoles: Record<string, unknown>[];
   serviceAccounts: ServiceAccountSecurity[];
   secrets: SecretSecurity[];
-  artifactRepositories: IamResource[];
+  artifactRepositories: ArtifactRepositorySecurity[];
   storageBuckets: StorageBucketSecurity[];
   eventarcTriggers: EventarcTriggerSecurity[];
   pubsubTopics: PubsubResourceSecurity[];
@@ -141,8 +146,10 @@ export interface ObservedFunction extends ExpectedFunction {
   revisionImage: string | null;
   buildId: string | null;
   buildSource: string | null;
+  buildImageDigest: string | null;
   imageBuildId: string | null;
   imageSource: string | null;
+  imageSourceFiles: Record<string, string> | null;
 }
 
 interface ExpectedIndex {
@@ -240,6 +247,8 @@ const FETCH_TIMEOUT_MS = 10_000;
 const RELEASE_HEADER = 'x-book-tracker-release';
 const MAX_FUNCTION_ARCHIVE_BYTES = 20 * 1024 * 1024;
 const MAX_FUNCTION_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_IMAGE_LAYER_BYTES = 100 * 1024 * 1024;
+const MAX_IMAGE_LAYER_EXPANDED_BYTES = 500 * 1024 * 1024;
 
 function record(value: unknown): Record<string, unknown> {
   assert.equal(typeof value, 'object');
@@ -392,6 +401,80 @@ function sourceArchiveFiles(content: Uint8Array): Record<string, string> {
   });
   assert.deepEqual(entries.map(([path]) => path).sort(), names);
   assert.ok(entries.length > 0, 'Function source archive is empty');
+  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
+}
+
+interface TarEntry {
+  path: string;
+  type: number;
+  body: Uint8Array;
+  linkName: string;
+}
+
+function tarString(content: Uint8Array): string {
+  const end = content.indexOf(0);
+  return new TextDecoder('utf-8', {fatal: true}).decode(
+    end === -1 ? content : content.subarray(0, end),
+  );
+}
+
+function tarOctal(content: Uint8Array): number {
+  const value = tarString(content).trim();
+  assert.match(value, /^[0-7]+$/);
+  return Number.parseInt(value, 8);
+}
+
+function tarEntries(content: Uint8Array): TarEntry[] {
+  assert.ok(content.byteLength <= MAX_IMAGE_LAYER_EXPANDED_BYTES, 'tar archive expands too large');
+  const entries: TarEntry[] = [];
+  for (let offset = 0; offset < content.byteLength;) {
+    assert.ok(offset + 512 <= content.byteLength, 'truncated tar header');
+    const header = content.subarray(offset, offset + 512);
+    if (header.every((value) => value === 0)) {
+      assert.equal(content.subarray(offset).every((value) => value === 0), true);
+      return entries;
+    }
+    const expectedChecksum = tarOctal(header.subarray(148, 156));
+    const actualChecksum = header.reduce((sum, value, index) =>
+      sum + (index >= 148 && index < 156 ? 32 : value), 0);
+    assert.equal(actualChecksum, expectedChecksum, 'invalid tar checksum');
+    const name = tarString(header.subarray(0, 100));
+    const prefix = tarString(header.subarray(345, 500));
+    const path = prefix === '' ? name : `${prefix}/${name}`;
+    assert.match(path, /^(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]+$/);
+    const size = tarOctal(header.subarray(124, 136));
+    const bodyStart = offset + 512;
+    const bodyEnd = bodyStart + size;
+    assert.ok(bodyEnd <= content.byteLength, 'truncated tar body');
+    entries.push({
+      path,
+      type: header[156],
+      body: content.subarray(bodyStart, bodyEnd),
+      linkName: tarString(header.subarray(157, 257)),
+    });
+    offset = bodyStart + Math.ceil(size / 512) * 512;
+  }
+  assert.fail('tar archive has no zero terminator');
+}
+
+function sourceTarGzipFiles(content: Uint8Array): Record<string, string> {
+  assert.ok(content.byteLength <= MAX_FUNCTION_ARCHIVE_BYTES, 'Function source tar is too large');
+  const entries: Array<readonly [string, string]> = [];
+  let expandedBytes = 0;
+  for (const entry of tarEntries(gunzipSync(content))) {
+    const path = entry.path.replace(/^\.\//, '');
+    if (entry.type === 53) continue;
+    assert.ok(entry.type === 0 || entry.type === 48, `unsupported source tar entry: ${path}`);
+    assert.notEqual(path, '');
+    assert.match(path, /^(?!\/)(?!-)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]+$/);
+    expandedBytes += entry.body.byteLength;
+    assert.ok(expandedBytes <= MAX_FUNCTION_SOURCE_BYTES,
+      'Function source tar expands too large');
+    entries.push([path, sha256(entry.body)]);
+  }
+  assert.equal(new Set(entries.map(([path]) => path)).size, entries.length,
+    'Function source tar has duplicate paths');
+  assert.ok(entries.length > 0, 'Function source tar is empty');
   return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
 }
 
@@ -585,8 +668,10 @@ async function functionSourceFiles(
   name: string,
   generation: Generation,
   storageSource: Record<string, unknown> | null,
+  versionId: string | null,
 ): Promise<Record<string, string>> {
   if (generation === 'GEN_2') {
+    assert.equal(versionId, null);
     assert.ok(storageSource !== null);
     const source = storageSource;
     const bucket = string(source.bucket);
@@ -603,12 +688,14 @@ async function functionSourceFiles(
     return sourceArchiveFiles(new Uint8Array(await response.arrayBuffer()));
   }
   assert.equal(storageSource, null);
+  assert.ok(versionId !== null);
+  assert.match(versionId, /^[1-9][0-9]*$/);
   const generated = await json(
     fetch_,
     `https://cloudfunctions.googleapis.com/v1/projects/${projectId}/locations/${region}/functions/${name}:generateDownloadUrl`,
     accessToken,
     projectId,
-    {method: 'POST', body: '{}'},
+    {method: 'POST', body: JSON.stringify({versionId})},
   );
   const downloadUrl = new URL(string(generated.downloadUrl));
   assert.equal(downloadUrl.protocol, 'https:');
@@ -628,6 +715,226 @@ function buildIdFromName(value: unknown, projectNumber: string, region: string):
   return buildId;
 }
 
+function environmentList(value: unknown): Record<string, string> {
+  const entries = array(value ?? []).map(string).map((entry) => {
+    const separator = entry.indexOf('=');
+    assert.ok(separator > 0, `invalid build environment entry: ${entry}`);
+    return [entry.slice(0, separator), entry.slice(separator + 1)] as const;
+  });
+  assert.equal(new Set(entries.map(([name]) => name)).size, entries.length,
+    'duplicate build environment variable');
+  return Object.fromEntries(entries);
+}
+
+async function cloudBuildImageDigest(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  buildId: string,
+  startTime: string,
+  finishTime: string,
+): Promise<string> {
+  const entries: Record<string, unknown>[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_API_PAGES; page += 1) {
+    const body = {
+      resourceNames: [`projects/${target.projectId}`],
+      filter: [
+        'resource.type="build"',
+        `resource.labels.build_id="${buildId}"`,
+        `((logName="projects/${target.projectId}/logs/cloudbuild" AND ` +
+          'labels.build_step="Step #2 - \\"build\\"" AND ' +
+          'textPayload:"*** Images (sha256:") OR ' +
+          `(logName="projects/${target.projectId}/logs/cloudaudit.googleapis.com%2Factivity" AND ` +
+          'protoPayload.methodName="google.devtools.cloudbuild.v1.CloudBuild.CreateBuild"))',
+      ].join(' AND '),
+      orderBy: 'timestamp asc',
+      ...(pageToken === undefined ? {} : {pageToken}),
+    };
+    const response = await json(
+      fetch_, 'https://logging.googleapis.com/v2/entries:list', accessToken, target.projectId,
+      {method: 'POST', body: JSON.stringify(body)},
+    );
+    entries.push(...array(response.entries ?? []).map(record));
+    const next = response.nextPageToken;
+    if (next === undefined || string(next).trim() === '') break;
+    assert.ok(page + 1 < MAX_API_PAGES,
+      'Cloud Build image log exceeded the maximum number of pages');
+    pageToken = string(next);
+  }
+  const outputEntries = entries.filter((entry) =>
+    entry.logName === `projects/${target.projectId}/logs/cloudbuild`);
+  const auditEntries = entries.filter((entry) =>
+    entry.logName ===
+      `projects/${target.projectId}/logs/cloudaudit.googleapis.com%2Factivity`);
+  assert.equal(outputEntries.length, 1,
+    'Cloud Build must emit exactly one output-image digest');
+  assert.equal(auditEntries.length, 1,
+    'Cloud Build must have exactly one administrative creation record');
+  const entry = outputEntries[0];
+  assert.ok(Object.keys(entry).every((key) => [
+    'insertId', 'labels', 'logName', 'receiveTimestamp', 'resource', 'severity',
+    'textPayload', 'timestamp',
+  ].includes(key)));
+  assert.match(string(entry.insertId), new RegExp(`^${buildId}-[1-9][0-9]*$`));
+  assert.equal(entry.logName, `projects/${target.projectId}/logs/cloudbuild`);
+  assert.equal(entry.severity, 'INFO');
+  assert.equal(Date.parse(string(entry.timestamp)) >= Date.parse(startTime), true);
+  assert.equal(Date.parse(string(entry.timestamp)) <= Date.parse(finishTime), true);
+  const labels = stringRecord(entry.labels);
+  assert.equal(labels.build_step, 'Step #2 - "build"');
+  const resource = record(entry.resource);
+  assert.equal(resource.type, 'build');
+  assert.deepEqual(stringRecord(record(resource.labels)), {
+    build_id: buildId,
+    build_trigger_id: '',
+    project_id: target.projectId,
+  });
+  const match = string(entry.textPayload).match(
+    /^Step #2 - "build": \*\*\* Images \((sha256:[0-9a-f]{64})\):$/,
+  );
+  assert.ok(match !== null);
+  const auditEntry = auditEntries[0];
+  assert.equal(auditEntry.severity, 'NOTICE');
+  assert.equal(Date.parse(string(auditEntry.timestamp)) <= Date.parse(startTime), true);
+  const auditResource = record(auditEntry.resource);
+  assert.equal(auditResource.type, 'build');
+  assert.deepEqual(stringRecord(record(auditResource.labels)), {
+    build_id: buildId,
+    build_trigger_id: '',
+    project_id: target.projectId,
+  });
+  const audit = record(auditEntry.protoPayload);
+  assert.equal(audit.serviceName, 'cloudbuild.googleapis.com');
+  assert.equal(audit.methodName, 'google.devtools.cloudbuild.v1.CloudBuild.CreateBuild');
+  assert.equal(
+    record(audit.authenticationInfo).principalEmail,
+    `service-${target.projectNumber}@gcf-admin-robot.iam.gserviceaccount.com`,
+  );
+  assert.equal(array(audit.authorizationInfo).map(record).some((authorization) =>
+    authorization.permission === 'cloudbuild.builds.create' &&
+    authorization.granted === true), true);
+  return match[1];
+}
+
+function assertManagedFunctionBuild(
+  build: Record<string, unknown>,
+  target: DeploymentTarget,
+  region: string,
+  buildId: string,
+  storageSource: Record<string, unknown>,
+  function_: Pick<ExpectedFunction, 'name' | 'entryPoint' | 'event'>,
+): void {
+  assert.equal(build.serviceAccount, undefined);
+  assert.equal(build.workerPool, undefined);
+  assert.deepEqual(build.secrets ?? [], []);
+  assert.deepEqual(build.availableSecrets ?? {}, {});
+  assert.deepEqual(build.images ?? [], []);
+  assert.deepEqual(build.artifacts ?? {}, {});
+  assert.deepEqual(build.sourceProvenance ?? {}, {});
+  const steps = array(build.steps).map(record);
+  assert.deepEqual(steps.map((step) => step.id), ['fetch', 'pre-buildpack', 'build']);
+  for (const step of steps) {
+    assert.ok(Object.keys(step).every((key) => [
+      'args', 'entrypoint', 'env', 'id', 'name', 'pullTiming', 'status', 'timing',
+    ].includes(key)));
+    assert.equal(step.status, 'SUCCESS');
+  }
+  const [fetchStep, preBuildStep, buildStep] = steps;
+  assert.match(string(fetchStep.name), new RegExp(
+    `^${region}-docker\\.pkg\\.dev/serverless-runtimes/utilities/gcs-fetcher:[A-Za-z0-9_.-]+$`,
+  ));
+  assert.deepEqual(array(fetchStep.args).map(string), [
+    '--type=ZipArchive',
+    `--location=gs://${string(storageSource.bucket)}/${string(storageSource.object)}`,
+    '--dest_dir=/workspace',
+    '--timeout_gcs=false',
+  ]);
+  assert.equal(fetchStep.entrypoint, undefined);
+  assert.deepEqual(fetchStep.env ?? [], []);
+
+  const packageName = [target.projectId, region, function_.name]
+    .map((part) => part.replaceAll('-', '--')).join('__');
+  const imageBase = `${region}-docker.pkg.dev/${target.projectId}/gcf-artifacts/${packageName}`;
+  const builderPattern = new RegExp(
+    `^${region}-docker\\.pkg\\.dev/serverless-runtimes/google-22-full/builder/nodejs:[A-Za-z0-9_.-]+$`,
+  );
+  assert.match(string(preBuildStep.name), builderPattern);
+  assert.equal(buildStep.name, preBuildStep.name);
+  assert.equal(preBuildStep.entrypoint, '/bin/shim');
+  assert.equal(buildStep.entrypoint, '/cnb/lifecycle/creator');
+  assert.deepEqual(array(preBuildStep.args).map(string), [
+    '--phase=pre',
+    `--app_image_unique=${imageBase}:version_1`,
+    `--app_image_stable=${imageBase}:latest`,
+    `--cache_image_unique=${imageBase}/cache:${buildId}`,
+    `--cache_image_stable=${imageBase}/cache:latest`,
+    '--env_var_names=BUILDER_OUTPUT,GOOGLE_RUNTIME,GOOGLE_LABEL_BUILDER_VERSION,GOOGLE_LABEL_BUILDER_IMAGE,GOOGLE_LABEL_RUN_IMAGE,GOOGLE_LABEL_SOURCE,GOOGLE_USE_SERVERLESS_RUNTIMES_TARBALLS,X_GOOGLE_FASTER_LANGUAGE_TARBALL_INSTALLATION,GOOGLE_RUNTIME_IMAGE_REGION,GOOGLE_RUNTIME_VERSION,X_GOOGLE_SKIP_RUNTIME_LAUNCH,GOOGLE_BUILD_ENV,GOOGLE_BUILD_UNIVERSE,GOOGLE_TPC_TARBALL_PROJECT,GOOGLE_TPC_HOSTNAME,GOOGLE_FUNCTION_TARGET,GOOGLE_FUNCTION_SIGNATURE_TYPE,X_GOOGLE_TARGET_PLATFORM,GOOGLE_LABEL_BUILD_ID,GOOGLE_LABEL_BASE_IMAGE,GOOGLE_LABEL_FUNCTION_TARGET,X_GOOGLE_SET_NODE_HEAP_SIZE,GOOGLE_NODE_RUN_SCRIPTS',
+    '--experimental_skip_retag_cache',
+  ]);
+  const preEnvironment = environmentList(preBuildStep.env);
+  assert.equal(preEnvironment.GOOGLE_RUNTIME, 'nodejs22');
+  assert.equal(preEnvironment.GOOGLE_LABEL_SOURCE,
+    `gs://${string(storageSource.bucket)}/${string(storageSource.object)}#${
+      string(storageSource.generation)}`);
+  assert.equal(preEnvironment.GOOGLE_LABEL_BUILD_ID, buildId);
+  assert.equal(preEnvironment.GOOGLE_FUNCTION_TARGET, function_.entryPoint);
+  assert.equal(preEnvironment.GOOGLE_FUNCTION_SIGNATURE_TYPE,
+    function_.event === null ? 'http' : 'event');
+  assert.equal(preEnvironment.X_GOOGLE_TARGET_PLATFORM, 'gcf');
+  assert.match(string(preEnvironment.GOOGLE_LABEL_BUILDER_IMAGE), builderPattern);
+  assert.match(string(preEnvironment.GOOGLE_LABEL_RUN_IMAGE), new RegExp(
+    `^${region}-docker\\.pkg\\.dev/serverless-runtimes/google-22-full/scratch/nodejs22:[A-Za-z0-9_.-]+$`,
+  ));
+  assert.match(string(preEnvironment.GOOGLE_LABEL_BASE_IMAGE), new RegExp(
+    `^${region}-docker\\.pkg\\.dev/serverless-runtimes/google-22-full/runtimes/nodejs22$`,
+  ));
+  assert.deepEqual(array(buildStep.args).map(string), [
+    `--tag=${imageBase}:latest`,
+    `${imageBase}:version_1`,
+  ]);
+  assert.deepEqual(environmentList(buildStep.env), {
+    CNB_RUN_IMAGE: preEnvironment.GOOGLE_LABEL_RUN_IMAGE,
+  });
+  const options = record(build.options);
+  assert.ok(Object.keys(options).every((key) => [
+    'env', 'logStreamingOption', 'logging', 'pool', 'volumes',
+  ].includes(key)));
+  assert.deepEqual(record(options.pool ?? {}), {});
+  assert.deepEqual(array(options.volumes).map(record), [
+    {name: 'layers', path: '/layers'},
+    {name: 'platform', path: '/platform'},
+  ]);
+  assert.equal(options.logStreamingOption, 'STREAM_OFF');
+  assert.equal(options.logging, 'CLOUD_LOGGING_ONLY');
+  const optionEnvironment = environmentList(options.env);
+  assert.equal(optionEnvironment.CNB_CACHE_IMAGE, `${imageBase}/cache:latest`);
+  assert.equal(optionEnvironment.CNB_PREVIOUS_IMAGE, `${imageBase}:latest`);
+  assert.deepEqual(Object.keys(optionEnvironment).sort(), [
+    'CNB_ANALYZED_PATH', 'CNB_APP_DIR', 'CNB_BUILDPACKS_DIR', 'CNB_CACHE_IMAGE',
+    'CNB_GROUP_ID', 'CNB_GROUP_PATH', 'CNB_LAYERS_DIR', 'CNB_NO_COLOR',
+    'CNB_PLATFORM_API', 'CNB_PLATFORM_DIR', 'CNB_PLAN_PATH', 'CNB_PREVIOUS_IMAGE',
+    'CNB_USER_ID',
+  ].sort());
+  const substitutions = stringRecord(build.substitutions);
+  for (const [name, value] of Object.entries(substitutions)) {
+    assert.match(name, /^_[A-Z][A-Z0-9_]*$/);
+    assert.equal(preEnvironment[name.slice(1)], value);
+  }
+  assert.equal(substitutions._GOOGLE_LABEL_BUILD_ID, undefined);
+  assert.deepEqual(array(build.tags).map(string).sort(), [
+    'bt-LIFECYCLE',
+    'p-gcf',
+    `r-nodejs22`,
+    `service_${function_.name}`,
+    't-function',
+    string(array(build.tags).map(string).find((tag) => /^b-[A-Za-z0-9_.-]+$/.test(tag))),
+    string(array(build.tags).map(string).find((tag) => /^v-nodejs22_[A-Za-z0-9_.-]+$/.test(tag))),
+  ].sort());
+  assert.equal(build.timeout, '1800s');
+  assert.equal(build.queueTtl, '360s');
+}
+
 async function functionBuild(
   fetch_: FetchLike,
   target: DeploymentTarget,
@@ -635,7 +942,14 @@ async function functionBuild(
   region: string,
   buildName: unknown,
   storageSource: Record<string, unknown>,
-): Promise<{buildId: string; buildSource: string; startTime: string; finishTime: string}> {
+  function_: Pick<ExpectedFunction, 'name' | 'entryPoint' | 'event'>,
+): Promise<{
+  buildId: string;
+  buildSource: string;
+  buildImageDigest: string;
+  startTime: string;
+  finishTime: string;
+}> {
   const buildId = buildIdFromName(buildName, target.projectNumber, region);
   const build = await json(
     fetch_, `https://cloudbuild.googleapis.com/v1/${string(buildName)}`,
@@ -647,19 +961,13 @@ async function functionBuild(
   const startTime = string(build.startTime);
   const finishTime = string(build.finishTime);
   assert.equal(Date.parse(startTime) < Date.parse(finishTime), true);
-  assert.deepEqual(build.secrets ?? [], []);
-  assert.deepEqual(build.availableSecrets ?? {}, {});
-  const steps = array(build.steps).map(record);
-  assert.ok(steps.length > 0);
-  for (const step of steps) assert.equal(step.status, 'SUCCESS');
+  assertManagedFunctionBuild(build, target, region, buildId, storageSource, function_);
   const buildSource = `gs://${string(storageSource.bucket)}/${string(storageSource.object)}#${
     string(storageSource.generation)}`;
-  const fetchStep = steps.find((step) => step.id === 'fetch');
-  assert.ok(fetchStep !== undefined);
-  assert.ok(array(fetchStep.args).map(string).includes(
-    `--location=gs://${string(storageSource.bucket)}/${string(storageSource.object)}`,
-  ));
-  return {buildId, buildSource, startTime, finishTime};
+  const buildImageDigest = await cloudBuildImageDigest(
+    fetch_, target, accessToken, buildId, startTime, finishTime,
+  );
+  return {buildId, buildSource, buildImageDigest, startTime, finishTime};
 }
 
 async function imageProvenance(
@@ -668,7 +976,11 @@ async function imageProvenance(
   accessToken: string,
   image: string,
   buildWindow: {startTime: string; finishTime: string},
-): Promise<{imageBuildId: string; imageSource: string}> {
+): Promise<{
+  imageBuildId: string;
+  imageSource: string;
+  imageSourceFiles: Record<string, string>;
+}> {
   const match = image.match(
     /^([a-z0-9-]+-docker\.pkg\.dev)\/([^/]+)\/([^/]+)\/(.+)@(sha256:[0-9a-f]{64})$/,
   );
@@ -679,11 +991,19 @@ async function imageProvenance(
   const metadataName = `projects/${imageProject}/locations/${host.slice(
     0, -'-docker.pkg.dev'.length)}/repositories/${repository}/dockerImages/${
     encodeURIComponent(packageName)}%40${digest}`;
-  const [manifest, metadata] = await Promise.all([
-    json(fetch_, `${base}/manifests/${digest}`, accessToken, projectId),
+  const [manifestResponse, metadata] = await Promise.all([
+    fetchWithRetry(
+      fetch_, `${base}/manifests/${digest}`,
+      {headers: authenticatedHeaders(accessToken, projectId)},
+      [200], 'immutable Function image manifest download',
+    ),
     json(fetch_, `https://artifactregistry.googleapis.com/v1/${metadataName}`,
       accessToken, projectId),
   ]);
+  const manifestBytes = new Uint8Array(await manifestResponse.arrayBuffer());
+  assert.equal(`sha256:${sha256(manifestBytes)}`, digest,
+    'Function image manifest does not match its digest');
+  const manifest = record(JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(manifestBytes)));
   assert.equal(metadata.uri, image);
   assert.deepEqual(array(metadata.tags).map(string).sort(), ['latest', 'version_1']);
   const uploadTime = Date.parse(string(metadata.uploadTime));
@@ -696,16 +1016,50 @@ async function imageProvenance(
   const config = record(manifest.config);
   const configDigest = string(config.digest);
   assert.match(configDigest, /^sha256:[0-9a-f]{64}$/);
-  const response = await fetchWithRetry(
+  const configResponse = await fetchWithRetry(
     fetch_, `${base}/blobs/${configDigest}`,
     {headers: authenticatedHeaders(accessToken, projectId)},
     [200], 'immutable Function image configuration download',
   );
-  const imageConfig = record(await response.json());
+  const configBytes = new Uint8Array(await configResponse.arrayBuffer());
+  assert.equal(`sha256:${sha256(configBytes)}`, configDigest,
+    'Function image configuration does not match its digest');
+  const imageConfig = record(JSON.parse(
+    new TextDecoder('utf-8', {fatal: true}).decode(configBytes),
+  ));
   const labels = stringRecord(record(imageConfig.config).Labels);
+  let sourceTar: Uint8Array | undefined;
+  for (const layerValue of array(manifest.layers)) {
+    const layer = record(layerValue);
+    assert.equal(layer.mediaType, 'application/vnd.docker.image.rootfs.diff.tar.gzip');
+    const layerDigest = string(layer.digest);
+    assert.match(layerDigest, /^sha256:[0-9a-f]{64}$/);
+    const layerSize = number(layer.size);
+    assert.ok(layerSize <= MAX_IMAGE_LAYER_BYTES, 'Function image layer is too large');
+    const layerResponse = await fetchWithRetry(
+      fetch_, `${base}/blobs/${layerDigest}`,
+      {headers: authenticatedHeaders(accessToken, projectId)},
+      [200], 'immutable Function image layer download',
+    );
+    const layerBytes = new Uint8Array(await layerResponse.arrayBuffer());
+    assert.equal(layerBytes.byteLength, layerSize);
+    assert.equal(`sha256:${sha256(layerBytes)}`, layerDigest,
+      'Function image layer does not match its digest');
+    for (const entry of tarEntries(gunzipSync(layerBytes))) {
+      if (entry.path === '/layers/google.utils.archive-source/src/.wh.source-code.tar.gz') {
+        sourceTar = undefined;
+      }
+      if (entry.path === '/layers/google.utils.archive-source/src/source-code.tar.gz') {
+        assert.ok(entry.type === 0 || entry.type === 48);
+        sourceTar = entry.body;
+      }
+    }
+  }
+  assert.ok(sourceTar !== undefined, 'Function image has no archived build input');
   return {
     imageBuildId: string(labels['google.build-id']),
     imageSource: string(labels['google.source']),
+    imageSourceFiles: sourceTarGzipFiles(sourceTar),
   };
 }
 
@@ -986,13 +1340,14 @@ async function deployedFunctions(
     const [sourceFiles, functionIam_, run, buildSecurity] = await Promise.all([
       functionSourceFiles(
         fetch_, target.projectId, accessToken, resource.region, resource.name, generation,
-        storageSource,
+        storageSource, generation === 'GEN_1' ? string(service.revision) : null,
       ),
       functionIam(fetch_, target.projectId, accessToken, resource.region, resource.name),
       generation === 'GEN_1' ? Promise.resolve(null) :
         runSecurity(fetch_, target.projectId, accessToken, resource.region, resource.name),
       generation === 'GEN_1' ? Promise.resolve(null) : functionBuild(
         fetch_, target, accessToken, resource.region, build.build, storageSource!,
+        environmentFunction,
       ),
     ]);
     const provenance = run === null ? null : await imageProvenance(
@@ -1060,8 +1415,10 @@ async function deployedFunctions(
       revisionImage: run?.revisionImage ?? null,
       buildId: buildSecurity?.buildId ?? null,
       buildSource: buildSecurity?.buildSource ?? null,
+      buildImageDigest: buildSecurity?.buildImageDigest ?? null,
       imageBuildId: provenance?.imageBuildId ?? null,
       imageSource: provenance?.imageSource ?? null,
+      imageSourceFiles: provenance?.imageSourceFiles ?? null,
     };
   }));
 }
@@ -1537,6 +1894,15 @@ function normalizedAcl(values: unknown): Record<string, unknown>[] {
 }
 
 function storageBucketConfiguration(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'kind', 'selfLink', 'id', 'name', 'projectNumber', 'metageneration', 'location',
+    'locationType', 'storageClass', 'etag', 'timeCreated', 'updated', 'owner',
+    'labels', 'website', 'versioning', 'cors', 'lifecycle', 'autoclass', 'billing',
+    'retentionPolicy', 'iamConfiguration', 'encryption', 'logging',
+    'defaultEventBasedHold', 'rpo', 'satisfiesPZS', 'satisfiesPZI',
+    'customPlacementConfig', 'softDeletePolicy', 'hierarchicalNamespace',
+    'objectRetention', 'ipFilter',
+  ].includes(key)), 'Cloud Storage bucket response contains an unknown field');
   return {
     autoclass: record(value.autoclass ?? {}),
     billing: record(value.billing ?? {}),
@@ -1564,21 +1930,14 @@ async function identityTenants(
   fetch_: FetchLike,
   target: DeploymentTarget,
   accessToken: string,
+  subtype: unknown,
 ): Promise<Record<string, unknown>[]> {
-  const url = `https://identitytoolkit.googleapis.com/v2/projects/${target.projectId}/tenants`;
-  const response = await fetchWithRetry(fetch_, url, {
-    headers: authenticatedHeaders(accessToken, target.projectId),
-  }, [200, 400], 'Identity Platform tenant inventory');
-  const body = record(await response.json());
-  if (response.status === 400) {
-    const error = record(body.error);
-    assert.equal(error.status, 'INVALID_ARGUMENT');
-    assert.equal(error.message, 'INVALID_PROJECT_ID');
-    return [];
-  }
-  assert.deepEqual(body.unreachable ?? [], []);
-  assert.ok(body.nextPageToken === undefined || string(body.nextPageToken).trim() === '');
-  return array(body.tenants ?? []).map(record);
+  if (subtype === 'FIREBASE_AUTH') return [];
+  assert.equal(subtype, 'IDENTITY_PLATFORM');
+  return listApi(
+    fetch_, `https://identitytoolkit.googleapis.com/v2/projects/${target.projectId}/tenants`,
+    'tenants', accessToken, target.projectId,
+  );
 }
 
 async function iamAt(
@@ -1588,8 +1947,10 @@ async function iamAt(
   accessToken: string,
   method: 'GET' | 'POST' = 'GET',
 ): Promise<IamBinding[]> {
+  const versionedUrl = method === 'GET' && !url.includes('optionsRequestedPolicyVersion=3') ?
+    `${url}${url.includes('?') ? '&' : '?'}options.requestedPolicyVersion=3` : url;
   return normalizedIamBindings(await json(
-    fetch_, url, accessToken, target.projectId,
+    fetch_, versionedUrl, accessToken, target.projectId,
     method === 'GET' ? undefined : {
       method,
       body: JSON.stringify({options: {requestedPolicyVersion: 3}}),
@@ -1598,6 +1959,11 @@ async function iamAt(
 }
 
 function normalizedEventarcTrigger(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'uid', 'createTime', 'updateTime', 'eventFilters', 'serviceAccount',
+    'destination', 'transport', 'labels', 'channel', 'eventDataContentType',
+    'conditions', 'reconciling', 'etag',
+  ].includes(key)), 'Eventarc trigger response contains an unknown field');
   return {
     destination: record(value.destination),
     eventFilters: normalizeFilters(array(value.eventFilters).map((filterValue) => {
@@ -1618,6 +1984,11 @@ function normalizedEventarcTrigger(value: Record<string, unknown>): Record<strin
 }
 
 function normalizedPubsubTopic(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'labels', 'messageStoragePolicy', 'kmsKeyName', 'schemaSettings',
+    'satisfiesPzs', 'messageRetentionDuration', 'state', 'ingestionDataSourceSettings',
+    'messageTransforms',
+  ].includes(key)), 'Pub/Sub topic response contains an unknown field');
   return {
     labels: record(value.labels ?? {}),
     messageStoragePolicy: record(value.messageStoragePolicy ?? {}),
@@ -1631,6 +2002,13 @@ function normalizedPubsubTopic(value: Record<string, unknown>): Record<string, u
 }
 
 function normalizedPubsubSubscription(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'topic', 'pushConfig', 'bigQueryConfig', 'cloudStorageConfig',
+    'ackDeadlineSeconds', 'retainAckedMessages', 'messageRetentionDuration', 'labels',
+    'enableMessageOrdering', 'expirationPolicy', 'filter', 'deadLetterPolicy',
+    'retryPolicy', 'detached', 'enableExactlyOnceDelivery', 'topicMessageRetentionDuration',
+    'state',
+  ].includes(key)), 'Pub/Sub subscription response contains an unknown field');
   return {
     topic: string(value.topic),
     pushConfig: record(value.pushConfig ?? {}),
@@ -1648,6 +2026,35 @@ function normalizedPubsubSubscription(value: Record<string, unknown>): Record<st
     detached: value.detached === true,
     enableExactlyOnceDelivery: value.enableExactlyOnceDelivery === true,
     state: nullableString(value.state),
+  };
+}
+
+function normalizedArtifactRepository(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'format', 'description', 'labels', 'mode', 'cleanupPolicies',
+    'cleanupPolicyDryRun', 'kmsKeyName', 'dockerConfig', 'mavenConfig',
+    'virtualRepositoryConfig', 'remoteRepositoryConfig', 'vulnerabilityScanningConfig',
+    'createTime', 'updateTime', 'sizeBytes', 'satisfiesPzs', 'satisfiesPzi', 'registryUri',
+  ].includes(key)));
+  const scanning = record(value.vulnerabilityScanningConfig ?? {});
+  assert.ok(Object.keys(scanning).every((key) => [
+    'lastEnableTime', 'enablementState', 'enablementStateReason',
+  ].includes(key)));
+  return {
+    format: string(value.format),
+    description: nullableString(value.description),
+    labels: record(value.labels ?? {}),
+    mode: string(value.mode),
+    cleanupPolicies: record(value.cleanupPolicies ?? {}),
+    cleanupPolicyDryRun: value.cleanupPolicyDryRun === true,
+    kmsKeyName: nullableString(value.kmsKeyName),
+    dockerConfig: record(value.dockerConfig ?? {}),
+    mavenConfig: record(value.mavenConfig ?? {}),
+    virtualRepositoryConfig: record(value.virtualRepositoryConfig ?? {}),
+    remoteRepositoryConfig: record(value.remoteRepositoryConfig ?? {}),
+    vulnerabilityScanningConfig: {
+      enablementState: nullableString(scanning.enablementState),
+    },
   };
 }
 
@@ -1669,22 +2076,66 @@ async function securedResources(
   }));
 }
 
+async function runServiceInventory(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+): Promise<string[]> {
+  const wildcardUrl =
+    `https://run.googleapis.com/v2/projects/${target.projectId}/locations/-/services`;
+  const services: Record<string, unknown>[] = [];
+  const unreachable = new Set<string>();
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_API_PAGES; page += 1) {
+    const url = pageToken === undefined ? wildcardUrl :
+      `${wildcardUrl}?pageToken=${encodeURIComponent(pageToken)}`;
+    const body = await json(fetch_, url, accessToken, target.projectId);
+    services.push(...array(body.services ?? []).map(record));
+    for (const region of array(body.unreachable ?? []).map(string)) {
+      assert.match(region, /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/);
+      unreachable.add(region);
+    }
+    const next = body.nextPageToken;
+    if (next === undefined || string(next).trim() === '') break;
+    assert.ok(page + 1 < MAX_API_PAGES, 'Cloud Run inventory exceeded the maximum pages');
+    pageToken = string(next);
+  }
+  for (const region of [...unreachable].sort()) {
+    const url =
+      `https://run.googleapis.com/v2/projects/${target.projectId}/locations/${region}/services`;
+    const response = await fetchWithRetry(
+      fetch_, url, {headers: authenticatedHeaders(accessToken, target.projectId)},
+      [200, 403], `Cloud Run inventory for initially unreachable region ${region}`,
+    );
+    const body = record(await response.json());
+    if (response.status === 403) {
+      const error = record(body.error);
+      assert.equal(error.status, 'PERMISSION_DENIED');
+      const details = array(error.details).map(record);
+      assert.equal(details.some((detail) =>
+        detail['@type'] === 'type.googleapis.com/google.rpc.ErrorInfo' &&
+        detail.reason === 'LOCATION_POLICY_VIOLATED' &&
+        record(detail.metadata).location === region), true,
+      `Cloud Run region ${region} is unreadable without a location-policy proof`);
+      continue;
+    }
+    assert.deepEqual(body.unreachable ?? [], []);
+    assert.ok(body.nextPageToken === undefined || string(body.nextPageToken).trim() === '',
+      `Cloud Run regional inventory unexpectedly paginated for ${region}`);
+    services.push(...array(body.services ?? []).map(record));
+  }
+  const names = services.map((service) => string(service.name)).sort();
+  assert.equal(new Set(names).size, names.length, 'duplicate Cloud Run service inventory entry');
+  return names;
+}
+
 async function deployedSecurity(
   fetch_: FetchLike,
   target: DeploymentTarget,
   accessToken: string,
   ancestorIamPolicies: IamResource[],
 ): Promise<ObservedSecurity> {
-  const runServicesPromise = listApi(
-    fetch_,
-    `https://cloudasset.googleapis.com/v1/projects/${target.projectId}:searchAllResources?assetTypes=run.googleapis.com%2FService`,
-    'results', accessToken, target.projectId,
-  ).then((values) => values.map((value) => {
-    const prefix = '//run.googleapis.com/';
-    const name = string(value.name);
-    assert.equal(name.startsWith(prefix), true);
-    return name.slice(prefix.length);
-  }).sort());
+  const runServicesPromise = runServiceInventory(fetch_, target, accessToken);
   const eventarcValuesPromise = listApi(
     fetch_, `https://eventarc.googleapis.com/v1/projects/${target.projectId}/locations/-/triggers`,
     'triggers', accessToken, target.projectId,
@@ -1714,7 +2165,7 @@ async function deployedSecurity(
     assert.equal(name.startsWith(prefix), true);
     return name.slice(prefix.length);
   }).sort());
-  const authProvidersPromise = Promise.all([
+  const authProvidersPromise = authPromise.then(async (authConfig) => Promise.all([
     [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/defaultSupportedIdpConfigs`, 'defaultSupportedIdpConfigs'],
     [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/oauthIdpConfigs`, 'oauthIdpConfigs'],
     [`https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/inboundSamlConfigs`, 'inboundSamlConfigs'],
@@ -1723,8 +2174,8 @@ async function deployedSecurity(
     field, accessToken, target.projectId,
   )] as const)).then(async (entries) => normalizedAuthProviderInventory({
     ...Object.fromEntries(entries),
-    tenants: await identityTenants(fetch_, target, accessToken),
-  }));
+    tenants: await identityTenants(fetch_, target, accessToken, authConfig.subtype),
+  })));
   const customRolesPromise = listApi(
     fetch_,
     `https://iam.googleapis.com/v1/projects/${target.projectId}/roles?showDeleted=true&view=FULL`,
@@ -1788,8 +2239,16 @@ async function deployedSecurity(
       };
     }));
   });
-  const repositoriesPromise = Promise.all(target.security.artifactRepositories.map(
-    async ({name}) => {
+  const repositoryListPromise = listApi(
+    fetch_,
+    `https://artifactregistry.googleapis.com/v1/projects/${target.projectId}/locations/-/repositories`,
+    'repositories', accessToken, target.projectId,
+  );
+  const repositoriesPromise = repositoryListPromise.then(async (repositories) => {
+    const names = repositories.map((repository) => string(repository.name)).sort();
+    assert.deepEqual(names,
+      target.security.artifactRepositories.map(({name}) => name).sort());
+    return Promise.all(names.map(async (name) => {
       const [repository, iam] = await Promise.all([
         json(
           fetch_, `https://artifactregistry.googleapis.com/v1/${name}`,
@@ -1801,10 +2260,9 @@ async function deployedSecurity(
         ),
       ]);
       assert.equal(repository.name, name);
-      assert.equal(repository.format, 'DOCKER');
-      return {name, iam};
-    },
-  ));
+      return {name, iam, configuration: normalizedArtifactRepository(repository)};
+    }));
+  });
   const pubsubTopicsPromise = listApi(
     fetch_, `https://pubsub.googleapis.com/v1/projects/${target.projectId}/topics`,
     'topics', accessToken, target.projectId,
@@ -2202,8 +2660,15 @@ export function deploymentProblems(
       if (observedFunction.buildId === null ||
           observedFunction.buildId !== observedFunction.imageBuildId ||
           observedFunction.buildSource === null ||
-          observedFunction.buildSource !== observedFunction.imageSource) {
+          observedFunction.buildSource !== observedFunction.imageSource ||
+          observedFunction.buildImageDigest === null ||
+          observedFunction.revisionImage === null ||
+          observedFunction.buildImageDigest !== observedFunction.revisionImage.split('@').at(-1)) {
         problems.push(`Cloud Run image provenance does not match the immutable Function build: ${key}`);
+      }
+      if (observedFunction.imageSourceFiles === null ||
+          canonical(observedFunction.imageSourceFiles) !== canonical(expected.functionFiles)) {
+        problems.push(`Cloud Run image source does not match the reviewed commit: ${key}`);
       }
       const pinnedTag = observed.hosting.pinnedTags[key];
       const traffic = observedFunction.runTraffic ?? [];
@@ -2370,9 +2835,12 @@ function securityTarget(
   const serviceAccounts = array(security.serviceAccounts).map((value_) => {
     const account = record(value_);
     assertExactKeys(account, ['name', 'iam', 'userManagedKeys']);
+    const userManagedKeys = sortedCanonical(array(account.userManagedKeys).map(record));
+    assert.deepEqual(userManagedKeys, [],
+      'user-managed service-account keys are forbidden in reviewed production state');
     return {
       ...targetIamResource({name: account.name, iam: account.iam}),
-      userManagedKeys: sortedCanonical(array(account.userManagedKeys).map(record)),
+      userManagedKeys,
     };
   });
   const requiredAccounts = [...new Set(functions.map(({serviceAccount}) => serviceAccount))].sort();
@@ -2394,7 +2862,14 @@ function securityTarget(
   const requiredSecrets = [...new Set(functions.flatMap((function_) =>
     function_.secrets.map(({secret}) => secret)))].sort();
   assert.deepEqual(secrets.map(({name}) => name).sort(), requiredSecrets);
-  const repositories = array(security.artifactRepositories).map(targetIamResource);
+  const repositories = array(security.artifactRepositories).map((value_) => {
+    const repository = record(value_);
+    assertExactKeys(repository, ['name', 'iam', 'configuration']);
+    return {
+      ...targetIamResource({name: repository.name, iam: repository.iam}),
+      configuration: record(repository.configuration),
+    };
+  });
   const requiredRepositories = [...new Set(functions
     .filter(({generation}) => generation === 'GEN_2')
     .map(({region}) =>
@@ -2445,13 +2920,17 @@ function securityTarget(
       };
     }));
   const eventarcTriggers = targetSecuredResources(security.eventarcTriggers);
-  const reviewedEventDestinations = eventarcTriggers.map(({configuration}) =>
-    canonical(record(configuration.destination))).sort();
-  const expectedEventDestinations = expectedEventarcTriggers({
+  const reviewedEventConfiguration = sortedCanonical(eventarcTriggers.map(({configuration}) => ({
+    destination: record(configuration.destination),
+    eventFilters: array(configuration.eventFilters).map(record),
+    labels: record(configuration.labels),
+    serviceAccount: string(configuration.serviceAccount),
+  })));
+  const expectedEventConfiguration = expectedEventarcTriggers({
     projectId,
     functions,
-  } as DeploymentTarget).map(({destination}) => canonical(destination)).sort();
-  assert.deepEqual(reviewedEventDestinations, expectedEventDestinations);
+  } as DeploymentTarget);
+  assert.deepEqual(reviewedEventConfiguration, expectedEventConfiguration);
   return {
     gitOrigin,
     storageRulesRelease,
@@ -2524,8 +3003,11 @@ function deploymentTarget(value: unknown): DeploymentTarget {
   const security = securityTarget(target.security, functions, projectId);
   const bucketNames = security.storageBuckets.map(({name}) => name);
   assert.equal(bucketNames.includes(security.storageRulesRelease), true);
-  if (bucketNames.includes(firebaseConfig.storageBucket)) {
-    assert.equal(firebaseConfig.storageBucket, security.storageRulesRelease);
+  if (firebaseConfig.storageBucket !== security.storageRulesRelease) {
+    assert.equal(firebaseConfig.storageBucket, `${projectId}.firebasestorage.app`);
+    assert.equal(security.storageRulesRelease, `${projectId}.appspot.com`);
+    assert.equal(bucketNames.includes(firebaseConfig.storageBucket), false,
+      'configured Firebase Storage alias must not expose a second bucket');
   }
   assert.equal(hostingSite, projectId);
   assert.match(projectId, /^[a-z][a-z0-9-]{4,29}$/);
@@ -2650,15 +3132,16 @@ export function reviewedTreeProblems(
   ).trim();
   const remote = remoteLine.split(/\s+/)[0] ?? '';
   const origin = gitText(runGit, ['remote', 'get-url', 'origin']).trim();
-  const localConfig = gitText(runGit, ['config', '--local', '--list', '-z'])
+  const configParts = gitText(runGit, ['config', '--list', '--show-origin', '-z'])
     .split('\0').filter(Boolean);
-  const urlRewrites = localConfig.filter((entry) =>
-    /^url\..*\.insteadof\n/i.test(entry));
+  assert.equal(configParts.length % 2, 0, 'invalid Git config origin output');
+  const urlRewrites = configParts.filter((entry, index) => index % 2 === 1 &&
+    /^url\..*\.(?:insteadof|pushinsteadof)\n/i.test(entry));
   if (head !== reviewedCommit) problems.push('HEAD is not the reviewed commit');
   if (pushed !== reviewedCommit) problems.push('origin/master is not the reviewed commit');
   if (remote !== reviewedCommit) problems.push('Remote master is not the reviewed commit');
   if (origin !== target.security.gitOrigin) problems.push('Git origin is not the reviewed repository');
-  if (urlRewrites.length > 0) problems.push('Repository-local Git URL rewrite can spoof origin');
+  if (urlRewrites.length > 0) problems.push('Git URL rewrite can spoof origin');
   const status = gitText(
     runGit,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],

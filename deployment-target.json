@@ -104,27 +104,13 @@
       {
         "name":"firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com",
         "iam":[],
-        "userManagedKeys":[{
-          "name":"projects/book-tracker-d8f24/serviceAccounts/firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com/keys/7267efd595651e52ea9a52e90338e103be409cf6",
-          "keyOrigin":"GOOGLE_PROVIDED",
-          "keyType":"USER_MANAGED",
-          "disabled":false,
-          "validAfterTime":"2025-11-27T02:10:09Z",
-          "validBeforeTime":"9999-12-31T23:59:59Z"
-        }]
+        "userManagedKeys":[]
       },
       {"name":"furniture-diffusion@book-tracker-d8f24.iam.gserviceaccount.com","iam":[],"userManagedKeys":[]},
       {
         "name":"vision-api@book-tracker-d8f24.iam.gserviceaccount.com",
         "iam":[],
-        "userManagedKeys":[{
-          "name":"projects/book-tracker-d8f24/serviceAccounts/vision-api@book-tracker-d8f24.iam.gserviceaccount.com/keys/61e8cb4880ee1f674bf1dc3c9c0fad883389077c",
-          "keyOrigin":"GOOGLE_PROVIDED",
-          "keyType":"USER_MANAGED",
-          "disabled":false,
-          "validAfterTime":"2025-03-27T16:03:22Z",
-          "validBeforeTime":"9999-12-31T23:59:59Z"
-        }]
+        "userManagedKeys":[]
       }
     ],
     "secrets": [{
@@ -133,8 +119,34 @@
       "versions": [{"version":"1","state":"ENABLED"},{"version":"2","state":"ENABLED"}]
     }],
     "artifactRepositories": [
-      {"name":"projects/book-tracker-d8f24/locations/europe-west1/repositories/gcf-artifacts","iam":[]},
-      {"name":"projects/book-tracker-d8f24/locations/us-central1/repositories/gcf-artifacts","iam":[]}
+      {
+        "name":"projects/book-tracker-d8f24/locations/europe-west1/repositories/gcf-artifacts",
+        "iam":[],
+        "configuration":{
+          "format":"DOCKER",
+          "description":"This repository is created and used by Cloud Functions for storing function docker images.",
+          "labels":{"goog-managed-by":"cloudfunctions"},
+          "mode":"STANDARD_REPOSITORY",
+          "cleanupPolicies":{},"cleanupPolicyDryRun":false,"kmsKeyName":null,
+          "dockerConfig":{},"mavenConfig":{},"virtualRepositoryConfig":{},
+          "remoteRepositoryConfig":{},
+          "vulnerabilityScanningConfig":{"enablementState":"SCANNING_DISABLED"}
+        }
+      },
+      {
+        "name":"projects/book-tracker-d8f24/locations/us-central1/repositories/gcf-artifacts",
+        "iam":[],
+        "configuration":{
+          "format":"DOCKER",
+          "description":"This repository is created and used by Cloud Functions for storing function docker images.",
+          "labels":{"goog-managed-by":"cloudfunctions"},
+          "mode":"STANDARD_REPOSITORY",
+          "cleanupPolicies":{},"cleanupPolicyDryRun":false,"kmsKeyName":null,
+          "dockerConfig":{},"mavenConfig":{},"virtualRepositoryConfig":{},
+          "remoteRepositoryConfig":{},
+          "vulnerabilityScanningConfig":{"enablementState":"SCANNING_DISABLED"}
+        }
+      }
     ],
     "storageBuckets": [
       {
