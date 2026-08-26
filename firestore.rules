@@ -836,7 +836,8 @@ service cloud.firestore {
     // the server-side sitemap enumerates markers with the Admin SDK.
     match /profileDiscovery/{username} {
       allow get: if request.auth != null
-                 && resource.data.uid == request.auth.uid;
+                 && get(/databases/$(database)/documents/profiles/$(username)).data.uid
+                    == request.auth.uid;
       allow list: if false;
       allow create: if request.auth != null
                     && username.matches('[a-z0-9-]{3,30}')

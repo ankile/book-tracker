@@ -173,6 +173,8 @@ test('owners can opt public profiles into search without making markers listable
   const profileRef = doc(owner, 'profiles', 'searchable-reader');
   const discoveryRef = doc(owner, 'profileDiscovery', 'searchable-reader');
   await assertSucceeds(setDoc(profileRef, profile('discovery-owner')));
+  const missingDiscovery = await assertSucceeds(getDoc(discoveryRef));
+  assert.equal(missingDiscovery.exists(), false);
   await assertSucceeds(setDoc(discoveryRef, {
     uid: 'discovery-owner',
     createdAt: serverTimestamp(),
