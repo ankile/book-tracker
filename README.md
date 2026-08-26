@@ -281,6 +281,14 @@ This runs Svelte diagnostics, PWA tests, Functions linting and compilation,
 the production web build, a bundle-size budget, and production-dependency
 security audits for both workspaces.
 
+The multi-tab authentication regression uses a real browser against isolated
+Auth and Firestore emulators. Install its browser once, then run it separately:
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
 ## Deployment
 
 ### Prerequisites for Deployment
