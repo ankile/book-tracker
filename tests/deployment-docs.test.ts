@@ -38,7 +38,7 @@ test('the README deploys compatible Hosting before the progress-source backfill'
     'node migrate-timer-claims.ts --prod --apply',
     'node migrate-timer-claims.ts --prod --apply',
     'node db-audit.ts --prod',
-    'firebase deploy --only functions:publicweb,hosting',
+    'firebase deploy --only functions,hosting',
     '7-day old-bundle overlap window',
     'node migrate-reading-progress-sources.ts --prod',
     'node db-snapshot.ts --prod',
@@ -66,14 +66,16 @@ test('profile renderer deployment stays coupled to Hosting and follows its rules
   const deployment = section(
     readme,
     '### Deploy Hosting and Profile Renderer',
-    '### Deploy to Preview Channel',
+    '### Test Release Candidates',
   );
 
   assert.match(deployment, /There is intentionally no Hosting-only release path/i);
   assertOrdered(deployment, [
     'npm run build',
-    'firebase deploy --only functions:publicweb,hosting',
+    'firebase deploy --only functions,hosting',
   ]);
+  assert.doesNotMatch(readme, /hosting:channel:deploy/);
+  assert.match(readme, /Do not create preview channels/i);
   assert.match(readme, /profileDiscovery\/<username>/);
   assert.match(readme, /public profile without a marker:[^\n]*`200` with `noindex,follow`/i);
   assert.match(migrations, /Deploy the additive `profileDiscovery` Firestore rules before exposing the UI/i);

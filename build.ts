@@ -31,6 +31,14 @@ execFileSync(execPath, [join(root, 'sync-profile-shell.ts')], {
   cwd: root,
   stdio: 'inherit',
 });
+execFileSync('npm', ['--prefix', join(root, 'functions'), 'run', 'build'], {
+  cwd: root,
+  stdio: 'inherit',
+});
+execFileSync(execPath, [join(root, 'sync-functions-manifest.ts')], {
+  cwd: root,
+  stdio: 'inherit',
+});
 execFileSync(execPath, [join(root, 'sync-hosting-manifest.ts')], {
   cwd: root,
   stdio: 'inherit',

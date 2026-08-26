@@ -105,10 +105,11 @@ the fresh client just made must be invisible to it (0 ops against new-shape docs
 
 ### 3. Deploy code changes, in this order
 
-1. **Functions** (`firebase deploy --only functions:<name>`) — trigger
+1. **Functions** (`firebase deploy --only functions`) — trigger
    behavior must be correct before bulk writes land.
 2. **Firestore rules/indexes** (`firebase deploy --only firestore`).
-3. **Hosting** (`npm run build` + `firebase deploy --only hosting`).
+3. **Hosting plus the reviewed Function archive** (`npm run build` +
+   `firebase deploy --only functions,hosting`).
 
 Rules before hosting is load-bearing: the client writes in atomic
 `writeBatch`es, so if new client code touches a not-yet-allowed collection,
@@ -132,7 +133,7 @@ Hosting from that same build with:
 ```bash
 npm run build
 npm exec --yes --package firebase-tools@15.24.0 -- \
-  firebase deploy --only functions:publicweb,hosting
+  firebase deploy --only functions,hosting
 ```
 
 Deploy the additive `profileDiscovery` Firestore rules before exposing the UI

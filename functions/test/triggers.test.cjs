@@ -79,6 +79,7 @@ test("preserves the deployed function export names", () => {
   assert.equal(deploymentTarget.releaseId, "security-2026-08-26-01");
   assert.deepEqual(deploymentTarget.hostingOrigins, [
     "https://book-tracker-d8f24.web.app",
+    "https://book-tracker-d8f24.firebaseapp.com",
     "https://book.ankile.com",
   ]);
   assert.deepEqual(deploymentTarget.functions.map(({name, generation, region}) => ({
@@ -201,18 +202,21 @@ test("binds every production function declaration to exported metadata", () => {
       target.secrets.map(({key}) => key).sort(),
       `${target.name} secrets`,
     );
-    assert.equal(
-      target.publicInvoker,
-      access === "callable" || access === "http",
-      `${target.name} public transport`,
+    assert.deepEqual(
+      target.functionIam,
+      generation === "GEN_1" && access !== "event" ? [{
+        role: "roles/cloudfunctions.invoker",
+        members: ["allUsers"],
+      }] : [],
+      `${target.name} Function IAM`,
     );
     assert.deepEqual(
-      target.invokers,
-      access === "event" ? [] : [
-        `${generation === "GEN_2" ? "roles/run.invoker" :
-          "roles/cloudfunctions.invoker"}:allUsers`,
-      ],
-      `${target.name} invoker IAM`,
+      target.runIam,
+      generation === "GEN_1" ? null : access === "http" ? [{
+        role: "roles/run.invoker",
+        members: ["allUsers"],
+      }] : [],
+      `${target.name} Cloud Run IAM`,
     );
     assert.equal(
       endpoint.labels["book-tracker-release"],

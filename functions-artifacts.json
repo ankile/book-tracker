@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "files": {
+    ".gitignore": "bd111126b84600b224349fb3e48d3431ac1ab66eee5cb9d907773b577a9389d2",
+    ".npmrc": "d79fb46786082a8cb407d3c265ee3295472d076fc45b2adbb9bd8f67958e27c9",
+    "assets/profile-shell.html": "40381b720e8aec8a3109488b5d628bfd843add46b22203dab55fe78f65e9ab5a",
+    "lib/admin.js": "ed83491d94604b15d9fa03d173c9db9f8351607a5dd32eb7f1c7ef87045310ef",
+    "lib/adminIssues.js": "deee4dd570ad5d13c39759c6e4cacff400f20c33189b1eff4a222556c7404e4e",
+    "lib/booksapi.js": "d93b1f4bda5fa9e6c7da96b4ce2ccfbe582ec9e01fd79e3eb67d665c0a56dbae",
+    "lib/decoders.js": "f3b583aa5ebff3e50220f9aa49bd0d153c6ce0655048bf7444b26f5b61ca19ff",
+    "lib/index.js": "206c6e96da2b0d3f3e1857a2dc16e1905b377f5222553a8b5447cc6e14f8c694",
+    "lib/logging.js": "415d97471e133347a9b3b63527253002d3011034259b90edbae8d31700576919",
+    "lib/publicProfileRenderer.js": "ab0ac519e0614618a8f5ed0525566878c84c183ae9af586d17b5f71b34178936",
+    "lib/publicWeb.js": "ffb73973242cfb5a8a0011deab76e7250a1c9fe4111ef67db2f3dc04de123347",
+    "lib/release.js": "33331a35b5cfc2583659db8f22d97c40c5c70a9aca94e3ad2ff2f1efe4ccf44d",
+    "lib/toggl-recovery.js": "160d6004df1bdd90c1f62eabc46121ebc0f6fee6cb711f6f599eb373ced8d30b",
+    "lib/toggl.js": "2bb00bb771ff27db7d9ded95089c01d20fd8d2eee812c951f00b50ccfab2b2fc",
+    "package-lock.json": "59d7da57c9e72388f9d86b4b5c798dae139e4639c68b1b4ee5d5f0545419ea82",
+    "package.json": "1ab1afe9838ad070e0dff0b85062e8f85479e5408837294a9860b8ee72ccb9bc"
+  },
+  "profileProbeSha256": "2c1518453d3663415d7d2984522a54d39d19e96644b60c59064dfc5b0c68b5ba"
+}

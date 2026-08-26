@@ -5,13 +5,29 @@
   "hostingSite": "book-tracker-d8f24",
   "hostingOrigins": [
     "https://book-tracker-d8f24.web.app",
+    "https://book-tracker-d8f24.firebaseapp.com",
     "https://book.ankile.com"
   ],
-  "allowedGeneratedHostingFiles": [
-    "__/firebase/init.js",
-    "__/firebase/init.json"
-  ],
+  "hostingCustomDomains": ["book.ankile.com"],
+  "generatedHostingFiles": {
+    "__/firebase/init.js": {
+      "sha256": "e54a5b28e54973ed3a87042d3237c40d163a663643592db92db7fa517cadf3c3",
+      "hostingHash": "08bd00a17a514a01dfdd5c5aa6587eb07b2e6f256df50142fee560fa872173c5"
+    },
+    "__/firebase/init.json": {
+      "sha256": "e056388f9deb1cd909c2a704fee6e4dc467255b1f5656188525b48aca1fe9fc3",
+      "hostingHash": "8d49fb1e1f3b1603939440e7c3e16c880d828223e5c1191f858469736586ba7b"
+    }
+  },
   "allowedUntrackedPrefixes": ["ideas/"],
+  "ancestorResources": ["projects/book-tracker-d8f24"],
+  "ancestorIamPolicySha256": "3b551bc5c2cf2508385c6916c2094c358db71ca175ef84e03ada7250d3fed99c",
+  "firebaseConfig": {
+    "projectId": "book-tracker-d8f24",
+    "databaseURL": "https://book-tracker-d8f24.firebaseio.com",
+    "storageBucket": "book-tracker-d8f24.firebasestorage.app",
+    "locationId": "europe-west"
+  },
   "functions": [
     {
       "name": "admin-overview",
@@ -23,8 +39,8 @@
       "maxInstances": null,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -42,8 +58,8 @@
         "secret": "FUNCTIONS_CONFIG_EXPORT",
         "version": "2"
       }],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -56,8 +72,8 @@
       "maxInstances": 3000,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": false,
-      "invokers": [],
+      "functionIam": [],
+      "runIam": null,
       "event": {
         "type": "providers/firebase.auth/eventTypes/user.create",
         "retry": false,
@@ -74,8 +90,8 @@
       "maxInstances": 3000,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": false,
-      "invokers": [],
+      "functionIam": [],
+      "runIam": null,
       "event": {
         "type": "providers/firebase.auth/eventTypes/user.delete",
         "retry": false,
@@ -92,8 +108,8 @@
       "maxInstances": 20,
       "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": false,
-      "invokers": [],
+      "functionIam": [],
+      "runIam": [],
       "event": {
         "type": "google.cloud.firestore.document.v1.deleted",
         "retry": false,
@@ -114,8 +130,8 @@
       "maxInstances": 20,
       "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/run.invoker:allUsers"],
+      "functionIam": [],
+      "runIam": [{"role": "roles/run.invoker", "members": ["allUsers"]}],
       "event": null
     },
     {
@@ -128,8 +144,8 @@
       "maxInstances": null,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -142,8 +158,8 @@
       "maxInstances": null,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -156,8 +172,8 @@
       "maxInstances": null,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -170,8 +186,8 @@
       "maxInstances": null,
       "serviceAccount": "book-tracker-d8f24@appspot.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": true,
-      "invokers": ["roles/cloudfunctions.invoker:allUsers"],
+      "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
+      "runIam": null,
       "event": null
     },
     {
@@ -184,8 +200,8 @@
       "maxInstances": 5,
       "serviceAccount": "440931185227-compute@developer.gserviceaccount.com",
       "secrets": [],
-      "publicInvoker": false,
-      "invokers": [],
+      "functionIam": [],
+      "runIam": [],
       "event": {
         "type": "google.cloud.firestore.document.v1.written",
         "retry": true,

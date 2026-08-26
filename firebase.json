@@ -60,6 +60,22 @@
     ]
   },
   "functions": {
+    "source": "functions",
+    "disallowLegacyRuntimeConfig": true,
+    "ignore": [
+      "node_modules",
+      ".git",
+      ".DS_Store",
+      ".env*",
+      ".secret.*",
+      "*.log",
+      "src",
+      "test",
+      "eslint.config.cjs",
+      "tsconfig.json",
+      "**/*.js.map",
+      "**/lib/scripts/**"
+    ],
     "predeploy": [
       "npm --prefix \"$RESOURCE_DIR\" run lint",
       "npm --prefix \"$RESOURCE_DIR\" run build"

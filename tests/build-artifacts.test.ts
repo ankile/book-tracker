@@ -5,12 +5,15 @@ import { access, readFile, readdir } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
+import {gzipSync} from 'node:zlib';
 
 const publicIndexUrl = new URL('../public/index.html', import.meta.url);
 const publicServiceWorkerUrl = new URL('../public/service-worker.js', import.meta.url);
 const publicVersionUrl = new URL('../public/_app/version.json', import.meta.url);
 const profileShellUrl = new URL('../functions/assets/profile-shell.html', import.meta.url);
 const hostingManifestUrl = new URL('../hosting-artifacts.json', import.meta.url);
+const functionsManifestUrl = new URL('../functions-artifacts.json', import.meta.url);
+const functionsRootUrl = new URL('../functions/', import.meta.url);
 const publicRootUrl = new URL('../public/', import.meta.url);
 
 function immutableAssetPaths(source: string): string[] {
@@ -138,16 +141,103 @@ test('Hosting manifest binds every generated deployment file', async () => {
   assert.notEqual(parsed, null);
   assert.equal(Array.isArray(parsed), false);
   const manifest = parsed as {version?: unknown; files?: unknown};
-  assert.equal(manifest.version, 1);
+  assert.equal(manifest.version, 2);
   assert.equal(typeof manifest.files, 'object');
   assert.notEqual(manifest.files, null);
   assert.equal(Array.isArray(manifest.files), false);
 
   const actual = Object.fromEntries(await Promise.all(
-    (await builtHostingFiles(publicRootUrl)).map(async (path) => [
-      relative(fileURLToPath(publicRootUrl), path).split(sep).join('/'),
-      createHash('sha256').update(await readFile(path)).digest('hex'),
+    (await builtHostingFiles(publicRootUrl)).map(async (path) => {
+      const content = await readFile(path);
+      return [
+        relative(fileURLToPath(publicRootUrl), path).split(sep).join('/'),
+        {
+          sha256: createHash('sha256').update(content).digest('hex'),
+          hostingHash: createHash('sha256')
+            .update(gzipSync(content, {level: 9}))
+            .digest('hex'),
+        },
+      ] as const;
+    }),
+  ));
+  assert.deepEqual(manifest.files, actual);
+});
+
+test('Functions manifest binds the exact compiled deployment source and profile probe', async () => {
+  const builtManifest = await readFile(functionsManifestUrl, 'utf8');
+  assert.equal(
+    sha256(indexedFile('functions-artifacts.json')),
+    sha256(builtManifest),
+    'functions-artifacts.json is stale; run npm run build and stage the generated manifest',
+  );
+  const manifest = JSON.parse(builtManifest) as {
+    version: number;
+    files: Record<string, string>;
+    profileProbeSha256: string;
+  };
+  assert.equal(manifest.version, 1);
+  const actual = Object.fromEntries(await Promise.all(
+    Object.keys(manifest.files).map(async (deploymentPath) => [
+      deploymentPath,
+      createHash('sha256')
+        .update(await readFile(new URL(deploymentPath, functionsRootUrl)))
+        .digest('hex'),
     ] as const),
   ));
   assert.deepEqual(manifest.files, actual);
+  assert.deepEqual(Object.keys(manifest.files).sort(), [
+    '.gitignore',
+    '.npmrc',
+    'assets/profile-shell.html',
+    'lib/admin.js',
+    'lib/adminIssues.js',
+    'lib/booksapi.js',
+    'lib/decoders.js',
+    'lib/index.js',
+    'lib/logging.js',
+    'lib/publicProfileRenderer.js',
+    'lib/publicWeb.js',
+    'lib/release.js',
+    'lib/toggl-recovery.js',
+    'lib/toggl.js',
+    'package-lock.json',
+    'package.json',
+  ]);
+  const rendererPath = '../functions/lib/' + 'publicProfileRenderer.js';
+  const renderer = await import(rendererPath) as {
+    renderNotFoundDocument(shell: string): string;
+  };
+  const shell = await readFile(profileShellUrl, 'utf8');
+  assert.equal(
+    manifest.profileProbeSha256,
+    sha256(renderer.renderNotFoundDocument(shell)),
+  );
+});
+
+test('Firebase Functions packaging excludes local configuration and non-runtime sources', () => {
+  const firebaseJson = JSON.parse(indexedFile('firebase.json')) as {
+    functions: Record<string, unknown>;
+  };
+  assert.deepEqual(firebaseJson.functions, {
+    source: 'functions',
+    disallowLegacyRuntimeConfig: true,
+    ignore: [
+      'node_modules',
+      '.git',
+      '.DS_Store',
+      '.env*',
+      '.secret.*',
+      '*.log',
+      'src',
+      'test',
+      'eslint.config.cjs',
+      'tsconfig.json',
+      '**/*.js.map',
+      '**/lib/scripts/**',
+    ],
+    predeploy: [
+      'npm --prefix "$RESOURCE_DIR" run lint',
+      'npm --prefix "$RESOURCE_DIR" run build',
+    ],
+  });
 });

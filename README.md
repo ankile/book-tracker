@@ -340,7 +340,7 @@ node db-audit.ts --prod
 
 # 4. Expose the claim-aware, progress-source-compatible client and its matching profile renderer.
 npm run build
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions,hosting
 
 # 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
 node migrate-reading-progress-sources.ts --prod
@@ -370,20 +370,23 @@ git rev-parse HEAD
 npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
 ```
 
-The command reruns the full validation and production build. It then requires
-the reviewed commit to equal both `HEAD` and `origin/master`, rejects unreviewed
-deploy inputs, and reads expected artifacts from that commit rather than the
-working tree. The live checks cover rules, composite indexes, TTL policies,
-Function release labels and security-sensitive configuration, invoker IAM,
-Gen 2 traffic, the active Hosting version's complete file manifest and serving
-configuration, every reviewed file on both production origins, and the profile
-and sitemap rewrites. Pass `--account=<gcloud-account>` when the active gcloud
-account is not the release account. Unknown or misspelled options fail.
+The command reruns the full validation and production build. It requires the
+reviewed commit to equal `HEAD`, the local tracking ref, and the current remote
+`master` returned by `git ls-remote`. It rejects ignored dotenv deploy inputs
+and reads expected artifacts from the reviewed commit rather than the working
+tree. The live checks cover the complete Firestore ruleset, indexes, TTL
+policies, every Function source archive, runtime and security configuration,
+complete Function and Cloud Run IAM policies, ancestor IAM, Gen 2 traffic and
+Hosting-pinned revisions, all Hosting sites/domains/channels, control-plane
+gzip hashes, bytes from every production origin, and the profile and sitemap
+rewrites. Pass `--account=<gcloud-account>` when the active gcloud account is
+not the release account. Unknown or misspelled options fail.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
-Change that ID whenever Function code or configuration changes, then deploy all
-Functions. A Hosting-only release leaves the Function release ID unchanged and
-deploys only `functions:publicweb,hosting` as described below.
+Change that ID for every release. Deploy all Functions so every deployed source
+archive matches the reviewed manifest; frontend changes also change the shell
+embedded in `publicweb`. There is no partial production Function or Hosting
+release path.
 
 ### Deploy Hosting and Profile Renderer
 
@@ -395,28 +398,26 @@ Function embeds that shell. Deploy both targets from one build:
 # Build the web app
 npm run build
 
-# Deploy the matching renderer revision and Hosting release together
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
+# Deploy every reviewed Function source archive and the matching Hosting release
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions,hosting
 ```
 
-### Deploy to Preview Channel
+### Test Release Candidates
 
-Test your changes on a temporary URL before deploying to production:
+Do not create preview channels or deploy preview Function revisions in the
+production Firebase project. Preview URLs are public and use the production
+Firebase configuration. Use the local emulators, or a separate non-production
+Firebase project with dummy data and credentials:
 
 ```bash
-# Build the app
-npm run build
-
-# Publish the matching renderer revision, then pin it to the preview release.
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb
-npm exec --yes --package firebase-tools@15.24.0 -- \
-  firebase hosting:channel:deploy preview --expires 30d
+npm run test:rules
+npm --prefix functions test
 ```
 
 ### Deploy Functions Only
 
-To deploy backend-only Firebase Functions changes that do not touch
-`publicweb`, `src/app.html`, client assets, or the shell sync script:
+Backend-only changes still require every Function to receive the same reviewed
+source archive:
 
 ```bash
 # The predeploy hooks will automatically lint and build
@@ -429,9 +430,9 @@ Or use the npm script:
 npm --prefix functions run deploy
 ```
 
-If `publicweb` or any web-shell input changed, use **Deploy Hosting and Profile
-Renderer** instead. Deploying either half alone can return HTML whose hashed
-assets do not exist in that Hosting release.
+If `publicweb` or any web-shell input changed, also deploy Hosting in the same
+release. Deploying either half alone can return HTML whose hashed assets do not
+exist in that Hosting release.
 
 ### View Deployment Logs
 
