@@ -219,6 +219,13 @@ record these together in the rollout log:
 The timer migration and Hosting deployment are release gates, not a single
 all-at-once deploy. Use this rollback matrix:
 
+Before the Functions step, copy the UTC timestamp printed by
+`node -e "console.log(new Date().toISOString())"`. After the compatible
+Functions, migrations, renderer, and Hosting release are complete, run
+`npm run verify:deployment -- --deployed-after=<copied-UTC-timestamp>`.
+Do not mark the rollout complete if it reports stale rules, a missing or extra
+Function, a generation mismatch, an old Function revision, or stale Hosting.
+
 1. **Merge only:** revert the merge commit. No Firebase state changed.
 2. **New rules only:** deploy `firestore:rules` from the pre-release tag.
    Do not deploy `--only firestore`: retain the additive indexes and TTL

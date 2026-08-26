@@ -1,0 +1,18 @@
+{
+  "projectId": "book-tracker-d8f24",
+  "hostingOrigin": "https://book-tracker-d8f24.web.app",
+  "region": "europe-west1",
+  "functions": [
+    {"name": "admin-overview", "generation": "GEN_1"},
+    {"name": "booksapi-lookupisbn", "generation": "GEN_1"},
+    {"name": "createUserDocument", "generation": "GEN_1"},
+    {"name": "deleteUserDocument", "generation": "GEN_1"},
+    {"name": "deletebookupdates", "generation": "GEN_2"},
+    {"name": "publicweb", "generation": "GEN_2"},
+    {"name": "toggl-clearstopping", "generation": "GEN_1"},
+    {"name": "toggl-savetoken", "generation": "GEN_1"},
+    {"name": "toggl-start", "generation": "GEN_1"},
+    {"name": "toggl-stop", "generation": "GEN_1"},
+    {"name": "toggl-syncqueue", "generation": "GEN_2"}
+  ]
+}

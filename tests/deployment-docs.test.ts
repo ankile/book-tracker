@@ -117,6 +117,10 @@ test('the strict-TypeScript rollback runbook preserves compatible release stages
   assert.match(rollback, /Do not use `db-restore\.ts`\s+for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
   assert.match(
     rollback,
+    /verify:deployment -- --deployed-after=<copied-UTC-timestamp>/,
+  );
+  assert.match(
+    rollback,
     /local snapshot is only a targeted recovery aid[\s\S]*without a shared read[\s\S]*does not currently provide enforced write quiescence/i,
   );
 });

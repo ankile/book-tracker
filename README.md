@@ -361,6 +361,22 @@ successfully, routine full deployments can use the standard `firebase deploy`
 command, but must run `npm run build` first so Hosting and `publicweb` receive
 the same generated shell.
 
+For every production release, copy a UTC timestamp immediately before the
+Functions deployment. After every target is live, run the deployment integrity
+check with that timestamp:
+
+```bash
+node -e "console.log(new Date().toISOString())"
+# Copy the printed value before deploying Functions.
+npm run verify:deployment -- --deployed-after=<copied-UTC-timestamp>
+```
+
+The check reads the live Google APIs and fails unless Firestore runs the exact
+local rules, the Function names and generations match `deployment-target.json`,
+every Function was updated after the copied boundary, and Hosting serves the
+local `_app/version.json`. Pass `--account=<gcloud-account>` when the active
+gcloud account is not the release account. Unknown or misspelled options fail.
+
 ### Deploy Hosting and Profile Renderer
 
 There is intentionally no Hosting-only release path. Even a frontend-only

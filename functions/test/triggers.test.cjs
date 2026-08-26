@@ -28,6 +28,25 @@ test("preserves the deployed function export names", () => {
     "stop",
     "syncqueue",
   ]);
+
+  const deploymentTarget = JSON.parse(readFileSync(
+    join(__dirname, "..", "..", "deployment-target.json"),
+    "utf8",
+  ));
+  assert.equal(deploymentTarget.region, "europe-west1");
+  assert.deepEqual(deploymentTarget.functions, [
+    {name: "admin-overview", generation: "GEN_1"},
+    {name: "booksapi-lookupisbn", generation: "GEN_1"},
+    {name: "createUserDocument", generation: "GEN_1"},
+    {name: "deleteUserDocument", generation: "GEN_1"},
+    {name: "deletebookupdates", generation: "GEN_2"},
+    {name: "publicweb", generation: "GEN_2"},
+    {name: "toggl-clearstopping", generation: "GEN_1"},
+    {name: "toggl-savetoken", generation: "GEN_1"},
+    {name: "toggl-start", generation: "GEN_1"},
+    {name: "toggl-stop", generation: "GEN_1"},
+    {name: "toggl-syncqueue", generation: "GEN_2"},
+  ]);
 });
 
 test("keeps every function in europe-west1 on its required generation", () => {
