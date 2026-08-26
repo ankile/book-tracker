@@ -361,13 +361,30 @@ successfully, routine full deployments can use the standard `firebase deploy`
 command, but must run `npm run build` first so Hosting and `publicweb` receive
 the same generated shell.
 
-For every production release, record the exact commit approved for deployment.
-Push that commit before changing Firebase. After every selected target is live,
-run the deployment integrity check with the reviewed commit:
+For every production release, record the exact commit approved for deployment
+and push it before changing Firebase. A release that changes a Gen 2 Function
+uses two reviewed commits. The deployment commit leaves each Gen 2
+`runtimeAttestation` and `security.runInventoryCheckpoint` as `null`. After that
+commit is reviewed, pushed, and live, remove the obsolete credentials and other
+stale resources described below, then capture the immutable runtime evidence:
 
 ```bash
 git rev-parse HEAD
-npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
+npm run validate
+node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture > /tmp/book-tracker-runtime-attestation.json
+```
+
+Capture succeeds only when every check other than the deliberately pending
+runtime attestations and inventory checkpoint passes. Merge its
+`runtimeAttestation` values and `runInventoryCheckpoint` into
+`deployment-target.json`; do not copy the temporary capture into the repository. The next
+commit must change only `deployment-target.json`, and every attestation's
+`deploymentCommit` must name its parent deployment commit. Review and push this
+target-only attestation commit. Make no Cloud Run changes after the captured
+checkpoint, wait at least ten minutes, and run the final gate:
+
+```bash
+npm run verify:deployment -- --commit=<attestation-40-character-SHA>
 ```
 
 The command reruns the full validation and production build. It requires the
@@ -384,18 +401,24 @@ project service account and the absence of user-managed keys, Secret Manager,
 every Storage bucket plus its IAM and ACL surfaces, the exact Artifact Registry
 repository inventory/configuration/IAM, all Firebase Rules
 releases, complete Eventarc transports and IAM, Pub/Sub topics/subscriptions and
-conditional IAM, the project-wide Cloud Run wildcard inventory plus direct proof
-for every initially unreachable region, the Gen 2 Cloud Build recipe, output
-digest, in-image source provenance, and traffic, Hosting-pinned revisions, all Hosting
+conditional IAM, the project-wide Cloud Run wildcard inventory, Cloud Asset's
+cross-region inventory, direct proof for every initially unreachable region,
+and a mutation-free Admin Activity interval after the reviewed inventory
+checkpoint. It also checks the Gen 2 Cloud Build recipe, output digest,
+in-image source provenance, the immutable revision and service execution
+settings, the complete effective OCI filesystem and execution configuration,
+and traffic, Hosting-pinned revisions, all Hosting
 sites/domains/channels, control-plane gzip hashes, bytes from every production
 origin, and the profile and sitemap rewrites. Pass
 `--account=<gcloud-account>` when the active gcloud account is not the release
 account. Unknown or misspelled options fail.
 
-The verifier does not accept Cloud Run's `unreachable` list. It directly queries
-each listed region and either inventories its services or requires the API's
-explicit `LOCATION_POLICY_VIOLATED` proof that the project cannot deploy there.
-This avoids both a regional blind spot and an eventually consistent inventory.
+The verifier does not accept Cloud Run's `unreachable` list or a location-policy
+denial as proof that no older service exists. It directly queries each listed
+region, requires an exact Cloud Asset service inventory, and rejects every Cloud
+Run Admin Activity entry after the reviewed checkpoint. A direct service must
+also have converged into Cloud Asset. Freeze Cloud Run mutations between capture
+and final verification; any mutation requires a fresh capture and checkpoint.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
 Change that ID for every release. Deploy all Functions so every deployed source

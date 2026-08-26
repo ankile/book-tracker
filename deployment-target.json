@@ -25,6 +25,7 @@
   "security": {
     "gitOrigin": "https://github.com/ankile/book-tracker.git",
     "storageRulesRelease": "book-tracker-d8f24.appspot.com",
+    "runInventoryCheckpoint": null,
     "authConfig": {
       "authorizedDomains": [
         "book-tracker-d8f24.firebaseapp.com",
@@ -443,7 +444,8 @@
       "secrets": [],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "booksapi-lookupisbn",
@@ -462,7 +464,8 @@
       }],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "createUserDocument",
@@ -480,7 +483,8 @@
         "type": "providers/firebase.auth/eventTypes/user.create",
         "retry": false,
         "filters": [{"attribute": "resource", "value": "projects/book-tracker-d8f24"}]
-      }
+      },
+      "runtimeAttestation": null
     },
     {
       "name": "deleteUserDocument",
@@ -498,7 +502,8 @@
         "type": "providers/firebase.auth/eventTypes/user.delete",
         "retry": false,
         "filters": [{"attribute": "resource", "value": "projects/book-tracker-d8f24"}]
-      }
+      },
+      "runtimeAttestation": null
     },
     {
       "name": "deletebookupdates",
@@ -520,7 +525,8 @@
           {"attribute": "document", "value": "users/{userId}/books/{bookId}", "operator": "match-path-pattern"},
           {"attribute": "namespace", "value": "(default)"}
         ]
-      }
+      },
+      "runtimeAttestation": null
     },
     {
       "name": "publicweb",
@@ -534,7 +540,8 @@
       "secrets": [],
       "functionIam": [],
       "runIam": [{"role": "roles/run.invoker", "members": ["allUsers"]}],
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "toggl-clearstopping",
@@ -548,7 +555,8 @@
       "secrets": [],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "toggl-savetoken",
@@ -562,7 +570,8 @@
       "secrets": [],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "toggl-start",
@@ -576,7 +585,8 @@
       "secrets": [],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "toggl-stop",
@@ -590,7 +600,8 @@
       "secrets": [],
       "functionIam": [{"role": "roles/cloudfunctions.invoker", "members": ["allUsers"]}],
       "runIam": null,
-      "event": null
+      "event": null,
+      "runtimeAttestation": null
     },
     {
       "name": "toggl-syncqueue",
@@ -612,7 +623,8 @@
           {"attribute": "document", "value": "users/{uid}/togglQueue/{queueId}", "operator": "match-path-pattern"},
           {"attribute": "namespace", "value": "(default)"}
         ]
-      }
+      },
+      "runtimeAttestation": null
     }
   ]
 }

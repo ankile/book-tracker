@@ -28,6 +28,25 @@ interface FunctionSecret {
   version: string;
 }
 
+interface RuntimeFile {
+  path: string;
+  type: 'file' | 'directory' | 'symlink' | 'hardlink' | 'character' | 'block' | 'fifo';
+  mode: number;
+  uid: number;
+  gid: number;
+  deviceMajor?: number;
+  deviceMinor?: number;
+  sha256?: string;
+  linkName?: string;
+}
+
+interface RuntimeAttestation {
+  deploymentCommit: string;
+  imageDigest: string;
+  executionConfig: Record<string, unknown>;
+  files: RuntimeFile[];
+}
+
 interface HostingArtifact {
   sha256: string;
   hostingHash: string;
@@ -76,6 +95,7 @@ interface PubsubResourceSecurity extends IamResource {
 interface SecurityTarget {
   gitOrigin: string;
   storageRulesRelease: string;
+  runInventoryCheckpoint: string | null;
   authConfig: Record<string, unknown>;
   ancestorIamPolicies: IamResource[];
   customRoles: Record<string, unknown>[];
@@ -90,7 +110,10 @@ interface SecurityTarget {
   firebaseRulesReleases: string[];
 }
 
-interface ObservedSecurity extends Omit<SecurityTarget, 'gitOrigin' | 'storageRulesRelease'> {
+interface ObservedSecurity extends Omit<
+  SecurityTarget,
+  'gitOrigin' | 'storageRulesRelease' | 'runInventoryCheckpoint'
+> {
   runServices: string[];
 }
 
@@ -107,6 +130,7 @@ export interface ExpectedFunction {
   functionIam: IamBinding[];
   runIam: IamBinding[] | null;
   event: FunctionEvent | null;
+  runtimeAttestation: RuntimeAttestation | null;
 }
 
 export interface ObservedFunction extends ExpectedFunction {
@@ -150,6 +174,7 @@ export interface ObservedFunction extends ExpectedFunction {
   imageBuildId: string | null;
   imageSource: string | null;
   imageSourceFiles: Record<string, string> | null;
+  imageRuntimeAttestation: Omit<RuntimeAttestation, 'deploymentCommit'> | null;
 }
 
 interface ExpectedIndex {
@@ -249,6 +274,7 @@ const MAX_FUNCTION_ARCHIVE_BYTES = 20 * 1024 * 1024;
 const MAX_FUNCTION_SOURCE_BYTES = 50 * 1024 * 1024;
 const MAX_IMAGE_LAYER_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_LAYER_EXPANDED_BYTES = 500 * 1024 * 1024;
+const RUN_INVENTORY_QUIESCENCE_MS = 10 * 60 * 1000;
 
 function record(value: unknown): Record<string, unknown> {
   assert.equal(typeof value, 'object');
@@ -303,11 +329,11 @@ function stringRecord(value: unknown): Record<string, string> {
 }
 
 function nullableString(value: unknown): string | null {
-  return value === undefined ? null : string(value);
+  return value === undefined || value === null ? null : string(value);
 }
 
 function nullableNumber(value: unknown): number | null {
-  return value === undefined ? null : number(value);
+  return value === undefined || value === null ? null : number(value);
 }
 
 function normalizedIamBindings(policy: Record<string, unknown>): IamBinding[] {
@@ -407,6 +433,11 @@ function sourceArchiveFiles(content: Uint8Array): Record<string, string> {
 interface TarEntry {
   path: string;
   type: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  deviceMajor: number;
+  deviceMinor: number;
   body: Uint8Array;
   linkName: string;
 }
@@ -420,6 +451,13 @@ function tarString(content: Uint8Array): string {
 
 function tarOctal(content: Uint8Array): number {
   const value = tarString(content).trim();
+  assert.match(value, /^[0-7]+$/);
+  return Number.parseInt(value, 8);
+}
+
+function tarOptionalOctal(content: Uint8Array): number {
+  const value = tarString(content).trim();
+  if (value === '') return 0;
   assert.match(value, /^[0-7]+$/);
   return Number.parseInt(value, 8);
 }
@@ -449,12 +487,106 @@ function tarEntries(content: Uint8Array): TarEntry[] {
     entries.push({
       path,
       type: header[156],
+      mode: tarOctal(header.subarray(100, 108)),
+      uid: tarOctal(header.subarray(108, 116)),
+      gid: tarOctal(header.subarray(116, 124)),
+      deviceMajor: tarOptionalOctal(header.subarray(329, 337)),
+      deviceMinor: tarOptionalOctal(header.subarray(337, 345)),
       body: content.subarray(bodyStart, bodyEnd),
       linkName: tarString(header.subarray(157, 257)),
     });
     offset = bodyStart + Math.ceil(size / 512) * 512;
   }
   assert.fail('tar archive has no zero terminator');
+}
+
+function runtimePath(value: string): string {
+  const path = `/${value.replace(/^\.\//, '').replace(/^\//, '').replace(/\/$/, '')}`;
+  assert.match(path, /^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]*$/);
+  return path;
+}
+
+function runtimeFiles(layers: TarEntry[][]): RuntimeFile[] {
+  const files = new Map<string, RuntimeFile>();
+  const remove = (path: string): void => {
+    for (const existing of [...files.keys()]) {
+      if (existing === path || existing.startsWith(`${path}/`)) files.delete(existing);
+    }
+  };
+  for (const layer of layers) {
+    for (const entry of layer) {
+      const path = runtimePath(entry.path);
+      const name = path.split('/').at(-1)!;
+      if (name === '.wh..wh..opq') {
+        const directory = path.slice(0, -'/.wh..wh..opq'.length) || '/';
+        for (const existing of [...files.keys()]) {
+          if (existing.startsWith(`${directory === '/' ? '' : directory}/`)) files.delete(existing);
+        }
+      } else if (name.startsWith('.wh.')) {
+        const directory = path.slice(0, -(name.length + 1));
+        remove(`${directory}/${name.slice('.wh.'.length)}`);
+      }
+    }
+    for (const entry of layer) {
+      const path = runtimePath(entry.path);
+      const name = path.split('/').at(-1)!;
+      if (name === '.wh..wh..opq' || name.startsWith('.wh.')) continue;
+      const shared = {path, mode: entry.mode, uid: entry.uid, gid: entry.gid};
+      let file: RuntimeFile;
+      if (entry.type === 0 || entry.type === 48) {
+        file = {...shared, type: 'file', sha256: sha256(entry.body)};
+      } else if (entry.type === 49 || entry.type === 50) {
+        assert.match(entry.linkName, /^[^\0\r\n]+$/);
+        file = {
+          ...shared,
+          type: entry.type === 49 ? 'hardlink' : 'symlink',
+          linkName: entry.linkName,
+        };
+      } else if (entry.type === 51 || entry.type === 52) {
+        file = {
+          ...shared,
+          type: entry.type === 51 ? 'character' : 'block',
+          deviceMajor: entry.deviceMajor,
+          deviceMinor: entry.deviceMinor,
+        };
+      } else if (entry.type === 53) {
+        file = {...shared, type: 'directory'};
+      } else if (entry.type === 54) {
+        file = {...shared, type: 'fifo'};
+      } else {
+        assert.fail(`unsupported runtime tar entry type ${entry.type}: ${path}`);
+      }
+      const previous = files.get(path);
+      if (file.type !== 'directory' || (previous !== undefined && previous.type !== 'directory')) {
+        remove(path);
+      }
+      files.set(path, file);
+    }
+  }
+  return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function imageExecutionConfig(value: unknown): Record<string, unknown> {
+  const config = record(value);
+  assert.ok(Object.keys(config).every((key) => [
+    'Hostname', 'Domainname', 'User', 'AttachStdin', 'AttachStdout', 'AttachStderr',
+    'ExposedPorts', 'Tty', 'OpenStdin', 'StdinOnce', 'Env', 'Cmd', 'Healthcheck',
+    'ArgsEscaped', 'Image', 'Volumes', 'WorkingDir', 'Entrypoint', 'NetworkDisabled',
+    'MacAddress', 'OnBuild', 'Labels', 'StopSignal', 'StopTimeout', 'Shell',
+  ].includes(key)), 'OCI image configuration contains an unknown execution field');
+  array(config.Entrypoint ?? []).map(string);
+  array(config.Cmd ?? []).map(string);
+  array(config.Env ?? []).map(string);
+  array(config.OnBuild ?? []).map(string);
+  array(config.Shell ?? []).map(string);
+  nullableString(config.User);
+  nullableString(config.WorkingDir);
+  nullableString(config.StopSignal);
+  record(config.ExposedPorts ?? {});
+  record(config.Healthcheck ?? {});
+  record(config.Labels ?? {});
+  record(config.Volumes ?? {});
+  return config;
 }
 
 function sourceTarGzipFiles(content: Uint8Array): Record<string, string> {
@@ -980,6 +1112,7 @@ async function imageProvenance(
   imageBuildId: string;
   imageSource: string;
   imageSourceFiles: Record<string, string>;
+  imageRuntimeAttestation: Omit<RuntimeAttestation, 'deploymentCommit'>;
 }> {
   const match = image.match(
     /^([a-z0-9-]+-docker\.pkg\.dev)\/([^/]+)\/([^/]+)\/(.+)@(sha256:[0-9a-f]{64})$/,
@@ -1012,8 +1145,15 @@ async function imageProvenance(
   assert.equal(uploadTime <= Date.parse(buildWindow.finishTime), true);
   assert.equal(updateTime >= uploadTime, true);
   assert.equal(updateTime <= Date.parse(buildWindow.finishTime), true);
+  assertExactKeys(manifest, ['schemaVersion', 'mediaType', 'config', 'layers']);
   assert.equal(manifest.schemaVersion, 2);
+  assert.equal(
+    manifest.mediaType,
+    'application/vnd.docker.distribution.manifest.v2+json',
+  );
   const config = record(manifest.config);
+  assertExactKeys(config, ['mediaType', 'size', 'digest']);
+  assert.equal(config.mediaType, 'application/vnd.docker.container.image.v1+json');
   const configDigest = string(config.digest);
   assert.match(configDigest, /^sha256:[0-9a-f]{64}$/);
   const configResponse = await fetchWithRetry(
@@ -1022,15 +1162,28 @@ async function imageProvenance(
     [200], 'immutable Function image configuration download',
   );
   const configBytes = new Uint8Array(await configResponse.arrayBuffer());
+  assert.equal(configBytes.byteLength, number(config.size));
   assert.equal(`sha256:${sha256(configBytes)}`, configDigest,
     'Function image configuration does not match its digest');
   const imageConfig = record(JSON.parse(
     new TextDecoder('utf-8', {fatal: true}).decode(configBytes),
   ));
+  assert.ok(Object.keys(imageConfig).every((key) => [
+    'architecture', 'config', 'created', 'history', 'os', 'rootfs',
+  ].includes(key)), 'OCI image metadata contains an unknown field');
+  assert.equal(imageConfig.architecture, 'amd64');
+  assert.equal(imageConfig.os, 'linux');
+  array(imageConfig.history).map(record);
+  const rootfs = record(imageConfig.rootfs);
+  assert.equal(rootfs.type, 'layers');
+  const diffIds = array(rootfs.diff_ids).map(string);
+  assert.equal(diffIds.length, array(manifest.layers).length);
   const labels = stringRecord(record(imageConfig.config).Labels);
   let sourceTar: Uint8Array | undefined;
-  for (const layerValue of array(manifest.layers)) {
+  const runtimeLayers: TarEntry[][] = [];
+  for (const [index, layerValue] of array(manifest.layers).entries()) {
     const layer = record(layerValue);
+    assertExactKeys(layer, ['mediaType', 'size', 'digest']);
     assert.equal(layer.mediaType, 'application/vnd.docker.image.rootfs.diff.tar.gzip');
     const layerDigest = string(layer.digest);
     assert.match(layerDigest, /^sha256:[0-9a-f]{64}$/);
@@ -1045,7 +1198,12 @@ async function imageProvenance(
     assert.equal(layerBytes.byteLength, layerSize);
     assert.equal(`sha256:${sha256(layerBytes)}`, layerDigest,
       'Function image layer does not match its digest');
-    for (const entry of tarEntries(gunzipSync(layerBytes))) {
+    const expandedLayer = gunzipSync(layerBytes);
+    assert.equal(`sha256:${sha256(expandedLayer)}`, diffIds[index],
+      'Function image layer does not match its rootfs diff ID');
+    const entries = tarEntries(expandedLayer);
+    runtimeLayers.push(entries);
+    for (const entry of entries) {
       if (entry.path === '/layers/google.utils.archive-source/src/.wh.source-code.tar.gz') {
         sourceTar = undefined;
       }
@@ -1060,6 +1218,11 @@ async function imageProvenance(
     imageBuildId: string(labels['google.build-id']),
     imageSource: string(labels['google.source']),
     imageSourceFiles: sourceTarGzipFiles(sourceTar),
+    imageRuntimeAttestation: {
+      imageDigest: digest,
+      executionConfig: imageExecutionConfig(imageConfig.config),
+      files: runtimeFiles(runtimeLayers),
+    },
   };
 }
 
@@ -1092,13 +1255,89 @@ function revisionName(
   return revision;
 }
 
+function normalizedRunEnvironment(value: unknown): Record<string, unknown>[] {
+  const environment = array(value ?? []).map((entryValue) => {
+    const entry = record(entryValue);
+    assert.ok(Object.keys(entry).every((key) => ['name', 'value', 'valueSource'].includes(key)),
+      'Cloud Run environment entry contains an unknown field');
+    const name = string(entry.name);
+    assert.match(name, /^[A-Za-z_][A-Za-z0-9_]*$/);
+    assert.notEqual(entry.value === undefined, entry.valueSource === undefined,
+      `Cloud Run environment ${name} must have exactly one value source`);
+    return {
+      name,
+      ...(entry.value === undefined ? {valueSource: record(entry.valueSource)} : {
+        value: string(entry.value),
+      }),
+    };
+  }).sort((left, right) => string(left.name).localeCompare(string(right.name)));
+  assert.equal(new Set(environment.map(({name}) => name)).size, environment.length,
+    'duplicate Cloud Run environment variable');
+  return environment;
+}
+
+function normalizedRunContainer(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'name', 'image', 'command', 'args', 'env', 'resources', 'ports', 'volumeMounts',
+    'workingDir', 'livenessProbe', 'startupProbe', 'dependsOn', 'baseImageUri',
+    'buildInfo',
+  ].includes(key)), 'Cloud Run container response contains an unknown execution field');
+  return {
+    name: string(value.name),
+    image: string(value.image),
+    command: array(value.command ?? []).map(string),
+    args: array(value.args ?? []).map(string),
+    environment: normalizedRunEnvironment(value.env),
+    resources: record(value.resources),
+    ports: array(value.ports ?? []).map(record),
+    volumeMounts: array(value.volumeMounts ?? []).map(record),
+    workingDir: nullableString(value.workingDir),
+    livenessProbe: record(value.livenessProbe ?? {}),
+    startupProbe: record(value.startupProbe ?? {}),
+    dependsOn: array(value.dependsOn ?? []).map(string),
+    baseImageUri: string(value.baseImageUri),
+    ...(value.buildInfo === undefined ? {} : {buildInfo: record(value.buildInfo)}),
+  };
+}
+
+function normalizedRunTemplate(value: Record<string, unknown>): Record<string, unknown> {
+  assert.ok(Object.keys(value).every((key) => [
+    'revision', 'labels', 'annotations', 'client', 'containers', 'volumes',
+    'scaling', 'vpcAccess', 'serviceAccount', 'maxInstanceRequestConcurrency',
+    'timeout', 'executionEnvironment', 'encryptionKey', 'serviceMesh',
+    'encryptionKeyRevocationAction', 'encryptionKeyShutdownDuration',
+    'sessionAffinity', 'gpuZonalRedundancyDisabled', 'nodeSelector',
+    'healthCheckDisabled', 'baseImageUri',
+  ].includes(key)), 'Cloud Run revision template contains an unknown execution field');
+  return {
+    revision: string(value.revision),
+    serviceAccount: string(value.serviceAccount),
+    timeout: string(value.timeout),
+    maxInstanceRequestConcurrency: number(value.maxInstanceRequestConcurrency),
+    scaling: record(value.scaling ?? {}),
+    vpcAccess: record(value.vpcAccess ?? {}),
+    encryptionKey: nullableString(value.encryptionKey),
+    serviceMesh: record(value.serviceMesh ?? {}),
+    encryptionKeyRevocationAction: nullableString(value.encryptionKeyRevocationAction),
+    encryptionKeyShutdownDuration: nullableString(value.encryptionKeyShutdownDuration),
+    sessionAffinity: value.sessionAffinity === true,
+    executionEnvironment: nullableString(value.executionEnvironment),
+    gpuZonalRedundancyDisabled: value.gpuZonalRedundancyDisabled === true,
+    nodeSelector: record(value.nodeSelector ?? {}),
+    healthCheckDisabled: value.healthCheckDisabled === true,
+    volumes: array(value.volumes ?? []).map(record),
+    containers: array(value.containers).map((container) =>
+      normalizedRunContainer(record(container))),
+  };
+}
+
 function normalizeRunConfiguration(
   value: Record<string, unknown>,
   projectId: string,
   region: string,
   name: string,
 ): Record<string, unknown> {
-  const template = record(value.template);
+  const template = normalizedRunTemplate(record(value.template));
   const containers = array(template.containers).map((containerValue) => {
     const container = record(containerValue);
     const image = string(container.image);
@@ -1110,12 +1349,16 @@ function normalizeRunConfiguration(
       name: string(container.name),
       image,
       baseImageUri: string(container.baseImageUri),
-      environmentNames: array(container.env ?? []).map((entry) =>
-        string(record(entry).name)).sort(),
+      command: array(container.command).map(string),
+      args: array(container.args).map(string),
+      environment: array(container.environment).map(record),
       resources: record(container.resources),
       ports: array(container.ports ?? []).map(record),
+      workingDir: nullableString(container.workingDir),
+      livenessProbe: record(container.livenessProbe),
       startupProbe: record(container.startupProbe),
       volumeMounts: array(container.volumeMounts ?? []).map(record),
+      dependsOn: array(container.dependsOn ?? []).map(string),
     };
   });
   return {
@@ -1132,9 +1375,13 @@ function normalizeRunConfiguration(
       scaling: record(template.scaling ?? {}),
       vpcAccess: record(template.vpcAccess ?? {}),
       encryptionKey: nullableString(template.encryptionKey),
+      serviceMesh: record(template.serviceMesh ?? {}),
+      encryptionKeyRevocationAction: nullableString(template.encryptionKeyRevocationAction),
+      encryptionKeyShutdownDuration: nullableString(template.encryptionKeyShutdownDuration),
       sessionAffinity: template.sessionAffinity === true,
       executionEnvironment: nullableString(template.executionEnvironment),
       gpuZonalRedundancyDisabled: template.gpuZonalRedundancyDisabled === true,
+      nodeSelector: record(template.nodeSelector ?? {}),
       healthCheckDisabled: template.healthCheckDisabled === true,
       volumes: array(template.volumes ?? []).map(record),
       containers,
@@ -1149,6 +1396,8 @@ async function runSecurity(
   accessToken: string,
   region: string,
   name: string,
+  entryPoint: string,
+  storageSource: Record<string, unknown>,
 ): Promise<{
   iam: IamBinding[];
   invokerIamDisabled: boolean;
@@ -1174,6 +1423,15 @@ async function runSecurity(
       projectId,
     ),
   ]);
+  assert.ok(Object.keys(service).every((key) => [
+    'name', 'description', 'uid', 'generation', 'labels', 'annotations', 'createTime',
+    'updateTime', 'deleteTime', 'expireTime', 'creator', 'lastModifier', 'client',
+    'clientVersion', 'ingress', 'launchStage', 'binaryAuthorization', 'template',
+    'traffic', 'scaling', 'invokerIamDisabled', 'defaultUri', 'customAudiences',
+    'observedGeneration', 'terminalCondition', 'conditions', 'latestReadyRevision',
+    'latestCreatedRevision', 'trafficStatuses', 'uri', 'reconciling', 'etag',
+    'iapEnabled', 'threatDetectionEnabled',
+  ].includes(key)), 'Cloud Run service response contains an unknown field');
   assert.equal(
     service.name,
     `projects/${projectId}/locations/${region}/services/${name}`,
@@ -1189,10 +1447,41 @@ async function runSecurity(
     accessToken,
     projectId,
   );
+  assert.ok(Object.keys(revision).every((key) => [
+    'name', 'uid', 'generation', 'labels', 'annotations', 'createTime', 'updateTime',
+    'deleteTime', 'expireTime', 'launchStage', 'service', 'scaling', 'vpcAccess',
+    'maxInstanceRequestConcurrency', 'timeout', 'serviceAccount', 'containers',
+    'volumes', 'executionEnvironment', 'encryptionKey', 'reconciling', 'conditions',
+    'observedGeneration', 'logUri', 'satisfiesPzs', 'sessionAffinity',
+    'encryptionKeyRevocationAction', 'encryptionKeyShutdownDuration', 'nodeSelector',
+    'gpuZonalRedundancyDisabled', 'creator', 'etag', 'baseImageUri', 'buildInfo',
+    'healthCheckDisabled', 'serviceMesh',
+  ].includes(key)), 'Cloud Run revision response contains an unknown field');
   assert.equal(
     revision.name,
     `projects/${projectId}/locations/${region}/services/${name}/revisions/${latestReadyRevision}`,
   );
+  assert.equal(revision.service, name);
+  const serviceTemplate = normalizedRunTemplate(record(service.template));
+  const revisionTemplate = normalizedRunTemplate({
+    revision: latestReadyRevision,
+    containers: revision.containers,
+    volumes: revision.volumes,
+    scaling: revision.scaling,
+    vpcAccess: revision.vpcAccess,
+    serviceAccount: revision.serviceAccount,
+    maxInstanceRequestConcurrency: revision.maxInstanceRequestConcurrency,
+    timeout: revision.timeout,
+    executionEnvironment: revision.executionEnvironment,
+    encryptionKey: revision.encryptionKey,
+    serviceMesh: revision.serviceMesh,
+    encryptionKeyRevocationAction: revision.encryptionKeyRevocationAction,
+    encryptionKeyShutdownDuration: revision.encryptionKeyShutdownDuration,
+    sessionAffinity: revision.sessionAffinity,
+    gpuZonalRedundancyDisabled: revision.gpuZonalRedundancyDisabled,
+    nodeSelector: revision.nodeSelector,
+    healthCheckDisabled: revision.healthCheckDisabled,
+  });
   const configuredContainers = array(record(service.template).containers).map(record);
   const revisionContainers = array(revision.containers).map(record);
   assert.equal(configuredContainers.length, 1);
@@ -1202,6 +1491,23 @@ async function runSecurity(
   assert.match(revisionImage, new RegExp(
     `^${region}-docker\\.pkg\\.dev/${projectId}/gcf-artifacts/[A-Za-z0-9_.%-]+@sha256:[0-9a-f]{64}$`,
   ));
+  const buildInfo = record(revisionContainers[0].buildInfo);
+  assertExactKeys(buildInfo, ['functionTarget', 'sourceLocation']);
+  assert.deepEqual(buildInfo, {
+    functionTarget: entryPoint,
+    sourceLocation: `gs://${string(storageSource.bucket)}/${string(storageSource.object)}#${
+      string(storageSource.generation)}`,
+  });
+  const comparableTemplate = (template: Record<string, unknown>): Record<string, unknown> => ({
+    ...Object.fromEntries(Object.entries(template).filter(([key]) => key !== 'revision')),
+    containers: array(template.containers).map((containerValue) => {
+      const container = record(containerValue);
+      return Object.fromEntries(Object.entries(container)
+        .filter(([key]) => key !== 'image' && key !== 'buildInfo'));
+    }),
+  });
+  assert.deepEqual(comparableTemplate(revisionTemplate), comparableTemplate(serviceTemplate),
+    'Cloud Run immutable revision execution settings differ from the service template');
   return {
     iam: normalizedIamBindings(policy),
     invokerIamDisabled: disabled === true,
@@ -1344,7 +1650,10 @@ async function deployedFunctions(
       ),
       functionIam(fetch_, target.projectId, accessToken, resource.region, resource.name),
       generation === 'GEN_1' ? Promise.resolve(null) :
-        runSecurity(fetch_, target.projectId, accessToken, resource.region, resource.name),
+        runSecurity(
+          fetch_, target.projectId, accessToken, resource.region, resource.name,
+          environmentFunction.entryPoint, storageSource!,
+        ),
       generation === 'GEN_1' ? Promise.resolve(null) : functionBuild(
         fetch_, target, accessToken, resource.region, build.build, storageSource!,
         environmentFunction,
@@ -1365,6 +1674,7 @@ async function deployedFunctions(
       functionIam: functionIam_,
       runIam: run?.iam ?? null,
       event,
+      runtimeAttestation: function_?.runtimeAttestation ?? null,
       releaseId: labels['book-tracker-release'] === undefined ? null :
         string(labels['book-tracker-release']),
       state: string(value.state),
@@ -1419,6 +1729,7 @@ async function deployedFunctions(
       imageBuildId: provenance?.imageBuildId ?? null,
       imageSource: provenance?.imageSource ?? null,
       imageSourceFiles: provenance?.imageSourceFiles ?? null,
+      imageRuntimeAttestation: provenance?.imageRuntimeAttestation ?? null,
     };
   }));
 }
@@ -2124,9 +2435,59 @@ async function runServiceInventory(
       `Cloud Run regional inventory unexpectedly paginated for ${region}`);
     services.push(...array(body.services ?? []).map(record));
   }
-  const names = services.map((service) => string(service.name)).sort();
-  assert.equal(new Set(names).size, names.length, 'duplicate Cloud Run service inventory entry');
-  return names;
+  const directlyVisible = services.map((service) => string(service.name)).sort();
+  assert.equal(new Set(directlyVisible).size, directlyVisible.length,
+    'duplicate Cloud Run direct inventory entry');
+  const assetServices = await listApi(
+    fetch_,
+    `https://cloudasset.googleapis.com/v1/projects/${target.projectId}:searchAllResources?` +
+      'assetTypes=run.googleapis.com%2FService&pageSize=500',
+    'results', accessToken, target.projectId,
+  );
+  const assetNames = assetServices.map((asset) => {
+    const prefix = '//run.googleapis.com/';
+    const name = string(asset.name);
+    assert.equal(name.startsWith(prefix), true);
+    return name.slice(prefix.length);
+  }).sort();
+  assert.equal(new Set(assetNames).size, assetNames.length,
+    'duplicate Cloud Asset Run inventory entry');
+  for (const name of directlyVisible) {
+    assert.equal(assetNames.includes(name), true,
+      `Cloud Asset has not converged on directly visible Run service ${name}`);
+  }
+  const checkpoint = target.security.runInventoryCheckpoint;
+  if (checkpoint !== null) {
+    assert.ok(Date.now() - Date.parse(checkpoint) >= RUN_INVENTORY_QUIESCENCE_MS,
+      'Cloud Run inventory checkpoint has not been quiescent for ten minutes');
+    let auditPageToken: string | undefined;
+    const mutations: Record<string, unknown>[] = [];
+    for (let page = 0; page < MAX_API_PAGES; page += 1) {
+      const body = {
+        resourceNames: [`projects/${target.projectId}`],
+        filter: [
+          `logName="projects/${target.projectId}/logs/cloudaudit.googleapis.com%2Factivity"`,
+          'protoPayload.serviceName="run.googleapis.com"',
+          `timestamp>="${checkpoint}"`,
+        ].join(' AND '),
+        orderBy: 'timestamp asc',
+        ...(auditPageToken === undefined ? {} : {pageToken: auditPageToken}),
+      };
+      const response = await json(
+        fetch_, 'https://logging.googleapis.com/v2/entries:list', accessToken, target.projectId,
+        {method: 'POST', body: JSON.stringify(body)},
+      );
+      mutations.push(...array(response.entries ?? []).map(record));
+      const next = response.nextPageToken;
+      if (next === undefined || string(next).trim() === '') break;
+      assert.ok(page + 1 < MAX_API_PAGES,
+        'Cloud Run mutation audit exceeded the maximum number of pages');
+      auditPageToken = string(next);
+    }
+    assert.deepEqual(mutations, [],
+      'Cloud Run changed after the reviewed inventory checkpoint');
+  }
+  return assetNames;
 }
 
 async function deployedSecurity(
@@ -2376,14 +2737,21 @@ function expectedRunConfiguration(
 ): Record<string, unknown> {
   const imagePackage = [target.projectId, function_.region, function_.name]
     .map((part) => part.replaceAll('-', '--')).join('__');
-  const environmentNames = [
-    'EVENTARC_CLOUD_EVENT_SOURCE',
-    'FIREBASE_CONFIG',
-    'FUNCTION_TARGET',
-    'GCLOUD_PROJECT',
-    'LOG_EXECUTION_ID',
-    ...(function_.event === null ? [] : ['FUNCTION_REGION', 'FUNCTION_SIGNATURE_TYPE']),
-  ].sort();
+  assert.deepEqual(function_.secrets, [],
+    'Gen 2 Cloud Run secret environment normalization must be explicitly reviewed');
+  const environment = Object.entries({
+    EVENTARC_CLOUD_EVENT_SOURCE:
+      `projects/${target.projectId}/locations/${function_.region}/services/${function_.name}`,
+    FIREBASE_CONFIG: JSON.stringify(target.firebaseConfig),
+    FUNCTION_TARGET: function_.entryPoint,
+    GCLOUD_PROJECT: target.projectId,
+    LOG_EXECUTION_ID: 'true',
+    ...(function_.event === null ? {} : {
+      FUNCTION_REGION: function_.region,
+      FUNCTION_SIGNATURE_TYPE: 'cloudevent',
+    }),
+  }).map(([name, value]) => ({name, value})).sort((left, right) =>
+    left.name.localeCompare(right.name));
   return {
     ingress: 'INGRESS_TRAFFIC_ALL',
     customAudiences: [
@@ -2400,9 +2768,13 @@ function expectedRunConfiguration(
       scaling: function_.maxInstances === null ? {} : {maxInstanceCount: function_.maxInstances},
       vpcAccess: {},
       encryptionKey: null,
+      serviceMesh: {},
+      encryptionKeyRevocationAction: null,
+      encryptionKeyShutdownDuration: null,
       sessionAffinity: false,
       executionEnvironment: null,
       gpuZonalRedundancyDisabled: false,
+      nodeSelector: {},
       healthCheckDisabled: false,
       volumes: [],
       containers: [{
@@ -2411,13 +2783,17 @@ function expectedRunConfiguration(
           `${function_.region}-docker.pkg.dev/${target.projectId}/gcf-artifacts/${imagePackage}:version_1`,
         baseImageUri:
           `${function_.region}-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22`,
-        environmentNames,
+        command: [],
+        args: [],
+        environment,
         resources: {
           limits: {cpu: '1', memory: '256Mi'},
           cpuIdle: true,
           startupCpuBoost: true,
         },
         ports: [{name: 'http1', containerPort: 8080}],
+        workingDir: null,
+        livenessProbe: {},
         startupProbe: {
           timeoutSeconds: 240,
           periodSeconds: 240,
@@ -2425,6 +2801,7 @@ function expectedRunConfiguration(
           tcpSocket: {port: 8080},
         },
         volumeMounts: [],
+        dependsOn: [],
       }],
     },
     expectedService:
@@ -2570,6 +2947,9 @@ export function deploymentProblems(
   if (canonical(observed.security.runServices) !== canonical(expectedRunServices(expected.target))) {
     problems.push('Cloud Run services do not match the reviewed Functions');
   }
+  if (expectedSecurity.runInventoryCheckpoint === null) {
+    problems.push('Cloud Run inventory checkpoint is pending');
+  }
   if (canonical(observed.security.eventarcTriggers) !==
       canonical(expectedSecurity.eventarcTriggers)) {
     problems.push('Eventarc triggers do not match the reviewed Functions');
@@ -2670,6 +3050,16 @@ export function deploymentProblems(
           canonical(observedFunction.imageSourceFiles) !== canonical(expected.functionFiles)) {
         problems.push(`Cloud Run image source does not match the reviewed commit: ${key}`);
       }
+      const runtimeAttestation = expectedFunction.runtimeAttestation;
+      if (runtimeAttestation === null) {
+        problems.push(`Cloud Run runtime image attestation is pending: ${key}`);
+      } else {
+        const {deploymentCommit: _deploymentCommit, ...reviewedRuntime} = runtimeAttestation;
+        if (observedFunction.imageRuntimeAttestation === null ||
+            canonical(observedFunction.imageRuntimeAttestation) !== canonical(reviewedRuntime)) {
+          problems.push(`Cloud Run executable image does not match the reviewed attestation: ${key}`);
+        }
+      }
       const pinnedTag = observed.hosting.pinnedTags[key];
       const traffic = observedFunction.runTraffic ?? [];
       const statuses = observedFunction.runTrafficStatuses ?? [];
@@ -2752,11 +3142,64 @@ function hostingArtifact(value: unknown): HostingArtifact {
   return result;
 }
 
+function runtimeFile(value: unknown): RuntimeFile {
+  const file = record(value);
+  const type = string(file.type);
+  assert.ok([
+    'file', 'directory', 'symlink', 'hardlink', 'character', 'block', 'fifo',
+  ].includes(type));
+  const common = ['path', 'type', 'mode', 'uid', 'gid'];
+  const extra = type === 'file' ? ['sha256'] :
+    type === 'symlink' || type === 'hardlink' ? ['linkName'] :
+      type === 'character' || type === 'block' ? ['deviceMajor', 'deviceMinor'] : [];
+  assertExactKeys(file, [...common, ...extra]);
+  const result = {
+    path: string(file.path),
+    type: type as RuntimeFile['type'],
+    mode: number(file.mode),
+    uid: number(file.uid),
+    gid: number(file.gid),
+    ...(file.sha256 === undefined ? {} : {sha256: string(file.sha256)}),
+    ...(file.linkName === undefined ? {} : {linkName: string(file.linkName)}),
+    ...(file.deviceMajor === undefined ? {} : {deviceMajor: number(file.deviceMajor)}),
+    ...(file.deviceMinor === undefined ? {} : {deviceMinor: number(file.deviceMinor)}),
+  };
+  assert.match(result.path, /^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]*$/);
+  assert.ok(Number.isSafeInteger(result.mode) && result.mode >= 0);
+  assert.ok(Number.isSafeInteger(result.uid) && result.uid >= 0);
+  assert.ok(Number.isSafeInteger(result.gid) && result.gid >= 0);
+  if (result.sha256 !== undefined) assert.match(result.sha256, /^[0-9a-f]{64}$/);
+  return result;
+}
+
+function runtimeAttestation(value: unknown): RuntimeAttestation | null {
+  if (value === null) return null;
+  const attestation = record(value);
+  assertExactKeys(attestation, [
+    'deploymentCommit', 'imageDigest', 'executionConfig', 'files',
+  ]);
+  const files = array(attestation.files).map(runtimeFile);
+  assert.deepEqual(files.map(({path}) => path), files.map(({path}) => path).sort(),
+    'runtime attestation paths must be sorted');
+  assert.equal(new Set(files.map(({path}) => path)).size, files.length,
+    'runtime attestation paths must be unique');
+  const result = {
+    deploymentCommit: string(attestation.deploymentCommit),
+    imageDigest: string(attestation.imageDigest),
+    executionConfig: record(attestation.executionConfig),
+    files,
+  };
+  assert.match(result.deploymentCommit, /^[0-9a-f]{40}$/);
+  assert.match(result.imageDigest, /^sha256:[0-9a-f]{64}$/);
+  return result;
+}
+
 function expectedFunction(value: unknown): ExpectedFunction {
   const function_ = record(value);
   assertExactKeys(function_, [
     'name', 'generation', 'region', 'entryPoint', 'access', 'timeoutSeconds',
     'maxInstances', 'serviceAccount', 'secrets', 'functionIam', 'runIam', 'event',
+    'runtimeAttestation',
   ]);
   const generation = string(function_.generation);
   assert.ok(generation === 'GEN_1' || generation === 'GEN_2');
@@ -2788,6 +3231,7 @@ function expectedFunction(value: unknown): ExpectedFunction {
     functionIam: normalizedIamBindings({bindings: array(function_.functionIam)}),
     runIam: function_.runIam === null ? null :
       normalizedIamBindings({bindings: array(function_.runIam)}),
+    runtimeAttestation: runtimeAttestation(function_.runtimeAttestation),
     event: event === null ? null : {
       type: string(event.type),
       retry: boolean(event.retry),
@@ -2807,6 +3251,7 @@ function expectedFunction(value: unknown): ExpectedFunction {
   assert.match(result.region, /^[a-z]+-[a-z]+[0-9]$/);
   assert.ok(result.timeoutSeconds > 0);
   assert.equal(result.runIam === null, result.generation === 'GEN_1');
+  if (result.generation === 'GEN_1') assert.equal(result.runtimeAttestation, null);
   assert.equal(result.event === null, result.access !== 'event');
   return result;
 }
@@ -2827,7 +3272,8 @@ function securityTarget(
 ): SecurityTarget {
   const security = record(value);
   assertExactKeys(security, [
-    'gitOrigin', 'storageRulesRelease', 'authConfig', 'ancestorIamPolicies',
+    'gitOrigin', 'storageRulesRelease', 'runInventoryCheckpoint',
+    'authConfig', 'ancestorIamPolicies',
     'customRoles', 'serviceAccounts', 'secrets', 'artifactRepositories', 'storageBuckets',
     'eventarcTriggers', 'pubsubTopics', 'pubsubSubscriptions', 'authProviders',
     'firebaseRulesReleases',
@@ -2910,6 +3356,12 @@ function securityTarget(
   assert.match(gitOrigin, /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/);
   const storageRulesRelease = string(security.storageRulesRelease);
   assert.match(storageRulesRelease, /^[a-z0-9][a-z0-9.-]+$/);
+  const runInventoryCheckpoint = nullableString(security.runInventoryCheckpoint);
+  if (runInventoryCheckpoint !== null) {
+    assert.match(runInventoryCheckpoint,
+      /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/);
+    assert.equal(Number.isNaN(Date.parse(runInventoryCheckpoint)), false);
+  }
   const targetSecuredResources = (values: unknown): PubsubResourceSecurity[] =>
     sortedCanonical(array(values).map((value_) => {
       const resource = record(value_);
@@ -2934,6 +3386,7 @@ function securityTarget(
   return {
     gitOrigin,
     storageRulesRelease,
+    runInventoryCheckpoint,
     authConfig: record(security.authConfig),
     ancestorIamPolicies: sortedCanonical(array(security.ancestorIamPolicies).map(targetIamResource)),
     customRoles,
@@ -3137,11 +3590,51 @@ export function reviewedTreeProblems(
   assert.equal(configParts.length % 2, 0, 'invalid Git config origin output');
   const urlRewrites = configParts.filter((entry, index) => index % 2 === 1 &&
     /^url\..*\.(?:insteadof|pushinsteadof)\n/i.test(entry));
+  const replacements = gitText(runGit, ['replace', '-l'])
+    .split(/\r?\n/).filter(Boolean);
   if (head !== reviewedCommit) problems.push('HEAD is not the reviewed commit');
   if (pushed !== reviewedCommit) problems.push('origin/master is not the reviewed commit');
   if (remote !== reviewedCommit) problems.push('Remote master is not the reviewed commit');
   if (origin !== target.security.gitOrigin) problems.push('Git origin is not the reviewed repository');
   if (urlRewrites.length > 0) problems.push('Git URL rewrite can spoof origin');
+  if (replacements.length > 0) problems.push('Git replacement refs can spoof reviewed objects');
+  const gen2Functions = target.functions.filter(({generation}) => generation === 'GEN_2');
+  const attestations = gen2Functions.flatMap(({runtimeAttestation}) =>
+    runtimeAttestation === null ? [] : [runtimeAttestation]);
+  if (attestations.length > 0) {
+    if (attestations.length !== gen2Functions.length) {
+      problems.push('Cloud Run runtime attestations are only partially recorded');
+    } else {
+      const deploymentCommits = [...new Set(attestations.map(({deploymentCommit}) =>
+        deploymentCommit))];
+      const parent = gitText(runGit, ['rev-parse', `${reviewedCommit}^`]).trim();
+      const changed = gitText(runGit, [
+        'diff-tree', '--no-commit-id', '--name-only', '-r', parent, reviewedCommit,
+      ]).split(/\r?\n/).filter(Boolean).sort();
+      const parentTarget = deploymentTarget(JSON.parse(
+        gitShow(runGit, parent, 'deployment-target.json').toString('utf8'),
+      ));
+      const withoutAttestations = (value: DeploymentTarget): unknown => ({
+        ...value,
+        security: {...value.security, runInventoryCheckpoint: null},
+        functions: value.functions.map((function_) => ({
+          ...function_,
+          runtimeAttestation: null,
+        })),
+      });
+      if (canonical(deploymentCommits) !== canonical([parent]) ||
+          canonical(changed) !== canonical(['deployment-target.json'])) {
+        problems.push('Runtime attestation commit is not a target-only child of the deployment');
+      }
+      if (parentTarget.security.runInventoryCheckpoint !== null ||
+          parentTarget.functions.some(({generation, runtimeAttestation}) =>
+            generation === 'GEN_2' && runtimeAttestation !== null) ||
+          canonical(withoutAttestations(parentTarget)) !==
+            canonical(withoutAttestations(target))) {
+        problems.push('Runtime attestation commit changes non-attestation deployment targets');
+      }
+    }
+  }
   const status = gitText(
     runGit,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
@@ -3177,7 +3670,7 @@ export function reviewedTreeProblems(
 }
 
 export function parseOptions(arguments_: string[]): Map<string, string> {
-  const allowed = new Set(['account', 'commit', 'project']);
+  const allowed = new Set(['account', 'commit', 'mode', 'project']);
   const parsed = new Map<string, string>();
   for (const argument of arguments_) {
     assert.ok(argument.startsWith('--'), `invalid argument: ${argument}`);
@@ -3198,6 +3691,7 @@ export interface CliDependencies {
   runGit: GitRunner;
   fetch: FetchLike;
   accessToken(account?: string): string;
+  now?(): Date;
   stdout(message: string): void;
   stderr(message: string): void;
 }
@@ -3211,6 +3705,8 @@ export async function runCli(
   assert.notEqual(reviewedCommit, undefined, 'missing --commit');
   assert.match(reviewedCommit!, /^[0-9a-f]{40}$/);
   const expected = readExpectedDeployment(reviewedCommit!, dependencies.runGit);
+  const mode = options.get('mode') ?? 'verify';
+  assert.ok(mode === 'verify' || mode === 'capture', 'invalid --mode');
   const project = options.get('project');
   if (project !== undefined) assert.equal(project, expected.target.projectId);
   const treeProblems = reviewedTreeProblems(
@@ -3226,6 +3722,45 @@ export async function runCli(
     dependencies.accessToken(options.get('account')),
   );
   const problems = deploymentProblems(expected, observed);
+  if (mode === 'capture') {
+    assert.equal(expected.target.security.runInventoryCheckpoint, null,
+      'capture requires a pending Run inventory checkpoint');
+    const gen2 = expected.target.functions.filter(({generation}) => generation === 'GEN_2');
+    assert.equal(gen2.every(({runtimeAttestation}) => runtimeAttestation === null), true,
+      'capture requires pending Gen 2 runtime attestations');
+    const allowed = new Set([
+      'Cloud Run inventory checkpoint is pending',
+      ...gen2.map((function_) =>
+        'Cloud Run runtime image attestation is pending: ' + functionKey(function_)),
+    ]);
+    const blocking = problems.filter((problem) => !allowed.has(problem));
+    if (blocking.length > 0) {
+      for (const problem of blocking) dependencies.stderr(problem + '\n');
+      return 1;
+    }
+    const observedByKey = new Map(observed.functions.map((function_) =>
+      [functionKey(function_), function_]));
+    const checkpoint = (dependencies.now?.() ?? new Date()).toISOString();
+    const functions = gen2.map((function_) => {
+      const key = functionKey(function_);
+      const runtimeAttestation = observedByKey.get(key)?.imageRuntimeAttestation;
+      assert.notEqual(runtimeAttestation, null, 'missing runtime attestation: ' + key);
+      assert.notEqual(runtimeAttestation, undefined, 'missing runtime attestation: ' + key);
+      return {
+        name: function_.name,
+        region: function_.region,
+        runtimeAttestation: {
+          deploymentCommit: reviewedCommit!,
+          ...runtimeAttestation!,
+        },
+      };
+    });
+    dependencies.stdout(JSON.stringify({
+      security: {runInventoryCheckpoint: checkpoint},
+      functions,
+    }, null, 2) + '\n');
+    return 0;
+  }
   if (problems.length > 0) {
     for (const problem of problems) dependencies.stderr(`${problem}\n`);
     return 1;
@@ -3237,7 +3772,10 @@ export async function runCli(
 export async function runProductionCli(arguments_: string[]): Promise<number> {
   const root = dirname(fileURLToPath(import.meta.url));
   const runGit: GitRunner = (gitArguments) => execFileSync(
-    'git', ['-C', root, ...gitArguments], {encoding: 'buffer'},
+    'git', ['-C', root, ...gitArguments], {
+      encoding: 'buffer',
+      env: {...process.env, GIT_NO_REPLACE_OBJECTS: '1'},
+    },
   );
   return runCli(arguments_, {
     root,

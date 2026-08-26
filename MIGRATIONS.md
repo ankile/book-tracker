@@ -221,14 +221,28 @@ record these together in the rollout log:
 The timer migration and Hosting deployment are release gates, not a single
 all-at-once deploy. Use this rollback matrix:
 
-Record and push the reviewed 40-character commit SHA before the Functions step.
-After the compatible Functions, migrations, renderer, and Hosting release are
-complete, run
-`npm run verify:deployment -- --commit=<reviewed-40-character-SHA>`.
+Record and push the reviewed 40-character deployment commit before the Functions
+step. That commit must leave the Gen 2 `runtimeAttestation` values and
+`security.runInventoryCheckpoint` pending as `null`. After the compatible
+Functions, migrations, renderer, and Hosting release are complete, remove the
+stale resources and user-managed keys below. Run `npm run validate`, then
+capture the live immutable image evidence with
+`node deployment-integrity-cli.ts --project=book-tracker-d8f24 --commit=<deployment-40-character-SHA> --mode=capture`.
+Merge the emitted values into `deployment-target.json`. The resulting
+attestation commit must change only that file and must name its parent deployment
+commit in every attestation. Review and push it, freeze all Cloud Run mutations,
+wait at least ten minutes from the captured checkpoint, and run
+`npm run verify:deployment -- --commit=<attestation-40-character-SHA>`.
+
 The verifier rechecks every region that Cloud Run's wildcard response reports as
-unreachable. It accepts only a direct service inventory or an explicit
-`LOCATION_POLICY_VIOLATED` response proving that the project cannot deploy in
-that region; do not waive a different regional error.
+unreachable, but a `LOCATION_POLICY_VIOLATED` response is not proof that no old
+service exists. It also requires Cloud Asset's exact cross-region Run inventory,
+requires directly visible services to have converged there, and rejects any Run
+Admin Activity after the reviewed checkpoint. It binds each Gen 2 revision to
+the exact service/revision command, arguments, environment, probes, mounts and
+other execution settings, plus the effective OCI filesystem and execution
+configuration. Any Run mutation after capture requires a fresh target-only
+attestation commit and another quiescence interval.
 Do not mark the rollout complete if it reports a mutable or unpushed tree,
 stale Firestore configuration, a Function release or configuration mismatch,
 unexpected invoker access, split Gen 2 traffic, stale Hosting files, or a stale
