@@ -38,6 +38,42 @@ interface IamBinding {
   condition?: Record<string, unknown>;
 }
 
+interface IamResource {
+  name: string;
+  iam: IamBinding[];
+}
+
+interface ServiceAccountSecurity extends IamResource {
+  userManagedKeys: Record<string, unknown>[];
+}
+
+interface SecretSecurity extends IamResource {
+  versions: Array<{version: string; state: string}>;
+}
+
+interface StorageBucketSecurity extends IamResource {
+  publicAccessPrevention: string;
+  uniformBucketLevelAccess: boolean;
+}
+
+interface SecurityTarget {
+  gitOrigin: string;
+  storageRulesRelease: string;
+  authConfig: Record<string, unknown>;
+  ancestorIamPolicies: IamResource[];
+  customRoles: Record<string, unknown>[];
+  serviceAccounts: ServiceAccountSecurity[];
+  secrets: SecretSecurity[];
+  artifactRepositories: IamResource[];
+  storageBuckets: StorageBucketSecurity[];
+  runUnreachableRegions: string[];
+}
+
+interface ObservedSecurity extends Omit<SecurityTarget, 'gitOrigin' | 'storageRulesRelease'> {
+  runServices: string[];
+  eventarcTriggers: Record<string, unknown>[];
+}
+
 export interface ExpectedFunction {
   name: string;
   generation: Generation;
@@ -84,6 +120,10 @@ export interface ObservedFunction extends ExpectedFunction {
   runLatestReadyRevision: string | null;
   runLatestCreatedRevision: string | null;
   runConfiguration: Record<string, unknown> | null;
+  runTraffic: Record<string, unknown>[] | null;
+  runTrafficStatuses: Record<string, unknown>[] | null;
+  configuredImage: string | null;
+  revisionImage: string | null;
 }
 
 interface ExpectedIndex {
@@ -108,6 +148,7 @@ export interface DeploymentTarget {
   allowedUntrackedPrefixes: string[];
   ancestorResources: string[];
   ancestorIamPolicySha256: string;
+  security: SecurityTarget;
   firebaseConfig: Record<string, string>;
   functions: ExpectedFunction[];
 }
@@ -115,6 +156,7 @@ export interface DeploymentTarget {
 export interface ExpectedDeployment {
   target: DeploymentTarget;
   firestoreRulesSha256: string;
+  storageRulesSha256: string;
   indexes: ExpectedIndex[];
   ttls: ExpectedTtl[];
   hostingFiles: Record<string, HostingArtifact>;
@@ -132,6 +174,7 @@ export interface ObservedHosting {
   channels: string[];
   customDomains: string[];
   pinnedRevisions: Record<string, string>;
+  pinnedTags: Record<string, string>;
   profileReleaseIds: Record<string, string | null>;
   profileProbeSha256: Record<string, string>;
   sitemapReleaseIds: Record<string, string | null>;
@@ -139,11 +182,13 @@ export interface ObservedHosting {
 
 export interface ObservedDeployment {
   firestoreRulesSha256: string;
+  storageRulesSha256: string;
   indexes: ExpectedIndex[];
   ttls: ExpectedTtl[];
   functions: ObservedFunction[];
   ancestorResources: string[];
   ancestorIamPolicySha256: string;
+  security: ObservedSecurity;
   hosting: ObservedHosting;
 }
 
@@ -239,7 +284,7 @@ function nullableNumber(value: unknown): number | null {
 
 function normalizedIamBindings(policy: Record<string, unknown>): IamBinding[] {
   assert.ok(Object.keys(policy).every((key) =>
-    ['bindings', 'etag', 'version', 'auditConfigs'].includes(key)));
+    ['bindings', 'etag', 'version', 'auditConfigs', 'kind', 'resourceId'].includes(key)));
   assert.deepEqual(policy.auditConfigs ?? [], []);
   return sortedCanonical(array(policy.bindings ?? []).map((value) => {
     const binding = record(value);
@@ -252,9 +297,17 @@ function normalizedIamBindings(policy: Record<string, unknown>): IamBinding[] {
         ['title', 'description', 'expression', 'location'].includes(key)));
       for (const entry of Object.values(parsed)) string(entry);
     }
+    const members = array(binding.members ?? []).map(string).sort();
+    for (const member of members) {
+      assert.equal(
+        member.startsWith('group:') || member.startsWith('domain:'),
+        false,
+        `mutable IAM principal is not reviewable: ${member}`,
+      );
+    }
     return {
       role: string(binding.role),
-      members: array(binding.members ?? []).map(string).sort(),
+      members,
       ...(condition === undefined ? {} : {condition: record(condition)}),
     };
   }));
@@ -454,6 +507,33 @@ async function deployedFirestoreRules(
   return string(matches[0].content);
 }
 
+async function deployedStorageRules(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+): Promise<string> {
+  const releaseName = `firebase.storage/${target.security.storageRulesRelease}`;
+  const release = await json(
+    fetch_,
+    `https://firebaserules.googleapis.com/v1/projects/${target.projectId}/releases/${releaseName}`,
+    accessToken,
+    target.projectId,
+  );
+  const rulesetName = string(release.rulesetName);
+  assert.match(
+    rulesetName,
+    new RegExp(`^projects/${target.projectId}/rulesets/[A-Za-z0-9_-]+$`),
+  );
+  const ruleset = await json(
+    fetch_, `https://firebaserules.googleapis.com/v1/${rulesetName}`,
+    accessToken, target.projectId,
+  );
+  const files = array(record(ruleset.source).files).map(record);
+  assert.equal(files.length, 1, 'Storage ruleset must contain exactly one source file');
+  assert.equal(string(files[0].name).split('/').at(-1), 'storage.rules');
+  return string(files[0].content);
+}
+
 async function listApi(
   fetch_: FetchLike,
   baseUrl: string,
@@ -483,10 +563,11 @@ async function functionSourceFiles(
   accessToken: string,
   region: string,
   name: string,
+  generation: Generation,
 ): Promise<Record<string, string>> {
   const generated = await json(
     fetch_,
-    `https://cloudfunctions.googleapis.com/v1/projects/${projectId}/locations/${region}/functions/${name}:generateDownloadUrl`,
+    `https://cloudfunctions.googleapis.com/${generation === 'GEN_2' ? 'v2' : 'v1'}/projects/${projectId}/locations/${region}/functions/${name}:generateDownloadUrl`,
     accessToken,
     projectId,
     {method: 'POST', body: '{}'},
@@ -545,6 +626,7 @@ function normalizeRunConfiguration(
     );
     return {
       name: string(container.name),
+      image,
       baseImageUri: string(container.baseImageUri),
       environmentNames: array(container.env ?? []).map((entry) =>
         string(record(entry).name)).sort(),
@@ -591,6 +673,10 @@ async function runSecurity(
   latestReadyRevision: string;
   latestCreatedRevision: string;
   configuration: Record<string, unknown>;
+  traffic: Record<string, unknown>[];
+  trafficStatuses: Record<string, unknown>[];
+  configuredImage: string;
+  revisionImage: string;
 }> {
   const [policy, service] = await Promise.all([
     json(
@@ -612,16 +698,40 @@ async function runSecurity(
   );
   const disabled = service.invokerIamDisabled;
   assert.ok(disabled === undefined || typeof disabled === 'boolean');
+  const latestReadyRevision = revisionName(
+    service.latestReadyRevision, projectId, region, name,
+  );
+  const revision = await json(
+    fetch_,
+    `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${name}/revisions/${latestReadyRevision}`,
+    accessToken,
+    projectId,
+  );
+  assert.equal(
+    revision.name,
+    `projects/${projectId}/locations/${region}/services/${name}/revisions/${latestReadyRevision}`,
+  );
+  const configuredContainers = array(record(service.template).containers).map(record);
+  const revisionContainers = array(revision.containers).map(record);
+  assert.equal(configuredContainers.length, 1);
+  assert.equal(revisionContainers.length, 1);
+  const configuredImage = string(configuredContainers[0].image);
+  const revisionImage = string(revisionContainers[0].image);
+  assert.match(revisionImage, new RegExp(
+    `^${region}-docker\\.pkg\\.dev/${projectId}/gcf-artifacts/[A-Za-z0-9_.%-]+@sha256:[0-9a-f]{64}$`,
+  ));
   return {
     iam: normalizedIamBindings(policy),
     invokerIamDisabled: disabled === true,
-    latestReadyRevision: revisionName(
-      service.latestReadyRevision, projectId, region, name,
-    ),
+    latestReadyRevision,
     latestCreatedRevision: revisionName(
       service.latestCreatedRevision, projectId, region, name,
     ),
     configuration: normalizeRunConfiguration(service, projectId, region, name),
+    traffic: sortedCanonical(array(service.traffic ?? []).map(record)),
+    trafficStatuses: sortedCanonical(array(service.trafficStatuses ?? []).map(record)),
+    configuredImage,
+    revisionImage,
   };
 }
 
@@ -735,8 +845,18 @@ async function deployedFunctions(
       entryPoint: string(build.entryPoint),
       event,
     };
+    if (generation === 'GEN_2') {
+      const source = record(record(build.source).storageSource);
+      const resolved = record(record(build.sourceProvenance).resolvedStorageSource);
+      assert.deepEqual(source, resolved);
+      assert.match(string(source.bucket), /^[a-z0-9][a-z0-9._-]+$/);
+      assert.match(string(source.object), /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$)).+$/);
+      assert.match(string(source.generation), /^[1-9][0-9]*$/);
+    }
     const [sourceFiles, functionIam_, run] = await Promise.all([
-      functionSourceFiles(fetch_, target.projectId, accessToken, resource.region, resource.name),
+      functionSourceFiles(
+        fetch_, target.projectId, accessToken, resource.region, resource.name, generation,
+      ),
       functionIam(fetch_, target.projectId, accessToken, resource.region, resource.name),
       generation === 'GEN_1' ? Promise.resolve(null) :
         runSecurity(fetch_, target.projectId, accessToken, resource.region, resource.name),
@@ -797,6 +917,10 @@ async function deployedFunctions(
       runLatestReadyRevision: run?.latestReadyRevision ?? null,
       runLatestCreatedRevision: run?.latestCreatedRevision ?? null,
       runConfiguration: run?.configuration ?? null,
+      runTraffic: run?.traffic ?? null,
+      runTrafficStatuses: run?.trafficStatuses ?? null,
+      configuredImage: run?.configuredImage ?? null,
+      revisionImage: run?.revisionImage ?? null,
     };
   }));
 }
@@ -854,7 +978,7 @@ async function deployedAncestorSecurity(
   fetch_: FetchLike,
   target: DeploymentTarget,
   accessToken: string,
-): Promise<{resources: string[]; policySha256: string}> {
+): Promise<{resources: string[]; policySha256: string; policies: IamResource[]}> {
   const project = await json(
     fetch_,
     `https://cloudresourcemanager.googleapis.com/v3/projects/${target.projectId}`,
@@ -890,9 +1014,10 @@ async function deployedAncestorSecurity(
         body: JSON.stringify({options: {requestedPolicyVersion: 3}}),
       },
     );
-    return {resource, bindings: normalizedIamBindings(policy)};
+    return {name: resource, iam: normalizedIamBindings(policy)};
   }));
-  return {resources, policySha256: sha256Canonical(policies)};
+  const legacyPolicies = policies.map(({name, iam}) => ({resource: name, bindings: iam}));
+  return {resources, policySha256: sha256Canonical(legacyPolicies), policies};
 }
 
 function assertExactKeys(value: Record<string, unknown>, allowed: string[]): void {
@@ -1061,6 +1186,7 @@ async function activeHostingVersion(
   files: Record<string, string>;
   config: Record<string, unknown>;
   pinnedRevisions: Record<string, string>;
+  pinnedTags: Record<string, string>;
 }> {
   const parent = `sites/${target.hostingSite}/channels/live`;
   const releases = await json(
@@ -1119,7 +1245,10 @@ async function activeHostingVersion(
     }),
   ));
   assert.equal(Object.keys(pinnedRevisions).length, normalized.pinnedTags.length);
-  return {files, config: normalized.config, pinnedRevisions};
+  const pinnedTags = Object.fromEntries(normalized.pinnedTags.map(({serviceId, region, tag}) =>
+    [`${region}/${serviceId}`, tag]));
+  assert.equal(Object.keys(pinnedTags).length, normalized.pinnedTags.length);
+  return {files, config: normalized.config, pinnedRevisions, pinnedTags};
 }
 
 async function deployedHosting(
@@ -1200,9 +1329,206 @@ async function deployedHosting(
     channels: normalizedChannels,
     customDomains: normalizedDomains,
     pinnedRevisions: active.pinnedRevisions,
+    pinnedTags: active.pinnedTags,
     profileReleaseIds,
     profileProbeSha256,
     sitemapReleaseIds,
+  };
+}
+
+function normalizedAuthConfig(value: Record<string, unknown>): Record<string, unknown> {
+  const signIn = record(value.signIn ?? {});
+  return {
+    authorizedDomains: array(value.authorizedDomains ?? []).map(string).sort(),
+    signIn: Object.fromEntries(Object.entries(signIn)
+      .filter(([key]) => key !== 'hashConfig')
+      .sort(([left], [right]) => left.localeCompare(right))),
+    mfa: record(value.mfa ?? {}),
+    multiTenant: record(value.multiTenant ?? {}),
+    client: {
+      permissions: record(record(value.client ?? {}).permissions ?? {}),
+      firebaseSubdomain: nullableString(record(value.client ?? {}).firebaseSubdomain),
+    },
+    blockingFunctions: record(value.blockingFunctions ?? {}),
+    monitoring: record(value.monitoring ?? {}),
+    smsRegionConfig: record(value.smsRegionConfig ?? {}),
+  };
+}
+
+async function iamAt(
+  fetch_: FetchLike,
+  url: string,
+  target: DeploymentTarget,
+  accessToken: string,
+  method: 'GET' | 'POST' = 'GET',
+): Promise<IamBinding[]> {
+  return normalizedIamBindings(await json(
+    fetch_, url, accessToken, target.projectId,
+    method === 'GET' ? undefined : {
+      method,
+      body: JSON.stringify({options: {requestedPolicyVersion: 3}}),
+    },
+  ));
+}
+
+async function deployedSecurity(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  ancestorIamPolicies: IamResource[],
+): Promise<ObservedSecurity> {
+  const runServicesPromise = (async () => {
+    const base = `https://run.googleapis.com/v2/projects/${target.projectId}/locations/-/services`;
+    const services: string[] = [];
+    const unreachable = new Set<string>();
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_API_PAGES; page += 1) {
+      const url = pageToken === undefined ? base :
+        `${base}?pageToken=${encodeURIComponent(pageToken)}`;
+      const response = await json(fetch_, url, accessToken, target.projectId);
+      for (const value of array(response.services ?? [])) services.push(string(record(value).name));
+      for (const region of array(response.unreachable ?? [])) unreachable.add(string(region));
+      const next = response.nextPageToken;
+      if (next === undefined || string(next).trim() === '') {
+        return {services: services.sort(), unreachable: [...unreachable].sort()};
+      }
+      pageToken = string(next);
+    }
+    assert.fail(`${base} exceeded ${MAX_API_PAGES} pages`);
+  })();
+  const eventarcPromise = listApi(
+    fetch_,
+    `https://eventarc.googleapis.com/v1/projects/${target.projectId}/locations/-/triggers`,
+    'triggers', accessToken, target.projectId,
+  ).then((values) => sortedCanonical(values.map((value) => ({
+    destination: record(value.destination),
+    eventFilters: normalizeFilters(array(value.eventFilters).map((filterValue) => {
+      const filter = record(filterValue);
+      return {
+        attribute: string(filter.attribute),
+        value: string(filter.value),
+        ...(filter.operator === undefined ? {} : {operator: string(filter.operator)}),
+      };
+    })),
+    labels: record(value.labels ?? {}),
+    serviceAccount: string(value.serviceAccount),
+  }))));
+  const authPromise = json(
+    fetch_,
+    `https://identitytoolkit.googleapis.com/admin/v2/projects/${target.projectId}/config`,
+    accessToken, target.projectId,
+  ).then(normalizedAuthConfig);
+  const customRolesPromise = listApi(
+    fetch_,
+    `https://iam.googleapis.com/v1/projects/${target.projectId}/roles?showDeleted=true`,
+    'roles', accessToken, target.projectId,
+  ).then((roles) => sortedCanonical(roles.map((role) => {
+    const normalized = {
+      name: string(role.name),
+      title: string(role.title),
+      description: nullableString(role.description),
+      includedPermissions: array(role.includedPermissions).map(string).sort(),
+      stage: string(role.stage),
+      deleted: role.deleted === true,
+    };
+    return normalized;
+  })));
+  const serviceAccountsPromise = Promise.all(target.security.serviceAccounts.map(async (expected) => {
+    const base = `https://iam.googleapis.com/v1/projects/${target.projectId}/serviceAccounts/${encodeURIComponent(expected.name)}`;
+    const [iam, keys] = await Promise.all([
+      iamAt(fetch_, `${base}:getIamPolicy`, target, accessToken, 'POST'),
+      listApi(fetch_, `${base}/keys`, 'keys', accessToken, target.projectId),
+    ]);
+    const userManagedKeys = sortedCanonical(keys.filter((key) =>
+      key.keyOrigin === 'USER_PROVIDED').map((key) => ({
+      name: string(key.name),
+      keyOrigin: string(key.keyOrigin),
+      keyType: string(key.keyType),
+      disabled: key.disabled === true,
+      validAfterTime: string(key.validAfterTime),
+      validBeforeTime: string(key.validBeforeTime),
+    })));
+    return {name: expected.name, iam, userManagedKeys};
+  }));
+  const secretListPromise = listApi(
+    fetch_, `https://secretmanager.googleapis.com/v1/projects/${target.projectId}/secrets`,
+    'secrets', accessToken, target.projectId,
+  );
+  const secretsPromise = secretListPromise.then(async (secrets) => {
+    const names = secrets.map((secret) => string(secret.name).split('/').at(-1)!).sort();
+    assert.deepEqual(names, target.security.secrets.map(({name}) => name).sort());
+    return Promise.all(target.security.secrets.map(async (expected) => {
+      const base = `https://secretmanager.googleapis.com/v1/projects/${target.projectId}/secrets/${expected.name}`;
+      const [iam, versions] = await Promise.all([
+        iamAt(fetch_, `${base}:getIamPolicy`, target, accessToken),
+        listApi(fetch_, `${base}/versions`, 'versions', accessToken, target.projectId),
+      ]);
+      return {
+        name: expected.name,
+        iam,
+        versions: versions.map((version) => ({
+          version: string(version.name).split('/').at(-1)!,
+          state: string(version.state),
+        })).sort((left, right) => left.version.localeCompare(right.version)),
+      };
+    }));
+  });
+  const repositoriesPromise = Promise.all(target.security.artifactRepositories.map(
+    async ({name}) => {
+      const [repository, iam] = await Promise.all([
+        json(
+          fetch_, `https://artifactregistry.googleapis.com/v1/${name}`,
+          accessToken, target.projectId,
+        ),
+        iamAt(
+          fetch_, `https://artifactregistry.googleapis.com/v1/${name}:getIamPolicy`, target,
+          accessToken,
+        ),
+      ]);
+      assert.equal(repository.name, name);
+      assert.equal(repository.format, 'DOCKER');
+      return {name, iam};
+    },
+  ));
+  const bucketsPromise = listApi(
+    fetch_, `https://storage.googleapis.com/storage/v1/b?project=${target.projectId}`,
+    'items', accessToken, target.projectId,
+  ).then(async (buckets) => {
+    const byName = new Map(buckets.map((bucket) => [string(bucket.name), bucket]));
+    const expectedNames = target.security.storageBuckets.map(({name}) => name).sort();
+    for (const name of expectedNames) assert.equal(byName.has(name), true);
+    return Promise.all(expectedNames.map(async (name) => {
+        const bucket = byName.get(name)!;
+        const iam = await iamAt(
+          fetch_, `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(name)}/iam?optionsRequestedPolicyVersion=3`, target,
+          accessToken,
+        );
+        const configuration = record(bucket.iamConfiguration ?? {});
+        return {
+          name,
+          iam,
+          publicAccessPrevention: nullableString(configuration.publicAccessPrevention) ?? 'inherited',
+          uniformBucketLevelAccess:
+            record(configuration.uniformBucketLevelAccess ?? {}).enabled === true,
+        };
+      }));
+  });
+  const [runInventory, eventarcTriggers, authConfig, customRoles, serviceAccounts,
+    secrets, artifactRepositories, storageBuckets] = await Promise.all([
+    runServicesPromise, eventarcPromise, authPromise, customRolesPromise,
+    serviceAccountsPromise, secretsPromise, repositoriesPromise, bucketsPromise,
+  ]);
+  return {
+    authConfig,
+    ancestorIamPolicies,
+    customRoles,
+    serviceAccounts: sortedCanonical(serviceAccounts),
+    secrets: sortedCanonical(secrets),
+    artifactRepositories: sortedCanonical(artifactRepositories),
+    storageBuckets: sortedCanonical(storageBuckets),
+    runServices: runInventory.services,
+    runUnreachableRegions: runInventory.unreachable,
+    eventarcTriggers,
   };
 }
 
@@ -1212,21 +1538,25 @@ export async function readObservedDeployment(
   accessToken: string,
 ): Promise<ObservedDeployment> {
   const {target} = expected;
-  const [rules, indexes, ttls, functions, ancestor, hosting] = await Promise.all([
+  const [rules, storageRules, indexes, ttls, functions, ancestor, hosting] = await Promise.all([
     deployedFirestoreRules(fetch_, target.projectId, accessToken),
+    deployedStorageRules(fetch_, target, accessToken),
     deployedIndexes(fetch_, target, accessToken),
     deployedTtls(fetch_, target, accessToken),
     deployedFunctions(fetch_, target, accessToken),
     deployedAncestorSecurity(fetch_, target, accessToken),
     deployedHosting(fetch_, target, expected.hostingFiles, accessToken),
   ]);
+  const security = await deployedSecurity(fetch_, target, accessToken, ancestor.policies);
   return {
     firestoreRulesSha256: sha256(rules),
+    storageRulesSha256: sha256(storageRules),
     indexes: sortedCanonical(indexes),
     ttls: sortedCanonical(ttls),
     functions,
     ancestorResources: ancestor.resources,
     ancestorIamPolicySha256: ancestor.policySha256,
+    security,
     hosting,
   };
 }
@@ -1236,6 +1566,8 @@ function expectedRunConfiguration(
   function_: ExpectedFunction,
   revision: string,
 ): Record<string, unknown> {
+  const imagePackage = [target.projectId, function_.region, function_.name]
+    .map((part) => part.replaceAll('-', '--')).join('__');
   const environmentNames = [
     'EVENTARC_CLOUD_EVENT_SOURCE',
     'FIREBASE_CONFIG',
@@ -1251,7 +1583,7 @@ function expectedRunConfiguration(
     ],
     binaryAuthorization: {},
     iapEnabled: false,
-    scaling: {maxInstanceCount: 20},
+    scaling: function_.maxInstances === null ? {} : {maxInstanceCount: function_.maxInstances},
     template: {
       revision,
       serviceAccount: function_.serviceAccount,
@@ -1267,6 +1599,8 @@ function expectedRunConfiguration(
       volumes: [],
       containers: [{
         name: 'worker',
+        image:
+          `${function_.region}-docker.pkg.dev/${target.projectId}/gcf-artifacts/${imagePackage}:version_1`,
         baseImageUri:
           `${function_.region}-docker.pkg.dev/serverless-runtimes/google-22-full/runtimes/nodejs22`,
         environmentNames,
@@ -1347,6 +1681,29 @@ function functionConfiguration(
   };
 }
 
+function expectedRunServices(target: DeploymentTarget): string[] {
+  return target.functions.filter(({generation}) => generation === 'GEN_2')
+    .map(({name, region}) =>
+      `projects/${target.projectId}/locations/${region}/services/${name}`).sort();
+}
+
+function expectedEventarcTriggers(target: DeploymentTarget): Record<string, unknown>[] {
+  return sortedCanonical(target.functions
+    .filter((function_) => function_.generation === 'GEN_2' && function_.event !== null)
+    .map((function_) => ({
+      destination: {
+        cloudFunction:
+          `projects/${target.projectId}/locations/${function_.region}/functions/${function_.name}`,
+      },
+      eventFilters: normalizeFilters([
+        ...function_.event!.filters,
+        {attribute: 'type', value: function_.event!.type},
+      ]),
+      labels: {'goog-managed-by': 'cloudfunctions'},
+      serviceAccount: function_.serviceAccount,
+    })));
+}
+
 export function deploymentProblems(
   expected: ExpectedDeployment,
   observed: ObservedDeployment,
@@ -1354,6 +1711,9 @@ export function deploymentProblems(
   const problems: string[] = [];
   if (expected.firestoreRulesSha256 !== observed.firestoreRulesSha256) {
     problems.push('Firestore rules do not match the reviewed commit');
+  }
+  if (expected.storageRulesSha256 !== observed.storageRulesSha256) {
+    problems.push('Storage rules do not match the reviewed commit');
   }
   if (canonical(sortedCanonical(expected.indexes)) !== canonical(sortedCanonical(observed.indexes))) {
     problems.push('Firestore indexes do not match the reviewed commit');
@@ -1365,6 +1725,43 @@ export function deploymentProblems(
   if (canonical(observed.ancestorResources) !== canonical(expected.target.ancestorResources) ||
       observed.ancestorIamPolicySha256 !== expected.target.ancestorIamPolicySha256) {
     problems.push('Effective ancestor IAM does not match the reviewed commit');
+  }
+  const expectedSecurity = expected.target.security;
+  if (canonical(observed.security.ancestorIamPolicies) !==
+      canonical(expectedSecurity.ancestorIamPolicies)) {
+    problems.push('Ancestor IAM policies do not match the reviewed commit');
+  }
+  if (canonical(observed.security.customRoles) !== canonical(expectedSecurity.customRoles)) {
+    problems.push('Custom IAM roles do not match the reviewed commit');
+  }
+  if (canonical(observed.security.serviceAccounts) !==
+      canonical(expectedSecurity.serviceAccounts)) {
+    problems.push('Service-account IAM or user-managed keys do not match the reviewed commit');
+  }
+  if (canonical(observed.security.secrets) !== canonical(expectedSecurity.secrets)) {
+    problems.push('Secret Manager security does not match the reviewed commit');
+  }
+  if (canonical(observed.security.artifactRepositories) !==
+      canonical(expectedSecurity.artifactRepositories)) {
+    problems.push('Artifact Registry security does not match the reviewed commit');
+  }
+  if (canonical(observed.security.storageBuckets) !==
+      canonical(expectedSecurity.storageBuckets)) {
+    problems.push('Cloud Storage security does not match the reviewed commit');
+  }
+  if (canonical(observed.security.authConfig) !== canonical(expectedSecurity.authConfig)) {
+    problems.push('Firebase Authentication security does not match the reviewed commit');
+  }
+  if (canonical(observed.security.runServices) !== canonical(expectedRunServices(expected.target))) {
+    problems.push('Cloud Run services do not match the reviewed Functions');
+  }
+  if (canonical(observed.security.runUnreachableRegions) !==
+      canonical(expectedSecurity.runUnreachableRegions)) {
+    problems.push('Cloud Run region coverage does not match the reviewed target');
+  }
+  if (canonical(observed.security.eventarcTriggers) !==
+      canonical(expectedEventarcTriggers(expected.target))) {
+    problems.push('Eventarc triggers do not match the reviewed Functions');
   }
 
   const allHostingFiles = {
@@ -1430,6 +1827,37 @@ export function deploymentProblems(
         expectedRunConfiguration(expected.target, expectedFunction, observedFunction.revision),
       )) {
         problems.push(`Cloud Run configuration mismatch: ${key}`);
+      }
+      const imagePackage = [
+        expected.target.projectId, expectedFunction.region, expectedFunction.name,
+      ].map((part) => part.replaceAll('-', '--')).join('__');
+      const imagePrefix =
+        `${expectedFunction.region}-docker.pkg.dev/${expected.target.projectId}/gcf-artifacts/${imagePackage}`;
+      const expectedImage = `${imagePrefix}:version_1`;
+      if (observedFunction.configuredImage !== expectedImage ||
+          observedFunction.revisionImage === null ||
+          !observedFunction.revisionImage.startsWith(`${imagePrefix}@sha256:`)) {
+        problems.push(`Cloud Run container image does not match the reviewed Function: ${key}`);
+      }
+      const pinnedTag = observed.hosting.pinnedTags[key];
+      const traffic = observedFunction.runTraffic ?? [];
+      const statuses = observedFunction.runTrafficStatuses ?? [];
+      const trafficTags = traffic.map((entry) => entry.tag).filter((tag) => tag !== undefined);
+      const statusTags = statuses.map((entry) => entry.tag).filter((tag) => tag !== undefined);
+      const trafficRevisionsAreCurrent = traffic.every((entry) =>
+        entry.revision === undefined || entry.revision === observedFunction.revision);
+      const statusRevisionsAreCurrent = statuses.every((entry) =>
+        entry.revision === observedFunction.revision ||
+        (entry.revision === undefined &&
+          entry.type === 'TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST'));
+      const latestAllocations = traffic.filter((entry) =>
+        entry.type === 'TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST' && entry.percent === 100);
+      const expectedTags = pinnedTag === undefined ? [] : [pinnedTag];
+      if (!trafficRevisionsAreCurrent || !statusRevisionsAreCurrent ||
+          canonical([...new Set(trafficTags)].sort()) !== canonical(expectedTags) ||
+          canonical([...new Set(statusTags)].sort()) !== canonical(expectedTags) ||
+          latestAllocations.length !== 1) {
+        problems.push(`Cloud Run traffic does not match the reviewed deployment: ${key}`);
       }
     }
     if (canonical(observedFunction.sourceFiles) !== canonical(expected.functionFiles)) {
@@ -1552,12 +1980,102 @@ function expectedFunction(value: unknown): ExpectedFunction {
   return result;
 }
 
+function targetIamResource(value: unknown): IamResource {
+  const resource = record(value);
+  assertExactKeys(resource, ['name', 'iam']);
+  return {
+    name: string(resource.name),
+    iam: normalizedIamBindings({bindings: array(resource.iam)}),
+  };
+}
+
+function securityTarget(
+  value: unknown,
+  functions: ExpectedFunction[],
+  projectId: string,
+): SecurityTarget {
+  const security = record(value);
+  assertExactKeys(security, [
+    'gitOrigin', 'storageRulesRelease', 'authConfig', 'ancestorIamPolicies',
+    'customRoles', 'serviceAccounts', 'secrets', 'artifactRepositories', 'storageBuckets',
+    'runUnreachableRegions',
+  ]);
+  const serviceAccounts = array(security.serviceAccounts).map((value_) => {
+    const account = record(value_);
+    assertExactKeys(account, ['name', 'iam', 'userManagedKeys']);
+    return {
+      ...targetIamResource({name: account.name, iam: account.iam}),
+      userManagedKeys: sortedCanonical(array(account.userManagedKeys).map(record)),
+    };
+  });
+  const requiredAccounts = [...new Set(functions.map(({serviceAccount}) => serviceAccount))].sort();
+  assert.deepEqual(serviceAccounts.map(({name}) => name).sort(), requiredAccounts);
+  const secrets = array(security.secrets).map((value_) => {
+    const secret = record(value_);
+    assertExactKeys(secret, ['name', 'iam', 'versions']);
+    return {
+      ...targetIamResource({name: secret.name, iam: secret.iam}),
+      versions: array(secret.versions).map((versionValue) => {
+        const version = record(versionValue);
+        assertExactKeys(version, ['version', 'state']);
+        return {version: string(version.version), state: string(version.state)};
+      }).sort((left, right) => left.version.localeCompare(right.version)),
+    };
+  });
+  const requiredSecrets = [...new Set(functions.flatMap((function_) =>
+    function_.secrets.map(({secret}) => secret)))].sort();
+  assert.deepEqual(secrets.map(({name}) => name).sort(), requiredSecrets);
+  const repositories = array(security.artifactRepositories).map(targetIamResource);
+  const requiredRepositories = [...new Set(functions
+    .filter(({generation}) => generation === 'GEN_2')
+    .map(({region}) =>
+      `projects/${projectId}/locations/${region}/repositories/gcf-artifacts`))].sort();
+  for (const required of requiredRepositories) {
+    assert.equal(repositories.some(({name}) => name === required), true);
+  }
+  const storageBuckets = array(security.storageBuckets).map((value_) => {
+    const bucket = record(value_);
+    assertExactKeys(bucket, [
+      'name', 'iam', 'publicAccessPrevention', 'uniformBucketLevelAccess',
+    ]);
+    return {
+      ...targetIamResource({name: bucket.name, iam: bucket.iam}),
+      publicAccessPrevention: string(bucket.publicAccessPrevention),
+      uniformBucketLevelAccess: boolean(bucket.uniformBucketLevelAccess),
+    };
+  });
+  assert.ok(storageBuckets.length > 0);
+  const customRoles = sortedCanonical(array(security.customRoles).map(record));
+  for (const role of customRoles) {
+    assertExactKeys(role, [
+      'name', 'title', 'description', 'includedPermissions', 'stage', 'deleted',
+    ]);
+    array(role.includedPermissions).map(string);
+  }
+  const gitOrigin = string(security.gitOrigin);
+  assert.match(gitOrigin, /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/);
+  const storageRulesRelease = string(security.storageRulesRelease);
+  assert.match(storageRulesRelease, /^[a-z0-9][a-z0-9.-]+$/);
+  return {
+    gitOrigin,
+    storageRulesRelease,
+    authConfig: normalizedAuthConfig(record(security.authConfig)),
+    ancestorIamPolicies: sortedCanonical(array(security.ancestorIamPolicies).map(targetIamResource)),
+    customRoles,
+    serviceAccounts: sortedCanonical(serviceAccounts),
+    secrets: sortedCanonical(secrets),
+    artifactRepositories: sortedCanonical(repositories),
+    storageBuckets: sortedCanonical(storageBuckets),
+    runUnreachableRegions: array(security.runUnreachableRegions).map(string).sort(),
+  };
+}
+
 function deploymentTarget(value: unknown): DeploymentTarget {
   const target = record(value);
   assertExactKeys(target, [
     'projectId', 'projectNumber', 'releaseId', 'hostingSite', 'hostingOrigins',
     'hostingCustomDomains', 'generatedHostingFiles', 'allowedUntrackedPrefixes',
-    'ancestorResources', 'ancestorIamPolicySha256', 'firebaseConfig', 'functions',
+    'ancestorResources', 'ancestorIamPolicySha256', 'security', 'firebaseConfig', 'functions',
   ]);
   const projectId = string(target.projectId);
   const hostingSite = string(target.hostingSite);
@@ -1618,6 +2136,7 @@ function deploymentTarget(value: unknown): DeploymentTarget {
     allowedUntrackedPrefixes: prefixes,
     ancestorResources: resources,
     ancestorIamPolicySha256: policyHash,
+    security: securityTarget(target.security, functions, projectId),
     firebaseConfig,
     functions,
   };
@@ -1660,6 +2179,9 @@ export function readExpectedDeployment(
     gitShow(runGit, reviewedCommit, 'firebase.json').toString('utf8'),
   ));
   assertReviewedFunctionsPackaging(firebaseJson);
+  const storage = record(firebaseJson.storage);
+  assertExactKeys(storage, ['rules']);
+  assert.equal(storage.rules, 'storage.rules');
   const indexConfig = JSON.parse(
     gitShow(runGit, reviewedCommit, 'firestore.indexes.json').toString('utf8'),
   ) as {
@@ -1696,6 +2218,7 @@ export function readExpectedDeployment(
   return {
     target,
     firestoreRulesSha256: sha256(gitShow(runGit, reviewedCommit, 'firestore.rules')),
+    storageRulesSha256: sha256(gitShow(runGit, reviewedCommit, 'storage.rules')),
     indexes: sortedCanonical(indexConfig.indexes.map(normalizeIndex)),
     ttls: sortedCanonical(indexConfig.fieldOverrides
       .filter((field) => field.ttl === true)
@@ -1720,9 +2243,11 @@ export function reviewedTreeProblems(
     ['ls-remote', '--exit-code', 'origin', 'refs/heads/master'],
   ).trim();
   const remote = remoteLine.split(/\s+/)[0] ?? '';
+  const origin = gitText(runGit, ['remote', 'get-url', 'origin']).trim();
   if (head !== reviewedCommit) problems.push('HEAD is not the reviewed commit');
   if (pushed !== reviewedCommit) problems.push('origin/master is not the reviewed commit');
   if (remote !== reviewedCommit) problems.push('Remote master is not the reviewed commit');
+  if (origin !== target.security.gitOrigin) problems.push('Git origin is not the reviewed repository');
   const status = gitText(
     runGit,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
@@ -1743,6 +2268,16 @@ export function reviewedTreeProblems(
   ).split('\0').filter(Boolean);
   for (const path of dotenvFiles) {
     problems.push(`Ignored Functions dotenv input: ${path}`);
+  }
+  const secretFiles = gitText(
+    runGit,
+    [
+      'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--',
+      ':(glob)functions/.secret.*',
+    ],
+  ).split('\0').filter(Boolean);
+  for (const path of secretFiles) {
+    problems.push(`Ignored Functions secret input: ${path}`);
   }
   return problems;
 }

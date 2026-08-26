@@ -324,8 +324,8 @@ when the new Functions are deployed: the queue worker can already produce an
 ambiguous remote Toggl outcome that the pre-release stack cannot reconcile.
 
 ```bash
-# 1. Reject uncorrelated legacy timer writes.
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
+# 1. Reject uncorrelated legacy timer writes and disable unused Cloud Storage.
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore,storage
 
 # 2. Deploy the claim-aware callables.
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
@@ -372,21 +372,34 @@ npm run verify:deployment -- --commit=<reviewed-40-character-SHA>
 
 The command reruns the full validation and production build. It requires the
 reviewed commit to equal `HEAD`, the local tracking ref, and the current remote
-`master` returned by `git ls-remote`. It rejects ignored dotenv deploy inputs
+`master` returned by `git ls-remote`, and it pins `origin` to the reviewed
+GitHub repository. It rejects ignored dotenv and local-secret deploy inputs
 and reads expected artifacts from the reviewed commit rather than the working
-tree. The live checks cover the complete Firestore ruleset, indexes, TTL
-policies, every Function source archive, runtime and security configuration,
-complete Function and Cloud Run IAM policies, ancestor IAM, Gen 2 traffic and
-Hosting-pinned revisions, all Hosting sites/domains/channels, control-plane
-gzip hashes, bytes from every production origin, and the profile and sitemap
-rewrites. Pass `--account=<gcloud-account>` when the active gcloud account is
-not the release account. Unknown or misspelled options fail.
+tree. The live checks cover Firestore and Storage rules, indexes and TTL
+policies, Firebase Authentication domains/providers, every Function source
+archive, runtime and security configuration, complete Function and Cloud Run
+IAM policies, ancestor and custom IAM, runtime identity keys, Secret Manager,
+source buckets, Artifact Registry, Eventarc, the project-wide Cloud Run service
+inventory, Gen 2 images/traffic and Hosting-pinned revisions, all Hosting
+sites/domains/channels, control-plane gzip hashes, bytes from every production
+origin, and the profile and sitemap rewrites. Pass
+`--account=<gcloud-account>` when the active gcloud account is not the release
+account. Unknown or misspelled options fail.
 
 `deployment-target.json` and `functions/src/release.ts` share one release ID.
 Change that ID for every release. Deploy all Functions so every deployed source
 archive matches the reviewed manifest; frontend changes also change the shell
 embedded in `publicweb`. There is no partial production Function or Hosting
 release path.
+
+Before the final integrity check, delete every non-live Hosting channel, remove
+every stale `fh-*` Cloud Run traffic tag while retaining the tag used by the
+active Hosting release, and restore Firebase Authentication authorized domains
+to the exact list in `deployment-target.json`. A deleted Hosting preview
+channel does not delete its Cloud Run tag. Also remove the generated
+`functions/.secret.local`; `npm --prefix functions run serve` recreates it from
+the tracked dummy emulator fixture when needed. The integrity check fails until
+all four surfaces match the reviewed target.
 
 ### Deploy Hosting and Profile Renderer
 

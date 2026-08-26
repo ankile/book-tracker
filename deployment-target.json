@@ -22,6 +22,110 @@
   "allowedUntrackedPrefixes": ["ideas/"],
   "ancestorResources": ["projects/book-tracker-d8f24"],
   "ancestorIamPolicySha256": "3b551bc5c2cf2508385c6916c2094c358db71ca175ef84e03ada7250d3fed99c",
+  "security": {
+    "gitOrigin": "https://github.com/ankile/book-tracker.git",
+    "storageRulesRelease": "book-tracker-d8f24.appspot.com",
+    "authConfig": {
+      "authorizedDomains": [
+        "book-tracker-d8f24.firebaseapp.com",
+        "book-tracker-d8f24.web.app",
+        "book.ankile.com",
+        "localhost"
+      ],
+      "signIn": {"email": {"enabled": true, "passwordRequired": true}},
+      "mfa": {"state": "DISABLED"},
+      "multiTenant": {},
+      "client": {"permissions": {}, "firebaseSubdomain": "book-tracker-d8f24"},
+      "blockingFunctions": {},
+      "monitoring": {"requestLogging": {}},
+      "smsRegionConfig": {}
+    },
+    "ancestorIamPolicies": [{
+      "name": "projects/book-tracker-d8f24",
+      "iam": [
+        {"role":"roles/appengine.serviceAgent","members":["serviceAccount:service-440931185227@gcp-gae-service.iam.gserviceaccount.com"]},
+        {"role":"roles/artifactregistry.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-artifactregistry.iam.gserviceaccount.com"]},
+        {"role":"roles/browser","members":["serviceAccount:furniture-diffusion@book-tracker-d8f24.iam.gserviceaccount.com"]},
+        {"role":"roles/cloudaicompanion.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-cloudaicompanion.iam.gserviceaccount.com"]},
+        {"role":"roles/cloudbuild.builds.builder","members":["serviceAccount:440931185227@cloudbuild.gserviceaccount.com"]},
+        {"role":"roles/cloudbuild.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-cloudbuild.iam.gserviceaccount.com"]},
+        {"role":"roles/cloudfunctions.serviceAgent","members":["serviceAccount:service-440931185227@gcf-admin-robot.iam.gserviceaccount.com"]},
+        {"role":"roles/compute.instanceGroupManagerServiceAgent","members":["serviceAccount:440931185227@cloudservices.gserviceaccount.com"]},
+        {"role":"roles/compute.serviceAgent","members":["serviceAccount:service-440931185227@compute-system.iam.gserviceaccount.com"]},
+        {"role":"roles/containerregistry.ServiceAgent","members":["serviceAccount:service-440931185227@containerregistry.iam.gserviceaccount.com"]},
+        {"role":"roles/editor","members":["serviceAccount:440931185227-compute@developer.gserviceaccount.com","serviceAccount:440931185227@cloudservices.gserviceaccount.com","serviceAccount:book-tracker-d8f24@appspot.gserviceaccount.com"]},
+        {"role":"roles/eventarc.eventReceiver","members":["serviceAccount:440931185227-compute@developer.gserviceaccount.com"]},
+        {"role":"roles/eventarc.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-eventarc.iam.gserviceaccount.com"]},
+        {"role":"roles/firebase.managementServiceAgent","members":["serviceAccount:firebase-service-account@firebase-sa-management.iam.gserviceaccount.com","serviceAccount:service-440931185227@gcp-sa-firebase.iam.gserviceaccount.com"]},
+        {"role":"roles/firebase.sdkAdminServiceAgent","members":["serviceAccount:firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com"]},
+        {"role":"roles/firebaseappcheck.admin","members":["serviceAccount:firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com"]},
+        {"role":"roles/firebasemods.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-firebasemods.iam.gserviceaccount.com"]},
+        {"role":"roles/firebaserules.system","members":["serviceAccount:service-440931185227@firebase-rules.iam.gserviceaccount.com"]},
+        {"role":"roles/firestore.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-firestore.iam.gserviceaccount.com"]},
+        {"role":"roles/iam.serviceAccountTokenCreator","members":["serviceAccount:firebase-adminsdk-6akbb@book-tracker-d8f24.iam.gserviceaccount.com","serviceAccount:service-440931185227@gcp-sa-pubsub.iam.gserviceaccount.com"]},
+        {"role":"roles/notebooks.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-notebooks.iam.gserviceaccount.com"]},
+        {"role":"roles/owner","members":["user:lars.ankile@gmail.com"]},
+        {"role":"roles/pubsub.serviceAgent","members":["serviceAccount:service-440931185227@gcp-sa-pubsub.iam.gserviceaccount.com"]},
+        {"role":"roles/run.invoker","members":["serviceAccount:440931185227-compute@developer.gserviceaccount.com"]},
+        {"role":"roles/run.serviceAgent","members":["serviceAccount:service-440931185227@serverless-robot-prod.iam.gserviceaccount.com"]}
+      ]
+    }],
+    "customRoles": [],
+    "serviceAccounts": [
+      {"name":"440931185227-compute@developer.gserviceaccount.com","iam":[],"userManagedKeys":[]},
+      {"name":"book-tracker-d8f24@appspot.gserviceaccount.com","iam":[],"userManagedKeys":[]}
+    ],
+    "secrets": [{
+      "name": "FUNCTIONS_CONFIG_EXPORT",
+      "iam": [{"role":"roles/secretmanager.secretAccessor","members":["serviceAccount:book-tracker-d8f24@appspot.gserviceaccount.com"]}],
+      "versions": [{"version":"1","state":"ENABLED"},{"version":"2","state":"ENABLED"}]
+    }],
+    "artifactRepositories": [
+      {"name":"projects/book-tracker-d8f24/locations/europe-west1/repositories/gcf-artifacts","iam":[]},
+      {"name":"projects/book-tracker-d8f24/locations/us-central1/repositories/gcf-artifacts","iam":[]}
+    ],
+    "storageBuckets": [
+      {
+        "name":"book-tracker-d8f24.appspot.com",
+        "iam":[
+          {"role":"roles/storage.admin","members":["serviceAccount:firebase-storage@system.gserviceaccount.com"]},
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited",
+        "uniformBucketLevelAccess":false
+      },
+      {
+        "name":"gcf-sources-440931185227-europe-west1",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited",
+        "uniformBucketLevelAccess":true
+      },
+      {
+        "name":"gcf-v2-sources-440931185227-europe-west1",
+        "iam":[
+          {"role":"roles/storage.legacyBucketOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyBucketReader","members":["projectViewer:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectOwner","members":["projectEditor:book-tracker-d8f24","projectOwner:book-tracker-d8f24"]},
+          {"role":"roles/storage.legacyObjectReader","members":["projectViewer:book-tracker-d8f24"]}
+        ],
+        "publicAccessPrevention":"inherited",
+        "uniformBucketLevelAccess":true
+      }
+    ],
+    "runUnreachableRegions": [
+      "europe-west15",
+      "me-central2",
+      "us-central2",
+      "us-east7",
+      "us-west8"
+    ]
+  },
   "firebaseConfig": {
     "projectId": "book-tracker-d8f24",
     "databaseURL": "https://book-tracker-d8f24.firebaseio.com",

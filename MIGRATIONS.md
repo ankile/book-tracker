@@ -107,7 +107,8 @@ the fresh client just made must be invisible to it (0 ops against new-shape docs
 
 1. **Functions** (`firebase deploy --only functions`) — trigger
    behavior must be correct before bulk writes land.
-2. **Firestore rules/indexes** (`firebase deploy --only firestore`).
+2. **Firestore rules/indexes and deny-all Storage rules**
+   (`firebase deploy --only firestore,storage`).
 3. **Hosting plus the reviewed Function archive** (`npm run build` +
    `firebase deploy --only functions,hosting`).
 
@@ -228,6 +229,12 @@ Do not mark the rollout complete if it reports a mutable or unpushed tree,
 stale Firestore configuration, a Function release or configuration mismatch,
 unexpected invoker access, split Gen 2 traffic, stale Hosting files, or a stale
 profile or sitemap rewrite.
+
+Before that final verification, remove old Hosting preview channels and their
+separate `fh-*` Cloud Run tags, restore the reviewed Firebase Authentication
+authorized-domain list, and delete the generated `functions/.secret.local`.
+These are release gates: preview-channel deletion alone does not remove a
+tagged, directly reachable Cloud Run revision.
 
 1. **Merge only:** revert the merge commit. No Firebase state changed.
 2. **New rules only:** deploy `firestore:rules` from the pre-release tag.
