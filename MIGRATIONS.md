@@ -172,13 +172,15 @@ cached old client can submit an offline reading batch that omits the key and is
 rejected as a whole. A rejected batch loses the reading update rather than only
 its provenance.
 
-1. After the timer rollout deploys Hosting, wait a default **7-day overlap
-   window** before backfilling. Ask users to reload or close long-running tabs:
-   any still-running old bundle, online or offline, writes the old shape. An
-   old online tab rejects immediately after the backfill; an offline client
-   rejects when its queued batch reconnects. Clients that keep the old bundle
-   beyond seven days remain a known risk, so record the actual window and this
-   residual risk in the rollout log.
+1. After the timer rollout deploys Hosting, reload or close every open
+   client before backfilling: any still-running old bundle, online or
+   offline, writes the old shape. An old online tab rejects its next reading
+   batch immediately after the backfill; an offline client rejects when its
+   queued batch reconnects. A rejected batch costs at most that one reading
+   update and heals on reload. This app has a single operator-user
+   (decided 2026-08-26), so there is no multi-user overlap window — reload
+   your own clients and proceed the same day. Record the window actually
+   observed in the rollout log.
 
    Session edit/delete rewind is deliberately disabled on un-backfilled books
    during this window. If the establishing session changes or disappears, its
@@ -407,5 +409,6 @@ rejects newly *created* gen1 Firestore triggers, so it must be gen2
 | 2026-08-24 | `migrate-enrich-books.ts` | ISBN-derived metadata: backfilled coverUrl/publisher/publishedDate/subjects/fiction on all 220 books from Open Library (139 enriched, 120 with covers; 81 defaults-only — 52 no ISBN, 19 unknown to OL, 10 invalid, all REPORTed); normalizes stored ISBNs to ISBN-13; audit 1100 findings -> 0. Lookups cached in `ol-cache.json` (gitignored), so the prod apply ran with 0 live fetches. OL soft-blocks bursty IPs — the script trickles at 1 req/30s with escalating backoff |
 | 2026-08-24 | `migrate-enrich-google.ts` | Google Books gap-fill over pass 1: improved 88 books (fiction unknown 159 -> 102, covers 120 -> 141, subjects 123 -> 138); gap-fill only, an existing Open Library value always wins. Its BISAC categories are what classify fiction/non-fiction — the remaining 102 unknowns are 52 books with no ISBN plus 50 whose volumes carry no categories. Key comes from the FUNCTIONS_CONFIG_EXPORT secret via `GOOGLE_BOOKS_KEY`; lookups cached in `gb-cache.json` (gitignored) |
 | 2026-08-24 | `migrate-enrich-nb.ts` | Nasjonalbiblioteket gap-fill (pass 3): improved 17 books, the Norwegian editions the first two passes had never heard of. MODS genres ("Romaner", "Skuespill", the explicit "notfiction" marker) are the fiction signal; cover scans are verified with a HEAD request before storing, since in-copyright ones 403. Free, no key; lookups cached in `nb-cache.json` (gitignored) |
+| 2026-08-26 | `migrate-reading-progress-sources.ts` | progress-ownership backfill, run same-day as the timer rollout: the default 7-day overlap window was dropped by owner decision 2026-08-26 (single-user app; operator reloads own clients; residual risk = one rejected reading batch from any un-reloaded old tab, heals on reload). Dry-run 219 books, snapshot `snapshots/2026-08-26T21-17-26.862Z-prod.json` (3883 docs), apply 219, second apply 0. Audit: 10 `book.progress-source-null-baseline`, each investigated and accepted as legacy — all 10 have zero `updates` docs (pages set 2020–2026-04 before update history; several finished books plus test entries "sdgsd" and "The great legend" 4000/5000); all other `book.progress-source-*` findings 0 |
 | 2026-08-26 | `migrate-timer-claims.ts` | timer-claim rollout completed the strict-TS release: release SHA `6fb5cf8` (merge of `9e9ec28` + auth-hotfix `582fb9a`, which the 08-25 Hosting deploy had silently reverted); rules were already live and hash-identical to source (`4ce640de…`, released 2026-08-26T00:30Z); deployed all Functions (claim-aware toggl, new `toggl-clearstopping`, admin/booksapi), then after a drain window: dry-run (17 users, all idle), snapshot `snapshots/2026-08-26T19-41-11.908Z-prod.json` (3866 docs), apply (17 migrated), second apply 0, audit `timer-lifecycle.*` findings 0; then `functions:publicweb,hosting` from the same validated build (live version `1787772834321` matches). Remaining audit findings: 219 `book.missing.currentPageUpdateId` — expected; **progress-source backfill due no earlier than 2026-09-02** (7-day overlap window started 2026-08-26). Operator: lars.ankile@gmail.com via Claude |
 | 2026-08-24 | `migrate-enrich-goodreads.ts` | Goodreads gap-fill (pass 4, last resort): improved 36 books — covers for the Norwegian classics plus fiction/non-fiction for English non-fiction. Reads schema.org JSON-LD from `/book/isbn/<isbn>` (robots-permitted; `/search` is not). NOT wired into the app — no CORS, and the ToS disallow automated access — so it stays a hand-run backfill over the owner's own library, paced at 5s and cached in `gr-cache.json`. **Run it after pass 3**, or it fills fields Nasjonalbiblioteket should own. Combined result of passes 3+4: fiction unknown 102 -> 64, covers 141 -> 157, "nothing found" 14 -> 0; the remaining 64 unknowns are 52 books with no ISBN and 10 with an invalid one (see /isbns) |
