@@ -4,6 +4,7 @@ import type {
 } from "./decoders";
 
 const ORIGIN = "https://book.ankile.com";
+const PROFILE_CARD = `${ORIGIN}/social/profile-card.png`;
 const TITLE_MARKER = '<title data-shell-title>Personal Book Tracker</title>';
 const DESCRIPTION_MARKER = [
   '<meta',
@@ -70,6 +71,15 @@ function displayName(profile: PublicProfile): string {
 function profileDescription(profile: PublicProfile): string {
   const name = displayName(profile);
   return `${name} has finished ${profile.stats.finishedBooks.toLocaleString("en-US")} books and read ${profile.stats.totalPagesRead.toLocaleString("en-US")} pages.`;
+}
+
+function jsonForHtml(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll("&", "\\u0026")
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
 }
 
 function linkHref(link: PublicProfileLink): string {
@@ -195,13 +205,44 @@ function profileHead(profile: PublicProfile, searchable: boolean): string {
   const robots = searchable
     ? "index,follow,max-image-preview:large"
     : "noindex,follow";
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "ProfilePage",
+    "@id": `${canonical}#profile-page`,
+    url: canonical,
+    name: title,
+    description,
+    dateModified: profile.updatedAt.toDate().toISOString(),
+    mainEntity: {
+      "@type": "Person",
+      "@id": `${canonical}#person`,
+      name,
+      alternateName: `@${profile.username}`,
+      url: canonical,
+      sameAs: profile.links.map(linkHref),
+    },
+  };
   return [
     `<meta data-server-profile-meta name="robots" content="${robots}" />`,
     `<link data-server-profile-meta rel="canonical" href="${escapeHtml(canonical)}" />`,
     '<meta data-server-profile-meta property="og:type" content="profile" />',
+    '<meta data-server-profile-meta property="og:site_name" content="Book Tracker" />',
     `<meta data-server-profile-meta property="og:title" content="${escapeHtml(title)}" />`,
     `<meta data-server-profile-meta property="og:description" content="${escapeHtml(description)}" />`,
     `<meta data-server-profile-meta property="og:url" content="${escapeHtml(canonical)}" />`,
+    `<meta data-server-profile-meta property="profile:username" content="${escapeHtml(profile.username)}" />`,
+    `<meta data-server-profile-meta property="og:image" content="${PROFILE_CARD}" />`,
+    `<meta data-server-profile-meta property="og:image:secure_url" content="${PROFILE_CARD}" />`,
+    '<meta data-server-profile-meta property="og:image:type" content="image/png" />',
+    '<meta data-server-profile-meta property="og:image:width" content="1200" />',
+    '<meta data-server-profile-meta property="og:image:height" content="630" />',
+    '<meta data-server-profile-meta property="og:image:alt" content="Book Tracker reading profile" />',
+    '<meta data-server-profile-meta name="twitter:card" content="summary_large_image" />',
+    `<meta data-server-profile-meta name="twitter:title" content="${escapeHtml(title)}" />`,
+    `<meta data-server-profile-meta name="twitter:description" content="${escapeHtml(description)}" />`,
+    `<meta data-server-profile-meta name="twitter:image" content="${PROFILE_CARD}" />`,
+    '<meta data-server-profile-meta name="twitter:image:alt" content="Book Tracker reading profile" />',
+    `<script data-server-profile-meta type="application/ld+json">${jsonForHtml(structuredData)}</script>`,
   ].join("\n\t\t");
 }
 

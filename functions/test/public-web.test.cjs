@@ -66,18 +66,30 @@ const marker = {
 
 test("renders a complete, escaped, indexable profile document", () => {
   const html = renderProfileDocument(shell, profile("ada-lovelace", {
-    givenName: "Ada <script>",
+    givenName: "Ada </script><script>",
   }), true);
 
-  assert.match(html, /Ada &lt;script&gt; Lovelace&#39;s reading profile \| Book Tracker/);
-  assert.doesNotMatch(html, /Ada <script>/);
+  assert.match(html, /Ada &lt;\/script&gt;&lt;script&gt; Lovelace&#39;s reading profile \| Book Tracker/);
+  assert.doesNotMatch(html, /Ada <\/script><script>/);
   assert.match(html, /name="robots" content="index,follow,max-image-preview:large"/);
   assert.match(html, /rel="canonical" href="https:\/\/book\.ankile\.com\/profiles\/ada-lovelace"/);
   assert.match(html, /property="og:title"/);
+  assert.match(html, /property="og:image" content="https:\/\/book\.ankile\.com\/social\/profile-card\.png"/);
+  assert.match(html, /name="twitter:card" content="summary_large_image"/);
+  const structuredData = JSON.parse(
+    html.match(/<script data-server-profile-meta type="application\/ld\+json">([^<]+)<\/script>/)[1],
+  );
+  assert.equal(structuredData["@type"], "ProfilePage");
+  assert.equal(structuredData.mainEntity["@type"], "Person");
+  assert.equal(structuredData.mainEntity.name, "Ada </script><script> Lovelace");
+  assert.equal(structuredData.mainEntity.alternateName, "@ada-lovelace");
+  assert.deepEqual(structuredData.mainEntity.sameAs, ["https://example.com/?x=1&y=2"]);
   assert.match(html, /Books read/);
   assert.match(html, /3,200/);
   assert.match(html, /href="https:\/\/example\.com\/\?x=1&amp;y=2"/);
   assert.match(html, /_app\/immutable\/entry\/start\.[A-Za-z0-9_-]+\.js/);
+  assert.match(html, /document\.documentElement\.classList\.add\('js'\)/);
+  assert.match(html, /html\.js #profile-snapshot-slot:not\(:empty\)/);
 });
 
 test("renders public unlisted profiles with noindex", () => {

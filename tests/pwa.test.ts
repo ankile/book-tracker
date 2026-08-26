@@ -6,6 +6,7 @@ const manifestPath = new URL('../static/manifest.json', import.meta.url);
 const appTemplatePath = new URL('../src/app.html', import.meta.url);
 const serviceWorkerPath = new URL('../src/service-worker.ts', import.meta.url);
 const robotsPath = new URL('../static/robots.txt', import.meta.url);
+const profileCardPath = new URL('../static/social/profile-card.png', import.meta.url);
 const firebaseConfigPath = new URL('../firebase.json', import.meta.url);
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 
@@ -42,6 +43,14 @@ test('iPhone metadata and launch colors match the manifest', async () => {
   assert.doesNotMatch(html, /cdn\.jsdelivr\.net/);
 });
 
+test('profile social card uses the large-preview aspect ratio declared by the renderer', async () => {
+  const png = await readFile(profileCardPath);
+
+  assert.equal(png.toString('ascii', 1, 4), 'PNG');
+  assert.equal(png.readUInt32BE(16), 1200);
+  assert.equal(png.readUInt32BE(20), 630);
+});
+
 test('service worker excludes screenshots and does not grow a navigation cache', async () => {
   const source = await readFile(serviceWorkerPath, 'utf8');
 
@@ -63,6 +72,12 @@ test('Hosting routes crawlable pages to the pinned renderer before the SPA fallb
   const config = JSON.parse(await readFile(firebaseConfigPath, 'utf8'));
   const rewrites = config.hosting.rewrites;
 
+  assert.deepEqual(config.hosting.redirects, [{
+    source: '/profiles/:username/',
+    destination: '/profiles/:username',
+    type: 301,
+  }]);
+
   assert.deepEqual(rewrites.at(0), {
     source: '/{sitemap.xml,profiles/**}',
     function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
@@ -79,4 +94,12 @@ test('Hosting routes crawlable pages to the pinned renderer before the SPA fallb
   assert.deepEqual(sitemapHeaders.headers, [{
     key: 'Cache-Control', value: 'public, max-age=300, s-maxage=300',
   }]);
+});
+
+test('JavaScript clients skip the crawler snapshot instead of flashing a second profile design', async () => {
+  const html = await readFile(appTemplatePath, 'utf8');
+
+  assert.match(html, /document\.documentElement\.classList\.add\('js'\)/);
+  assert.match(html, /html:not\(\.js\) #profile-snapshot-slot:not\(:empty\) \+ #app-shell/);
+  assert.match(html, /html\.js #profile-snapshot-slot:not\(:empty\)/);
 });

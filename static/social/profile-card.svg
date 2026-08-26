@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">Book Tracker reading profile</title>
+  <desc id="description">An open-book mark beside the words Book Tracker and Reading profiles.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#35686a"/>
+      <stop offset="1" stop-color="#244f51"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(850 180) rotate(135) scale(560 420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b9d3d4" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#b9d3d4" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#background)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <g transform="translate(95 155)">
+    <rect width="320" height="320" rx="72" fill="#ffffff" fill-opacity=".1"/>
+    <g transform="translate(32 32) scale(.5)">
+      <path d="M64 131c66-24 129-13 192 31v238c-63-44-126-55-192-31V131Z" fill="#fffdf7"/>
+      <path d="M448 131c-66-24-129-13-192 31v238c63-44 126-55 192-31V131Z" fill="#fffdf7"/>
+      <path d="M256 162v238" stroke="#b9d3d4" stroke-width="12" stroke-linecap="round"/>
+      <path d="M100 181c39-9 78-3 116 17M100 235c39-9 78-3 116 17M100 289c39-9 78-3 116 17" fill="none" stroke="#35686a" stroke-width="13" stroke-linecap="round"/>
+      <path d="M412 181c-39-9-78-3-116 17M412 235c-39-9-78-3-116 17M412 289c-39-9-78-3-116 17" fill="none" stroke="#35686a" stroke-width="13" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <g fill="#fffdf7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="480" y="238" font-size="76" font-weight="700" letter-spacing="-2">Book Tracker</text>
+    <text x="484" y="310" font-size="38" font-weight="600" fill="#d7e7e7">Reading profiles</text>
+    <text x="484" y="374" font-size="28" fill="#ffffff" fill-opacity=".82">Books, pages, time and activity.</text>
+    <text x="484" y="448" font-size="24" font-weight="600" fill="#b9d3d4">book.ankile.com</text>
+  </g>
+</svg>

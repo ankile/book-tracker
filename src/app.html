@@ -23,6 +23,7 @@
 		<link rel="icon" href="/favicon.ico" />
 		<link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
 		<link rel="manifest" href="/manifest.json" />
+		<script>document.documentElement.classList.add('js');</script>
 
 		<style>
 			:root {
@@ -36,7 +37,11 @@
 				min-height: 100%;
 			}
 
-			#profile-snapshot-slot:not(:empty) + #app-shell {
+			html:not(.js) #profile-snapshot-slot:not(:empty) + #app-shell {
+				display: none;
+			}
+
+			html.js #profile-snapshot-slot:not(:empty) {
 				display: none;
 			}
 

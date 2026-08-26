@@ -11,6 +11,13 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "redirects": [
+      {
+        "source": "/profiles/:username/",
+        "destination": "/profiles/:username",
+        "type": 301
+      }
+    ],
     "rewrites": [
       {
         "source": "/{sitemap.xml,profiles/**}",

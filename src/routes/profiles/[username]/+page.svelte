@@ -46,11 +46,10 @@
     return () => (current = false);
   });
 
-  // The Hosting function fills this slot with indexable HTML before the
-  // client starts. Keep it on screen through auth restoration and the
-  // Firestore read, then reveal the interactive Svelte page. If the client
-  // load fails, the server snapshot remains useful instead of becoming an
-  // empty error state.
+  // The Hosting function fills this slot with indexable HTML. app.html hides
+  // it immediately when JavaScript is available, so people see this route's
+  // loading state instead of a second profile design. It remains the complete
+  // no-JavaScript response and is removed after the client resolves the page.
   $effect(() => {
     if (profile === undefined || profileLoadFailed) return;
     document.getElementById('profile-snapshot-slot')?.replaceChildren();
