@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {existsSync, readFileSync} from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+} from 'node:fs';
 import {dirname, posix, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {gunzipSync, inflateRawSync} from 'node:zlib';
@@ -172,6 +178,7 @@ export interface ObservedFunction extends ExpectedFunction {
   revisionImage: string | null;
   buildId: string | null;
   buildSource: string | null;
+  buildImageDigest: string | null;
   imageBuildId: string | null;
   imageSource: string | null;
   imageSourceFiles: Record<string, string> | null;
@@ -274,9 +281,11 @@ const FETCH_TIMEOUT_MS = 10_000;
 const RELEASE_HEADER = 'x-book-tracker-release';
 const MAX_FUNCTION_ARCHIVE_BYTES = 20 * 1024 * 1024;
 const MAX_FUNCTION_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_FUNCTION_SOURCE_TAR_BYTES = 75 * 1024 * 1024;
 const MAX_IMAGE_LAYER_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_LAYER_EXPANDED_BYTES = 500 * 1024 * 1024;
 const RUN_INVENTORY_QUIESCENCE_MS = 10 * 60 * 1000;
+const MAX_RUN_INVENTORY_CHECKPOINT_AGE_MS = 60 * 60 * 1000;
 
 function record(value: unknown): Record<string, unknown> {
   assert.equal(typeof value, 'object');
@@ -387,14 +396,16 @@ function crc32(content: Uint8Array): number {
 function zipEntries(content: Uint8Array): Array<{path: string; body: Uint8Array}> {
   const view = new DataView(content.buffer, content.byteOffset, content.byteLength);
   const minimum = Math.max(0, content.byteLength - 65_557);
-  let end = -1;
+  const alignedEnds: number[] = [];
   for (let offset = content.byteLength - 22; offset >= minimum; offset -= 1) {
-    if (view.getUint32(offset, true) === 0x06054b50) {
-      end = offset;
-      break;
+    if (view.getUint32(offset, true) === 0x06054b50 &&
+        offset + 22 + view.getUint16(offset + 20, true) === content.byteLength) {
+      alignedEnds.push(offset);
     }
   }
-  assert.notEqual(end, -1, 'Function source archive has no ZIP end record');
+  assert.equal(alignedEnds.length, 1,
+    'Function source archive must have one EOF-aligned ZIP end record');
+  const end = alignedEnds[0];
   assert.equal(view.getUint16(end + 4, true), 0, 'multi-disk ZIP is unsupported');
   assert.equal(view.getUint16(end + 6, true), 0, 'multi-disk ZIP is unsupported');
   const entriesOnDisk = view.getUint16(end + 8, true);
@@ -411,7 +422,11 @@ function zipEntries(content: Uint8Array): Array<{path: string; body: Uint8Array}
   let expandedBytes = 0;
   let offset = directoryOffset;
   for (let index = 0; index < entryCount; index += 1) {
+    assert.ok(offset + 46 <= end, 'truncated ZIP central entry');
     assert.equal(view.getUint32(offset, true), 0x02014b50, 'invalid ZIP central entry');
+    const versionMadeBy = view.getUint16(offset + 4, true);
+    const creatorSystem = versionMadeBy >>> 8;
+    const versionNeeded = view.getUint16(offset + 6, true);
     const flags = view.getUint16(offset + 8, true);
     const method = view.getUint16(offset + 10, true);
     const checksum = view.getUint32(offset + 16, true);
@@ -422,11 +437,27 @@ function zipEntries(content: Uint8Array): Array<{path: string; body: Uint8Array}
     const commentLength = view.getUint16(offset + 32, true);
     assert.equal(view.getUint16(offset + 34, true), 0, 'multi-disk ZIP is unsupported');
     const localOffset = view.getUint32(offset + 42, true);
+    const externalAttributes = view.getUint32(offset + 38, true);
+    assert.equal(versionNeeded <= 20, true, 'unsupported ZIP extraction version');
+    assert.equal(creatorSystem === 0 || creatorSystem === 3, true,
+      'unsupported ZIP creator system');
     assert.notEqual(compressedSize, 0xffffffff, 'ZIP64 is unsupported');
     assert.notEqual(originalSize, 0xffffffff, 'ZIP64 is unsupported');
     assert.notEqual(localOffset, 0xffffffff, 'ZIP64 is unsupported');
-    assert.equal((flags & 1) === 0, true, 'encrypted ZIP entries are unsupported');
+    assert.equal(flags & ~0x800, 0, 'unsupported ZIP entry flags');
     assert.equal(method === 0 || method === 8, true, 'unsupported ZIP compression method');
+    assert.equal(extraLength, 0, 'ZIP central extra fields are unsupported');
+    assert.equal(commentLength, 0, 'ZIP entry comments are unsupported');
+    assert.equal(view.getUint16(offset + 36, true), 0,
+      'ZIP internal attributes are unsupported');
+    if (creatorSystem === 3) {
+      const fileType = (externalAttributes >>> 16) & 0o170000;
+      assert.equal(fileType === 0 || fileType === 0o100000, true,
+        'ZIP entry is not a regular file');
+    } else {
+      assert.equal((externalAttributes & 0x10) === 0, true,
+        'ZIP entry is a directory');
+    }
     const nameBytes = content.subarray(offset + 46, offset + 46 + nameLength);
     const encoding = (flags & 0x800) === 0 ? 'latin1' : 'utf-8';
     const path = new TextDecoder(encoding, {fatal: true}).decode(nameBytes);
@@ -436,17 +467,23 @@ function zipEntries(content: Uint8Array): Array<{path: string; body: Uint8Array}
     assert.equal(view.getUint32(localOffset, true), 0x04034b50, 'invalid ZIP local entry');
     assert.equal(view.getUint16(localOffset + 6, true), flags, 'ZIP flags disagree');
     assert.equal(view.getUint16(localOffset + 8, true), method, 'ZIP methods disagree');
+    assert.equal(view.getUint32(localOffset + 14, true), checksum, 'ZIP checksums disagree');
+    assert.equal(view.getUint32(localOffset + 18, true), compressedSize,
+      'ZIP compressed sizes disagree');
+    assert.equal(view.getUint32(localOffset + 22, true), originalSize,
+      'ZIP original sizes disagree');
     const localNameLength = view.getUint16(localOffset + 26, true);
     const localExtraLength = view.getUint16(localOffset + 28, true);
+    assert.equal(localExtraLength, 0, 'ZIP local extra fields are unsupported');
     const localName = content.subarray(localOffset + 30, localOffset + 30 + localNameLength);
     assert.deepEqual(localName, nameBytes, 'ZIP local and central paths disagree');
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
     const dataEnd = dataStart + compressedSize;
     assert.ok(dataEnd <= directoryOffset, 'ZIP entry overlaps its directory');
-    for (const [start, end] of dataRanges) {
-      assert.equal(dataEnd <= start || dataStart >= end, true, 'ZIP entries overlap');
+    for (const [start, previousEnd] of dataRanges) {
+      assert.equal(dataEnd <= start || localOffset >= previousEnd, true, 'ZIP entries overlap');
     }
-    dataRanges.push([dataStart, dataEnd]);
+    dataRanges.push([localOffset, dataEnd]);
     expandedBytes += originalSize;
     assert.ok(expandedBytes <= MAX_FUNCTION_SOURCE_BYTES,
       'Function source archive expands too large');
@@ -557,6 +594,17 @@ function assertNoSymlinkPathAliases(files: RuntimeFile[]): void {
   }
 }
 
+function assertNoEffectiveSymlinkAncestor(
+  files: Map<string, {file: RuntimeFile; body?: Uint8Array}>,
+  path: string,
+): void {
+  for (const {file} of files.values()) {
+    if (file.type === 'symlink' && path.startsWith(file.path + '/')) {
+      assert.fail('runtime layer path traverses an effective symlink: ' + path);
+    }
+  }
+}
+
 function runtimeFilesystem(layers: TarEntry[][]): {
   files: RuntimeFile[];
   bodies: Map<string, Uint8Array>;
@@ -570,6 +618,7 @@ function runtimeFilesystem(layers: TarEntry[][]): {
   for (const layer of layers) {
     for (const entry of layer) {
       const path = runtimePath(entry.path);
+      assertNoEffectiveSymlinkAncestor(files, path);
       const name = path.split('/').at(-1)!;
       if (name === '.wh..wh..opq') {
         const directory = path.slice(0, -'/.wh..wh..opq'.length) || '/';
@@ -583,6 +632,7 @@ function runtimeFilesystem(layers: TarEntry[][]): {
     }
     for (const entry of layer) {
       const path = runtimePath(entry.path);
+      assertNoEffectiveSymlinkAncestor(files, path);
       const name = path.split('/').at(-1)!;
       if (name === '.wh..wh..opq' || name.startsWith('.wh.')) continue;
       const shared = {path, mode: entry.mode, uid: entry.uid, gid: entry.gid};
@@ -662,7 +712,9 @@ function sourceTarGzipFiles(content: Uint8Array): Record<string, string> {
   assert.ok(content.byteLength <= MAX_FUNCTION_ARCHIVE_BYTES, 'Function source tar is too large');
   const entries: Array<readonly [string, string]> = [];
   let expandedBytes = 0;
-  for (const entry of tarEntries(gunzipSync(content))) {
+  for (const entry of tarEntries(gunzipSync(content, {
+    maxOutputLength: MAX_FUNCTION_SOURCE_TAR_BYTES,
+  }))) {
     const path = entry.path.replace(/^\.\//, '');
     if (entry.type === 53) continue;
     assert.ok(entry.type === 0 || entry.type === 48, `unsupported source tar entry: ${path}`);
@@ -1010,6 +1062,71 @@ async function assertCloudBuildAudit(
   }
 }
 
+async function cloudBuildOutputDigest(
+  fetch_: FetchLike,
+  target: DeploymentTarget,
+  accessToken: string,
+  buildId: string,
+  startTime: string,
+  finishTime: string,
+): Promise<string> {
+  const entries: Record<string, unknown>[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_API_PAGES; page += 1) {
+    const body = {
+      resourceNames: [`projects/${target.projectId}`],
+      filter: [
+        'resource.type="build"',
+        `resource.labels.build_id="${buildId}"`,
+        `logName="projects/${target.projectId}/logs/cloudbuild"`,
+        'labels.build_step="Step #2 - \\"build\\""',
+        'textPayload:"*** Images (sha256:"',
+        `timestamp>="${startTime}"`,
+        `timestamp<="${finishTime}"`,
+      ].join(' AND '),
+      orderBy: 'timestamp asc',
+      ...(pageToken === undefined ? {} : {pageToken}),
+    };
+    const response = await json(
+      fetch_, 'https://logging.googleapis.com/v2/entries:list', accessToken, target.projectId,
+      {method: 'POST', body: JSON.stringify(body)},
+    );
+    entries.push(...array(response.entries ?? []).map(record));
+    const next = response.nextPageToken;
+    if (next === undefined || string(next).trim() === '') break;
+    assert.ok(page + 1 < MAX_API_PAGES,
+      'Cloud Build output digest exceeded the maximum number of pages');
+    pageToken = string(next);
+  }
+  const outputEntries = entries.filter((entry) =>
+    entry.logName === `projects/${target.projectId}/logs/cloudbuild`);
+  assert.equal(outputEntries.length, 1,
+    'capture requires exactly one retained Cloud Build output-image digest');
+  const entry = outputEntries[0];
+  assert.ok(Object.keys(entry).every((key) => [
+    'insertId', 'labels', 'logName', 'receiveTimestamp', 'resource', 'severity',
+    'textPayload', 'timestamp',
+  ].includes(key)));
+  assert.match(string(entry.insertId), new RegExp(`^${buildId}-[1-9][0-9]*$`));
+  assert.equal(entry.logName, `projects/${target.projectId}/logs/cloudbuild`);
+  assert.equal(entry.severity, 'INFO');
+  assert.equal(Date.parse(string(entry.timestamp)) >= Date.parse(startTime), true);
+  assert.equal(Date.parse(string(entry.timestamp)) <= Date.parse(finishTime), true);
+  assert.deepEqual(stringRecord(entry.labels), {build_step: 'Step #2 - "build"'});
+  const resource = record(entry.resource);
+  assert.equal(resource.type, 'build');
+  assert.deepEqual(stringRecord(record(resource.labels)), {
+    build_id: buildId,
+    build_trigger_id: '',
+    project_id: target.projectId,
+  });
+  const match = string(entry.textPayload).match(
+    /^Step #2 - "build": \*\*\* Images \((sha256:[0-9a-f]{64})\):$/,
+  );
+  assert.ok(match !== null);
+  return match[1];
+}
+
 function assertManagedFunctionBuild(
   build: Record<string, unknown>,
   target: DeploymentTarget,
@@ -1151,10 +1268,11 @@ async function functionBuild(
   region: string,
   buildName: unknown,
   storageSource: Record<string, unknown>,
-  function_: Pick<ExpectedFunction, 'name' | 'entryPoint' | 'event'>,
+  function_: Pick<ExpectedFunction, 'name' | 'entryPoint' | 'event' | 'runtimeAttestation'>,
 ): Promise<{
   buildId: string;
   buildSource: string;
+  buildImageDigest: string | null;
   startTime: string;
   finishTime: string;
 }> {
@@ -1175,7 +1293,11 @@ async function functionBuild(
   await assertCloudBuildAudit(
     fetch_, target, accessToken, buildId, startTime, finishTime,
   );
-  return {buildId, buildSource, startTime, finishTime};
+  const buildImageDigest = function_.runtimeAttestation === null ?
+    await cloudBuildOutputDigest(
+      fetch_, target, accessToken, buildId, startTime, finishTime,
+    ) : null;
+  return {buildId, buildSource, buildImageDigest, startTime, finishTime};
 }
 
 async function imageProvenance(
@@ -1273,7 +1395,9 @@ async function imageProvenance(
     assert.equal(layerBytes.byteLength, layerSize);
     assert.equal(`sha256:${sha256(layerBytes)}`, layerDigest,
       'Function image layer does not match its digest');
-    const expandedLayer = gunzipSync(layerBytes);
+    const expandedLayer = gunzipSync(layerBytes, {
+      maxOutputLength: MAX_IMAGE_LAYER_EXPANDED_BYTES,
+    });
     assert.equal(`sha256:${sha256(expandedLayer)}`, diffIds[index],
       'Function image layer does not match its rootfs diff ID');
     const entries = tarEntries(expandedLayer);
@@ -1785,6 +1909,7 @@ async function deployedFunctions(
       ...resource,
       entryPoint: string(build.entryPoint),
       event,
+      runtimeAttestation: null,
     };
     const storageSource = generation === 'GEN_2' ?
       record(record(build.source).storageSource) : null;
@@ -1879,6 +2004,7 @@ async function deployedFunctions(
       revisionImage: run?.revisionImage ?? null,
       buildId: buildSecurity?.buildId ?? null,
       buildSource: buildSecurity?.buildSource ?? null,
+      buildImageDigest: buildSecurity?.buildImageDigest ?? null,
       imageBuildId: provenance?.imageBuildId ?? null,
       imageSource: provenance?.imageSource ?? null,
       imageSourceFiles: provenance?.imageSourceFiles ?? null,
@@ -2613,7 +2739,7 @@ async function runServiceInventory(
   return assetNames;
 }
 
-export async function assertNoRunMutations(
+export async function assertNoProjectMutations(
   fetch_: FetchLike,
   target: DeploymentTarget,
   accessToken: string,
@@ -2621,8 +2747,6 @@ export async function assertNoRunMutations(
 ): Promise<void> {
   const checkpoint = target.security.runInventoryCheckpoint;
   if (checkpoint === null) return;
-  assert.ok(Date.now() - Date.parse(checkpoint) >= RUN_INVENTORY_QUIESCENCE_MS,
-    'Cloud Run inventory checkpoint has not been quiescent for ten minutes');
   assert.match(cutoff,
     /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/);
   assert.equal(Date.parse(cutoff) >= Date.parse(checkpoint), true,
@@ -2634,7 +2758,6 @@ export async function assertNoRunMutations(
       resourceNames: [`projects/${target.projectId}`],
       filter: [
         `logName="projects/${target.projectId}/logs/cloudaudit.googleapis.com%2Factivity"`,
-        'protoPayload.serviceName="run.googleapis.com"',
         `timestamp>="${checkpoint}"`,
         `timestamp<="${cutoff}"`,
       ].join(' AND '),
@@ -2645,15 +2768,19 @@ export async function assertNoRunMutations(
       fetch_, 'https://logging.googleapis.com/v2/entries:list', accessToken, target.projectId,
       {method: 'POST', body: JSON.stringify(body)},
     );
-    mutations.push(...array(response.entries ?? []).map(record));
+    mutations.push(...array(response.entries ?? []).map(record).filter((entry) =>
+      entry.logName ===
+        `projects/${target.projectId}/logs/cloudaudit.googleapis.com%2Factivity` &&
+      Date.parse(string(entry.timestamp)) >= Date.parse(checkpoint) &&
+      Date.parse(string(entry.timestamp)) <= Date.parse(cutoff)));
     const next = response.nextPageToken;
     if (next === undefined || string(next).trim() === '') break;
     assert.ok(page + 1 < MAX_API_PAGES,
-      'Cloud Run mutation audit exceeded the maximum number of pages');
+      'project mutation audit exceeded the maximum number of pages');
     auditPageToken = string(next);
   }
   assert.deepEqual(mutations, [],
-    'Cloud Run changed between the reviewed checkpoint and inventory cutoff');
+    'the project changed between the reviewed checkpoint and inventory cutoff');
 }
 
 async function emptyRunResourceInventory(
@@ -3343,7 +3470,12 @@ export function deploymentProblems(
       if (observedFunction.buildId === null ||
           observedFunction.buildId !== observedFunction.imageBuildId ||
           observedFunction.buildSource === null ||
-          observedFunction.buildSource !== observedFunction.imageSource) {
+          observedFunction.buildSource !== observedFunction.imageSource ||
+          (expectedFunction.runtimeAttestation === null &&
+            (observedFunction.buildImageDigest === null ||
+              observedFunction.revisionImage === null ||
+              observedFunction.buildImageDigest !==
+                observedFunction.revisionImage.split('@').at(-1)))) {
         problems.push(`Cloud Run image provenance does not match the immutable Function build: ${key}`);
       }
       if (observedFunction.imageSourceFiles === null ||
@@ -3883,6 +4015,8 @@ export function reviewedTreeProblems(
   runGit: GitRunner,
   graftFileExists = false,
   excludeFileHasPatterns = false,
+  attributesFileHasPatterns = false,
+  directTrackedProblems: string[] = [],
 ): string[] {
   const problems: string[] = [];
   const head = gitText(runGit, ['rev-parse', 'HEAD']).trim();
@@ -3900,9 +4034,18 @@ export function reviewedTreeProblems(
     /^url\..*\.(?:insteadof|pushinsteadof)\n/i.test(entry));
   const unsafeConfiguration = configParts.filter((entry, index) => {
     if (index % 2 === 0) return false;
-    const name = entry.slice(0, entry.indexOf('\n')).toLowerCase();
+    const separator = entry.indexOf('\n');
+    const name = (separator === -1 ? entry : entry.slice(0, separator)).toLowerCase();
+    const value = separator === -1 ? '' : entry.slice(separator + 1).toLowerCase();
+    const origin = configParts[index - 1];
+    if (name === 'core.fsmonitor' && value === 'false' && origin === 'command line:') {
+      return false;
+    }
     return name.startsWith('http.') || name === 'core.gitproxy' ||
-      name === 'core.excludesfile' || /^remote\.[^.]+\.proxy(?:authmethod)?$/.test(name);
+      name === 'core.excludesfile' || name === 'core.attributesfile' ||
+      name === 'core.fsmonitor' || name === 'core.worktree' ||
+      name.startsWith('filter.') ||
+      /^remote\.[^.]+\.proxy(?:authmethod)?$/.test(name);
   });
   const replacements = gitText(runGit, ['replace', '-l'])
     .split(/\r?\n/).filter(Boolean);
@@ -3917,6 +4060,8 @@ export function reviewedTreeProblems(
   if (replacements.length > 0) problems.push('Git replacement refs can spoof reviewed objects');
   if (graftFileExists) problems.push('Git graft file can spoof reviewed ancestry');
   if (excludeFileHasPatterns) problems.push('Git info exclude can hide unreviewed files');
+  if (attributesFileHasPatterns) problems.push('Git info attributes can transform reviewed files');
+  problems.push(...directTrackedProblems);
   const gen2Functions = target.functions.filter(({generation}) => generation === 'GEN_2');
   const attestations = gen2Functions.flatMap(({runtimeAttestation}) =>
     runtimeAttestation === null ? [] : [runtimeAttestation]);
@@ -3992,6 +4137,85 @@ export function reviewedTreeProblems(
   return problems;
 }
 
+interface GitTreeEntry {
+  mode: string;
+  hash: string;
+  path: string;
+}
+
+function gitTreeEntries(output: string, source: 'index' | 'tree'): GitTreeEntry[] {
+  return output.split('\0').filter(Boolean).map((entry) => {
+    const tab = entry.indexOf('\t');
+    assert.ok(tab > 0, `invalid Git ${source} entry`);
+    const metadata = entry.slice(0, tab).split(' ');
+    const path = entry.slice(tab + 1);
+    assert.match(path, /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]+$/);
+    if (source === 'index') {
+      assert.equal(metadata.length, 3, 'invalid Git index metadata');
+      assert.equal(metadata[2], '0', 'unmerged Git index entry');
+      return {mode: metadata[0], hash: metadata[1], path};
+    }
+    assert.equal(metadata.length, 3, 'invalid Git tree metadata');
+    assert.equal(metadata[1], 'blob', 'Git submodules are unsupported deployment inputs');
+    return {mode: metadata[0], hash: metadata[2], path};
+  }).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function directTrackedTreeProblems(
+  root: string,
+  reviewedCommit: string,
+  runGit: GitRunner,
+): string[] {
+  const problems: string[] = [];
+  const flags = gitText(runGit, ['ls-files', '-v', '-z'])
+    .split('\0').filter(Boolean);
+  for (const entry of flags) {
+    assert.match(entry, /^. /, 'invalid Git index flag entry');
+    if (entry[0] !== 'H') {
+      problems.push(`Git special index flag can hide a tracked change: ${entry.slice(2)}`);
+    }
+  }
+  const index = gitTreeEntries(
+    gitText(runGit, ['ls-files', '--stage', '-z']), 'index',
+  );
+  const tree = gitTreeEntries(
+    gitText(runGit, ['ls-tree', '-r', '--full-tree', '-z', reviewedCommit]), 'tree',
+  );
+  if (canonical(index) !== canonical(tree)) {
+    problems.push('Git index does not exactly match the reviewed tree');
+  }
+  const objectFormat = gitText(runGit, ['rev-parse', '--show-object-format']).trim();
+  assert.ok(objectFormat === 'sha1' || objectFormat === 'sha256',
+    'unsupported Git object format');
+  for (const entry of index) {
+    const absolute = resolve(root, entry.path);
+    const metadata = lstatSync(absolute);
+    let body: Buffer;
+    if (entry.mode === '100644' || entry.mode === '100755') {
+      assert.equal(metadata.isFile(), true, 'tracked path is not a regular file: ' + entry.path);
+      const executable = (metadata.mode & 0o111) !== 0;
+      if (executable !== (entry.mode === '100755')) {
+        problems.push(`Tracked file mode differs from the reviewed tree: ${entry.path}`);
+      }
+      body = readFileSync(absolute);
+    } else if (entry.mode === '120000') {
+      assert.equal(metadata.isSymbolicLink(), true,
+        'tracked path is not a symbolic link: ' + entry.path);
+      body = Buffer.from(readlinkSync(absolute));
+    } else {
+      assert.fail(`unsupported tracked Git mode ${entry.mode}: ${entry.path}`);
+    }
+    const hash = createHash(objectFormat)
+      .update(`blob ${body.byteLength}\0`)
+      .update(body)
+      .digest('hex');
+    if (hash !== entry.hash) {
+      problems.push(`Tracked file bytes differ from the reviewed tree: ${entry.path}`);
+    }
+  }
+  return problems;
+}
+
 export function parseOptions(arguments_: string[]): Map<string, string> {
   const allowed = new Set(['account', 'checkpoint', 'commit', 'mode', 'project']);
   const parsed = new Map<string, string>();
@@ -4016,6 +4240,8 @@ export interface CliDependencies {
   accessToken(account?: string): string;
   graftFileExists?(): boolean;
   excludeFileHasPatterns?(): boolean;
+  attributesFileHasPatterns?(): boolean;
+  directTrackedProblems?(reviewedCommit: string): string[];
   settleRunAudit(): Promise<void>;
   stdout(message: string): void;
   stderr(message: string): void;
@@ -4037,8 +4263,11 @@ export async function runCli(
     assert.notEqual(checkpoint, undefined, 'capture requires --checkpoint');
     assert.match(checkpoint!,
       /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/);
-    assert.ok(Date.now() - Date.parse(checkpoint!) >= RUN_INVENTORY_QUIESCENCE_MS,
+    const checkpointAge = Date.now() - Date.parse(checkpoint!);
+    assert.ok(checkpointAge >= RUN_INVENTORY_QUIESCENCE_MS,
       'capture checkpoint has not been quiescent for ten minutes');
+    assert.ok(checkpointAge <= MAX_RUN_INVENTORY_CHECKPOINT_AGE_MS,
+      'capture checkpoint is too old');
   } else {
     assert.equal(checkpoint, undefined, '--checkpoint is only valid in capture mode');
   }
@@ -4048,29 +4277,36 @@ export async function runCli(
     reviewedCommit!, expected.target, dependencies.runGit,
     dependencies.graftFileExists?.() ?? false,
     dependencies.excludeFileHasPatterns?.() ?? false,
+    dependencies.attributesFileHasPatterns?.() ?? false,
+    dependencies.directTrackedProblems?.(reviewedCommit!) ?? [],
   );
   if (treeProblems.length > 0) {
     for (const problem of treeProblems) dependencies.stderr(`${problem}\n`);
     return 1;
   }
   const liveExpected = structuredClone(expected);
-  if (mode === 'capture') {
-    liveExpected.target.security.runInventoryCheckpoint = checkpoint!;
-  }
+  const auditStart = mode === 'capture' ? checkpoint! : new Date().toISOString();
+  liveExpected.target.security.runInventoryCheckpoint = auditStart;
   const accessToken = dependencies.accessToken(options.get('account'));
+  const firstObserved = await readObservedDeployment(
+    dependencies.fetch,
+    liveExpected,
+    accessToken,
+  );
+  await dependencies.settleRunAudit();
   const observed = await readObservedDeployment(
     dependencies.fetch,
     liveExpected,
     accessToken,
   );
-  if (liveExpected.target.security.runInventoryCheckpoint !== null) {
-    const auditCutoff = new Date().toISOString();
-    await dependencies.settleRunAudit();
-    await assertNoRunMutations(
-      dependencies.fetch, liveExpected.target, accessToken, auditCutoff,
-    );
-  }
+  const observationsChanged = canonical(firstObserved) !== canonical(observed);
+  const auditCutoff = new Date().toISOString();
+  await dependencies.settleRunAudit();
+  await assertNoProjectMutations(
+    dependencies.fetch, liveExpected.target, accessToken, auditCutoff,
+  );
   const problems = deploymentProblems(liveExpected, observed);
+  if (observationsChanged) problems.unshift('Deployment changed during settled consistency reads');
   if (mode === 'capture') {
     assert.equal(expected.target.security.runInventoryCheckpoint, null,
       'capture requires a pending Run inventory checkpoint');
@@ -4118,31 +4354,61 @@ export async function runCli(
 
 export async function runProductionCli(arguments_: string[]): Promise<number> {
   const root = dirname(fileURLToPath(import.meta.url));
+  const baseGitEnvironment = {
+    PATH: process.env.PATH,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.fsmonitor',
+    GIT_CONFIG_VALUE_0: 'false',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_GRAFT_FILE: '/dev/null',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+  const unboundGit: GitRunner = (gitArguments) => execFileSync(
+    'git', ['-C', root, ...gitArguments], {
+      encoding: 'buffer',
+      env: baseGitEnvironment,
+    },
+  );
+  assert.equal(realpathSync(gitText(unboundGit, ['rev-parse', '--show-toplevel']).trim()),
+    realpathSync(root), 'deployment verifier is not bound to its repository worktree');
+  const gitDirectory = realpathSync(
+    gitText(unboundGit, ['rev-parse', '--absolute-git-dir']).trim(),
+  );
+  const dotGit = resolve(root, '.git');
+  assert.equal(lstatSync(dotGit).isDirectory(), true,
+    'linked Git worktrees are unsupported for deployment verification');
+  assert.equal(gitDirectory, realpathSync(dotGit),
+    'deployment verifier is not bound to its repository Git directory');
+  const gitEnvironment = {
+    ...baseGitEnvironment,
+    GIT_DIR: gitDirectory,
+    GIT_WORK_TREE: realpathSync(root),
+  };
   const runGit: GitRunner = (gitArguments) => execFileSync(
     'git', ['-C', root, ...gitArguments], {
       encoding: 'buffer',
-      env: {
-        PATH: process.env.PATH,
-        GIT_CONFIG_COUNT: '0',
-        GIT_CONFIG_GLOBAL: '/dev/null',
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_GRAFT_FILE: '/dev/null',
-        GIT_NO_REPLACE_OBJECTS: '1',
-        GIT_TERMINAL_PROMPT: '0',
-      },
+      env: gitEnvironment,
     },
   );
   const gitPath = (name: string): string => resolve(
     root, gitText(runGit, ['rev-parse', '--git-path', name]).trim(),
   );
   const excludeFile = gitPath('info/exclude');
+  const attributesFile = gitPath('info/attributes');
+  const hasActiveLines = (path: string): boolean =>
+    existsSync(path) && readFileSync(path, 'utf8')
+      .split(/\r?\n/).some((line) => line.trim() !== '' && !line.trim().startsWith('#'));
   return runCli(arguments_, {
     root,
     runGit,
     fetch: fetch as FetchLike,
     graftFileExists: () => existsSync(gitPath('info/grafts')),
-    excludeFileHasPatterns: () => existsSync(excludeFile) && readFileSync(excludeFile, 'utf8')
-      .split(/\r?\n/).some((line) => line.trim() !== '' && !line.trim().startsWith('#')),
+    excludeFileHasPatterns: () => hasActiveLines(excludeFile),
+    attributesFileHasPatterns: () => hasActiveLines(attributesFile),
+    directTrackedProblems: (reviewedCommit) =>
+      directTrackedTreeProblems(root, reviewedCommit, runGit),
     settleRunAudit: () => delay(RUN_INVENTORY_QUIESCENCE_MS),
     accessToken: (account) => {
       const tokenArguments = ['auth', 'print-access-token'];

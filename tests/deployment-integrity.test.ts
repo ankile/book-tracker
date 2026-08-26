@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdtempSync, symlinkSync} from 'node:fs';
+import {mkdtempSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
 import {gzipSync} from 'node:zlib';
 import {zipSync} from 'fflate';
 import {
-  assertNoRunMutations,
+  assertNoProjectMutations,
   deploymentProblems,
+  directTrackedTreeProblems,
   fetchWithRetry,
   parseOptions,
   readExpectedDeployment,
@@ -462,6 +463,7 @@ const currentFunction: ObservedFunction = {
   revisionImage: null,
   buildId: null,
   buildSource: null,
+  buildImageDigest: null,
   imageBuildId: null,
   imageSource: null,
   imageSourceFiles: null,
@@ -711,6 +713,7 @@ const currentGen2Function: ObservedFunction = {
     `europe-west1-docker.pkg.dev/test-project/gcf-artifacts/test--project__europe--west1__publicweb@${IMAGE_DIGEST}`,
   buildId: '11111111-1111-1111-1111-111111111111',
   buildSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
+  buildImageDigest: null,
   imageBuildId: '11111111-1111-1111-1111-111111111111',
   imageSource: 'gs://gcf-v2-sources-123456789-europe-west1/publicweb/function-source.zip#123',
   imageSourceFiles: FUNCTION_FILES,
@@ -1525,7 +1528,8 @@ function apiFixture(
     });
     if (url === 'https://logging.googleapis.com/v2/entries:list' && init?.body !== undefined) {
       const body = JSON.parse(init.body) as {filter?: string};
-      if (body.filter?.includes('protoPayload.serviceName="run.googleapis.com"') === true) {
+      if (body.filter?.includes('cloudaudit.googleapis.com%2Factivity') === true &&
+          body.filter.includes('CloudBuild.CreateBuild') === false) {
         return response({json: {entries: runAuditEntries}});
       }
     }
@@ -1943,6 +1947,7 @@ test('finds a pre-existing Run service through Cloud Asset despite a denied regi
 
 test('rejects a Run inventory checkpoint when audit logs contain a later mutation', async () => {
   const fixture = apiFixture(new Map(), [{
+    logName: 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity',
     timestamp: '2026-01-01T00:00:00Z',
     protoPayload: {
       serviceName: 'run.googleapis.com',
@@ -1950,10 +1955,10 @@ test('rejects a Run inventory checkpoint when audit logs contain a later mutatio
     },
   }]);
   await assert.rejects(
-    assertNoRunMutations(
+    assertNoProjectMutations(
       fixture.fetch, expected.target, 'dummy-token', '2026-01-02T00:00:00Z',
     ),
-    /Cloud Run changed between the reviewed checkpoint and inventory cutoff/,
+    /project changed between the reviewed checkpoint and inventory cutoff/,
   );
 });
 
@@ -2259,10 +2264,39 @@ test('rejects files materialized beneath a symlinked runtime directory', async (
   const secondLayer = tarArchive({
     '/app/index.js': new TextEncoder().encode('stealSecrets();\n'),
   });
-  const fixture = runtimeImageFixture([firstLayer, secondLayer]);
+  const replaceAlias = tarArchive({
+    '/app': new Uint8Array(),
+  }, {}, {});
+  const fixture = runtimeImageFixture([firstLayer, secondLayer, replaceAlias]);
   await assert.rejects(
     readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
-    /runtime path traverses a symlinked directory/,
+    /runtime layer path traverses an effective symlink/,
+  );
+});
+
+test('rejects a second EOF-aligned ZIP hidden inside an archive comment', async () => {
+  const reviewed = new Uint8Array(FUNCTION_ARCHIVE);
+  const hidden = new Uint8Array(zipSync({
+    'attacker.js': new TextEncoder().encode('stealSecrets();\n'),
+  }));
+  const hiddenView = new DataView(hidden.buffer, hidden.byteOffset, hidden.byteLength);
+  const hiddenEnd = hidden.byteLength - 22;
+  const hiddenDirectory = hiddenView.getUint32(hiddenEnd + 16, true);
+  hiddenView.setUint32(hiddenDirectory + 42,
+    hiddenView.getUint32(hiddenDirectory + 42, true) + reviewed.byteLength, true);
+  hiddenView.setUint32(hiddenEnd + 16, hiddenDirectory + reviewed.byteLength, true);
+  const reviewedView = new DataView(reviewed.buffer, reviewed.byteOffset, reviewed.byteLength);
+  reviewedView.setUint16(reviewed.byteLength - 2, hidden.byteLength, true);
+  const ambiguous = new Uint8Array(reviewed.byteLength + hidden.byteLength);
+  ambiguous.set(reviewed);
+  ambiguous.set(hidden, reviewed.byteLength);
+  const fixture = apiFixture(new Map([[
+    'https://storage.googleapis.com/storage/v1/b/gcf-v2-sources-123456789-europe-west1/o/publicweb%2Ffunction-source.zip?alt=media&generation=123',
+    {body: ambiguous},
+  ]]));
+  await assert.rejects(
+    readObservedDeployment(fixture.fetch, expected, 'dummy-token'),
+    /one EOF-aligned ZIP end record/,
   );
 });
 
@@ -3009,6 +3043,23 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
   assert.deepEqual(reviewedTreeProblems(COMMIT, target, gitFixture(), false, true), [
     'Git info exclude can hide unreviewed files',
   ]);
+  assert.deepEqual(reviewedTreeProblems(COMMIT, target, gitFixture(), false, false, true), [
+    'Git info attributes can transform reviewed files',
+  ]);
+  for (const configuration of [
+    'core.fsmonitor\n/attacker/socket\0',
+    'core.worktree\n/tmp/attacker-tree\0',
+    'filter.attacker.clean\n/attacker/filter\0',
+    'core.attributesfile\n/tmp/attacker-attributes\0',
+    'core.fsmonitor\0',
+  ]) {
+    assert.deepEqual(reviewedTreeProblems(
+      COMMIT,
+      target,
+      gitFixture('', COMMIT, COMMIT, COMMIT, '', '', target.security.gitOrigin,
+        configuration),
+    ), ['Git transport or exclude configuration can spoof reviewed state']);
+  }
   const rawParent = 'c'.repeat(40);
   const parentTarget = structuredClone(target);
   parentTarget.security.runInventoryCheckpoint = null;
@@ -3038,6 +3089,49 @@ test('rejects a mismatched commit and dirty deploy inputs while allowing reviewe
   ]);
 });
 
+test('rehashes tracked files despite assume-unchanged and skip-worktree flags', (t) => {
+  const repository = mkdtempSync(join(tmpdir(), 'book-tracker-git-integrity-'));
+  t.after(() => rmSync(repository, {recursive: true, force: true}));
+  const runGit: GitRunner = (arguments_) => execFileSync('git', [
+    '-C', repository, ...arguments_,
+  ]);
+  execFileSync('git', ['-C', repository, 'init', '--quiet']);
+  execFileSync('git', ['-C', repository, 'config', 'user.name', 'Security Test']);
+  execFileSync('git', ['-C', repository, 'config', 'user.email', 'security@example.test']);
+  writeFileSync(join(repository, 'deployment-integrity.ts'), 'export const secure = true;\n');
+  writeFileSync(join(repository, 'deployment-integrity-cli.ts'), 'import "./deployment-integrity";\n');
+  execFileSync('git', ['-C', repository, 'add', '.']);
+  execFileSync('git', ['-C', repository, 'commit', '--quiet', '-m', 'reviewed']);
+  const reviewedCommit = execFileSync(
+    'git', ['-C', repository, 'rev-parse', 'HEAD'], {encoding: 'utf8'},
+  ).trim();
+  assert.deepEqual(directTrackedTreeProblems(repository, reviewedCommit, runGit), []);
+
+  execFileSync('git', [
+    '-C', repository, 'update-index', '--assume-unchanged', 'deployment-integrity.ts',
+  ]);
+  writeFileSync(join(repository, 'deployment-integrity.ts'), 'export const secure = false;\n');
+  const assumed = directTrackedTreeProblems(repository, reviewedCommit, runGit);
+  assert.equal(assumed.includes(
+    'Git special index flag can hide a tracked change: deployment-integrity.ts',
+  ), true);
+  assert.equal(assumed.includes(
+    'Tracked file bytes differ from the reviewed tree: deployment-integrity.ts',
+  ), true);
+
+  execFileSync('git', [
+    '-C', repository, 'update-index', '--skip-worktree', 'deployment-integrity-cli.ts',
+  ]);
+  writeFileSync(join(repository, 'deployment-integrity-cli.ts'), 'process.exit(0);\n');
+  const skipped = directTrackedTreeProblems(repository, reviewedCommit, runGit);
+  assert.equal(skipped.includes(
+    'Git special index flag can hide a tracked change: deployment-integrity-cli.ts',
+  ), true);
+  assert.equal(skipped.includes(
+    'Tracked file bytes differ from the reviewed tree: deployment-integrity-cli.ts',
+  ), true);
+});
+
 test('rejects unknown, empty, duplicate, and obsolete timestamp arguments', () => {
   assert.throws(() => parseOptions(['--deployed-after=2026-08-25T21:00:00Z']), /unknown argument/);
   assert.throws(() => parseOptions(['--commit=']), /requires a value/);
@@ -3045,6 +3139,7 @@ test('rejects unknown, empty, duplicate, and obsolete timestamp arguments', () =
 });
 
 test('capture mode emits target-only runtime attestations after all other checks pass', async () => {
+  const checkpoint = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   const pendingTarget = structuredClone(target);
   pendingTarget.security.runInventoryCheckpoint = null;
   for (const function_ of pendingTarget.functions) {
@@ -3062,7 +3157,7 @@ test('capture mode emits target-only runtime attestations after all other checks
       '--commit=' + COMMIT,
       '--project=test-project',
       '--mode=capture',
-      '--checkpoint=2026-01-02T03:04:05Z',
+      '--checkpoint=' + checkpoint,
     ],
     {
       root: process.cwd(),
@@ -3077,7 +3172,7 @@ test('capture mode emits target-only runtime attestations after all other checks
   assert.equal(result, 0);
   assert.deepEqual(errors, []);
   assert.deepEqual(JSON.parse(output.join('')), {
-    security: {runInventoryCheckpoint: '2026-01-02T03:04:05Z'},
+    security: {runInventoryCheckpoint: checkpoint},
     functions: [{
       name: 'publicweb',
       region: 'europe-west1',
@@ -3090,6 +3185,48 @@ test('capture mode emits target-only runtime attestations after all other checks
     }],
   });
 
+  const maliciousLayer = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/workspace/package.json': new TextEncoder().encode(FUNCTION_PACKAGE),
+    '/workspace/attacker.js': new TextEncoder().encode('stealSecrets();\n'),
+  });
+  const overwrittenWorkspace = tarArchive({
+    '/layers/google.utils.archive-source/src/source-code.tar.gz': IMAGE_SOURCE_TAR,
+    '/workspace/package.json': new TextEncoder().encode('{"scripts":{"start":"steal"}}\n'),
+  });
+  const maliciousCaptures = [
+    runtimeImageFixture([maliciousLayer]),
+    runtimeImageFixture([overwrittenWorkspace]),
+    runtimeImageFixture([IMAGE_LAYER_EXPANDED], {
+      ...IMAGE_CONFIG.config,
+      Entrypoint: ['/workspace/attacker'],
+    }),
+  ];
+  for (const malicious of maliciousCaptures) {
+    const captureErrors: string[] = [];
+    const captureResult = await runCli(
+      [
+        '--commit=' + COMMIT,
+        '--project=test-project',
+        '--mode=capture',
+        '--checkpoint=' + checkpoint,
+      ],
+      {
+        root: process.cwd(),
+        runGit,
+        fetch: malicious.fetch,
+        accessToken: () => 'dummy-token',
+        settleRunAudit: async () => {},
+        stdout: () => assert.fail('malicious first capture must not emit an attestation'),
+        stderr: (message) => captureErrors.push(message),
+      },
+    );
+    assert.equal(captureResult, 1);
+    assert.equal(captureErrors.some((message) => message.includes(
+      'Cloud Run image provenance does not match the immutable Function build',
+    )), true);
+  }
+
   const delayedMutations: Record<string, unknown>[] = [];
   const mutationFixture = apiFixture(new Map(), delayedMutations);
   await assert.rejects(
@@ -3098,7 +3235,7 @@ test('capture mode emits target-only runtime attestations after all other checks
         '--commit=' + COMMIT,
         '--project=test-project',
         '--mode=capture',
-        '--checkpoint=2026-01-02T03:04:05Z',
+        '--checkpoint=' + checkpoint,
       ],
       {
         root: process.cwd(),
@@ -3107,10 +3244,11 @@ test('capture mode emits target-only runtime attestations after all other checks
         accessToken: () => 'dummy-token',
         settleRunAudit: async () => {
           delayedMutations.push({
-            timestamp: '2026-01-02T03:05:00Z',
+            logName: 'projects/test-project/logs/cloudaudit.googleapis.com%2Factivity',
+            timestamp: checkpoint,
             protoPayload: {
-              serviceName: 'run.googleapis.com',
-              methodName: 'google.cloud.run.v2.Services.CreateService',
+              serviceName: 'firebaserules.googleapis.com',
+              methodName: 'google.firebase.rules.v1.FirebaseRules.UpdateRelease',
             },
           });
         },
@@ -3118,7 +3256,7 @@ test('capture mode emits target-only runtime attestations after all other checks
         stderr: () => assert.fail('API verification failure must throw closed'),
       },
     ),
-    /Cloud Run changed between the reviewed checkpoint and inventory cutoff/,
+    /project changed between the reviewed checkpoint and inventory cutoff/,
   );
 });
 
