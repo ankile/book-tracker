@@ -258,6 +258,24 @@ export interface PublicProfileDay {
   sessions: number;
 }
 
+export interface PublicProfileMomentum {
+  recentPagesPerDay: number;
+  lifetimePagesPerDay: number;
+  ratio: number | null;
+}
+
+export interface PublicProfileSuperlatives {
+  biggestDay: {day: string; pages: number} | null;
+  longestSession: {minutes: number} | null;
+  medianSessionMinutes: number;
+  fastestFinish: {days: number; pageCount: number} | null;
+}
+
+export interface PublicProfileRecords {
+  momentum: PublicProfileMomentum | null;
+  superlatives: PublicProfileSuperlatives;
+}
+
 export interface PublicProfile {
   username: string;
   uid: string;
@@ -266,6 +284,7 @@ export interface PublicProfile {
   familyName: string;
   links: PublicProfileLink[];
   stats: PublicProfileStats;
+  records: PublicProfileRecords | null;
   years: PublicProfileYear[];
   days: PublicProfileDay[];
   updatedAt: Timestamp;
@@ -360,6 +379,78 @@ function publicProfileDays(
   });
 }
 
+function publicProfileMomentum(
+  value: unknown,
+  fail: DecodeFailure,
+): PublicProfileMomentum | null {
+  if (value === null) return null;
+  const label = "profile momentum";
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, ["recentPagesPerDay", "lifetimePagesPerDay", "ratio"], label, fail);
+  return {
+    recentPagesPerDay: finiteNumber(decoded.recentPagesPerDay, `${label} recent pace`, fail),
+    lifetimePagesPerDay: finiteNumber(decoded.lifetimePagesPerDay, `${label} lifetime pace`, fail),
+    ratio: decoded.ratio === null ? null : finiteNumber(decoded.ratio, `${label} ratio`, fail),
+  };
+}
+
+function publicProfileSuperlatives(
+  value: unknown,
+  fail: DecodeFailure,
+): PublicProfileSuperlatives {
+  const label = "profile superlatives";
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, ["biggestDay", "longestSession", "medianSessionMinutes", "fastestFinish"], label, fail);
+  let biggestDay: PublicProfileSuperlatives["biggestDay"] = null;
+  if (decoded.biggestDay !== null) {
+    const row = record(decoded.biggestDay, `${label} biggest day`, fail);
+    exactKeys(row, ["day", "pages"], `${label} biggest day`, fail);
+    biggestDay = {
+      day: string(row.day, `${label} biggest day date`, fail, 10),
+      pages: finiteNumber(row.pages, `${label} biggest day pages`, fail),
+    };
+  }
+  let longestSession: PublicProfileSuperlatives["longestSession"] = null;
+  if (decoded.longestSession !== null) {
+    const row = record(decoded.longestSession, `${label} longest session`, fail);
+    exactKeys(row, ["minutes"], `${label} longest session`, fail);
+    longestSession = {
+      minutes: finiteNumber(row.minutes, `${label} longest session minutes`, fail),
+    };
+  }
+  let fastestFinish: PublicProfileSuperlatives["fastestFinish"] = null;
+  if (decoded.fastestFinish !== null) {
+    const row = record(decoded.fastestFinish, `${label} fastest finish`, fail);
+    exactKeys(row, ["days", "pageCount"], `${label} fastest finish`, fail);
+    fastestFinish = {
+      days: finiteNumber(row.days, `${label} fastest finish days`, fail),
+      pageCount: finiteNumber(row.pageCount, `${label} fastest finish pages`, fail),
+    };
+  }
+  return {
+    biggestDay,
+    longestSession,
+    medianSessionMinutes: finiteNumber(decoded.medianSessionMinutes, `${label} median session`, fail),
+    fastestFinish,
+  };
+}
+
+// Records are rendered by the client page (superlatives row), so the JSON
+// projection must carry them; the same pinned shape the rules enforce.
+function publicProfileRecords(
+  value: unknown,
+  fail: DecodeFailure,
+): PublicProfileRecords | null {
+  if (value === null) return null;
+  const label = "profile records";
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, ["momentum", "superlatives"], label, fail);
+  return {
+    momentum: publicProfileMomentum(decoded.momentum, fail),
+    superlatives: publicProfileSuperlatives(decoded.superlatives, fail),
+  };
+}
+
 export function decodePublicProfile(
   username: string,
   value: unknown,
@@ -383,6 +474,7 @@ export function decodePublicProfile(
     links: decoded.links.map((entry, index) =>
       publicProfileLink(entry, `profile link ${index}`, fail)),
     stats: publicProfileStats(decoded.stats, "profile stats", fail),
+    records: publicProfileRecords(decoded.records, fail),
     years: publicProfileYears(decoded.years, fail),
     days: publicProfileDays(decoded.days, fail),
     updatedAt: firestoreTimestamp(decoded.updatedAt, "profile update time", fail),

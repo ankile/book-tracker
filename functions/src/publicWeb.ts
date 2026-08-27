@@ -7,6 +7,11 @@ import {
   decodeProfileDiscoveryMarker,
   decodePublicProfile,
   type PublicProfile,
+  type PublicProfileLink,
+  type PublicProfileRecords,
+  type PublicProfileStats,
+  type PublicProfileYear,
+  type PublicProfileDay,
 } from "./decoders";
 import {
   renderNotFoundDocument,
@@ -15,12 +20,19 @@ import {
 } from "./publicProfileRenderer";
 
 const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
+const PROFILE_ROUTE = /^\/profiles\/([^/]+)$/;
+const PROFILE_JSON_ROUTE = /^\/profiles\/([^/]+)\.json$/;
 
 // Profiles are public by definition, so both hits and misses may sit on the
-// Hosting CDN: a crawler or request flood then costs one function call and
-// two Firestore reads per username per five minutes instead of per request.
-// firebase.json carries the same value for the /profiles/** route.
+// Hosting CDN, and firebase.json carries the same value for /profiles/**.
+// The CDN is a convenience, not the ceiling: the function's origin URL is
+// reachable directly and every distinct query string is a fresh CDN key, so
+// the in-process read cache below is what actually bounds Firestore reads
+// per username (SEC-019, SEC-020).
 const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
+const SITEMAP_CACHE_CONTROL = "public, max-age=300, s-maxage=300";
+const READ_CACHE_TTL_MS = 60_000;
+const READ_CACHE_MAX_ENTRIES = 1000;
 
 interface StoredDocument {
   id: string;
@@ -42,6 +54,83 @@ export interface PublicWebResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+}
+
+// The wire shape of /profiles/<username>.json, consumed by the SPA route.
+// Deliberately narrower than the stored document: `uid` is the owner's
+// Firebase identity and has no business on a public endpoint, and `public`
+// is implied — private profiles are not served here at all.
+export interface PublicProfileView {
+  username: string;
+  givenName: string;
+  familyName: string;
+  links: PublicProfileLink[];
+  stats: PublicProfileStats;
+  records: PublicProfileRecords | null;
+  years: PublicProfileYear[];
+  days: PublicProfileDay[];
+  updatedAt: string;
+}
+
+export function publicProfileView(profile: PublicProfile): PublicProfileView {
+  return {
+    username: profile.username,
+    givenName: profile.givenName,
+    familyName: profile.familyName,
+    links: profile.links,
+    stats: profile.stats,
+    records: profile.records,
+    years: profile.years,
+    days: profile.days,
+    updatedAt: profile.updatedAt.toDate().toISOString(),
+  };
+}
+
+export interface ReadCacheOptions {
+  ttlMs: number;
+  maxEntries: number;
+  now?: () => number;
+}
+
+// Per-instance memo of repository reads. Entries are keyed per document and
+// expire after ttlMs; a rejected read is evicted immediately so a transient
+// Firestore failure is never served for a minute. Concurrent callers for the
+// same key share one in-flight promise. Size is bounded by evicting the
+// least recently inserted key so a username flood cannot grow memory.
+export function cachedRepository(
+  repository: PublicWebRepository,
+  options: ReadCacheOptions,
+): PublicWebRepository {
+  const now = options.now ?? Date.now;
+  const entries = new Map<string, {expiresAt: number; value: Promise<unknown>}>();
+
+  function read<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const at = now();
+    const cached = entries.get(key);
+    if (cached !== undefined && cached.expiresAt > at) {
+      return cached.value as Promise<T>;
+    }
+    const value = load();
+    entries.delete(key);
+    entries.set(key, {expiresAt: at + options.ttlMs, value});
+    value.catch(() => {
+      if (entries.get(key)?.value === value) entries.delete(key);
+    });
+    for (const oldest of entries.keys()) {
+      if (entries.size <= options.maxEntries) break;
+      entries.delete(oldest);
+    }
+    return value;
+  }
+
+  return {
+    getProfile: (username) =>
+      read(`profile:${username}`, () => repository.getProfile(username)),
+    getDiscovery: (username) =>
+      read(`discovery:${username}`, () => repository.getDiscovery(username)),
+    listDiscoveries: () =>
+      read("discoveries", () => repository.listDiscoveries()),
+  };
 }
 
 const firestoreRepository: PublicWebRepository = {
@@ -66,6 +155,13 @@ function htmlHeaders(cacheControl: string): Record<string, string> {
   return {
     "Cache-Control": cacheControl,
     "Content-Type": "text/html; charset=utf-8",
+  };
+}
+
+function jsonHeaders(): Record<string, string> {
+  return {
+    "Cache-Control": PROFILE_CACHE_CONTROL,
+    "Content-Type": "application/json; charset=utf-8",
   };
 }
 
@@ -152,6 +248,30 @@ async function profileResponse(
   };
 }
 
+// The SPA's data source for public profiles. Same visibility rule and the
+// same cache headers as the HTML page; a missing, private, or malformed
+// username is one indistinguishable 404 so username existence never leaks.
+async function profileJsonResponse(
+  request: PublicWebRequest,
+  repository: PublicWebRepository,
+  username: string | null,
+): Promise<PublicWebResponse> {
+  const storedProfile = username === null ? null : await repository.getProfile(username);
+  if (username === null || storedProfile === null || !profileIsPublic(storedProfile)) {
+    return {
+      status: 404,
+      headers: jsonHeaders(),
+      body: request.method === "HEAD" ? "" : "{\"error\":\"not-found\"}\n",
+    };
+  }
+  const profile = decodePublicProfile(username, storedProfile);
+  return {
+    status: 200,
+    headers: jsonHeaders(),
+    body: request.method === "HEAD" ? "" : JSON.stringify(publicProfileView(profile)),
+  };
+}
+
 export async function resolvePublicWebRequest(
   request: PublicWebRequest,
   repository: PublicWebRepository,
@@ -174,14 +294,20 @@ export async function resolvePublicWebRequest(
     return {
       status: 200,
       headers: {
-        "Cache-Control": "public, max-age=300, s-maxage=300",
+        "Cache-Control": SITEMAP_CACHE_CONTROL,
         "Content-Type": "application/xml; charset=utf-8",
       },
       body: request.method === "HEAD" ? "" : renderSitemap(profiles),
     };
   }
 
-  const match = /^\/profiles\/([^/]+)$/.exec(request.path);
+  const jsonMatch = PROFILE_JSON_ROUTE.exec(request.path);
+  if (jsonMatch !== null) {
+    const username = USERNAME_PATTERN.test(jsonMatch[1]) ? jsonMatch[1] : null;
+    return profileJsonResponse(request, repository, username);
+  }
+
+  const match = PROFILE_ROUTE.exec(request.path);
   if (match === null || !USERNAME_PATTERN.test(match[1])) {
     return {
       status: 404,
@@ -192,14 +318,23 @@ export async function resolvePublicWebRequest(
   return profileResponse(request, repository, shell, match[1]);
 }
 
+let cachedShell: string | null = null;
+
 function profileShell(): string {
-  return readFileSync(join(__dirname, "../assets/profile-shell.html"), "utf8");
+  cachedShell ??= readFileSync(join(__dirname, "../assets/profile-shell.html"), "utf8");
+  return cachedShell;
 }
 
-// maxInstances bounds what a crawler or request flood can cost: two
-// instances at the gen-2 default concurrency (80) is far above real traffic
-// and, with the CDN cache above, is the ceiling on billed invocations and
-// Firestore reads. Raise deliberately if legitimate traffic ever queues.
+const liveRepository = cachedRepository(firestoreRepository, {
+  ttlMs: READ_CACHE_TTL_MS,
+  maxEntries: READ_CACHE_MAX_ENTRIES,
+});
+
+// maxInstances bounds what a crawler or request flood can cost in
+// invocations: two instances at the gen-2 default concurrency (80) is far
+// above real traffic. Firestore reads are bounded separately by the
+// per-instance read cache. Raise deliberately if legitimate traffic ever
+// queues — the trade is availability under a flood, not correctness.
 export const publicweb = onRequest(
   {
     region: "europe-west1",
@@ -209,7 +344,7 @@ export const publicweb = onRequest(
   async (request, response) => {
     const result = await resolvePublicWebRequest(
       {method: request.method, path: request.path},
-      firestoreRepository,
+      liveRepository,
       profileShell(),
     );
     response.status(result.status);

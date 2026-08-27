@@ -151,5 +151,7 @@ serviceAccountKey.json
 /gb-cache.json
 /nb-cache.json
 /gr-cache.json
-/*-backup-*.json
-/*-backup-*.yaml
+*-backup-*.json
+*-backup-*.yaml
+.env*
+!.env.example

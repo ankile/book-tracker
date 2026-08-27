@@ -75,6 +75,21 @@ export interface Profile extends ProfilePayload {
   updatedAt: Timestamp;
 }
 
+// What the /profiles/<username> page renders. A public profile arrives as
+// JSON from the publicweb function (CDN-cached, never carrying the owner's
+// uid); the viewer's own profile — public or private — is read from
+// Firestore. Both are projected onto this shape so the page never handles
+// the raw document. updatedAt is an ISO string because JSON has no
+// Timestamp.
+export interface ProfileView extends ProfilePayload {
+  username: string;
+  public: boolean;
+  givenName: string;
+  familyName: string;
+  links: ProfileLink[];
+  updatedAt: string;
+}
+
 // Search discovery is deliberately stored outside the exact profile document.
 // Old cached clients overwrite profiles wholesale, but they never touch this
 // marker collection. The marker's existence means the owner opted into search.

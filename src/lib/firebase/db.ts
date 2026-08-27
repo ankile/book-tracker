@@ -59,6 +59,7 @@ import type {
   ProfileDiscovery,
   ProfileLink,
   ProfilePayload,
+  ProfileView,
 } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
 import {
@@ -68,6 +69,8 @@ import {
   decodeLiveQueueSweepItem,
   decodeProfile,
   decodeProfileDiscovery,
+  decodeProfileView,
+  profileView,
   decodeQueueSweepBatch,
   decodeUser,
   type NewQueueOperation,
@@ -194,7 +197,7 @@ function decodeStored<T>(decode: () => T): T {
     return decode();
   } catch (error) {
     addError('Invalid data.');
-    // Anonymous clients can read public profiles, but allowing anonymous
+    // Anonymous clients decode public profile JSON, but allowing anonymous
     // decode telemetry would give anyone a free write-spam endpoint.
     if (auth.currentUser !== null) {
       logIssue({
@@ -351,6 +354,21 @@ function resolveAuthorIds(batch: WriteBatch, userId: string, chips: AuthorChip[]
   });
 }
 
+// Public profile projection from the publicweb function. Under `vite dev`
+// the path falls through to the SPA shell (no function), so this route only
+// resolves public profiles against a deployed or emulated Hosting stack.
+async function fetchPublicProfile(username: string): Promise<ProfileView | null> {
+  const response = await fetch(`/profiles/${encodeURIComponent(username)}.json`, {
+    headers: { Accept: 'application/json' },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Public profile request failed with status ${response.status}.`);
+  }
+  const payload: unknown = await response.json();
+  return decodeStored(() => decodeProfileView(payload, `profiles/${username}.json`));
+}
+
 class Database {
   // Returns a Svelte store that listens to the user document.
   // Starts as undefined (loading) so consumers can distinguish "not yet
@@ -447,20 +465,32 @@ class Database {
   }
 
   // One-shot read for the /profiles/<username> page; null when the profile
-  // doesn't exist or isn't visible to this viewer. The rules answer
-  // permission-denied both for a private profile read by a non-owner and
-  // for a missing doc, so the two are deliberately indistinguishable here
-  // (username existence must not leak). No listener — a shared link is a
-  // snapshot view.
-  static async getProfile(username: string): Promise<Profile | null> {
+  // doesn't exist or isn't visible to this viewer, and the two are
+  // deliberately indistinguishable (username existence must not leak).
+  // Public profiles are served by the publicweb function as
+  // /profiles/<username>.json — CDN- and instance-cached, no uid on the
+  // wire — so a viewer never reads the raw document (SEC-019); the rules
+  // allow profile gets only to the owner. A signed-in viewer asks Firestore
+  // first: that succeeds only for their own profile, public or private, and
+  // gives the owner a fresh copy instead of a cached one. No listener — a
+  // shared link is a snapshot view.
+  static async getProfile(username: string): Promise<ProfileView | null> {
+    if (auth.currentUser !== null) {
+      const own = await Database.getOwnProfile(username);
+      if (own !== null) return own;
+    }
+    return fetchPublicProfile(username);
+  }
+
+  static async getOwnProfile(username: string): Promise<ProfileView | null> {
     const snapshot = await getDoc(doc(db, 'profiles', username)).catch((error) => {
       if (error instanceof FirebaseError && error.code === 'permission-denied') return null;
       throw error;
     });
     return snapshot?.exists()
-      ? decodeStored(
+      ? profileView(decodeStored(
         () => decodeProfile(snapshot.id, snapshot.data(), snapshot.ref.path),
-      )
+      ))
       : null;
   }
 

@@ -10,16 +10,16 @@
   import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
-  import type { Profile } from '$lib/interfaces/profile.ts';
+  import type { ProfileView } from '$lib/interfaces/profile.ts';
 
   const username = $derived(page.params.username ?? '');
 
   // undefined → loading, null → no such profile, or one this viewer may
-  // not see (the rules make those indistinguishable on purpose). The fetch
-  // waits for the auth session to finish restoring: whether a private
-  // profile is readable depends on who is asking, and firing before the
-  // token is back would deny the owner their own page.
-  let profile = $state<Profile | null | undefined>(undefined);
+  // not see (deliberately indistinguishable). The fetch waits for the auth
+  // session to finish restoring: whether a private profile is readable
+  // depends on who is asking, and firing before the token is back would
+  // deny the owner their own page.
+  let profile = $state<ProfileView | null | undefined>(undefined);
   const profileTitle = $derived(
     profile
       ? `${joinPersonName(profile) || profile.username}'s reading profile | Book Tracker`

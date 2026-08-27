@@ -11,7 +11,7 @@ const {
   renderProfileDocument,
   renderSitemap,
 } = require("../lib/publicProfileRenderer");
-const {resolvePublicWebRequest} = require("../lib/publicWeb");
+const {cachedRepository, resolvePublicWebRequest} = require("../lib/publicWeb");
 
 const shell = readFileSync(
   join(__dirname, "..", "assets", "profile-shell.html"),
@@ -170,6 +170,133 @@ test("request resolver validates routes and HEAD without a response body", async
   assert.equal(method.status, 405);
   assert.equal(method.headers.Allow, "GET, HEAD");
   assert.equal(method.headers["Cache-Control"], "no-store");
+});
+
+test("profile JSON projection serves public profiles without the owner uid", async () => {
+  const records = {
+    momentum: {recentPagesPerDay: 40, lifetimePagesPerDay: 25, ratio: 1.6},
+    superlatives: {
+      biggestDay: {day: "2026-08-20", pages: 120},
+      longestSession: {minutes: 95},
+      medianSessionMinutes: 30,
+      fastestFinish: {days: 3, pageCount: 300},
+    },
+  };
+  const repo = repository({profiles: {"ada-lovelace": {...storedProfile(), records}}});
+  const response = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace.json"},
+    repo,
+    shell,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["Content-Type"], "application/json; charset=utf-8");
+  assert.equal(response.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
+  const body = JSON.parse(response.body);
+  assert.deepEqual(Object.keys(body).sort(), [
+    "days", "familyName", "givenName", "links", "records", "stats",
+    "updatedAt", "username", "years",
+  ]);
+  assert.equal(body.username, "ada-lovelace");
+  assert.equal(body.updatedAt, "2026-08-24T12:00:00.000Z");
+  assert.deepEqual(body.records, records);
+  assert.deepEqual(body.links, [{type: "homepage", value: "https://example.com/?x=1&y=2"}]);
+  assert.doesNotMatch(response.body, /owner/);
+
+  const head = await resolvePublicWebRequest(
+    {method: "HEAD", path: "/profiles/ada-lovelace.json"},
+    repo,
+    shell,
+  );
+  assert.equal(head.status, 200);
+  assert.equal(head.body, "");
+});
+
+test("profile JSON projection answers missing, private, and invalid names identically", async () => {
+  const cases = [
+    [repository(), "/profiles/ada-lovelace.json"],
+    [repository({profiles: {"ada-lovelace": storedProfile({public: false})}}), "/profiles/ada-lovelace.json"],
+    [repository({profiles: {"ada-lovelace": storedProfile()}}), "/profiles/Ada-Lovelace.json"],
+    [repository({profiles: {"ada-lovelace": storedProfile()}}), "/profiles/ada-lovelace.json.json"],
+  ];
+  for (const [repo, path] of cases) {
+    const response = await resolvePublicWebRequest({method: "GET", path}, repo, shell);
+    assert.equal(response.status, 404, path);
+    assert.equal(response.headers["Content-Type"], "application/json; charset=utf-8");
+    assert.equal(response.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
+    assert.deepEqual(JSON.parse(response.body), {error: "not-found"});
+  }
+  const method = await resolvePublicWebRequest(
+    {method: "POST", path: "/profiles/ada-lovelace.json"},
+    repository(),
+    shell,
+  );
+  assert.equal(method.status, 405);
+});
+
+test("cached repository bounds reads per document, expires, and never caches failures", async () => {
+  let clock = 1_000;
+  const calls = {profile: 0, discovery: 0, list: 0};
+  let failNext = false;
+  const source = {
+    getProfile: async (username) => {
+      calls.profile += 1;
+      if (failNext) {
+        failNext = false;
+        throw new Error("firestore unavailable");
+      }
+      return storedProfile({givenName: username});
+    },
+    getDiscovery: async () => {
+      calls.discovery += 1;
+      return marker;
+    },
+    listDiscoveries: async () => {
+      calls.list += 1;
+      return [{id: "ada-lovelace", value: marker}];
+    },
+  };
+  const cached = cachedRepository(source, {ttlMs: 60_000, maxEntries: 2, now: () => clock});
+
+  const [first, second] = await Promise.all([
+    cached.getProfile("ada-lovelace"),
+    cached.getProfile("ada-lovelace"),
+  ]);
+  assert.equal(first, second);
+  assert.equal(calls.profile, 1);
+  await cached.getProfile("ada-lovelace");
+  assert.equal(calls.profile, 1);
+
+  clock += 60_000;
+  await cached.getProfile("ada-lovelace");
+  assert.equal(calls.profile, 2);
+
+  await cached.getDiscovery("ada-lovelace");
+  await cached.getDiscovery("ada-lovelace");
+  assert.equal(calls.discovery, 1);
+  await cached.listDiscoveries();
+  await cached.listDiscoveries();
+  assert.equal(calls.list, 1);
+
+  // Two entries max: the oldest key is evicted once a third arrives.
+  await cached.getProfile("grace-hopper");
+  await cached.getProfile("ada-lovelace");
+  assert.equal(calls.profile, 4);
+
+  failNext = true;
+  await assert.rejects(cached.getProfile("mary-shelley"), /firestore unavailable/);
+  await cached.getProfile("mary-shelley");
+  assert.equal(calls.profile, 6);
+  await cached.getProfile("mary-shelley");
+  assert.equal(calls.profile, 6);
+
+  // Same visibility decisions through the cache as through the source.
+  const response = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/mary-shelley"},
+    cached,
+    shell,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(calls.profile, 6);
 });
 
 test("sitemap includes only public profiles with matching discovery owners", async () => {

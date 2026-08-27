@@ -158,14 +158,23 @@ test('profile links support targeted, deduplicated arrayUnion writes up to the c
   }));
 });
 
-test('public profiles are readable but private profiles are not', async () => {
+test('profile documents are readable only by their owner, public or not', async () => {
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await setDoc(doc(context.firestore(), 'profiles', 'public-reader'), profile('owner'));
     await setDoc(doc(context.firestore(), 'profiles', 'private-reader'), profile('owner', { public: false }));
   });
+  // Public profiles are served by the publicweb function, never read from
+  // the document by anonymous or third-party clients (SEC-019).
   const anonymous = environment.unauthenticatedContext().firestore();
-  await assertSucceeds(getDoc(doc(anonymous, 'profiles', 'public-reader')));
+  await assertFails(getDoc(doc(anonymous, 'profiles', 'public-reader')));
   await assertFails(getDoc(doc(anonymous, 'profiles', 'private-reader')));
+  await assertFails(getDoc(doc(anonymous, 'profiles', 'no-such-reader')));
+  const stranger = environment.authenticatedContext('stranger').firestore();
+  await assertFails(getDoc(doc(stranger, 'profiles', 'public-reader')));
+  await assertFails(getDoc(doc(stranger, 'profiles', 'private-reader')));
+  const owner = environment.authenticatedContext('owner').firestore();
+  await assertSucceeds(getDoc(doc(owner, 'profiles', 'public-reader')));
+  await assertSucceeds(getDoc(doc(owner, 'profiles', 'private-reader')));
 });
 
 test('owners can opt public profiles into search without making markers listable', async () => {

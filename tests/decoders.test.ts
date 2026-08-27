@@ -11,6 +11,8 @@ import {
   decodeLiveQueueSweepItem,
   decodeProfile,
   decodeProfileDiscovery,
+  decodeProfileView,
+  profileView,
   decodeQueueSweepBatch,
   decodeQueueSweepItem,
   decodeUser,
@@ -173,6 +175,75 @@ test('profile decoder validates exact nested public payloads', () => {
     }, 'profiles/ada'),
     /count.*finite number/,
   );
+});
+
+test('profile view decoder accepts the publicweb JSON projection and nothing more', () => {
+  const view = {
+    username: 'ada',
+    givenName: 'Ada',
+    familyName: 'Lovelace',
+    links: [{ type: 'github', value: 'ada' }],
+    stats: {
+      totalBooks: 1, finishedBooks: 1, readingBooks: 0, totalTimeReadHours: 2,
+      totalPagesRead: 100, booksPerYear: 1, avgTimePerBook: 120, authors: 1,
+    },
+    records: {
+      momentum: { recentPagesPerDay: 10, lifetimePagesPerDay: 5, ratio: 2 },
+      superlatives: {
+        biggestDay: { day: '2026-08-24', pages: 100 },
+        longestSession: { minutes: 120 },
+        medianSessionMinutes: 60,
+        fastestFinish: null,
+      },
+    },
+    years: [{ year: 2026, count: 1, hours: 2, pages: 100 }],
+    days: [{ day: '2026-08-24', pagesRead: 100, timeRead: 120, sessions: 1 }],
+    updatedAt: '2026-08-24T12:00:00.000Z',
+  };
+  const decoded = decodeProfileView(view, 'profiles/ada.json');
+  assert.equal(decoded.username, 'ada');
+  assert.equal(decoded.public, true);
+  assert.equal(decoded.updatedAt, '2026-08-24T12:00:00.000Z');
+  assert.deepEqual(decoded.records, view.records);
+  // The projection never carries the owner's uid; a payload that does is
+  // not the endpoint this decoder is for.
+  assert.throws(
+    () => decodeProfileView({ ...view, uid: 'owner' }, 'profiles/ada.json'),
+    /only keys/,
+  );
+  assert.throws(
+    () => decodeProfileView({ ...view, updatedAt: 'yesterday' }, 'profiles/ada.json'),
+    /ISO timestamp/,
+  );
+  assert.throws(
+    () => decodeProfileView({ ...view, days: [{ day: '2026-08-24', pagesRead: 'many', timeRead: 1, sessions: 1 }] }, 'profiles/ada.json'),
+    /pagesRead.*finite number/,
+  );
+});
+
+test('an owner-read Firestore profile projects onto the same view shape', () => {
+  const stored = {
+    uid: 'owner',
+    public: false,
+    givenName: 'Ada',
+    familyName: 'Lovelace',
+    links: [],
+    stats: {
+      totalBooks: 1, finishedBooks: 1, readingBooks: 0, totalTimeReadHours: 2,
+      totalPagesRead: 100, booksPerYear: 1, avgTimePerBook: 120, authors: 1,
+    },
+    records: null,
+    years: [],
+    days: [],
+    updatedAt,
+  };
+  const view = profileView(decodeProfile('ada', stored, 'profiles/ada'));
+  assert.equal('uid' in view, false);
+  assert.equal(view.public, false);
+  assert.equal(view.updatedAt, updatedAt.toDate().toISOString());
+  // Minus the visibility flag, the owner projection is exactly the wire shape.
+  const wire = Object.fromEntries(Object.entries(view).filter(([key]) => key !== 'public'));
+  assert.deepEqual(decodeProfileView(wire, 'profiles/ada.json'), { ...view, public: true });
 });
 
 test('profile discovery decoder accepts only the owner marker shape', () => {

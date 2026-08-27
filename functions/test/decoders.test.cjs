@@ -71,10 +71,37 @@ test("public profile and discovery decoders pin their published shapes", () => {
     familyName: "Lovelace",
     links: [{type: "github", value: "ada"}],
     stats: profile.stats,
+    records: null,
     years: profile.years,
     days: profile.days,
     updatedAt,
   });
+  const records = {
+    momentum: {recentPagesPerDay: 40, lifetimePagesPerDay: 25, ratio: 1.6},
+    superlatives: {
+      biggestDay: {day: "2026-08-20", pages: 120},
+      longestSession: {minutes: 95},
+      medianSessionMinutes: 30,
+      fastestFinish: {days: 3, pageCount: 300},
+    },
+  };
+  assert.deepEqual(
+    decoders.decodePublicProfile("ada-lovelace", {...profile, records}).records,
+    records,
+  );
+  assert.throws(
+    () => decoders.decodePublicProfile("ada-lovelace", {
+      ...profile,
+      records: {
+        ...records,
+        superlatives: {
+          ...records.superlatives,
+          longestSession: {minutes: 95, title: "Private book"},
+        },
+      },
+    }),
+    /unexpected field "title"/,
+  );
   assert.throws(
     () => decoders.decodePublicProfile("ada-lovelace", {...profile, privateTitle: "secret"}),
     /unexpected field "privateTitle"/,

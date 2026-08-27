@@ -26,6 +26,7 @@ import {
   type ProfileDiscovery,
   type ProfileRecords,
   type ProfileStats,
+  type ProfileView,
   type ProfileYear,
   type PublishedSuperlatives,
 } from '../interfaces/profile.ts';
@@ -506,6 +507,48 @@ export function decodeProfile(username: string, value: unknown, path: string): P
     years: data.years.map((entry, index) => profileYear(entry, `${path}.years[${index}]`)),
     days: data.days.map((entry, index) => profileDay(entry, `${path}.days[${index}]`)),
     updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
+  };
+}
+
+// The /profiles/<username>.json projection served by the publicweb
+// function. Same field decoders as the Firestore document, but no uid (the
+// endpoint never sends one) and an ISO updatedAt.
+export function decodeProfileView(value: unknown, path: string): ProfileView {
+  const data = record(value, path);
+  exactKeys(
+    data,
+    ['username', 'givenName', 'familyName', 'links', 'stats', 'records', 'years', 'days', 'updatedAt'],
+    path,
+  );
+  if (!Array.isArray(data.links)) fail(`${path}.links`, 'an array');
+  if (!Array.isArray(data.years)) fail(`${path}.years`, 'an array');
+  if (!Array.isArray(data.days)) fail(`${path}.days`, 'an array');
+  return {
+    username: nonEmptyString(data.username, `${path}.username`),
+    public: true,
+    givenName: string(data.givenName, `${path}.givenName`),
+    familyName: string(data.familyName, `${path}.familyName`),
+    links: data.links.map((entry, index) => profileLink(entry, `${path}.links[${index}]`)),
+    stats: profileStats(data.stats, `${path}.stats`),
+    records: profileRecords(data.records, `${path}.records`),
+    years: data.years.map((entry, index) => profileYear(entry, `${path}.years[${index}]`)),
+    days: data.days.map((entry, index) => profileDay(entry, `${path}.days[${index}]`)),
+    updatedAt: isoTimestamp(data.updatedAt, `${path}.updatedAt`),
+  };
+}
+
+export function profileView(profile: Profile): ProfileView {
+  return {
+    username: profile.username,
+    public: profile.public,
+    givenName: profile.givenName,
+    familyName: profile.familyName,
+    links: profile.links,
+    stats: profile.stats,
+    records: profile.records,
+    years: profile.years,
+    days: profile.days,
+    updatedAt: profile.updatedAt.toDate().toISOString(),
   };
 }
 
