@@ -237,7 +237,19 @@ same owner uid. The server applies these states:
 - private or missing profile: indistinguishable `404` HTML with
   `noindex,nofollow`;
 - a stale marker whose profile is missing, private, or owned by a different uid:
-  excluded from the sitemap and reported by `db-audit.ts`.
+  excluded from the sitemap and reported by `db-audit.ts`;
+- `/profiles/<username>.json`: the same visibility rule as the HTML, no `uid`
+  on the wire, `public, max-age=60, s-maxage=300`. The Svelte app reads it for
+  every profile except the viewer's own, because the `profiles/{username}`
+  document is readable only by its owner (SEC-019). Under `vite dev` nothing
+  serves this path, so other people's profiles resolve only against a deployed
+  or emulated Hosting stack.
+
+The Function memoises finished responses per instance for 60 s and refuses
+uncached work with a `503` once 300 misses land in a minute, so a flood of
+distinct paths is bounded even when it bypasses the CDN. A profile flipped
+private can therefore stay served for up to 60 s (function) + 300 s (shared
+CDN) + 60 s (browser); there is no purge path.
 
 `npm run build` creates both `public/index.html` and
 `functions/assets/profile-shell.html`. They deliberately contain the same

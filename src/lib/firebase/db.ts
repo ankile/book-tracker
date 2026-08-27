@@ -62,6 +62,7 @@ import type {
   ProfileView,
 } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
+import { resolveProfileView } from '../utils/profileRead.ts';
 import {
   decodeAuthor,
   decodeBook,
@@ -355,15 +356,22 @@ function resolveAuthorIds(batch: WriteBatch, userId: string, chips: AuthorChip[]
 }
 
 // Public profile projection from the publicweb function. Under `vite dev`
-// the path falls through to the SPA shell (no function), so this route only
-// resolves public profiles against a deployed or emulated Hosting stack.
+// nothing serves /profiles/*.json — the path falls through to the SPA
+// shell — so other people's profiles only resolve against a deployed or
+// emulated Hosting stack; the content-type check turns that into a clear
+// error instead of a JSON parse failure.
 async function fetchPublicProfile(username: string): Promise<ProfileView | null> {
-  const response = await fetch(`/profiles/${encodeURIComponent(username)}.json`, {
-    headers: { Accept: 'application/json' },
-  });
+  const response = await fetch(`/profiles/${encodeURIComponent(username)}.json`);
   if (response.status === 404) return null;
   if (!response.ok) {
     throw new Error(`Public profile request failed with status ${response.status}.`);
+  }
+  const contentType = response.headers.get('Content-Type') ?? '';
+  if (!contentType.startsWith('application/json')) {
+    throw new Error(
+      `Public profile request returned ${contentType || 'no content type'}; `
+      + '/profiles/<username>.json is served by the publicweb function, not by vite dev.',
+    );
   }
   const payload: unknown = await response.json();
   return decodeStored(() => decodeProfileView(payload, `profiles/${username}.json`));
@@ -474,12 +482,12 @@ class Database {
   // first: that succeeds only for their own profile, public or private, and
   // gives the owner a fresh copy instead of a cached one. No listener — a
   // shared link is a snapshot view.
-  static async getProfile(username: string): Promise<ProfileView | null> {
-    if (auth.currentUser !== null) {
-      const own = await Database.getOwnProfile(username);
-      if (own !== null) return own;
-    }
-    return fetchPublicProfile(username);
+  static getProfile(username: string): Promise<ProfileView | null> {
+    return resolveProfileView(
+      auth.currentUser !== null,
+      () => Database.getOwnProfile(username),
+      () => fetchPublicProfile(username),
+    );
   }
 
   static async getOwnProfile(username: string): Promise<ProfileView | null> {

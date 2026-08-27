@@ -11,7 +11,12 @@ const {
   renderProfileDocument,
   renderSitemap,
 } = require("../lib/publicProfileRenderer");
-const {cachedRepository, resolvePublicWebRequest} = require("../lib/publicWeb");
+const {
+  MISS_BUDGET_EXHAUSTED,
+  cachedPublicWebResponse,
+  createTtlCache,
+  resolvePublicWebRequest,
+} = require("../lib/publicWeb");
 
 const shell = readFileSync(
   join(__dirname, "..", "assets", "profile-shell.html"),
@@ -233,70 +238,144 @@ test("profile JSON projection answers missing, private, and invalid names identi
   assert.equal(method.status, 405);
 });
 
-test("cached repository bounds reads per document, expires, and never caches failures", async () => {
-  let clock = 1_000;
-  const calls = {profile: 0, discovery: 0, list: 0};
-  let failNext = false;
-  const source = {
+test("an unknown or private profile costs one read, a public one two", async () => {
+  const calls = {profile: 0, discovery: 0};
+  const counting = (profiles) => ({
     getProfile: async (username) => {
       calls.profile += 1;
-      if (failNext) {
-        failNext = false;
-        throw new Error("firestore unavailable");
-      }
-      return storedProfile({givenName: username});
+      return profiles[username] ?? null;
     },
     getDiscovery: async () => {
       calls.discovery += 1;
       return marker;
     },
-    listDiscoveries: async () => {
-      calls.list += 1;
-      return [{id: "ada-lovelace", value: marker}];
-    },
-  };
-  const cached = cachedRepository(source, {ttlMs: 60_000, maxEntries: 2, now: () => clock});
-
-  const [first, second] = await Promise.all([
-    cached.getProfile("ada-lovelace"),
-    cached.getProfile("ada-lovelace"),
-  ]);
-  assert.equal(first, second);
-  assert.equal(calls.profile, 1);
-  await cached.getProfile("ada-lovelace");
-  assert.equal(calls.profile, 1);
-
-  clock += 60_000;
-  await cached.getProfile("ada-lovelace");
-  assert.equal(calls.profile, 2);
-
-  await cached.getDiscovery("ada-lovelace");
-  await cached.getDiscovery("ada-lovelace");
-  assert.equal(calls.discovery, 1);
-  await cached.listDiscoveries();
-  await cached.listDiscoveries();
-  assert.equal(calls.list, 1);
-
-  // Two entries max: the oldest key is evicted once a third arrives.
-  await cached.getProfile("grace-hopper");
-  await cached.getProfile("ada-lovelace");
-  assert.equal(calls.profile, 4);
-
-  failNext = true;
-  await assert.rejects(cached.getProfile("mary-shelley"), /firestore unavailable/);
-  await cached.getProfile("mary-shelley");
-  assert.equal(calls.profile, 6);
-  await cached.getProfile("mary-shelley");
-  assert.equal(calls.profile, 6);
-
-  // Same visibility decisions through the cache as through the source.
-  const response = await resolvePublicWebRequest(
-    {method: "GET", path: "/profiles/mary-shelley"},
-    cached,
+    listDiscoveries: async () => [],
+  });
+  await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/nobody-here"},
+    counting({}),
     shell,
   );
-  assert.equal(response.status, 200);
-  assert.equal(calls.profile, 6);
+  await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace"},
+    counting({"ada-lovelace": storedProfile({public: false})}),
+    shell,
+  );
+  assert.deepEqual(calls, {profile: 2, discovery: 0});
+  await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace"},
+    counting({"ada-lovelace": storedProfile()}),
+    shell,
+  );
+  assert.deepEqual(calls, {profile: 3, discovery: 1});
+});
+
+test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and meters misses", async () => {
+  let clock = 1_000;
+  const cache = createTtlCache({
+    ttlMs: 60_000, maxEntries: 2, maxMissesPerWindow: 4, windowMs: 60_000, now: () => clock,
+  });
+  let loads = 0;
+  const load = (value) => async () => {
+    loads += 1;
+    return value;
+  };
+
+  const a1 = cache.get("a", load("a"));
+  const a2 = cache.get("a", load("a"));
+  assert.equal(a1, a2);
+  assert.equal(await a1, "a");
+  assert.equal(loads, 1);
+
+  clock += 59_999;
+  assert.equal(await cache.get("a", load("a")), "a");
+  assert.equal(loads, 1);
+  clock += 1;
+  assert.equal(await cache.get("a", load("a")), "a");
+  assert.equal(loads, 2);
+
+  // maxEntries 2: touching "a" makes "b" the least recently used, so a
+  // third key evicts "b", not "a".
+  await cache.get("b", load("b"));
+  await cache.get("a", load("a"));
+  await cache.get("c", load("c"));
+  assert.equal(loads, 4);
+  assert.equal(await cache.get("a", load("a")), "a");
+  assert.equal(loads, 4);
+  assert.equal(await cache.get("b", load("b")), "b");
+  assert.equal(loads, 5);
+  // The window budget is 4 loads (a again, b, c, b again); a fifth distinct
+  // key is refused without loading.
+  assert.equal(cache.get("d", load("d")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(loads, 5);
+  // Cached keys still serve while the budget is exhausted.
+  assert.equal(await cache.get("b", load("b")), "b");
+  assert.equal(loads, 5);
+
+  clock += 60_000;
+  assert.equal(await cache.get("d", load("d")), "d");
+  assert.equal(loads, 6);
+
+  await assert.rejects(
+    cache.get("broken", async () => {
+      loads += 1;
+      throw new Error("firestore unavailable");
+    }),
+    /firestore unavailable/,
+  );
+  assert.equal(await cache.get("broken", load("repaired")), "repaired");
+  assert.equal(loads, 8);
+});
+
+test("cached responses serve repeats without reads, share HEAD with GET, and 503 past the budget", async () => {
+  let clock = 1_000;
+  const cache = createTtlCache({
+    ttlMs: 60_000, maxEntries: 100, maxMissesPerWindow: 2, windowMs: 60_000, now: () => clock,
+  });
+  let reads = 0;
+  const repo = {
+    getProfile: async (username) => {
+      reads += 1;
+      return username === "ada-lovelace" ? storedProfile() : null;
+    },
+    getDiscovery: async () => null,
+    listDiscoveries: async () => [],
+  };
+  const get = (path, method = "GET") =>
+    cachedPublicWebResponse({method, path}, repo, shell, cache);
+
+  const first = await get("/profiles/ada-lovelace.json");
+  const second = await get("/profiles/ada-lovelace.json");
+  assert.equal(first.status, 200);
+  assert.equal(second.body, first.body);
+  assert.equal(reads, 1);
+  const head = await get("/profiles/ada-lovelace.json", "HEAD");
+  assert.equal(head.status, 200);
+  assert.equal(head.body, "");
+  assert.equal(head.headers["Content-Type"], "application/json; charset=utf-8");
+  assert.equal(reads, 1);
+
+  const miss = await get("/profiles/nobody-here.json");
+  assert.equal(miss.status, 404);
+  assert.equal(reads, 2);
+  assert.equal((await get("/profiles/nobody-here.json")).status, 404);
+  assert.equal(reads, 2);
+
+  const refused = await get("/profiles/another-name.json");
+  assert.equal(refused.status, 503);
+  assert.equal(refused.headers["Cache-Control"], "no-store");
+  assert.equal(refused.headers["Retry-After"], "60");
+  assert.equal(reads, 2);
+  // Known paths keep serving during the refusal window.
+  assert.equal((await get("/profiles/ada-lovelace.json")).status, 200);
+  // 405 never consults the cache or Firestore.
+  const method = await get("/profiles/ada-lovelace.json", "POST");
+  assert.equal(method.status, 405);
+  assert.equal(reads, 2);
+
+  clock += 60_000;
+  assert.equal((await get("/profiles/another-name.json")).status, 404);
+  assert.equal(reads, 3);
 });
 
 test("sitemap includes only public profiles with matching discovery owners", async () => {

@@ -25,14 +25,26 @@ const PROFILE_JSON_ROUTE = /^\/profiles\/([^/]+)\.json$/;
 
 // Profiles are public by definition, so both hits and misses may sit on the
 // Hosting CDN, and firebase.json carries the same value for /profiles/**.
-// The CDN is a convenience, not the ceiling: the function's origin URL is
-// reachable directly and every distinct query string is a fresh CDN key, so
-// the in-process read cache below is what actually bounds Firestore reads
-// per username (SEC-019, SEC-020).
+// The CDN is a convenience, not the ceiling: the function has four
+// directly reachable origin hostnames and every distinct query string or
+// percent-encoding is a fresh CDN key. The response cache below is what
+// bounds the origin's work (SEC-019, SEC-020): a repeat path costs nothing
+// for RESPONSE_CACHE_TTL_MS, and a flood of *distinct* paths — the key
+// space is attacker-chosen — is capped by the per-instance miss budget,
+// after which the origin answers 503 without touching Firestore. Privacy
+// lag for a profile flipped private composes across tiers: up to 60 s here
+// + 300 s shared CDN + 60 s browser, with no purge path (SEC-031).
 const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
 const SITEMAP_CACHE_CONTROL = "public, max-age=300, s-maxage=300";
-const READ_CACHE_TTL_MS = 60_000;
-const READ_CACHE_MAX_ENTRIES = 1000;
+const RESPONSE_CACHE_TTL_MS = 60_000;
+// Bounds cached bodies, not just entries: at ~100 KB per real profile this
+// is ~10 MB against the 256 MiB default; unknown names cache a 22-byte 404.
+const RESPONSE_CACHE_MAX_ENTRIES = 100;
+// Uncached responses each cost one or two Firestore reads plus a decode and
+// render. 300 per minute per instance (2 instances) is far above real
+// traffic and caps a rotating-name flood at ~0.9M reads/day worst case.
+const MISS_BUDGET_PER_WINDOW = 300;
+const MISS_BUDGET_WINDOW_MS = 60_000;
 
 interface StoredDocument {
   id: string;
@@ -86,50 +98,61 @@ export function publicProfileView(profile: PublicProfile): PublicProfileView {
   };
 }
 
-export interface ReadCacheOptions {
+export interface TtlCacheOptions {
   ttlMs: number;
   maxEntries: number;
+  maxMissesPerWindow: number;
+  windowMs: number;
   now?: () => number;
 }
 
-// Per-instance memo of repository reads. Entries are keyed per document and
-// expire after ttlMs; a rejected read is evicted immediately so a transient
-// Firestore failure is never served for a minute. Concurrent callers for the
-// same key share one in-flight promise. Size is bounded by evicting the
-// least recently inserted key so a username flood cannot grow memory.
-export function cachedRepository(
-  repository: PublicWebRepository,
-  options: ReadCacheOptions,
-): PublicWebRepository {
-  const now = options.now ?? Date.now;
-  const entries = new Map<string, {expiresAt: number; value: Promise<unknown>}>();
+export const MISS_BUDGET_EXHAUSTED = Symbol("publicweb miss budget exhausted");
 
-  function read<T>(key: string, load: () => Promise<T>): Promise<T> {
-    const at = now();
-    const cached = entries.get(key);
-    if (cached !== undefined && cached.expiresAt > at) {
-      return cached.value as Promise<T>;
-    }
-    const value = load();
-    entries.delete(key);
-    entries.set(key, {expiresAt: at + options.ttlMs, value});
-    value.catch(() => {
-      if (entries.get(key)?.value === value) entries.delete(key);
-    });
-    for (const oldest of entries.keys()) {
-      if (entries.size <= options.maxEntries) break;
-      entries.delete(oldest);
-    }
-    return value;
-  }
+export interface TtlCache<T> {
+  get(_key: string, _load: () => Promise<T>): Promise<T> | typeof MISS_BUDGET_EXHAUSTED;
+}
+
+// Per-instance memo. Entries expire after ttlMs; a hit refreshes recency and
+// the least recently used key is evicted past maxEntries. A rejected load is
+// evicted immediately so a transient Firestore failure is never served for
+// a minute; concurrent callers for one key share the in-flight promise.
+// Loads are metered: once maxMissesPerWindow uncached loads have started in
+// the current window the cache stops loading and reports
+// MISS_BUDGET_EXHAUSTED, which is the ceiling on what a flood of distinct
+// keys can cost this instance.
+export function createTtlCache<T>(options: TtlCacheOptions): TtlCache<T> {
+  const now = options.now ?? Date.now;
+  const entries = new Map<string, {expiresAt: number; value: Promise<T>}>();
+  let windowStart = now();
+  let misses = 0;
 
   return {
-    getProfile: (username) =>
-      read(`profile:${username}`, () => repository.getProfile(username)),
-    getDiscovery: (username) =>
-      read(`discovery:${username}`, () => repository.getDiscovery(username)),
-    listDiscoveries: () =>
-      read("discoveries", () => repository.listDiscoveries()),
+    get(key, load) {
+      const at = now();
+      const cached = entries.get(key);
+      if (cached !== undefined && cached.expiresAt > at) {
+        entries.delete(key);
+        entries.set(key, cached);
+        return cached.value;
+      }
+      if (at - windowStart >= options.windowMs) {
+        windowStart = at;
+        misses = 0;
+      }
+      if (misses >= options.maxMissesPerWindow) return MISS_BUDGET_EXHAUSTED;
+      misses += 1;
+      const value = load();
+      entries.delete(key);
+      entries.set(key, {expiresAt: at + options.ttlMs, value});
+      value.catch(() => {
+        if (entries.get(key)?.value === value) entries.delete(key);
+      });
+      for (const oldest of entries.keys()) {
+        if (entries.size <= options.maxEntries) break;
+        entries.delete(oldest);
+      }
+      return value;
+    },
   };
 }
 
@@ -218,16 +241,15 @@ async function sitemapProfiles(
   return entries.filter((entry): entry is SitemapEntry => entry !== null);
 }
 
+// Profile first, discovery marker only for a public profile: an unknown
+// name — the common case under a flood — costs one read, not two.
 async function profileResponse(
   request: PublicWebRequest,
   repository: PublicWebRepository,
   shell: string,
   username: string,
 ): Promise<PublicWebResponse> {
-  const [storedProfile, storedDiscovery] = await Promise.all([
-    repository.getProfile(username),
-    repository.getDiscovery(username),
-  ]);
+  const storedProfile = await repository.getProfile(username);
   if (storedProfile === null || !profileIsPublic(storedProfile)) {
     return {
       status: 404,
@@ -237,6 +259,7 @@ async function profileResponse(
   }
 
   const profile: PublicProfile = decodePublicProfile(username, storedProfile);
+  const storedDiscovery = await repository.getDiscovery(username);
   const searchable = storedDiscovery === null
     ? false
     : decodeProfileDiscoveryMarker(storedDiscovery).uid === profile.uid;
@@ -261,7 +284,7 @@ async function profileJsonResponse(
     return {
       status: 404,
       headers: jsonHeaders(),
-      body: request.method === "HEAD" ? "" : "{\"error\":\"not-found\"}\n",
+      body: request.method === "HEAD" ? "" : JSON.stringify({error: "not-found"}),
     };
   }
   const profile = decodePublicProfile(username, storedProfile);
@@ -318,6 +341,38 @@ export async function resolvePublicWebRequest(
   return profileResponse(request, repository, shell, match[1]);
 }
 
+// Finished responses are what get cached: decode, render, and serialise
+// once per path per TTL. HEAD shares GET's entry and drops the body; 405s
+// cost no reads and bypass the cache; a rejected resolve propagates and is
+// not retained.
+export async function cachedPublicWebResponse(
+  request: PublicWebRequest,
+  repository: PublicWebRepository,
+  shell: string,
+  cache: TtlCache<PublicWebResponse>,
+): Promise<PublicWebResponse> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return resolvePublicWebRequest(request, repository, shell);
+  }
+  const cached = cache.get(
+    request.path,
+    () => resolvePublicWebRequest({method: "GET", path: request.path}, repository, shell),
+  );
+  if (cached === MISS_BUDGET_EXHAUSTED) {
+    return {
+      status: 503,
+      headers: {
+        "Cache-Control": "no-store",
+        "Retry-After": "60",
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body: "Temporarily unavailable.\n",
+    };
+  }
+  const response = await cached;
+  return request.method === "HEAD" ? {...response, body: ""} : response;
+}
+
 let cachedShell: string | null = null;
 
 function profileShell(): string {
@@ -325,16 +380,19 @@ function profileShell(): string {
   return cachedShell;
 }
 
-const liveRepository = cachedRepository(firestoreRepository, {
-  ttlMs: READ_CACHE_TTL_MS,
-  maxEntries: READ_CACHE_MAX_ENTRIES,
+const responseCache = createTtlCache<PublicWebResponse>({
+  ttlMs: RESPONSE_CACHE_TTL_MS,
+  maxEntries: RESPONSE_CACHE_MAX_ENTRIES,
+  maxMissesPerWindow: MISS_BUDGET_PER_WINDOW,
+  windowMs: MISS_BUDGET_WINDOW_MS,
 });
 
 // maxInstances bounds what a crawler or request flood can cost in
 // invocations: two instances at the gen-2 default concurrency (80) is far
-// above real traffic. Firestore reads are bounded separately by the
-// per-instance read cache. Raise deliberately if legitimate traffic ever
-// queues — the trade is availability under a flood, not correctness.
+// above real traffic. Firestore reads and render work are bounded
+// separately by the per-instance response cache and its miss budget. Raise
+// deliberately if legitimate traffic ever queues — the trade is
+// availability under a flood, not correctness.
 export const publicweb = onRequest(
   {
     region: "europe-west1",
@@ -342,10 +400,11 @@ export const publicweb = onRequest(
     maxInstances: 2,
   },
   async (request, response) => {
-    const result = await resolvePublicWebRequest(
+    const result = await cachedPublicWebResponse(
       {method: request.method, path: request.path},
-      liveRepository,
+      firestoreRepository,
       profileShell(),
+      responseCache,
     );
     response.status(result.status);
     for (const [name, value] of Object.entries(result.headers)) {

@@ -857,15 +857,15 @@ service cloud.firestore {
 
     // Opt-in public profile pages: /profiles/<username> renders this doc.
     // `get` is open only while the owner has explicitly flipped the doc's
-    // `public` flag, but the document itself is readable only by its
-    // owner: public profiles reach everyone through the publicweb function
-    // (Admin SDK, CDN- and instance-cached HTML plus
-    // /profiles/<username>.json without the uid). Letting anonymous clients
-    // get the raw doc handed any requester an uncached, uncapped ~700 KB
-    // read with no credential and exposed the owner's Firebase uid
-    // (SEC-019). A private or missing profile reads as permission-denied
-    // to everyone else, which the client renders as not-found so username
-    // existence never leaks. (A get on a missing doc also lands here as an
+    // `public` flag decides whether the publicweb function will serve it;
+    // the document itself is readable only by its owner. Public profiles
+    // reach everyone through that function (Admin SDK, CDN- and
+    // instance-cached HTML plus /profiles/<username>.json without the
+    // uid). Letting anonymous clients get the raw doc handed any requester
+    // an uncached, uncapped ~700 KB read with no credential and exposed the
+    // owner's Firebase uid (SEC-019). Any profile that is not the caller's
+    // own — public, private, or missing — reads as permission-denied, which
+    // the client renders as not-found so username existence never leaks. (A get on a missing doc also lands here as an
     // evaluation error → denied, deliberately the same signal.) `list` is
     // owner-only — the Me page finds its own doc by querying on uid, and
     // strangers must not be able to enumerate usernames. The username is
