@@ -305,7 +305,9 @@ test("runs every function as its dedicated least-privilege identity", () => {
   // Nothing exported may fall back to a project-default (Editor) identity,
   // including any function added later without a serviceAccount. An unset
   // option is a ResetValue sentinel object, not undefined, hence the
-  // typeof check (which also names the offender).
+  // typeof check (which also names the offender). Every export must also be
+  // named in the tier map above: a new function is assigned a tier here
+  // deliberately, not by matching a pattern.
   const exported = [];
   const walk = (value, path) => {
     if (value && value.__endpoint) exported.push([path, value]);
@@ -314,11 +316,15 @@ test("runs every function as its dedicated least-privilege identity", () => {
     }
   };
   walk(functions, "functions");
-  assert.equal(exported.length, 11);
+  const tiers = new Map([
+    ["functions.publicweb", publicwebRuntime],
+    ...Object.keys(authenticated).map((name) => [`functions.${name}`, functionsRuntime]),
+  ]);
+  assert.deepEqual(exported.map(([name]) => name).sort(), [...tiers.keys()].sort());
   for (const [name, deployedFunction] of exported) {
     const identity = deployedFunction.__endpoint.serviceAccountEmail;
     assert.equal(typeof identity, "string", `${name} has no serviceAccount`);
-    assert.match(identity, /^(publicweb|functions)-runtime@book-tracker-d8f24\.iam\.gserviceaccount\.com$/, name);
+    assert.equal(identity, tiers.get(name), name);
   }
   // Eventarc delivers from Google's network: exactly the two event-driven
   // gen2 services accept no public ingress. Everything else — callables,

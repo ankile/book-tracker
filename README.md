@@ -354,6 +354,21 @@ identities, and the two Firestore-triggered gen2 services are
 `ALLOW_INTERNAL_ONLY`. A new function that needs another Google API gets
 its role added to the matching account — never `roles/editor`.
 
+The Hosting rewrite for `/profiles/**` and `/sitemap.xml` uses `pinTag`,
+so `book.ankile.com` is served by the Cloud Run revision that was tagged at
+the last **Hosting** deploy, not by whatever `publicweb` revision is latest.
+Any change to `publicweb`'s identity or roles therefore needs a Hosting
+deploy to re-pin (`firebase deploy --only functions:publicweb,hosting`),
+and the post-deploy check must go through `https://book.ankile.com/profiles/…`
+and `/sitemap.xml`, not the `*.run.app` origin — the origin always runs the
+latest revision and passed while the pinned one was returning 500
+(2026-08-27, see MIGRATIONS). Hosting leaves every previously pinned
+revision tagged and publicly reachable at its `fh-<tag>---…run.app` URL;
+after a deploy, drop stale tags and delete retired revisions
+(`gcloud run services update-traffic publicweb --remove-tags …`,
+`gcloud run revisions delete …`) so only revisions on the current identity
+stay addressable.
+
 ### Deploy Everything
 
 The first strict-TypeScript release must follow the authoritative

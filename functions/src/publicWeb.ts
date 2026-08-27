@@ -43,8 +43,10 @@ const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
 const SITEMAP_CACHE_CONTROL = "public, max-age=300, s-maxage=300";
 const RESPONSE_CACHE_TTL_MS = 60_000;
 const RESPONSE_CACHE_STALE_MS = 300_000;
-// Bounds cached bodies, not just entries: at ~100 KB per real profile this
-// is ~10 MB against the 256 MiB default. 404s are ~22 bytes each.
+// Bounds cached bodies, not just entries: at ~100 KB per real profile the
+// retained pool is ~10 MB, and the transient pool holds 404s — ~22 bytes
+// for the JSON route but a ~6.5 KB rendered document for the HTML route —
+// so at most ~7 MB more, against the 256 MiB default.
 const RESPONSE_CACHE_MAX_ENTRIES = 100;
 const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
 // Uncached responses each cost one or two Firestore reads plus a decode and
