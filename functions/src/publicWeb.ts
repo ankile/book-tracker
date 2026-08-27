@@ -43,10 +43,12 @@ const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
 const SITEMAP_CACHE_CONTROL = "public, max-age=300, s-maxage=300";
 const RESPONSE_CACHE_TTL_MS = 60_000;
 const RESPONSE_CACHE_STALE_MS = 300_000;
-// Bounds cached bodies, not just entries: at ~100 KB per real profile the
-// retained pool is ~10 MB, and the transient pool holds 404s — ~22 bytes
-// for the JSON route but a ~6.5 KB rendered document for the HTML route —
-// so at most ~7 MB more, against the 256 MiB default.
+// Bounds cached bodies, not just entries. Size from what firestore.rules
+// lets a stranger store, not from today's data: a profile at the rules
+// ceiling (days ≤ 4000, years ≤ 200) serialises to ~470 KB on the JSON
+// route (~30 KB as HTML), so the retained pool is up to ~45 MB, and the
+// transient pool holds 404s — ~22 bytes for JSON, ~6.5 KB rendered — at
+// most ~7 MB more, against the 256 MiB default.
 const RESPONSE_CACHE_MAX_ENTRIES = 100;
 const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
 // Uncached responses each cost one or two Firestore reads plus a decode and
@@ -54,6 +56,13 @@ const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
 // traffic and caps a rotating-name flood at ~0.9M reads/day worst case.
 const MISS_BUDGET_PER_WINDOW = 300;
 const MISS_BUDGET_WINDOW_MS = 60_000;
+// The sitemap is the one request whose cost scales with data strangers can
+// create (SEC-032): one miss, but a profile read per discovery marker. Both
+// the scan and the fan-out are bounded so a seeded collection can neither
+// hold hundreds of ~470 KB documents in memory at once nor read without
+// end; past the cap the sitemap is silently partial (logged).
+export const SITEMAP_MAX_PROFILES = 5_000;
+export const SITEMAP_READ_CONCURRENCY = 25;
 
 interface StoredDocument {
   id: string;
@@ -63,7 +72,7 @@ interface StoredDocument {
 export interface PublicWebRepository {
   getProfile(_username: string): Promise<unknown | null>;
   getDiscovery(_username: string): Promise<unknown | null>;
-  listDiscoveries(): Promise<StoredDocument[]>;
+  listDiscoveries(_limit: number): Promise<StoredDocument[]>;
 }
 
 export interface PublicWebRequest {
@@ -214,8 +223,8 @@ const firestoreRepository: PublicWebRepository = {
     const snapshot = await getFirestore().collection("profileDiscovery").doc(username).get();
     return snapshot.exists ? snapshot.data() ?? null : null;
   },
-  async listDiscoveries() {
-    const snapshot = await getFirestore().collection("profileDiscovery").get();
+  async listDiscoveries(limit) {
+    const snapshot = await getFirestore().collection("profileDiscovery").limit(limit).get();
     return snapshot.docs.map((document) => ({
       id: document.id,
       value: document.data(),
@@ -276,18 +285,43 @@ function sitemapEntry(
 async function sitemapProfiles(
   repository: PublicWebRepository,
 ): Promise<SitemapEntry[]> {
-  const discoveries = await repository.listDiscoveries();
-  const entries = await Promise.all(discoveries.map(async (document) => {
-    if (!USERNAME_PATTERN.test(document.id)) {
-      logger.warn("publicweb.sitemap.skip", {
-        username: document.id,
-        reason: "invalid profile discovery id",
-      });
-      return null;
-    }
-    return sitemapEntry(document, await repository.getProfile(document.id));
-  }));
-  return entries.filter((entry): entry is SitemapEntry => entry !== null);
+  const discoveries = await repository.listDiscoveries(SITEMAP_MAX_PROFILES);
+  if (discoveries.length >= SITEMAP_MAX_PROFILES) {
+    logger.warn("publicweb.sitemap.truncated", {limit: SITEMAP_MAX_PROFILES});
+  }
+  const entries: SitemapEntry[] = [];
+  for (let start = 0; start < discoveries.length; start += SITEMAP_READ_CONCURRENCY) {
+    const batch = discoveries.slice(start, start + SITEMAP_READ_CONCURRENCY);
+    const resolved = await Promise.all(batch.map(async (document) => {
+      if (!USERNAME_PATTERN.test(document.id)) {
+        logger.warn("publicweb.sitemap.skip", {
+          username: document.id,
+          reason: "invalid profile discovery id",
+        });
+        return null;
+      }
+      return sitemapEntry(document, await repository.getProfile(document.id));
+    }));
+    for (const entry of resolved) if (entry !== null) entries.push(entry);
+  }
+  return entries;
+}
+
+// A public profile that fails to decode is the owner's own malformed data
+// (rules bound shapes, not every nested value — SEC-009/SEC-032). It must
+// be an ordinary, memoised 404, not a 500: a rejected load is metered but
+// never memoised, so a throwing profile would let one repeated URL spend
+// the whole miss budget with no key rotation at all.
+function decodeStoredProfile(username: string, stored: unknown): PublicProfile | null {
+  try {
+    return decodePublicProfile(username, stored);
+  } catch (error) {
+    logger.warn("publicweb.profile.skip", {
+      username,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 // Profile first, discovery marker only for a public profile: an unknown
@@ -299,7 +333,10 @@ async function profileResponse(
   username: string,
 ): Promise<PublicWebResponse> {
   const storedProfile = await repository.getProfile(username);
-  if (storedProfile === null || !profileIsPublic(storedProfile)) {
+  const profile = storedProfile === null || !profileIsPublic(storedProfile)
+    ? null
+    : decodeStoredProfile(username, storedProfile);
+  if (profile === null) {
     return {
       status: 404,
       headers: htmlHeaders(PROFILE_CACHE_CONTROL),
@@ -307,7 +344,6 @@ async function profileResponse(
     };
   }
 
-  const profile: PublicProfile = decodePublicProfile(username, storedProfile);
   const storedDiscovery = await repository.getDiscovery(username);
   const searchable = storedDiscovery === null
     ? false
@@ -329,14 +365,16 @@ async function profileJsonResponse(
   username: string | null,
 ): Promise<PublicWebResponse> {
   const storedProfile = username === null ? null : await repository.getProfile(username);
-  if (username === null || storedProfile === null || !profileIsPublic(storedProfile)) {
+  const profile = username === null || storedProfile === null || !profileIsPublic(storedProfile)
+    ? null
+    : decodeStoredProfile(username, storedProfile);
+  if (profile === null) {
     return {
       status: 404,
       headers: jsonHeaders(),
       body: request.method === "HEAD" ? "" : JSON.stringify({error: "not-found"}),
     };
   }
-  const profile = decodePublicProfile(username, storedProfile);
   return {
     status: 200,
     headers: jsonHeaders(),
@@ -392,9 +430,10 @@ export async function resolvePublicWebRequest(
 
 // Finished responses are what get cached: decode, render, and serialise
 // once per path per TTL. HEAD shares GET's entry and drops the body; 405s
-// cost no reads and bypass the cache; a rejected resolve propagates and is
-// not memoised; 404s are memoised in the transient pool, so a repeated
-// unknown path is free but a flood of them cannot evict profiles.
+// cost no reads and bypass the cache; a rejected resolve (a Firestore
+// failure — malformed data is a 404, never a throw) propagates and is not
+// memoised; 404s are memoised in the transient pool, so a repeated unknown
+// path is free but a flood of them cannot evict profiles.
 export async function cachedPublicWebResponse(
   request: PublicWebRequest,
   repository: PublicWebRepository,

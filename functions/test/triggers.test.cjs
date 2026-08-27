@@ -326,6 +326,18 @@ test("runs every function as its dedicated least-privilege identity", () => {
     assert.equal(typeof identity, "string", `${name} has no serviceAccount`);
     assert.equal(identity, tiers.get(name), name);
   }
+  // A raw HTTP surface (httpsTrigger without callableTrigger) is reachable
+  // by strangers with no Firebase auth at all, so it must stay on the
+  // read-only tier and must not widen its invoker. Callables are HTTP too,
+  // but the SDK checks the ID token before any handler runs.
+  const raw = exported.filter(([, deployedFunction]) =>
+    deployedFunction.__endpoint.httpsTrigger !== undefined &&
+    deployedFunction.__endpoint.callableTrigger === undefined);
+  assert.deepEqual(raw.map(([name]) => name), ["functions.publicweb"]);
+  for (const [name, deployedFunction] of raw) {
+    assert.equal(deployedFunction.__endpoint.serviceAccountEmail, publicwebRuntime, name);
+    assert.equal(deployedFunction.__endpoint.httpsTrigger.invoker, undefined, name);
+  }
   // Eventarc delivers from Google's network: exactly the two event-driven
   // gen2 services accept no public ingress. Everything else — callables,
   // the Hosting-rewritten publicweb, and gen1 Auth triggers, which Google

@@ -367,7 +367,11 @@ revision tagged and publicly reachable at its `fh-<tag>---…run.app` URL;
 after a deploy, drop stale tags and delete retired revisions
 (`gcloud run services update-traffic publicweb --remove-tags …`,
 `gcloud run revisions delete …`) so only revisions on the current identity
-stay addressable.
+stay addressable. That cleanup also means **never roll Hosting back through
+the console**: every earlier release's rewrite points at a tag that no
+longer exists, so a rollback breaks every profile page and the sitemap.
+Recover from a bad release with a fresh
+`firebase deploy --only functions:publicweb,hosting` instead.
 
 ### Deploy Everything
 

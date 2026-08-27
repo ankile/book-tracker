@@ -13,6 +13,8 @@ const {
 } = require("../lib/publicProfileRenderer");
 const {
   MISS_BUDGET_EXHAUSTED,
+  SITEMAP_MAX_PROFILES,
+  SITEMAP_READ_CONCURRENCY,
   cachedPublicWebResponse,
   createTtlCache,
   resolvePublicWebRequest,
@@ -520,6 +522,73 @@ test("sitemap skips a malformed profile or marker instead of failing", async () 
   assert.equal(result.status, 200);
   assert.match(result.body, /profiles\/ada-lovelace/);
   assert.doesNotMatch(result.body, /broken-profile|broken-marker|Bad Slug/);
+});
+
+test("a public profile that fails to decode is a memoised 404 on both routes, not a 500", async () => {
+  const calls = {profile: 0};
+  const broken = {
+    getProfile: async () => {
+      calls.profile += 1;
+      return storedProfile({days: [{day: "2026-08-20", pagesRead: "junk"}]});
+    },
+    getDiscovery: async () => marker,
+    listDiscoveries: async () => [],
+  };
+  const html = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace"}, broken, shell,
+  );
+  assert.equal(html.status, 404);
+  assert.equal(html.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
+  assert.match(html.body, /<!doctype html>/i);
+  const json = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace.json"}, broken, shell,
+  );
+  assert.equal(json.status, 404);
+  assert.deepEqual(JSON.parse(json.body), {error: "not-found"});
+  assert.equal(calls.profile, 2);
+
+  // Through the cache the 404 is transient-pooled: a repeated hostile URL
+  // costs no read and no budget after the first miss.
+  const cache = createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 3, windowMs: 60_000, retain: (r) => r.status === 200,
+  });
+  for (let i = 0; i < 10; i += 1) {
+    const result = await cachedPublicWebResponse(
+      {method: "GET", path: "/profiles/ada-lovelace.json"}, broken, shell, cache,
+    );
+    assert.equal(result.status, 404);
+  }
+  assert.equal(calls.profile, 3);
+});
+
+test("sitemap bounds its scan and reads profiles in batches, never all at once", async () => {
+  let requestedLimit = null;
+  let inflight = 0;
+  let peak = 0;
+  const count = SITEMAP_READ_CONCURRENCY * 3 + 7;
+  const discoveries = Object.fromEntries(
+    Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
+  );
+  const batched = {
+    getProfile: async (username) => {
+      inflight += 1;
+      peak = Math.max(peak, inflight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inflight -= 1;
+      return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
+    },
+    getDiscovery: async () => null,
+    listDiscoveries: async (limit) => {
+      requestedLimit = limit;
+      return Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value}));
+    },
+  };
+  const result = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, batched, shell);
+  assert.equal(result.status, 200);
+  assert.equal(requestedLimit, SITEMAP_MAX_PROFILES);
+  assert.equal(peak, SITEMAP_READ_CONCURRENCY);
+  assert.equal((result.body.match(/<loc>/g) ?? []).length, count);
 });
 
 test("sitemap renderer is deterministic and XML-safe", () => {
