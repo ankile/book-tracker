@@ -3,6 +3,7 @@ import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
+import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 initializeApp();
 const db = getFirestore();
@@ -21,12 +22,18 @@ const db = getFirestore();
 // rejects newly created gen1 Firestore triggers, and gen2 requires
 // lowercase function names.
 // Generous timeout: recursiveDelete of a long-lived book's updates
-// subcollection can outrun the 60s default.
+// subcollection can outrun the 60s default. retry: recursiveDelete is
+// idempotent, and without it one failed delivery (a transient Firestore
+// error, an ingress misclassification) would orphan the subcollection
+// silently and permanently.
 exports.deletebookupdates = onDocumentDeleted(
   {
     document: "users/{userId}/books/{bookId}",
     region: "europe-west1",
     timeoutSeconds: 300,
+    retry: true,
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    ingressSettings: EVENT_INGRESS,
   },
   async (event) => {
     if (!event.data) return;
@@ -36,6 +43,7 @@ exports.deletebookupdates = onDocumentDeleted(
 // Create a user document when a new user signs up
 exports.createUserDocument = functions
   .region("europe-west1")
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
   .auth.user()
   .onCreate(async (user) => {
     const userRef = db.collection("users").doc(user.uid);
@@ -59,6 +67,7 @@ exports.createUserDocument = functions
 
 exports.deleteUserDocument = functions
   .region("europe-west1")
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
   .auth.user()
   .onDelete(async (user) => {
     // Account deletion must immediately remove both the public document and

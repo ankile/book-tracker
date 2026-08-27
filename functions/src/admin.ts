@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
+import {FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
   IssueIdentity,
@@ -97,6 +98,7 @@ function adminCallable(
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
+    .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
     .https.onCall(async (data: unknown, context) => {
       await requireAdmin(context);
       decodeEmptyCallableRequest(data, invalidArgument);

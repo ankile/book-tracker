@@ -281,3 +281,56 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
   assert.equal(packageJson.scripts.start, "npm run serve");
   assert.equal(packageJson.scripts.shell, "npm run serve");
 });
+
+test("runs every function as its dedicated least-privilege identity", () => {
+  const publicwebRuntime = "publicweb-runtime@book-tracker-d8f24.iam.gserviceaccount.com";
+  const functionsRuntime = "functions-runtime@book-tracker-d8f24.iam.gserviceaccount.com";
+  // The one stranger-reachable function reads Firestore and nothing else.
+  assert.equal(functions.publicweb.__endpoint.serviceAccountEmail, publicwebRuntime);
+  const authenticated = {
+    deletebookupdates: functions.deletebookupdates,
+    createUserDocument: functions.createUserDocument,
+    deleteUserDocument: functions.deleteUserDocument,
+    "admin.overview": functions.admin.overview,
+    "booksapi.lookupisbn": functions.booksapi.lookupisbn,
+    "toggl.savetoken": functions.toggl.savetoken,
+    "toggl.start": functions.toggl.start,
+    "toggl.stop": functions.toggl.stop,
+    "toggl.clearstopping": functions.toggl.clearstopping,
+    "toggl.syncqueue": functions.toggl.syncqueue,
+  };
+  for (const [name, deployedFunction] of Object.entries(authenticated)) {
+    assert.equal(deployedFunction.__endpoint.serviceAccountEmail, functionsRuntime, name);
+  }
+  // Nothing exported may fall back to a project-default (Editor) identity,
+  // including any function added later without a serviceAccount. An unset
+  // option is a ResetValue sentinel object, not undefined, hence the
+  // typeof check (which also names the offender).
+  const exported = [];
+  const walk = (value, path) => {
+    if (value && value.__endpoint) exported.push([path, value]);
+    else if (value && (typeof value === "object" || typeof value === "function")) {
+      for (const [key, child] of Object.entries(value)) walk(child, `${path}.${key}`);
+    }
+  };
+  walk(functions, "functions");
+  assert.equal(exported.length, 11);
+  for (const [name, deployedFunction] of exported) {
+    const identity = deployedFunction.__endpoint.serviceAccountEmail;
+    assert.equal(typeof identity, "string", `${name} has no serviceAccount`);
+    assert.match(identity, /^(publicweb|functions)-runtime@book-tracker-d8f24\.iam\.gserviceaccount\.com$/, name);
+  }
+  // Eventarc delivers from Google's network: exactly the two event-driven
+  // gen2 services accept no public ingress. Everything else — callables,
+  // the Hosting-rewritten publicweb, and gen1 Auth triggers, which Google
+  // invokes over the public endpoint — keeps the default.
+  const internalOnly = new Set(["functions.deletebookupdates", "functions.toggl.syncqueue"]);
+  for (const [name, deployedFunction] of exported) {
+    const ingress = deployedFunction.__endpoint.ingressSettings;
+    if (internalOnly.has(name)) assert.equal(ingress, "ALLOW_INTERNAL_ONLY", name);
+    else assert.notEqual(typeof ingress, "string", `${name} sets ingress ${String(ingress)}`);
+  }
+  // The cascade delete is idempotent and must not orphan a subcollection
+  // on one failed delivery.
+  assert.equal(functions.deletebookupdates.__endpoint.eventTrigger.retry, true);
+});

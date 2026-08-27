@@ -18,6 +18,7 @@ import {
   renderProfileDocument,
   renderSitemap,
 } from "./publicProfileRenderer";
+import {PUBLICWEB_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
 const PROFILE_ROUTE = /^\/profiles\/([^/]+)$/;
@@ -448,6 +449,7 @@ export const publicweb = onRequest(
     region: "europe-west1",
     timeoutSeconds: 30,
     maxInstances: 2,
+    serviceAccount: PUBLICWEB_RUNTIME_SERVICE_ACCOUNT,
   },
   async (request, response) => {
     const result = await cachedPublicWebResponse(

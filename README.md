@@ -334,6 +334,26 @@ npm run test:e2e
    This preserves the existing `booksapi` URL and API key without printing or
    copying the secret into the repository.
 
+#### Runtime identities
+
+Functions do not run as the project-default (Editor) service accounts.
+`functions/src/runtime.ts` names two dedicated accounts that must exist in
+IAM before a deploy: `publicweb-runtime@` (`roles/datastore.viewer` — the
+one function strangers reach can only read Firestore, nothing else) and
+`functions-runtime@` (`roles/datastore.user`, `roles/firebaseauth.viewer`,
+`roles/eventarc.eventReceiver`, `roles/run.invoker` on the two
+Eventarc-fed services, and `secretmanager.secretAccessor` on
+`FUNCTIONS_CONFIG_EXPORT`). `datastore.viewer` is read access to the whole
+database (Firestore IAM cannot scope to collections), so the reduction is
+"read-only, nothing else", not "public data only". The deployer needs
+`iam.serviceAccountUser` on both accounts — a project Owner has it; any
+other deployer (for example the `firebase-adminsdk` key used for headless
+Hosting deploys) would need that role granted on these two accounts, not
+on the App Engine default. `triggers.test.cjs` fails if any exported function lacks one of these
+identities, and the two Firestore-triggered gen2 services are
+`ALLOW_INTERNAL_ONLY`. A new function that needs another Google API gets
+its role added to the matching account — never `roles/editor`.
+
 ### Deploy Everything
 
 The first strict-TypeScript release must follow the authoritative
