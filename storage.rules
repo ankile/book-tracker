@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// The app does not use Cloud Storage. Deny every client read and write so a
+// signed-in account cannot use the default bucket as file hosting (SEC-017).
+// Admin SDK and console access are unaffected by these rules.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

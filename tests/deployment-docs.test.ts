@@ -87,7 +87,7 @@ test('the general migration order links to the timer-claim exception', async () 
   assert.match(migrations, /#### Reading-progress-source rollout/);
   assert.match(
     migrations,
-    /default \*\*7-day overlap\s+window\*\*[\s\S]*still-running old bundle, online or offline/i,
+    /single operator-user[\s\S]*no multi-user overlap window[\s\S]*proceed the same day/i,
   );
   assert.match(
     migrations,

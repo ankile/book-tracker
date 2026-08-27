@@ -107,7 +107,10 @@ the fresh client just made must be invisible to it (0 ops against new-shape docs
 
 1. **Functions** (`firebase deploy --only functions:<name>`) — trigger
    behavior must be correct before bulk writes land.
-2. **Firestore rules/indexes** (`firebase deploy --only firestore`).
+2. **Firestore rules/indexes and Storage rules** (`firebase deploy --only
+   firestore,storage`). `storage.rules` is deny-all (the app does not use
+   Cloud Storage; added 2026-08-26 for SEC-017) and should stay that way
+   unless a feature starts using the bucket.
 3. **Hosting** (`npm run build` + `firebase deploy --only hosting`).
 
 Rules before hosting is load-bearing: the client writes in atomic
