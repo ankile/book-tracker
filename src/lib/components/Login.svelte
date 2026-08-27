@@ -121,6 +121,12 @@
     color: firebrick;
     margin: 0.75rem 0 0;
   }
+
+  .hint {
+    margin: -1em 0 1.5em;
+    font-size: smaller;
+    color: darkgray;
+  }
 </style>
 
 <div class="container">
@@ -148,7 +154,11 @@
         placeholder="Password"
         type="password"
         required
+        minlength={login ? undefined : 12}
         bind:value={password} />
+      {#if !login}
+        <p class="hint">At least 12 characters.</p>
+      {/if}
     </div>
     <Button type="submit" disabled={authAttempt.pending}>
       {authAttempt.pending ? 'Please wait…' : login ? 'Log in' : 'Register'}
