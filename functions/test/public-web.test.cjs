@@ -273,7 +273,7 @@ test("an unknown or private profile costs one read, a public one two", async () 
 test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and meters misses", async () => {
   let clock = 1_000;
   const cache = createTtlCache({
-    ttlMs: 60_000, maxEntries: 2, maxMissesPerWindow: 4, windowMs: 60_000, now: () => clock,
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2, maxMissesPerWindow: 4, windowMs: 60_000, now: () => clock,
   });
   let loads = 0;
   const load = (value) => async () => {
@@ -316,6 +316,8 @@ test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and
   assert.equal(await cache.get("d", load("d")), "d");
   assert.equal(loads, 6);
 
+  // A rejected load propagates and leaves nothing behind: the next call
+  // loads again.
   await assert.rejects(
     cache.get("broken", async () => {
       loads += 1;
@@ -327,10 +329,87 @@ test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and
   assert.equal(loads, 8);
 });
 
+test("ttl cache pools transient values apart, serves retained ones stale, and drops replaced entries", async () => {
+  assert.throws(
+    () => createTtlCache({ttlMs: 60_000, staleTtlMs: 60_000, maxEntries: 1, maxTransientEntries: 1, maxMissesPerWindow: 1, windowMs: 1}),
+    /staleTtlMs must exceed ttlMs/,
+  );
+  let clock = 1_000;
+  const cache = createTtlCache({
+    ttlMs: 60_000,
+    staleTtlMs: 300_000,
+    maxEntries: 2,
+    maxTransientEntries: 2,
+    maxMissesPerWindow: 3,
+    windowMs: 30_000,
+    retain: (value) => value !== "miss",
+    now: () => clock,
+  });
+  let loads = 0;
+  const load = (value) => async () => {
+    loads += 1;
+    return value;
+  };
+
+  await cache.get("a", load("a"));
+  await cache.get("b", load("b"));
+  assert.equal(await cache.get("x", load("miss")), "miss");
+  assert.equal(loads, 3);
+  // Budget spent; a transient repeat is still free.
+  assert.equal(cache.get("y", load("y")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(await cache.get("x", load("miss")), "miss");
+  assert.equal(await cache.get("a", load("a")), "a");
+  assert.equal(loads, 3);
+
+  // New window, "a" and "b" past ttlMs. Three transient loads spend the
+  // budget and overflow the transient pool (cap 2) — without touching the
+  // retained pool, so "a" and "b" are served stale rather than refused.
+  clock += 60_000;
+  for (const key of ["x2", "y2", "z2"]) assert.equal(await cache.get(key, load("miss")), "miss");
+  assert.equal(loads, 6);
+  assert.equal(await cache.get("a", load("a")), "a");
+  assert.equal(await cache.get("b", load("b")), "b");
+  assert.equal(cache.get("x2", load("miss")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(await cache.get("y2", load("miss")), "miss");
+  assert.equal(loads, 6);
+
+  // "a" reloads as transient: the retained entry is dropped, not kept for
+  // stale service.
+  clock += 30_000;
+  assert.equal(await cache.get("a", load("miss")), "miss");
+  assert.equal(await cache.get("p", load("miss")), "miss");
+  assert.equal(await cache.get("a", load("a")), "miss");
+  // Touching "a" made "p" the transient pool's LRU, so "q" evicts "p".
+  assert.equal(await cache.get("q", load("miss")), "miss");
+  assert.equal(loads, 9);
+  assert.equal(await cache.get("a", load("a")), "miss");
+  assert.equal(cache.get("p", load("miss")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(loads, 9);
+  clock += 60_000;
+  for (const key of ["r", "s", "t"]) assert.equal(await cache.get(key, load("miss")), "miss");
+  assert.equal(loads, 12);
+  assert.equal(cache.get("a", load("a")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(await cache.get("b", load("b")), "b");
+  assert.equal(loads, 12);
+
+  // 300 s after its load "b" is past staleTtlMs and refused like any key.
+  clock += 150_000;
+  for (const key of ["u", "v", "w"]) assert.equal(await cache.get(key, load("miss")), "miss");
+  assert.equal(loads, 15);
+  assert.equal(cache.get("b", load("b")), MISS_BUDGET_EXHAUSTED);
+});
+
 test("cached responses serve repeats without reads, share HEAD with GET, and 503 past the budget", async () => {
   let clock = 1_000;
   const cache = createTtlCache({
-    ttlMs: 60_000, maxEntries: 100, maxMissesPerWindow: 2, windowMs: 60_000, now: () => clock,
+    ttlMs: 60_000,
+    staleTtlMs: 300_000,
+    maxEntries: 100,
+    maxTransientEntries: 100,
+    maxMissesPerWindow: 2,
+    windowMs: 60_000,
+    retain: (response) => response.status === 200,
+    now: () => clock,
   });
   let reads = 0;
   const repo = {
@@ -358,24 +437,34 @@ test("cached responses serve repeats without reads, share HEAD with GET, and 503
   const miss = await get("/profiles/nobody-here.json");
   assert.equal(miss.status, 404);
   assert.equal(reads, 2);
+  // Budget spent: a repeated 404 is memoised, a new name is refused.
   assert.equal((await get("/profiles/nobody-here.json")).status, 404);
-  assert.equal(reads, 2);
-
   const refused = await get("/profiles/another-name.json");
   assert.equal(refused.status, 503);
   assert.equal(refused.headers["Cache-Control"], "no-store");
   assert.equal(refused.headers["Retry-After"], "60");
   assert.equal(reads, 2);
-  // Known paths keep serving during the refusal window.
   assert.equal((await get("/profiles/ada-lovelace.json")).status, 200);
   // 405 never consults the cache or Firestore.
   const method = await get("/profiles/ada-lovelace.json", "POST");
   assert.equal(method.status, 405);
   assert.equal(reads, 2);
 
+  // Next window: two unknown names spend the budget again; the profile,
+  // now past its minute, is served stale instead of refused.
   clock += 60_000;
   assert.equal((await get("/profiles/another-name.json")).status, 404);
-  assert.equal(reads, 3);
+  assert.equal((await get("/profiles/third-name.json")).status, 404);
+  assert.equal(reads, 4);
+  assert.equal((await get("/profiles/fourth-name.json")).status, 503);
+  assert.equal((await get("/profiles/ada-lovelace.json")).status, 200);
+  assert.equal((await get("/profiles/ada-lovelace", "HEAD")).status, 503);
+  assert.equal(reads, 4);
+
+  // Budget back: the stale profile refreshes with a read.
+  clock += 60_000;
+  assert.equal((await get("/profiles/ada-lovelace.json")).status, 200);
+  assert.equal(reads, 5);
 });
 
 test("sitemap includes only public profiles with matching discovery owners", async () => {

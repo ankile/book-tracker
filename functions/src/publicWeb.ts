@@ -31,15 +31,21 @@ const PROFILE_JSON_ROUTE = /^\/profiles\/([^/]+)\.json$/;
 // bounds the origin's work (SEC-019, SEC-020): a repeat path costs nothing
 // for RESPONSE_CACHE_TTL_MS, and a flood of *distinct* paths — the key
 // space is attacker-chosen — is capped by the per-instance miss budget,
-// after which the origin answers 503 without touching Firestore. Privacy
-// lag for a profile flipped private composes across tiers: up to 60 s here
-// + 300 s shared CDN + 60 s browser, with no purge path (SEC-031).
+// after which the origin answers 503 without touching Firestore. 200s and
+// 404s live in separately bounded pools, so the flood's 404s cannot evict
+// real profiles, and while the budget is exhausted a memoised profile is
+// served stale for up to RESPONSE_CACHE_STALE_MS instead of failing. Privacy lag for a profile
+// flipped private composes across tiers: up to 60 s here (300 s while the
+// origin is being flooded) + 300 s shared CDN + 60 s browser, with no
+// purge path (SEC-031).
 const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
 const SITEMAP_CACHE_CONTROL = "public, max-age=300, s-maxage=300";
 const RESPONSE_CACHE_TTL_MS = 60_000;
+const RESPONSE_CACHE_STALE_MS = 300_000;
 // Bounds cached bodies, not just entries: at ~100 KB per real profile this
-// is ~10 MB against the 256 MiB default; unknown names cache a 22-byte 404.
+// is ~10 MB against the 256 MiB default. 404s are ~22 bytes each.
 const RESPONSE_CACHE_MAX_ENTRIES = 100;
+const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
 // Uncached responses each cost one or two Firestore reads plus a decode and
 // render. 300 per minute per instance (2 instances) is far above real
 // traffic and caps a rotating-name flood at ~0.9M reads/day worst case.
@@ -98,11 +104,20 @@ export function publicProfileView(profile: PublicProfile): PublicProfileView {
   };
 }
 
-export interface TtlCacheOptions {
+export interface TtlCacheOptions<T> {
   ttlMs: number;
+  // Lifetime of a retained entry past which it is dropped even for stale
+  // service; must exceed ttlMs.
+  staleTtlMs: number;
   maxEntries: number;
+  maxTransientEntries: number;
   maxMissesPerWindow: number;
   windowMs: number;
+  // Which loaded values are retained (memoised for staleTtlMs, counted
+  // against maxEntries); the rest are transient — memoised for ttlMs only,
+  // in their own pool bounded by maxTransientEntries. Defaults to retaining
+  // everything.
+  retain?: (_value: T) => boolean;
   now?: () => number;
 }
 
@@ -112,45 +127,76 @@ export interface TtlCache<T> {
   get(_key: string, _load: () => Promise<T>): Promise<T> | typeof MISS_BUDGET_EXHAUSTED;
 }
 
-// Per-instance memo. Entries expire after ttlMs; a hit refreshes recency and
-// the least recently used key is evicted past maxEntries. A rejected load is
-// evicted immediately so a transient Firestore failure is never served for
-// a minute; concurrent callers for one key share the in-flight promise.
-// Loads are metered: once maxMissesPerWindow uncached loads have started in
-// the current window the cache stops loading and reports
-// MISS_BUDGET_EXHAUSTED, which is the ceiling on what a flood of distinct
-// keys can cost this instance.
-export function createTtlCache<T>(options: TtlCacheOptions): TtlCache<T> {
+interface CacheEntry<T> {
+  loadedAt: number;
+  value: T;
+}
+
+// Per-instance memo. An entry is fresh for ttlMs; a hit refreshes recency
+// and the least recently used key of the same pool is evicted past that
+// pool's cap. Concurrent callers for one key share the in-flight promise,
+// and a load only enters a pool once it resolves, so pending and rejected
+// loads never occupy or evict a slot. Loads are metered: once
+// maxMissesPerWindow uncached loads have started in the current window the
+// cache stops loading and reports MISS_BUDGET_EXHAUSTED, which is the
+// ceiling on what a flood of distinct keys can cost this instance — unless
+// the key has a retained entry younger than staleTtlMs, which is served
+// stale rather than refused. A key that reloads as transient drops its
+// retained entry, so a value the cache has seen replaced is never revived.
+export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
+  if (options.staleTtlMs <= options.ttlMs) throw new Error("staleTtlMs must exceed ttlMs");
   const now = options.now ?? Date.now;
-  const entries = new Map<string, {expiresAt: number; value: Promise<T>}>();
+  const retain = options.retain ?? (() => true);
+  const retained = new Map<string, CacheEntry<T>>();
+  const transient = new Map<string, CacheEntry<T>>();
+  const inflight = new Map<string, Promise<T>>();
   let windowStart = now();
   let misses = 0;
+
+  const touch = (pool: Map<string, CacheEntry<T>>, key: string, entry: CacheEntry<T>): Promise<T> => {
+    pool.delete(key);
+    pool.set(key, entry);
+    return Promise.resolve(entry.value);
+  };
+  const insert = (pool: Map<string, CacheEntry<T>>, cap: number, key: string, entry: CacheEntry<T>): void => {
+    pool.delete(key);
+    pool.set(key, entry);
+    for (const oldest of pool.keys()) {
+      if (pool.size <= cap) break;
+      pool.delete(oldest);
+    }
+  };
 
   return {
     get(key, load) {
       const at = now();
-      const cached = entries.get(key);
-      if (cached !== undefined && cached.expiresAt > at) {
-        entries.delete(key);
-        entries.set(key, cached);
-        return cached.value;
-      }
+      const kept = retained.get(key);
+      if (kept !== undefined && kept.loadedAt + options.ttlMs > at) return touch(retained, key, kept);
+      const passing = transient.get(key);
+      if (passing !== undefined && passing.loadedAt + options.ttlMs > at) return touch(transient, key, passing);
+      const pending = inflight.get(key);
+      if (pending !== undefined) return pending;
       if (at - windowStart >= options.windowMs) {
         windowStart = at;
         misses = 0;
       }
-      if (misses >= options.maxMissesPerWindow) return MISS_BUDGET_EXHAUSTED;
-      misses += 1;
-      const value = load();
-      entries.delete(key);
-      entries.set(key, {expiresAt: at + options.ttlMs, value});
-      value.catch(() => {
-        if (entries.get(key)?.value === value) entries.delete(key);
-      });
-      for (const oldest of entries.keys()) {
-        if (entries.size <= options.maxEntries) break;
-        entries.delete(oldest);
+      if (misses >= options.maxMissesPerWindow) {
+        if (kept !== undefined && kept.loadedAt + options.staleTtlMs > at) return touch(retained, key, kept);
+        return MISS_BUDGET_EXHAUSTED;
       }
+      misses += 1;
+      const value = load().then((loaded) => {
+        const entry = {loadedAt: at, value: loaded};
+        if (retain(loaded)) {
+          transient.delete(key);
+          insert(retained, options.maxEntries, key, entry);
+        } else {
+          retained.delete(key);
+          insert(transient, options.maxTransientEntries, key, entry);
+        }
+        return loaded;
+      }).finally(() => inflight.delete(key));
+      inflight.set(key, value);
       return value;
     },
   };
@@ -344,7 +390,8 @@ export async function resolvePublicWebRequest(
 // Finished responses are what get cached: decode, render, and serialise
 // once per path per TTL. HEAD shares GET's entry and drops the body; 405s
 // cost no reads and bypass the cache; a rejected resolve propagates and is
-// not retained.
+// not memoised; 404s are memoised in the transient pool, so a repeated
+// unknown path is free but a flood of them cannot evict profiles.
 export async function cachedPublicWebResponse(
   request: PublicWebRequest,
   repository: PublicWebRepository,
@@ -382,7 +429,10 @@ function profileShell(): string {
 
 const responseCache = createTtlCache<PublicWebResponse>({
   ttlMs: RESPONSE_CACHE_TTL_MS,
+  staleTtlMs: RESPONSE_CACHE_STALE_MS,
+  retain: (response) => response.status === 200,
   maxEntries: RESPONSE_CACHE_MAX_ENTRIES,
+  maxTransientEntries: RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES,
   maxMissesPerWindow: MISS_BUDGET_PER_WINDOW,
   windowMs: MISS_BUDGET_WINDOW_MS,
 });

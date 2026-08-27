@@ -245,11 +245,15 @@ same owner uid. The server applies these states:
   serves this path, so other people's profiles resolve only against a deployed
   or emulated Hosting stack.
 
-The Function memoises finished responses per instance for 60 s and refuses
-uncached work with a `503` once 300 misses land in a minute, so a flood of
-distinct paths is bounded even when it bypasses the CDN. A profile flipped
-private can therefore stay served for up to 60 s (function) + 300 s (shared
-CDN) + 60 s (browser); there is no purge path.
+The Function memoises finished `200` responses per instance for 60 s and
+refuses uncached work with a `503` once 300 misses land in a minute, so a
+flood of distinct paths is bounded even when it bypasses the CDN. `404`s are
+memoised in a separate pool, so repeats stay free but a flood of them cannot
+evict real profiles, and while the budget is exhausted a memoised profile (or
+the sitemap) is served stale (up to 5 min old) rather than refused; a profile
+the origin has since seen as private is not revived. A profile flipped private can therefore stay served for up to 60 s
+(function; 300 s while the origin is being flooded) + 300 s (shared CDN) +
+60 s (browser); there is no purge path.
 
 `npm run build` creates both `public/index.html` and
 `functions/assets/profile-shell.html`. They deliberately contain the same
