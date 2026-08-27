@@ -51,7 +51,7 @@
       {
         "source": "/profiles/**",
         "headers": [
-          { "key": "Cache-Control", "value": "no-store" }
+          { "key": "Cache-Control", "value": "public, max-age=60, s-maxage=300" }
         ]
       },
       {

@@ -117,7 +117,7 @@ test("request resolver enforces public and discovery state", async () => {
     shell,
   );
   assert.equal(listed.status, 200);
-  assert.equal(listed.headers["Cache-Control"], "no-store");
+  assert.equal(listed.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
   assert.match(listed.body, /index,follow/);
 
   const unlisted = await resolvePublicWebRequest(
@@ -138,6 +138,7 @@ test("request resolver enforces public and discovery state", async () => {
       shell,
     );
     assert.equal(response.status, 404);
+    assert.equal(response.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
     assert.match(response.body, /noindex,nofollow/);
     assert.doesNotMatch(response.body, /ada-lovelace/);
   }
@@ -159,6 +160,7 @@ test("request resolver validates routes and HEAD without a response body", async
     shell,
   );
   assert.equal(invalid.status, 404);
+  assert.equal(invalid.headers["Cache-Control"], "public, max-age=60, s-maxage=300");
 
   const method = await resolvePublicWebRequest(
     {method: "POST", path: "/profiles/ada-lovelace"},
@@ -167,6 +169,7 @@ test("request resolver validates routes and HEAD without a response body", async
   );
   assert.equal(method.status, 405);
   assert.equal(method.headers.Allow, "GET, HEAD");
+  assert.equal(method.headers["Cache-Control"], "no-store");
 });
 
 test("sitemap includes only public profiles with matching discovery owners", async () => {
@@ -197,6 +200,31 @@ test("sitemap includes only public profiles with matching discovery owners", asy
   assert.match(result.body, /profiles\/ada-lovelace/);
   assert.doesNotMatch(result.body, /grace-hopper|missing-reader|private-reader/);
   assert.match(result.body, /<lastmod>2026-08-24T12:00:00\.000Z<\/lastmod>/);
+});
+
+test("sitemap skips a malformed profile or marker instead of failing", async () => {
+  const result = await resolvePublicWebRequest(
+    {method: "GET", path: "/sitemap.xml"},
+    repository({
+      profiles: {
+        "ada-lovelace": storedProfile(),
+        "broken-profile": storedProfile({uid: "broken", updatedAt: "not a timestamp"}),
+        "broken-marker": storedProfile({uid: "marked"}),
+        "Bad Slug": storedProfile({uid: "slug"}),
+      },
+      discoveries: {
+        "ada-lovelace": marker,
+        "broken-profile": {...marker, uid: "broken"},
+        "broken-marker": {uid: 42},
+        "Bad Slug": {...marker, uid: "slug"},
+      },
+    }),
+    shell,
+  );
+
+  assert.equal(result.status, 200);
+  assert.match(result.body, /profiles\/ada-lovelace/);
+  assert.doesNotMatch(result.body, /broken-profile|broken-marker|Bad Slug/);
 });
 
 test("sitemap renderer is deterministic and XML-safe", () => {

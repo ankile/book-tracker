@@ -90,7 +90,9 @@ test('Hosting routes crawlable pages to the pinned renderer before the SPA fallb
   const sitemapHeaders = config.hosting.headers.find(
     (entry: {source: string}) => entry.source === '/sitemap.xml',
   );
-  assert.deepEqual(profileHeaders.headers, [{key: 'Cache-Control', value: 'no-store'}]);
+  assert.deepEqual(profileHeaders.headers, [{
+    key: 'Cache-Control', value: 'public, max-age=60, s-maxage=300',
+  }]);
   assert.deepEqual(sitemapHeaders.headers, [{
     key: 'Cache-Control', value: 'public, max-age=300, s-maxage=300',
   }]);

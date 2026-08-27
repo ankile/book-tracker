@@ -68,6 +68,9 @@ test("keeps every function in europe-west1 on its required generation", () => {
   assert.equal(functions.publicweb.__endpoint.platform, "gcfv2");
   assert.deepEqual(functions.publicweb.__endpoint.region, ["europe-west1"]);
   assert.notEqual(functions.publicweb.__endpoint.httpsTrigger, undefined);
+  // The public renderer is the one endpoint strangers and crawlers can hit
+  // without an account; an explicit instance cap is its cost ceiling.
+  assert.equal(functions.publicweb.__endpoint.maxInstances, 2);
 });
 
 test("preserves the Firestore and Authentication event contracts", () => {

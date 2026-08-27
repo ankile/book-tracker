@@ -1,5 +1,6 @@
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
+import {logger} from "firebase-functions";
 import {onRequest} from "firebase-functions/v2/https";
 import {getFirestore} from "firebase-admin/firestore";
 import {
@@ -14,6 +15,12 @@ import {
 } from "./publicProfileRenderer";
 
 const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
+
+// Profiles are public by definition, so both hits and misses may sit on the
+// Hosting CDN: a crawler or request flood then costs one function call and
+// two Firestore reads per username per five minutes instead of per request.
+// firebase.json carries the same value for the /profiles/** route.
+const PROFILE_CACHE_CONTROL = "public, max-age=60, s-maxage=300";
 
 interface StoredDocument {
   id: string;
@@ -67,27 +74,52 @@ function profileIsPublic(value: unknown): boolean {
     !Array.isArray(value) && "public" in value && value.public === true;
 }
 
+interface SitemapEntry {
+  username: string;
+  updatedAt: Date;
+}
+
+// One malformed discovery marker or profile document must cost only its own
+// sitemap row, not the whole sitemap: rules bound the shapes but do not
+// validate every nested value (SEC-009), and the sitemap is the one place
+// a single bad document is rendered alongside everyone else's. Firestore
+// read failures still propagate — those are infrastructure, not data.
+function sitemapEntry(
+  document: StoredDocument,
+  storedProfile: unknown | null,
+): SitemapEntry | null {
+  if (storedProfile === null || !profileIsPublic(storedProfile)) return null;
+  let markerUid: string;
+  let profile: PublicProfile;
+  try {
+    markerUid = decodeProfileDiscoveryMarker(document.value).uid;
+    profile = decodePublicProfile(document.id, storedProfile);
+  } catch (error) {
+    logger.warn("publicweb.sitemap.skip", {
+      username: document.id,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+  if (profile.uid !== markerUid) return null;
+  return {username: document.id, updatedAt: profile.updatedAt.toDate()};
+}
+
 async function sitemapProfiles(
   repository: PublicWebRepository,
-): Promise<Array<{username: string; updatedAt: Date}>> {
+): Promise<SitemapEntry[]> {
   const discoveries = await repository.listDiscoveries();
-  const profiles = await Promise.all(discoveries.map(async (document) => {
+  const entries = await Promise.all(discoveries.map(async (document) => {
     if (!USERNAME_PATTERN.test(document.id)) {
-      throw new Error(`invalid profile discovery id ${document.id}`);
+      logger.warn("publicweb.sitemap.skip", {
+        username: document.id,
+        reason: "invalid profile discovery id",
+      });
+      return null;
     }
-    const marker = decodeProfileDiscoveryMarker(document.value);
-    const storedProfile = await repository.getProfile(document.id);
-    if (storedProfile === null || !profileIsPublic(storedProfile)) return null;
-    const profile = decodePublicProfile(document.id, storedProfile);
-    if (profile.uid !== marker.uid) return null;
-    return {
-      username: document.id,
-      updatedAt: profile.updatedAt.toDate(),
-    };
+    return sitemapEntry(document, await repository.getProfile(document.id));
   }));
-  return profiles.filter(
-    (profile): profile is {username: string; updatedAt: Date} => profile !== null,
-  );
+  return entries.filter((entry): entry is SitemapEntry => entry !== null);
 }
 
 async function profileResponse(
@@ -103,7 +135,7 @@ async function profileResponse(
   if (storedProfile === null || !profileIsPublic(storedProfile)) {
     return {
       status: 404,
-      headers: htmlHeaders("no-store"),
+      headers: htmlHeaders(PROFILE_CACHE_CONTROL),
       body: request.method === "HEAD" ? "" : renderNotFoundDocument(shell),
     };
   }
@@ -114,7 +146,7 @@ async function profileResponse(
     : decodeProfileDiscoveryMarker(storedDiscovery).uid === profile.uid;
   return {
     status: 200,
-    headers: htmlHeaders("no-store"),
+    headers: htmlHeaders(PROFILE_CACHE_CONTROL),
     body: request.method === "HEAD" ? "" :
       renderProfileDocument(shell, profile, searchable),
   };
@@ -153,7 +185,7 @@ export async function resolvePublicWebRequest(
   if (match === null || !USERNAME_PATTERN.test(match[1])) {
     return {
       status: 404,
-      headers: htmlHeaders("no-store"),
+      headers: htmlHeaders(PROFILE_CACHE_CONTROL),
       body: request.method === "HEAD" ? "" : renderNotFoundDocument(shell),
     };
   }
@@ -164,10 +196,15 @@ function profileShell(): string {
   return readFileSync(join(__dirname, "../assets/profile-shell.html"), "utf8");
 }
 
+// maxInstances bounds what a crawler or request flood can cost: two
+// instances at the gen-2 default concurrency (80) is far above real traffic
+// and, with the CDN cache above, is the ceiling on billed invocations and
+// Firestore reads. Raise deliberately if legitimate traffic ever queues.
 export const publicweb = onRequest(
   {
     region: "europe-west1",
     timeoutSeconds: 30,
+    maxInstances: 2,
   },
   async (request, response) => {
     const result = await resolvePublicWebRequest(
