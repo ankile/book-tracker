@@ -2,6 +2,12 @@ import {Timestamp} from "firebase-admin/firestore";
 import {createHash} from "node:crypto";
 import {decodeStoredIssue, isRecord} from "./decoders";
 
+// Per-account cap and the cap for rows without a uid, both enforced at
+// query time (admin.ts readIssuesFor) and reported on the wire so the panel
+// can say which accounts hit them. Documented in README and the admin page.
+export const ISSUES_PER_UID = 10;
+export const ANONYMOUS_ISSUE_LIMIT = 25;
+
 export interface IssueIdentity {
   email: string;
   verified: boolean;
@@ -26,9 +32,20 @@ export interface StoredIssueDocument {
   fallbackAt: number;
 }
 
-export interface MappedIssues {
+// One per-account (or uid-null) query result: up to limit + 1 documents,
+// newest first, so the assembler can tell "exactly at the cap" from "more
+// than the cap" without a second read.
+export interface IssueGroup {
+  uid: string | null;
+  documents: readonly StoredIssueDocument[];
+}
+
+export interface IssueFeed {
   rows: AdminIssueRow[];
-  truncated: boolean;
+  // Accounts whose rows in the window exceeded the per-account cap.
+  cappedAccounts: number;
+  // Whether the uid-null group exceeded its own cap.
+  anonymousCapped: boolean;
 }
 
 const MALFORMED_EVENT = "logEvents.malformed";
@@ -90,33 +107,34 @@ function mapIssueDocument(
   };
 }
 
-// Newest-first rows, at most `limit` in total and `perUidLimit` per account.
-// The per-account cap is what keeps the feed readable now that the
-// callable quota bounds a single account to a rate rather than a total:
-// twenty rows an hour still fills a hundred-row feed in five hours, but
-// ten rows per account means blinding it costs ten accounts (SEC-038).
-// Rows without a uid (server rows for deleted users, historical anonymous
-// sign-in failures, malformed rows) are outside the cap: none of them can
-// be produced by a client any more. `truncated` is true when any row in
-// the scanned window was left out, for either reason, so the panel can say
-// the feed is incomplete instead of looking finished.
-export function mapIssueDocuments(
-  documents: readonly StoredIssueDocument[],
-  limit: number,
+// The feed is assembled from one query per account (plus one for rows
+// without a uid), each already limited by Firestore to cap + 1 rows. A cap
+// applied at query time is what makes the feed flood-proof: no volume from
+// one account can push another account's rows out of the scan, because
+// there is no shared scan (SEC-038). Rows without a uid — historical
+// anonymous sign-in failures, which no client can produce any more, and
+// malformed rows that lost the field — are read under their own cap. A
+// malformed row that still carries a uid is capped with its account,
+// because the cap is on the stored field, not the decoded one.
+export function assembleIssueFeed(
+  groups: readonly IssueGroup[],
+  perAccountLimit: number,
+  anonymousLimit: number,
   identities: ReadonlyMap<string, IssueIdentity>,
-  perUidLimit: number,
-): MappedIssues {
+): IssueFeed {
   const rows: AdminIssueRow[] = [];
-  const shownPerUid = new Map<string, number>();
-  for (const document of documents) {
-    if (rows.length >= limit) break;
-    const row = mapIssueDocument(document, identities);
-    if (row.uid !== null) {
-      const shown = shownPerUid.get(row.uid) ?? 0;
-      if (shown >= perUidLimit) continue;
-      shownPerUid.set(row.uid, shown + 1);
+  let cappedAccounts = 0;
+  let anonymousCapped = false;
+  for (const group of groups) {
+    const limit = group.uid === null ? anonymousLimit : perAccountLimit;
+    if (group.documents.length > limit) {
+      if (group.uid === null) anonymousCapped = true;
+      else cappedAccounts += 1;
     }
-    rows.push(row);
+    for (const document of group.documents.slice(0, limit)) {
+      rows.push(mapIssueDocument(document, identities));
+    }
   }
-  return {rows, truncated: rows.length < documents.length};
+  rows.sort((a, b) => b.at - a.at);
+  return {rows, cappedAccounts, anonymousCapped};
 }

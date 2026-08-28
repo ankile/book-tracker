@@ -28,14 +28,19 @@ const invalidArgument = (message: string): never => {
   throw new functions.https.HttpsError("invalid-argument", message);
 };
 
-function consumeLookupQuota(uid: string): Promise<void> {
-  return consumeQuota(
+async function consumeLookupQuota(uid: string): Promise<void> {
+  const decision = await consumeQuota(
     db,
     `users/${uid}/functionQuotas/booksApi`,
     LOOKUPS_PER_WINDOW,
     LOOKUP_WINDOW_MS,
-    "Google Books lookup limit reached. Try again later.",
   );
+  if (!decision.granted) {
+    throw new functions.https.HttpsError(
+      "resource-exhausted",
+      "Google Books lookup limit reached. Try again later.",
+    );
+  }
 }
 
 // Callable, not onRequest: this proxies a metered API key, so it must not

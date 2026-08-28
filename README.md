@@ -87,11 +87,14 @@ Client telemetry takes the same route. Warn/error events (`firestore.*`,
 requires a signed-in caller, allowlists the event, bounds every field, pins
 the uid and allows twenty reports per user per hour
 (`users/{uid}/functionQuotas/issueReports`, Admin-SDK-only); excess is
-refused with `resource-exhausted` and a `telemetry.quota_exceeded` warning
-in the function log. No client can write `logEvents` directly, and failed
-sign-ins are not recorded anywhere (SEC-001, SEC-029, SEC-038). The admin
-overview shows at most ten rows per account within each of its two feed
-budgets.
+refused with `resource-exhausted` and one `telemetry.quota_exceeded`
+warning per user per window in the function log. Reports made while offline
+are dropped, not queued. No client can write `logEvents` directly, and
+failed sign-ins are not recorded anywhere (SEC-001, SEC-029, SEC-038). The
+admin overview reads each account's rows with its own capped query (ten per
+account, 25 for rows without a uid — index `logEvents(uid, createdAt)`), so
+no account's volume can push another's out of the feed; the page names the
+accounts that hit the cap.
 
 ### Backfilling existing books
 
@@ -411,8 +414,9 @@ errors, `publicweb.sitemap.truncated`/`.skip`, `admin-overview` denials,
 (`publicweb.sitemap.failed` at ERROR marks a refused sitemap — one line
 per five minutes of 503s because the refusal is memoised; the sitemap uptime
 check is the signal that fires, since it fails on any sitemap 503),
-`telemetry.quota_exceeded` at WARN (one account has sent twenty issue
-reports in an hour — a broken client or a deliberate flood; no policy yet),
+`telemetry.quota_exceeded` at WARN (one line per user per hour: that
+account sent twenty issue reports — a broken client or a deliberate flood;
+no policy yet),
 and Pub/Sub undelivered messages on the two Eventarc subscriptions (nine
 policies) — all to the owner's email channel. The uptime and Pub/Sub policies have no
 notification rate limit; the log-match ones notify at most hourly (the

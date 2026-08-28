@@ -49,11 +49,13 @@ test('unexpected Errors use generic copy without exposing their message', () => 
 });
 
 test('unknown Firebase codes use generic copy', () => {
-  const failure = describeAuthFailure(
-    new FirebaseError('auth/new-code', 'password=Secret1@example.com'),
-  );
-
-  assert.deepEqual(failure, { userMessage: 'Something went wrong. Please try again.' });
+  for (const code of ['auth/new-code', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.deepEqual(
+      describeAuthFailure(new FirebaseError(code, 'password=Secret1@example.com')),
+      { userMessage: 'Something went wrong. Please try again.' },
+      code,
+    );
+  }
 });
 
 test('non-Error throws receive a generic visible message', () => {

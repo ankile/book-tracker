@@ -1,5 +1,6 @@
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
 import { app } from './index.ts';
+import type { IssueReport } from '../utils/issueReport.ts';
 
 export interface TogglConfigResponse {
   workspaceId: number;
@@ -24,20 +25,6 @@ export interface GoogleVolumeInfo {
   publishedDate?: string;
   categories?: string[];
   imageLinks?: { thumbnail?: string };
-}
-
-// Mirrors CLIENT_ISSUE_EVENTS / decodeIssueReport in functions/src/decoders.ts.
-export type ClientIssueEvent =
-  | 'firestore.listener_failed'
-  | 'firestore.decode_failed'
-  | 'firestore.write_failed'
-  | 'toggl.sync_stuck';
-
-export interface IssueReport {
-  level: 'warn' | 'error';
-  event: ClientIssueEvent;
-  message: string;
-  code: string | null;
 }
 
 export interface AdminUserRow {
@@ -74,7 +61,14 @@ export interface AdminOverview {
   users: AdminUserRow[];
   issues: AdminIssueRow[];
   issueWindowDays: number;
-  truncated: { app: number | null; anonymous: number | null };
+  // Feed caps, enforced per account at query time; cappedAccounts is how
+  // many accounts had more rows in the window than perAccount.
+  issueCaps: {
+    perAccount: number;
+    cappedAccounts: number;
+    anonymous: number;
+    anonymousCapped: boolean;
+  };
 }
 
 const fns = getFunctions(app, 'europe-west1');

@@ -3,7 +3,7 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {Timestamp} = require("firebase-admin/firestore");
-const {mapIssueDocuments} = require("../lib/adminIssues");
+const {ANONYMOUS_ISSUE_LIMIT, assembleIssueFeed, ISSUES_PER_UID} = require("../lib/adminIssues");
 
 const createdAt = Timestamp.fromMillis(1_700_000_000_000);
 const fallbackAt = 1_600_000_000_000;
@@ -29,14 +29,20 @@ const identities = new Map([
   ["owner", {email: "owner@example.test", verified: true}],
 ]);
 
+// Rows for one account (or uid-null) as the feed query would return them.
+const group = (uid, documents) => ({uid, documents});
+const feedOf = (documents, limit = 10) =>
+  assembleIssueFeed([group("owner", documents)], limit, limit, identities);
+
 test("valid issue rows retain decoded fields and resolve identities", () => {
-  const {rows, truncated} = mapIssueDocuments([
+  const {rows, cappedAccounts, anonymousCapped} = feedOf([
     document("known", validIssue({code: "deadline-exceeded"})),
     document("deleted", validIssue({uid: "deleted"})),
     document("anonymous", validIssue({uid: null, detail: {email: "claim@example.test"}})),
-  ], 10, identities, 10);
+  ]);
 
-  assert.equal(truncated, false);
+  assert.equal(cappedAccounts, 0);
+  assert.equal(anonymousCapped, false);
   assert.deepEqual(rows.map(({email, emailVerified, malformed}) => ({
     email,
     emailVerified,
@@ -82,11 +88,9 @@ test("every malformed field shape becomes the same fixed placeholder", () => {
     validIssue({detail: {email: "detail-secret".repeat(40)}}),
     validIssue({createdAt: "timestamp-secret"}),
   ];
-  const rows = mapIssueDocuments(
+  const rows = feedOf(
     malformedValues.map((value, index) => document(`malformed-${index}`, value)),
     malformedValues.length,
-    identities,
-    10,
   ).rows;
 
   assert.equal(rows.length, malformedValues.length);
@@ -119,66 +123,73 @@ test("every malformed field shape becomes the same fixed placeholder", () => {
   }
 });
 
-test("mapping preserves snapshot order, cardinality, identity, and truncation", () => {
-  const {rows, truncated} = mapIssueDocuments([
-    document("newest", validIssue({message: "newest"})),
-    document("malformed-middle", validIssue({level: "attacker-level"})),
-    document("older", validIssue({message: "older"})),
-  ], 2, identities, 10);
+test("the feed is newest-first across accounts and keeps identity per row", () => {
+  const {rows} = assembleIssueFeed([
+    group("owner", [
+      document("owner-new", validIssue({createdAt: Timestamp.fromMillis(3_000), message: "owner new"})),
+      document("owner-old", validIssue({createdAt: Timestamp.fromMillis(1_000), message: "owner old"})),
+    ]),
+    group("stranger", [
+      document("stranger-mid", validIssue({uid: "stranger", createdAt: Timestamp.fromMillis(2_000), message: "stranger"})),
+      document("stranger-bad", validIssue({level: "attacker-level", uid: "stranger", createdAt: Timestamp.fromMillis(500)})),
+    ]),
+  ], 10, 10, identities);
 
-  assert.equal(truncated, true);
-  assert.equal(rows[0].message, "newest");
-  assert.equal(rows[1].event, "logEvents.malformed");
-  assert.equal(rows.length, 2);
-  assert.equal(rows[1].malformed, true);
+  assert.deepEqual(rows.map((row) => [row.message, row.email, row.at]), [
+    ["owner new", "owner@example.test", 3_000],
+    ["stranger", "(deleted user)", 2_000],
+    ["owner old", "owner@example.test", 1_000],
+    ["Stored issue record is malformed. Its fields were hidden.", "(malformed issue)", 500],
+  ]);
+  assert.equal(rows[3].malformed, true);
+  assert.equal(rows[3].uid, null);
 });
 
 test("caller-controlled document ids never cross the callable boundary", () => {
   const secretId = "password=Secret1@example.com";
-  const rows = mapIssueDocuments([
+  const rows = feedOf([
     document(secretId, validIssue({level: "attacker-level"})),
-  ], 1, identities, 10).rows;
+  ]).rows;
 
   assert.equal(rows.length, 1);
   assert.match(rows[0].id, /^[a-f0-9]{64}$/);
   assert.doesNotMatch(JSON.stringify(rows), /Secret1@example\.com/);
 });
 
-test("each account is capped inside a budget and rows without a uid are not", () => {
+test("each account is capped at the per-account limit, uid-null rows at their own", () => {
   const flood = Array.from({length: 12}, (_, index) =>
     document(`flood-${index}`, validIssue({uid: "flooder", message: `flood ${index}`})));
-  const {rows, truncated} = mapIssueDocuments([
-    ...flood.slice(0, 6),
-    document("owner-1", validIssue({message: "owner first"})),
-    ...flood.slice(6),
-    document("server", validIssue({uid: null, message: "server row"})),
-    document("owner-2", validIssue({message: "owner second"})),
-    document("malformed", validIssue({level: "attacker-level", uid: "flooder"})),
-  ], 100, identities, 10);
+  const anonymous = Array.from({length: 4}, (_, index) =>
+    document(`anon-${index}`, validIssue({uid: null, message: `anon ${index}`})));
+  const {rows, cappedAccounts, anonymousCapped} = assembleIssueFeed([
+    group("flooder", flood.slice(0, 11)),
+    group("owner", [document("owner-1", validIssue({message: "owner"}))]),
+    group(null, anonymous),
+  ], 10, 3, identities);
 
-  assert.equal(truncated, true);
-  assert.deepEqual(rows.map((row) => row.message), [
-    ...flood.slice(0, 6).map((_, index) => `flood ${index}`),
-    "owner first",
-    ...flood.slice(6, 10).map((_, index) => `flood ${index + 6}`),
-    "server row",
-    "owner second",
-    "Stored issue record is malformed. Its fields were hidden.",
-  ]);
+  assert.equal(cappedAccounts, 1);
+  assert.equal(anonymousCapped, true);
   assert.equal(rows.filter((row) => row.uid === "flooder").length, 10);
+  assert.equal(rows.filter((row) => row.uid === null).length, 3);
+  assert.equal(rows.filter((row) => row.uid === "owner").length, 1);
+  // Exactly at the cap is not capped: the query reads cap + 1 to tell.
+  assert.deepEqual(
+    assembleIssueFeed([group("flooder", flood.slice(0, 10))], 10, 3, identities).cappedAccounts,
+    0,
+  );
+  // A malformed row that still names an account counts against it.
+  const capped = assembleIssueFeed([group("flooder", [
+    ...flood.slice(0, 10),
+    document("bad", validIssue({level: "attacker-level", uid: "flooder"})),
+  ])], 10, 3, identities);
+  assert.equal(capped.cappedAccounts, 1);
+  assert.equal(capped.rows.length, 10);
 });
 
-test("the total limit stops the scan and reports truncation", () => {
-  const {rows, truncated} = mapIssueDocuments([
-    document("a", validIssue({uid: "one"})),
-    document("b", validIssue({uid: "two"})),
-    document("c", validIssue({uid: "three"})),
-  ], 2, identities, 1);
-
-  assert.equal(truncated, true);
-  assert.deepEqual(rows.map((row) => row.uid), ["one", "two"]);
-  assert.equal(mapIssueDocuments([
-    document("a", validIssue({uid: "one"})),
-    document("b", validIssue({uid: "one"})),
-  ], 5, identities, 5).truncated, false);
+test("the shipped feed caps are the documented ones", () => {
+  // README and the admin page copy state these numbers; the red-team of
+  // fd4f0fd found the cap could be changed to anything without a test
+  // noticing.
+  assert.equal(ISSUES_PER_UID, 10);
+  assert.equal(ANONYMOUS_ISSUE_LIMIT, 25);
 });

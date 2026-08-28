@@ -6,6 +6,7 @@ import type { RulesTestContext, RulesTestEnvironment } from '@firebase/rules-uni
 import {
   arrayUnion,
   collection,
+  collectionGroup,
   deleteField,
   deleteDoc,
   disableNetwork,
@@ -1452,35 +1453,59 @@ const issue = (uid: string | null, event: string) => ({
 });
 
 test('logEvents has no client path at all: telemetry goes through the callable', async () => {
-  const owner = environment.authenticatedContext('issue-owner').firestore();
-  // The exact row the old rules accepted from a signed-in client.
-  await assertFails(setDoc(
-    doc(owner, 'logEvents', 'decode-failure'),
-    issue('issue-owner', 'firestore.decode_failed'),
-  ));
-  await assertFails(getDoc(doc(owner, 'logEvents', 'decode-failure')));
-  await assertFails(getDocs(collection(owner, 'logEvents')));
+  // A row the Admin SDK wrote, so update/delete/get have something to hit.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'logEvents', 'seeded'),
+      issue('issue-owner', 'firestore.decode_failed'),
+    );
+  });
 
-  const anonymous = environment.unauthenticatedContext().firestore();
-  // The exact row the old rules accepted from a signed-out client.
-  await assertFails(setDoc(
-    doc(anonymous, 'logEvents', 'sign-in-failure'),
-    issue(null, 'auth.sign_in_failed'),
-  ));
-  await assertFails(setDoc(
-    doc(anonymous, 'logEvents', 'sign-up-failure'),
-    issue(null, 'auth.sign_up_failed'),
-  ));
-  await assertFails(getDocs(collection(anonymous, 'logEvents')));
+  for (const [label, db] of [
+    ['owner', environment.authenticatedContext('issue-owner').firestore()],
+    ['stranger', environment.authenticatedContext('issue-stranger').firestore()],
+    ['anonymous', environment.unauthenticatedContext().firestore()],
+  ] as const) {
+    // The exact rows the old rules accepted from signed-in and signed-out clients.
+    await assertFails(setDoc(doc(db, 'logEvents', `${label}-create`), issue('issue-owner', 'firestore.decode_failed')));
+    await assertFails(setDoc(doc(db, 'logEvents', `${label}-anon`), issue(null, 'auth.sign_in_failed')));
+    await assertFails(setDoc(doc(db, 'logEvents', `${label}-anon-up`), issue(null, 'auth.sign_up_failed')));
+    await assertFails(getDoc(doc(db, 'logEvents', 'seeded')));
+    await assertFails(updateDoc(doc(db, 'logEvents', 'seeded'), { message: 'scrubbed' }));
+    await assertFails(deleteDoc(doc(db, 'logEvents', 'seeded')));
+    await assertFails(getDocs(collection(db, 'logEvents')));
+    await assertFails(getDocs(query(collectionGroup(db, 'logEvents'))));
+    // A logEvents subcollection under a path the client can write is not a
+    // client path either, and neither is an updates subcollection under a row.
+    await assertFails(setDoc(doc(db, 'users', 'issue-owner', 'logEvents', 'nested'), issue('issue-owner', 'firestore.decode_failed')));
+    await assertFails(setDoc(doc(db, 'users', 'issue-owner', 'books', 'b1', 'logEvents', 'nested'), issue('issue-owner', 'firestore.decode_failed')));
+    await assertFails(setDoc(doc(db, 'logEvents', 'seeded', 'updates', 'planted'), { owner: 'users/issue-owner' }));
+  }
 });
 
-test('the issue-report quota document is inaccessible to its owner', async () => {
+test('issue-report quota documents are inaccessible to their owner and to strangers', async () => {
   const uid = 'issue-quota-owner';
-  const db = environment.authenticatedContext(uid).firestore();
-  const ref = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
-  await assertFails(getDoc(ref));
-  await assertFails(setDoc(ref, {windowStartedAt: Timestamp.now(), count: 0}));
-  await assertFails(deleteDoc(ref));
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'users', uid, 'functionQuotas', 'issueReports'),
+      { windowStartedAt: Timestamp.now(), count: 20 },
+    );
+  });
+  for (const db of [
+    environment.authenticatedContext(uid).firestore(),
+    environment.authenticatedContext('issue-quota-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    const ref = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
+    await assertFails(getDoc(ref));
+    await assertFails(setDoc(ref, { windowStartedAt: Timestamp.now(), count: 0 }));
+    await assertFails(updateDoc(ref, { count: 0 }));
+    await assertFails(deleteDoc(ref));
+    // Pre-seeding junk would restart the counter at one on every call.
+    await assertFails(setDoc(doc(db, 'users', uid, 'functionQuotas', 'issueReports-next'), { junk: true }));
+    await assertFails(getDocs(collection(db, 'users', uid, 'functionQuotas')));
+    await assertFails(getDocs(query(collectionGroup(db, 'functionQuotas'))));
+  }
 });
 
 test('owners can create and read only exact pending Toggl queue payloads', async () => {

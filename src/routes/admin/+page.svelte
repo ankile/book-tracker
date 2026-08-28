@@ -15,14 +15,21 @@
   });
 
   // A capped feed that looks complete is worse than one that admits it is
-  // capped, so each budget that hit its limit is named explicitly.
-  const truncation = $derived(
-    [
-      overview?.truncated?.app && `${overview.truncated.app} app events`,
-      overview?.truncated?.anonymous &&
-        `${overview.truncated.anonymous} anonymous sign-in failures`
-    ].filter(Boolean)
-  );
+  // capped, so every cap that was hit is named with its real number.
+  const capNotes = $derived.by(() => {
+    const caps = overview?.issueCaps;
+    if (!caps) return [];
+    const notes: string[] = [];
+    if (caps.cappedAccounts > 0) {
+      notes.push(
+        `${caps.cappedAccounts} ${caps.cappedAccounts === 1 ? 'account has' : 'accounts have'} more than ${caps.perAccount} rows in this window; only the newest ${caps.perAccount} of each are listed`
+      );
+    }
+    if (caps.anonymousCapped) {
+      notes.push(`only the newest ${caps.anonymous} anonymous sign-in failures are listed`);
+    }
+    return notes;
+  });
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
@@ -247,16 +254,15 @@
       <h2>Recent issues</h2>
       <p class="card-subtext">
         Warnings and errors from the last {overview.issueWindowDays} days,
-        newest first. App events and anonymous sign-in failures are fetched
-        under separate caps, and each account gets at most ten rows per
-        cap, so no single source can push the rest out of view. Anonymous
-        rows are no longer written; the ones still listed predate that
-        change and expire with the 90-day retention.
+        newest first. Each account is read separately and shows at most
+        {overview.issueCaps.perAccount} rows, so one account's volume
+        never hides another's. Anonymous rows are no longer written; the
+        ones still listed predate that change and expire with the 90-day
+        retention.
       </p>
-      {#if truncation.length > 0}
+      {#if capNotes.length > 0}
         <p class="truncated">
-          Showing the newest {truncation.join(' and ')} — older entries in
-          this window are not listed.
+          Capped: {capNotes.join('; ')}.
         </p>
       {/if}
       {#if overview.issues.length === 0}

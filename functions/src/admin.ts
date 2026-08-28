@@ -4,8 +4,11 @@ import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore"
 import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
+  ANONYMOUS_ISSUE_LIMIT,
+  assembleIssueFeed,
+  IssueGroup,
   IssueIdentity,
-  mapIssueDocuments,
+  ISSUES_PER_UID,
 } from "./adminIssues";
 
 const db = getFirestore();
@@ -24,28 +27,22 @@ const ADMIN_UID = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
 const ISSUE_WINDOW_DAYS = 14;
 const AUDIT_RETENTION_DAYS = 365;
 
-// Issues are fetched in two independent budgets rather than one ranked
-// list. Anonymous rows came from an unauthenticated write path (closed in
-// SEC-001; the budget stays until the last such row expires under the
-// 90-day TTL, 2026-11-26), so a flood of them would otherwise evict every
-// authenticated row from a single shared limit and blind the panel —
-// which is the one thing it exists to prevent. Within a budget each
-// account is capped as well (ISSUES_PER_UID), and the query scans a
-// window wider than the budget so the cap has rows to fall back on. The
-// event names mirror CLIENT_ISSUE_EVENTS in decoders.ts plus the
-// server-written toggl.sync_failed.
-const APP_EVENTS = [
-  "firestore.listener_failed",
-  "firestore.decode_failed",
-  "firestore.write_failed",
-  "toggl.sync_stuck",
-  "toggl.sync_failed",
-];
-const ANON_EVENTS = ["auth.sign_in_failed", "auth.sign_up_failed"];
-const APP_ISSUE_LIMIT = 100;
-const ANON_ISSUE_LIMIT = 25;
-const ISSUES_PER_UID = 10;
-const ISSUE_SCAN_LIMIT = 500;
+// The issue feed is one query per account plus one for rows without a
+// uid, each capped by Firestore itself (ISSUES_PER_UID / ANONYMOUS_ISSUE_LIMIT
+// + 1 to detect the cap). There is deliberately no shared newest-N scan: a
+// single account at the callable's 20-reports-an-hour quota would own a
+// 500-row scan within a day and age every other account's rows out of it,
+// and once ten accounts flood, a per-account cap applied after a shared
+// scan stops doing anything at all (SEC-038 red-team, 2026-08-28). With a
+// query per account, the most any account can contribute is its cap, and
+// no account's volume affects what is read for another. The trade is
+// that rows from a uid that exists in neither Auth nor users/ are never
+// queried (a fully purged account); such rows are also the ones with the
+// least forensic value. Rows without a uid are historical anonymous
+// sign-in failures (no client can write them since SEC-001; the last
+// expire 2026-11-26) plus any malformed row that lost the field.
+// The caps themselves live in adminIssues.ts (a plain module, so tests can
+// pin them without loading the callable exports).
 
 // Successful views append an audit row (only the operator can produce
 // one). Denials go to Cloud Logging instead of Firestore: any signed-in
@@ -181,31 +178,27 @@ async function domainStats(uid: string) {
   };
 }
 
-// Reads one issue budget. Returns the rows plus whether anything in the
-// scanned window was left out (budget or per-account cap), so the page
-// can say so instead of silently showing a truncated feed.
-async function readIssues(
-  events: string[],
+// One capped, newest-first read for a single account (or for uid-null
+// rows). limit + 1 so the assembler can report the cap honestly.
+async function readIssuesFor(
+  uid: string | null,
   limit: number,
   cutoff: Timestamp,
-  identities: Map<string, IssueIdentity>,
-) {
+): Promise<IssueGroup> {
   const snap = await db.collection("logEvents")
-    .where("event", "in", events)
+    .where("uid", "==", uid)
     .where("createdAt", ">=", cutoff)
     .orderBy("createdAt", "desc")
-    .limit(ISSUE_SCAN_LIMIT)
+    .limit(limit + 1)
     .get();
-  return mapIssueDocuments(
-    snap.docs.map((doc) => ({
+  return {
+    uid,
+    documents: snap.docs.map((doc) => ({
       id: doc.id,
       value: doc.data(),
       fallbackAt: doc.createTime?.toMillis() ?? cutoff.toMillis(),
     })),
-    limit,
-    identities,
-    ISSUES_PER_UID,
-  );
+  };
 }
 
 exports.overview = adminCallable(async () => {
@@ -270,19 +263,26 @@ exports.overview = adminCallable(async () => {
 
   const cutoff =
     Timestamp.fromMillis(Date.now() - ISSUE_WINDOW_DAYS * 24 * 3600 * 1000);
-  const [app, anon] = await Promise.all([
-    readIssues(APP_EVENTS, APP_ISSUE_LIMIT, cutoff, identities),
-    readIssues(ANON_EVENTS, ANON_ISSUE_LIMIT, cutoff, identities),
+  const groups = await Promise.all([
+    ...uids.map((uid) => readIssuesFor(uid, ISSUES_PER_UID, cutoff)),
+    readIssuesFor(null, ANONYMOUS_ISSUE_LIMIT, cutoff),
   ]);
-  const issues = [...app.rows, ...anon.rows].sort((a, b) => b.at - a.at);
+  const feed = assembleIssueFeed(
+    groups,
+    ISSUES_PER_UID,
+    ANONYMOUS_ISSUE_LIMIT,
+    identities,
+  );
 
   return {
     users,
-    issues,
+    issues: feed.rows,
     issueWindowDays: ISSUE_WINDOW_DAYS,
-    truncated: {
-      app: app.truncated ? APP_ISSUE_LIMIT : null,
-      anonymous: anon.truncated ? ANON_ISSUE_LIMIT : null,
+    issueCaps: {
+      perAccount: ISSUES_PER_UID,
+      cappedAccounts: feed.cappedAccounts,
+      anonymous: ANONYMOUS_ISSUE_LIMIT,
+      anonymousCapped: feed.anonymousCapped,
     },
   };
 });

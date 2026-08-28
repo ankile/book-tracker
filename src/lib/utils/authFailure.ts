@@ -38,7 +38,13 @@ export function describeAuthFailure(error: unknown): AuthFailureDescription {
   if (!(error instanceof FirebaseError)) {
     return { userMessage: GENERIC_AUTH_FAILURE };
   }
-  return { userMessage: AUTH_FAILURE_MESSAGES[error.code] ?? GENERIC_AUTH_FAILURE };
+  // hasOwn, not a bare lookup: a code named like an Object.prototype member
+  // ("constructor") would otherwise resolve to a function, not copy.
+  return {
+    userMessage: Object.hasOwn(AUTH_FAILURE_MESSAGES, error.code)
+      ? AUTH_FAILURE_MESSAGES[error.code]
+      : GENERIC_AUTH_FAILURE,
+  };
 }
 
 export async function runAuthAttempt(

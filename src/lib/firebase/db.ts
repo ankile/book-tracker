@@ -29,7 +29,8 @@ import { derived, type Readable, type Unsubscriber } from 'svelte/store';
 import { FirebaseError } from 'firebase/app';
 import { app } from './index.ts';
 import { auth } from './auth.ts';
-import { reportIssue, type ClientIssueEvent } from './functions.ts';
+import { reportIssue } from './functions.ts';
+import { issueReportPayload, type IssueInput } from '../utils/issueReport.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { isFinished } from '../utils/finished.ts';
@@ -137,36 +138,23 @@ function cachedStore<T>(
   return store;
 }
 
-interface IssueInput {
-  level: 'warn' | 'error';
-  event: ClientIssueEvent;
-  message: string;
-  code?: string | null;
-}
-
 // Report a warn/error event to the durable issue log the admin overview
 // surfaces. The row is written by the telemetry-reportissue callable, not
 // by this client: the callable pins uid to the caller, allowlists the event,
 // bounds every field and counts reports per user (twenty an hour), so
 // nothing here can flood the collection or the operator's feed (SEC-001,
-// SEC-038). Signed-out clients report nothing — the only thing they could
-// truthfully say is that their own sign-in failed, and keeping an
-// unauthenticated write path open for that was the SEC-001 hole. Never
+// SEC-038). Signed-out clients report nothing (issueReportPayload). Never
 // pass secrets in message/code, and prefer operation names over user
 // content: the operator reads this log, so another user's book titles do
 // not belong in it. Fire-and-forget with a console-only catch: the logger
 // reporting the app's failures must not feed back into addError, or a
-// backend outage would recurse. Timestamps and retention are server-side.
-export function logIssue({ level, event, message, code = null }: IssueInput): void {
-  if (auth.currentUser === null) return;
-  reportIssue({
-    level,
-    event,
-    // Truncated to the caps the callable enforces; one oversized value
-    // would otherwise reject the whole report and lose the event.
-    message: message.slice(0, 1000),
-    code: code === null ? null : String(code).slice(0, 100),
-  }).catch((error) => console.error('logIssue failed', error));
+// backend outage would recurse. There is no offline queue — a report made
+// offline is dropped, not retried — and timestamps and retention are
+// server-side.
+export function logIssue(input: IssueInput): void {
+  const payload = issueReportPayload(auth.currentUser !== null, input);
+  if (payload === null) return;
+  reportIssue(payload).catch((error) => console.error('logIssue failed', error));
 }
 
 // Decoder failures are schema violations, not missing records. Keep them

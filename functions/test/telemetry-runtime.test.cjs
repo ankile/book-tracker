@@ -3,6 +3,7 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {logger} = require("firebase-functions");
 
 const deployed = require("../lib");
 const db = getFirestore();
@@ -127,12 +128,35 @@ test("reportissue enforces the per-user hourly quota before storing", async (t) 
       {recorded: true},
     );
   }
+  const warnings = [];
+  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  for (let index = 0; index < 5; index += 1) {
+    await assert.rejects(
+      deployed.telemetry.reportissue.run(report, authContext),
+      (error) => error.code === "resource-exhausted",
+    );
+  }
+  assert.equal(store.rows.length, 20);
+  // The first refusal is recorded on the counter and logged once; the
+  // next four refusals cost a read each and nothing else.
+  assert.equal(store.quota().count, 21);
+  assert.deepEqual(warnings, [[
+    "telemetry.quota_exceeded",
+    {uid: "owner", event: "firestore.listener_failed"},
+  ]]);
+});
+
+test("a refusal logged in an earlier instance is not logged again", async (t) => {
+  const store = installStore(t, {windowStartedAt: Timestamp.now(), count: 21});
+  const warnings = [];
+  t.mock.method(logger, "warn", (...args) => warnings.push(args));
   await assert.rejects(
     deployed.telemetry.reportissue.run(report, authContext),
     (error) => error.code === "resource-exhausted",
   );
-  assert.equal(store.rows.length, 20);
-  assert.equal(store.quota().count, 20);
+  assert.equal(store.quota().count, 21);
+  assert.equal(store.rows.length, 0);
+  assert.deepEqual(warnings, []);
 });
 
 test("an expired or malformed quota window restarts at one", async (t) => {
