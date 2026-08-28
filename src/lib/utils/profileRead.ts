@@ -16,16 +16,21 @@ export async function resolveProfileView(
   readOwn: ProfileReader,
   readPublic: ProfileReader,
 ): Promise<ProfileView | null> {
-  let ownFailure: unknown = null;
+  // Boxed so a rejection whose value happens to be null is still a failure.
+  let ownFailure: { error: unknown } | null = null;
   if (mayOwn) {
-    const own = await readOwn().catch((error: unknown) => {
-      ownFailure = error;
-      return null;
-    });
-    if (own !== null) return own;
+    const own = await readOwn().then(
+      (view) => ({ view }),
+      (error: unknown) => ({ error }),
+    );
+    if ('view' in own) {
+      if (own.view !== null) return own.view;
+    } else {
+      ownFailure = own;
+    }
   }
   const shared = await readPublic();
-  if (shared === null && ownFailure !== null) throw ownFailure;
+  if (shared === null && ownFailure !== null) throw ownFailure.error;
   return shared;
 }
 

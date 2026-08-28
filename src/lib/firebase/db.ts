@@ -383,11 +383,17 @@ async function fetchPublicProfile(username: string): Promise<ProfileView | null>
   return assertProfileViewFor(decodeProfileView(payload, `profiles/${username}.json`), username);
 }
 
-// The signed-in user's own profile username as last reported by the
-// getMyProfile listener (which the app layout keeps attached): undefined
-// until it has answered, null when they have no profile. Lets getProfile
-// skip a Firestore read that rules would deny for someone else's page.
-const ownProfileUsernames = new Map<string, string | null>();
+// The usernames of the signed-in user's own profile documents as last
+// confirmed by the server through the getMyProfile listener (the app
+// prefetch attaches it on private routes, so this is populated after a
+// visit to /me or the library, not on a cold /profiles load): absent until
+// a server snapshot has arrived, an empty set when they have none. Only
+// server snapshots count — an offline or cache-only snapshot can be empty
+// or stale and must not make the owner's own page unreachable — and the
+// entry is dropped with the listener. Lets getProfile skip a Firestore
+// read that rules would deny for someone else's page; unknown keeps the
+// try-then-fall-through order, so the skip can only save a read.
+const ownProfileUsernames = new Map<string, Set<string>>();
 
 class Database {
   // Returns a Svelte store that listens to the user document.
@@ -473,15 +479,21 @@ class Database {
     return cachedStore(profileStores, userId, undefined, (set) => {
       const q = query(collection(db, 'profiles'), where('uid', '==', userId));
 
-      return onSnapshot(q, (snapshot) => {
+      const stop = onSnapshot(q, (snapshot) => {
         const profileDoc = snapshot.docs[0];
-        ownProfileUsernames.set(userId, profileDoc ? profileDoc.id : null);
+        if (!snapshot.metadata.fromCache) {
+          ownProfileUsernames.set(userId, new Set(snapshot.docs.map((d) => d.id)));
+        }
         set(profileDoc
           ? decodeStored(
             () => decodeProfile(profileDoc.id, profileDoc.data(), profileDoc.ref.path),
           )
           : null);
       }, listenError('load your public profile'));
+      return () => {
+        stop();
+        ownProfileUsernames.delete(userId);
+      };
     });
   }
 
@@ -500,8 +512,8 @@ class Database {
   // view.
   static getProfile(username: string): Promise<ProfileView | null> {
     const viewer = auth.currentUser;
-    const own = viewer === null ? null : ownProfileUsernames.get(viewer.uid);
-    const mayOwn = viewer !== null && (own === undefined || own === username);
+    const own = viewer === null ? undefined : ownProfileUsernames.get(viewer.uid);
+    const mayOwn = viewer !== null && (own === undefined || own.has(username));
     return resolveProfileView(
       mayOwn,
       () => Database.getOwnProfile(username),

@@ -83,7 +83,13 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // matter what its load cost, so a failure that was never memoised was
 // retried as a full scan on every request, ≈ 300 scans per budget window
 // instead of one per five minutes. An empty cut-short scan is refused the
-// same way rather than published as an empty sitemap; and the
+// same way rather than published as an empty sitemap. The deadline is
+// cooperative: a scan that runs out of time keeps the batches it has and
+// answers partial, like the budget; only a marker list that never answers
+// is abandoned outright. Trade accepted: once the pinned complete sitemap
+// is past its hour, a failing scan replaces it with the refusal for five
+// minutes rather than serving the hour-old list (which could name a
+// profile since made private); and the
 // finished sitemap is pinned in its
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
@@ -144,21 +150,25 @@ const GZIP_MIN_BYTES = 1024;
 // (SEC-091).
 export function acceptsGzip(acceptEncoding: string | undefined): boolean {
   if (acceptEncoding === undefined) return false;
-  let wildcard: boolean | null = null;
+  // A coding named more than once takes its lowest weight, so the answer
+  // does not depend on the order a proxy appended its own member in.
+  let gzip: number | null = null;
+  let wildcard: number | null = null;
   for (const member of acceptEncoding.split(",")) {
     const [rawCoding, ...params] = member.split(";");
     const coding = rawCoding.trim().toLowerCase();
-    if (coding === "") continue;
+    if (coding !== "gzip" && coding !== "x-gzip" && coding !== "*") continue;
     let weight = 1;
     for (const param of params) {
       const [name, value] = param.split("=");
       if (name.trim().toLowerCase() === "q" && value !== undefined) weight = Number(value.trim());
     }
-    const accepted = Number.isFinite(weight) && weight > 0;
-    if (coding === "gzip" || coding === "x-gzip") return accepted;
-    if (coding === "*") wildcard = accepted;
+    if (!Number.isFinite(weight) || weight < 0) weight = 0;
+    if (coding === "*") wildcard = wildcard === null ? weight : Math.min(wildcard, weight);
+    else gzip = gzip === null ? weight : Math.min(gzip, weight);
   }
-  return wildcard === true;
+  if (gzip !== null) return gzip > 0;
+  return wildcard !== null && wildcard > 0;
 }
 
 function withGzip(response: PublicWebResponse): PublicWebResponse {
@@ -429,20 +439,56 @@ interface SitemapScan {
   complete: boolean;
 }
 
-async function sitemapProfiles(repository: PublicWebRepository): Promise<SitemapScan> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`sitemap scan exceeded ${SITEMAP_SCAN_DEADLINE_MS} ms`)),
-      SITEMAP_SCAN_DEADLINE_MS,
-    );
-  });
-  return Promise.race([scanSitemapProfiles(repository), deadline]).finally(() => clearTimeout(timer));
+class ScanDeadlineExceeded extends Error {
+  constructor() {
+    super(`sitemap scan exceeded ${SITEMAP_SCAN_DEADLINE_MS} ms`);
+  }
 }
 
-async function scanSitemapProfiles(repository: PublicWebRepository): Promise<SitemapScan> {
+// One timer per scan. `race` bounds a single await; `expired` lets the
+// batch loop stop issuing reads once it has fired. The timer never keeps
+// the process alive and is cleared when the scan settles.
+class ScanDeadline {
+  expired = false;
+  private readonly rejection: Promise<never>;
+  private readonly timer: ReturnType<typeof setTimeout>;
+
+  constructor(ms: number) {
+    let expire: () => void = () => undefined;
+    this.rejection = new Promise<never>((_resolve, reject) => {
+      expire = () => {
+        this.expired = true;
+        reject(new ScanDeadlineExceeded());
+      };
+    });
+    // Rejections are observed through race(); this keeps an expiry that
+    // fires between awaits from surfacing as an unhandled rejection.
+    this.rejection.catch(() => undefined);
+    this.timer = setTimeout(expire, ms);
+    this.timer.unref();
+  }
+
+  race<T>(pending: Promise<T>): Promise<T> {
+    return Promise.race([pending, this.rejection]);
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
+}
+
+async function sitemapProfiles(repository: PublicWebRepository): Promise<SitemapScan> {
+  const deadline = new ScanDeadline(SITEMAP_SCAN_DEADLINE_MS);
+  return scanSitemapProfiles(repository, deadline).finally(() => deadline.clear());
+}
+
+async function scanSitemapProfiles(
+  repository: PublicWebRepository,
+  deadline: ScanDeadline,
+): Promise<SitemapScan> {
   const startedAt = Date.now();
-  const discoveries = await repository.listDiscoveries(SITEMAP_MAX_PROFILES);
+  // Nothing to salvage if the marker list itself never answers.
+  const discoveries = await deadline.race(repository.listDiscoveries(SITEMAP_MAX_PROFILES));
   if (discoveries.length >= SITEMAP_MAX_PROFILES) {
     logger.warn("publicweb.sitemap.truncated", {limit: SITEMAP_MAX_PROFILES});
   }
@@ -452,7 +498,7 @@ async function scanSitemapProfiles(repository: PublicWebRepository): Promise<Sit
   // not once per document.
   const skipped: SitemapSkip[] = [];
   for (let start = 0; start < discoveries.length; start += SITEMAP_READ_CONCURRENCY) {
-    if (Date.now() - startedAt > SITEMAP_SCAN_BUDGET_MS) {
+    if (deadline.expired || Date.now() - startedAt > SITEMAP_SCAN_BUDGET_MS) {
       logger.warn("publicweb.sitemap.truncated", {
         budgetMs: SITEMAP_SCAN_BUDGET_MS, scanned: start, of: discoveries.length,
       });
@@ -460,13 +506,26 @@ async function scanSitemapProfiles(repository: PublicWebRepository): Promise<Sit
       break;
     }
     const batch = discoveries.slice(start, start + SITEMAP_READ_CONCURRENCY);
-    const resolved = await Promise.all(batch.map(async (document) => {
+    const reads = Promise.all(batch.map(async (document) => {
       if (!USERNAME_PATTERN.test(document.id)) {
         skipped.push({username: document.id, reason: "invalid profile discovery id"});
         return null;
       }
       return sitemapEntry(document, await repository.getProfile(document.id), skipped);
     }));
+    // A batch still in flight at the deadline is the only work given up:
+    // the entries already read are kept and the scan answers partial.
+    const resolved = await deadline.race(reads).catch((error: unknown) => {
+      if (error instanceof ScanDeadlineExceeded) return null;
+      throw error;
+    });
+    if (resolved === null) {
+      logger.warn("publicweb.sitemap.truncated", {
+        deadlineMs: SITEMAP_SCAN_DEADLINE_MS, scanned: start, of: discoveries.length,
+      });
+      complete = false;
+      break;
+    }
     for (const entry of resolved) if (entry !== null) entries.push(entry);
   }
   if (skipped.length > 0) {
@@ -565,6 +624,35 @@ async function profileJsonResponse(
   };
 }
 
+function sitemapUnavailable(): PublicWebResponse {
+  return {
+    status: 503,
+    headers: {
+      "Cache-Control": "no-store",
+      "Retry-After": "300",
+      "Content-Type": "text/plain; charset=utf-8",
+    },
+    body: "Sitemap temporarily unavailable.\n",
+  };
+}
+
+async function sitemapResponse(repository: PublicWebRepository): Promise<PublicWebResponse> {
+  const scan = await sitemapProfiles(repository);
+  if (!scan.complete && scan.entries.length === 0) {
+    logger.error("publicweb.sitemap.failed", {message: "scan cut short before its first batch"});
+    return sitemapUnavailable();
+  }
+  return {
+    status: 200,
+    headers: {
+      "Cache-Control": SITEMAP_CACHE_CONTROL,
+      "Content-Type": "application/xml; charset=utf-8",
+    },
+    body: renderSitemap(scan.entries),
+    ...(scan.complete ? {} : {partial: true}),
+  };
+}
+
 export async function resolvePublicWebRequest(
   request: PublicWebRequest,
   repository: PublicWebRepository,
@@ -585,33 +673,14 @@ export async function resolvePublicWebRequest(
   if (request.path === "/sitemap.xml") {
     // A failed or empty scan must resolve, not reject: the response cache
     // memoises only settled values, and a sitemap miss is the one load
-    // whose cost is not one read (SEC-090).
-    const scan = await sitemapProfiles(repository).catch((error: unknown) => {
+    // whose cost is not one read (SEC-090). The render is inside the same
+    // region so nothing between the scan and the memo can reject.
+    return sitemapResponse(repository).catch((error: unknown) => {
       logger.error("publicweb.sitemap.failed", {
         message: error instanceof Error ? error.message : String(error),
       });
-      return null;
+      return sitemapUnavailable();
     });
-    if (scan === null || (!scan.complete && scan.entries.length === 0)) {
-      return {
-        status: 503,
-        headers: {
-          "Cache-Control": "no-store",
-          "Retry-After": "300",
-          "Content-Type": "text/plain; charset=utf-8",
-        },
-        body: "Sitemap temporarily unavailable.\n",
-      };
-    }
-    return {
-      status: 200,
-      headers: {
-        "Cache-Control": SITEMAP_CACHE_CONTROL,
-        "Content-Type": "application/xml; charset=utf-8",
-      },
-      body: request.method === "HEAD" ? "" : renderSitemap(scan.entries),
-      ...(scan.complete ? {} : {partial: true}),
-    };
   }
 
   const jsonMatch = PROFILE_JSON_ROUTE.exec(request.path);
@@ -672,7 +741,7 @@ function profileShell(): string {
   return cachedShell;
 }
 
-const responseCache = createTtlCache<PublicWebResponse>({
+export const RESPONSE_CACHE_OPTIONS: TtlCacheOptions<PublicWebResponse> = {
   ttlMs: RESPONSE_CACHE_TTL_MS,
   staleTtlMs: RESPONSE_CACHE_STALE_MS,
   retain: (response) => response.status === 200 && response.partial !== true,
@@ -683,7 +752,9 @@ const responseCache = createTtlCache<PublicWebResponse>({
   pin: (path) => path === "/sitemap.xml",
   pinnedTtlMs: SITEMAP_MEMO_TTL_MS,
   pinnedDegradedTtlMs: SITEMAP_PARTIAL_MEMO_TTL_MS,
-});
+};
+
+const responseCache = createTtlCache<PublicWebResponse>(RESPONSE_CACHE_OPTIONS);
 
 // maxInstances bounds what a crawler or request flood can cost in
 // invocations, and concurrency bounds what in-flight requests can hold in

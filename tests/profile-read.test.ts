@@ -64,6 +64,17 @@ test('the own-read failure surfaces only when the projection has nothing either'
   );
 });
 
+test('an own read that rejects with a bare null or undefined is still a failure', async () => {
+  await assert.rejects(
+    resolveProfileView(true, () => Promise.reject(null), async () => null),
+    (error) => error === null,
+  );
+  await assert.rejects(
+    resolveProfileView(true, () => Promise.reject(undefined), async () => null),
+    (error) => error === undefined,
+  );
+});
+
 test('a projection for a different username is rejected, never rendered', () => {
   assert.equal(assertProfileViewFor(view('ada', true), 'ada').username, 'ada');
   assert.throws(() => assertProfileViewFor(view('someone-else', true), 'ada'), /Requested profiles\/ada\.json but received someone-else/);

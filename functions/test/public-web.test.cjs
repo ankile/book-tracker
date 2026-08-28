@@ -19,6 +19,7 @@ const {
   SITEMAP_READ_CONCURRENCY,
   SITEMAP_SCAN_BUDGET_MS,
   SITEMAP_SCAN_DEADLINE_MS,
+  RESPONSE_CACHE_OPTIONS,
   acceptsGzip,
   cachedPublicWebResponse,
   createTtlCache,
@@ -792,14 +793,10 @@ test("sitemap renderer is deterministic and XML-safe", () => {
   assert.match(sitemap, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
 });
 
+// The production cache options with an injected clock, so these tests
+// cannot drift from what the deployed instance runs.
 function sitemapCache(now) {
-  return createTtlCache({
-    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
-    maxMissesPerWindow: 1_000, windowMs: 60_000,
-    retain: (r) => r.status === 200 && r.partial !== true,
-    pin: (key) => key === "/sitemap.xml", pinnedTtlMs: 3_600_000, pinnedDegradedTtlMs: 300_000,
-    now,
-  });
+  return createTtlCache({...RESPONSE_CACHE_OPTIONS, now});
 }
 
 test("a sitemap scan that fails resolves as a memoised 503 instead of rescanning on every request", async (t) => {
@@ -922,4 +919,76 @@ test("gzip negotiation honours q-values and the wildcard", () => {
   assert.equal(acceptsGzip(""), false);
   assert.equal(acceptsGzip(undefined), false);
   assert.equal(acceptsGzip("notgzip"), false);
+  assert.equal(acceptsGzip("br;fallback=gzip"), false);
+  // Duplicates: the lowest weight wins regardless of order.
+  assert.equal(acceptsGzip("gzip;q=0, gzip"), false);
+  assert.equal(acceptsGzip("gzip, gzip;q=0"), false);
+  assert.equal(acceptsGzip("gzip;q=0.5, x-gzip"), true);
+  assert.equal(acceptsGzip("*, gzip;q=0"), false);
+  assert.equal(acceptsGzip("*;q=0, gzip"), true);
+  assert.equal(acceptsGzip("GZIP;Q=0"), false);
+  assert.equal(acceptsGzip("gzip ; q = 0"), false);
+  assert.equal(acceptsGzip("gzip;foo=bar"), true);
+  assert.equal(acceptsGzip("gzip;q=-1"), false);
+  assert.equal(acceptsGzip("gzip;q=Infinity"), false);
+  // Total over hostile input: never throws, always a boolean.
+  for (const hostile of ["a" + ";".repeat(16_000), ",".repeat(16_000), "gzip;q=" + "9".repeat(4_000), "\u0000\u00ff;q=0", ";;;===,,,"]) {
+    assert.equal(typeof acceptsGzip(hostile), "boolean");
+  }
+});
+
+test("a batch in flight at the deadline is given up but the entries already read are kept", async (t) => {
+  t.mock.timers.enable({apis: ["setTimeout"]});
+  const count = SITEMAP_READ_CONCURRENCY * 4;
+  const discoveries = Object.fromEntries(
+    Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
+  );
+  let reads = 0;
+  const holds = [];
+  const stalling = {
+    getProfile: (username) => {
+      reads += 1;
+      const value = storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
+      // The first batch answers; the second hangs until released.
+      if (reads <= SITEMAP_READ_CONCURRENCY) return Promise.resolve(value);
+      return new Promise((resolve) => holds.push(() => resolve(value)));
+    },
+    getDiscovery: async () => null,
+    listDiscoveries: async (limit) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
+  };
+  const pending = resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, stalling, shell);
+  // Let the first batch settle and the second start before the deadline fires.
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
+  t.mock.timers.tick(SITEMAP_SCAN_DEADLINE_MS);
+  const result = await pending;
+  assert.equal(result.status, 200);
+  assert.equal(result.partial, true);
+  assert.equal((result.body.match(/<loc>/g) ?? []).length, SITEMAP_READ_CONCURRENCY);
+  // No third batch was started after the deadline.
+  assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
+  for (const release of holds) release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
+});
+
+test("a failure after the scan is memoised like a failed scan, never rescanned per request", async (t) => {
+  let clock = 1_000_000;
+  t.mock.method(Date, "now", () => clock);
+  const renderer = require("../lib/publicProfileRenderer");
+  t.mock.method(renderer, "renderSitemap", () => { throw new Error("render exploded"); });
+  let scans = 0;
+  const repo = {
+    getProfile: async () => storedProfile(),
+    getDiscovery: async () => null,
+    listDiscoveries: async () => { scans += 1; return [{id: "ada-lovelace", value: marker}]; },
+  };
+  const cache = sitemapCache(() => clock);
+  for (let i = 0; i < 20; i += 1) {
+    const response = await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, repo, shell, cache);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers["Cache-Control"], "no-store");
+    clock += 1_000;
+  }
+  assert.equal(scans, 1);
 });

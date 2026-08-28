@@ -251,7 +251,15 @@ flood of distinct paths is bounded even when it bypasses the CDN. `404`s are
 memoised in a separate pool, so repeats stay free but a flood of them cannot
 evict real profiles, and while the budget is exhausted a memoised profile (or
 the sitemap) is served stale (up to 5 min old) rather than refused; a profile
-the origin has since seen as private is not revived. A profile flipped private can therefore stay served for up to 60 s
+the origin has since seen as private is not revived. A sitemap scan that
+fails, runs past its 25 s deadline with nothing read, or is cut short before
+its first batch answers `503` `Retry-After: 300`, and that refusal is
+memoised for five minutes so a Firestore fault costs one scan per instance
+per five minutes, not one per request (SEC-090); a scan that runs out of
+time mid-way keeps what it has read and answers a partial sitemap, held for
+the same five minutes. Once the pinned complete sitemap is more than an hour
+old, a failing scan replaces it with the refusal rather than serving the
+stale list. A profile flipped private can therefore stay served for up to 60 s
 (function; 300 s while the origin is being flooded) + 300 s (shared CDN) +
 60 s (browser); there is no purge path. The sitemap is memoised for an
 hour in its own slot (so a flood of strangers' profiles cannot force a
@@ -389,6 +397,9 @@ Detection (2026-08-28): two content-matching uptime checks through
 `publicweb` 5xx (designed 503s separately, once a day at most),
 `PERMISSION_DENIED` at ERROR in any gen-1 or gen-2 function, gen-1 function
 errors, `publicweb.sitemap.truncated`/`.skip`, `admin-overview` denials,
+(`publicweb.sitemap.failed` at ERROR marks a refused sitemap — one line
+per five minutes of 503s because the refusal is memoised; the sitemap uptime
+check is the signal that fires, since it fails on any sitemap 503),
 and Pub/Sub undelivered messages on the two Eventarc subscriptions (nine
 policies) — all to the owner's email channel. The uptime and Pub/Sub policies have no
 notification rate limit; the log-match ones notify at most hourly (the
