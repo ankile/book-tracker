@@ -130,3 +130,15 @@ test('the progress migration traverses phantom users and logs the applied transa
   assert.notEqual(transaction, -1, 'apply mode must return the patch chosen inside the transaction');
   assert.ok(appliedLog > transaction, 'apply mode must log the transaction-applied patch');
 });
+
+test('every Firebase CLI invocation in the runbook pins the same firebase-tools version', async () => {
+  const readme = await readFile(readmeUrl, 'utf8');
+  // Multi-line commands (`\` continuations) are one invocation.
+  const invocations = readme.replace(/\\\n\s*/g, ' ').split('\n').filter((line) =>
+    /^\s*(npm exec|npx|firebase)\b/.test(line) && /\bfirebase (deploy|login|hosting:|functions:|emulators:)/.test(line));
+  assert.ok(invocations.length >= 10, 'expected the README to document CLI invocations');
+  for (const line of invocations) {
+    assert.match(line, /firebase-tools@15\.24\.0/, `unpinned Firebase CLI: ${line.trim()}`);
+  }
+  assert.doesNotMatch(readme, /npx -y firebase-tools/, 'the CLI holds the deploy credential; never resolve it to latest');
+});

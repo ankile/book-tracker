@@ -505,9 +505,14 @@ class Database {
   static getProfileDiscovery(username: string): Readable<ProfileDiscovery | null | undefined> {
     return cachedStore(profileDiscoveryStores, username, undefined, (set) => (
       onSnapshot(doc(db, 'profileDiscovery', username), (snapshot) => {
+        // createdAt is a serverTimestamp(); the optimistic local snapshot
+        // would otherwise carry null until the server acknowledges.
         set(snapshot.exists()
           ? decodeStored(
-            () => decodeProfileDiscovery(snapshot.data(), snapshot.ref.path),
+            () => decodeProfileDiscovery(
+              snapshot.data({ serverTimestamps: 'estimate' }),
+              snapshot.ref.path,
+            ),
           )
           : null);
       }, listenError('load your profile search setting'))
@@ -564,7 +569,7 @@ class Database {
   static enableProfileDiscovery({ userId, username }: ProfileDiscoveryWrite): Promise<void> {
     return setDoc(doc(db, 'profileDiscovery', username), {
       uid: userId,
-      createdAt: Timestamp.now(),
+      createdAt: serverTimestamp(),
     });
   }
 
@@ -605,7 +610,7 @@ class Database {
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
         uid: userId,
-        createdAt: Timestamp.now(),
+        createdAt: serverTimestamp(),
       });
     }
     // Always clear the old marker. This is a no-op when it is absent and a

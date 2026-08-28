@@ -62,18 +62,24 @@ const MISS_BUDGET_PER_WINDOW = 300;
 const MISS_BUDGET_WINDOW_MS = 60_000;
 // The sitemap is the one request whose cost scales with data strangers can
 // create (SEC-032): one miss, but a profile read per discovery marker. The
-// scan is capped (oldest markers first, so a seeded collection appends
-// after real profiles rather than displacing them — until the marker
-// timestamp is server-pinned, a backdated marker can still sort earlier),
-// reads run in small batches so at most a batch of ~0.7 MB documents is in
-// memory at once, and the finished sitemap is pinned in its own memo slot
-// for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot evict it and
-// force a rescan: worst case is one scan per instance per 5 minutes,
-// ~0.6M reads/day across both instances. Past the cap the sitemap is
-// partial and says so in the log.
+// scan is capped, oldest markers first — rules pin a marker's createdAt to
+// the server clock, so a seeded collection can only append after the
+// profiles that were there before it, never displace them; reads run in
+// small batches so at most a batch of ~0.7 MB documents is in memory at
+// once; the scan gives up after SITEMAP_SCAN_BUDGET_MS and serves what it
+// has rather than time out (a timed-out load is never memoised and would
+// be retried on every request); and the finished sitemap is pinned in its
+// own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
+// evict it and force a rescan. The uptime check fetches the sitemap
+// every 15 minutes through the CDN, so the memo TTL — not the check — sets
+// the floor: one scan per instance per hour, ≤ ~50k reads/day across both
+// instances at the cap. A sitemap can therefore lag a privacy change by
+// up to an hour (+ stale allowance + CDN); profiles pages do not. Past the
+// cap or the time budget the sitemap is partial and says so in the log.
 export const SITEMAP_MAX_PROFILES = 1_000;
 export const SITEMAP_READ_CONCURRENCY = 25;
-const SITEMAP_MEMO_TTL_MS = 300_000;
+export const SITEMAP_SCAN_BUDGET_MS = 20_000;
+const SITEMAP_MEMO_TTL_MS = 3_600_000;
 
 interface StoredDocument {
   id: string;
@@ -320,6 +326,7 @@ function sitemapEntry(
 async function sitemapProfiles(
   repository: PublicWebRepository,
 ): Promise<SitemapEntry[]> {
+  const startedAt = Date.now();
   const discoveries = await repository.listDiscoveries(SITEMAP_MAX_PROFILES);
   if (discoveries.length >= SITEMAP_MAX_PROFILES) {
     logger.warn("publicweb.sitemap.truncated", {limit: SITEMAP_MAX_PROFILES});
@@ -329,6 +336,12 @@ async function sitemapProfiles(
   // not once per document.
   const skipped: SitemapSkip[] = [];
   for (let start = 0; start < discoveries.length; start += SITEMAP_READ_CONCURRENCY) {
+    if (Date.now() - startedAt > SITEMAP_SCAN_BUDGET_MS) {
+      logger.warn("publicweb.sitemap.truncated", {
+        budgetMs: SITEMAP_SCAN_BUDGET_MS, scanned: start, of: discoveries.length,
+      });
+      break;
+    }
     const batch = discoveries.slice(start, start + SITEMAP_READ_CONCURRENCY);
     const resolved = await Promise.all(batch.map(async (document) => {
       if (!USERNAME_PATTERN.test(document.id)) {

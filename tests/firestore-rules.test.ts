@@ -244,7 +244,7 @@ test('profile rename can move its discovery marker atomically', async () => {
   batch.delete(oldProfile);
   batch.set(doc(db, 'profileDiscovery', 'new-search-name'), {
     uid: 'rename-discovery-owner',
-    createdAt: Timestamp.now(),
+    createdAt: serverTimestamp(),
   });
   batch.delete(oldDiscovery);
   await assertSucceeds(batch.commit());

@@ -377,10 +377,16 @@ public pages (or, for the Eventarc services, fails deliveries silently for
 `login --reauth` after any Google-account grant change: plain `login`
 trusts a stale cached credential.
 
-Detection (2026-08-27): two content-matching uptime checks through
-`book.ankile.com` (`/profiles/lars`, `/sitemap.xml`) and alert policies for
-their failure, `publicweb` 5xx, any `PERMISSION_DENIED` in a function, and
-`publicweb.sitemap.truncated`/`.skip` — all to the owner's email channel.
+Detection (2026-08-28): two content-matching uptime checks through
+`book.ankile.com` (`/profiles/lars` every 5 min, `/sitemap.xml` every
+15 min — it must list `lars`) and alert policies for their failure,
+`publicweb` 5xx (designed 503s separately, once a day at most),
+`PERMISSION_DENIED` at ERROR in any gen-1 or gen-2 function, gen-1 function
+errors, and `publicweb.sitemap.truncated`/`.skip` — all to the owner's email
+channel. Deploys: build, **commit the artifacts**, then deploy — the Hosting
+predeploy re-verifies the committed build and fails on drift; the functions
+predeploy runs `npm ci` first. Always use the pinned CLI (`npm exec
+--package firebase-tools@15.24.0`), never `npx -y firebase-tools`.
 
 ### Deploy Everything
 

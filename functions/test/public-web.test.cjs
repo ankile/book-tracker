@@ -15,6 +15,7 @@ const {
   MISS_BUDGET_EXHAUSTED,
   SITEMAP_MAX_PROFILES,
   SITEMAP_READ_CONCURRENCY,
+  SITEMAP_SCAN_BUDGET_MS,
   cachedPublicWebResponse,
   createTtlCache,
   resolvePublicWebRequest,
@@ -633,6 +634,30 @@ test("a public profile with a malformed discovery marker renders unlisted instea
   );
   assert.equal(result.status, 200);
   assert.match(result.body, /name="robots" content="noindex/);
+});
+
+test("sitemap stops scanning past its time budget and serves what it has", async (t) => {
+  let clock = 1_000_000;
+  t.mock.method(Date, "now", () => clock);
+  const count = SITEMAP_READ_CONCURRENCY * 4;
+  const discoveries = Object.fromEntries(
+    Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
+  );
+  let reads = 0;
+  const slow = {
+    getProfile: async (username) => {
+      reads += 1;
+      // Each batch of reads pushes the clock forward; the third batch crosses the budget.
+      if (reads % SITEMAP_READ_CONCURRENCY === 0) clock += SITEMAP_SCAN_BUDGET_MS / 2 + 1;
+      return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
+    },
+    getDiscovery: async () => null,
+    listDiscoveries: async (limit) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
+  };
+  const result = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, slow, shell);
+  assert.equal(result.status, 200);
+  assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
+  assert.equal((result.body.match(/<loc>/g) ?? []).length, SITEMAP_READ_CONCURRENCY * 2);
 });
 
 test("sitemap renderer is deterministic and XML-safe", () => {

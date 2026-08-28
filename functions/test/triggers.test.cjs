@@ -168,16 +168,25 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
   ]);
 });
 
-test("user deletion removes public profiles and discovery markers atomically", async (t) => {
-  const userRef = {path: "users/owner"};
-  const profileRef = {path: "profiles/ada-lovelace"};
-  const discoveryRef = {path: "profileDiscovery/ada-lovelace"};
+test("user deletion pages through profiles, deletes only markers it still owns, and retries", async (t) => {
+  const userRef = {path: "users/owner", deleted: 0, delete: async function() { this.deleted += 1; }};
+  const pages = [];
   const deletes = [];
-  let committed = false;
+  let commits = 0;
+  let markerOwner = "owner";
+  let getAllCount = 0;
+  const profileRef = (name) => ({path: `profiles/${name}`});
+  const discoveryRef = (name) => ({path: `profileDiscovery/${name}`});
   const profiles = {
     where: (field, operator, value) => {
       assert.deepEqual([field, operator, value], ["uid", "==", "owner"]);
-      return {get: async () => ({docs: [{id: "ada-lovelace", ref: profileRef}]})};
+      return {limit: (size) => {
+        assert.equal(size, 100);
+        return {get: async () => {
+          const docs = pages.shift() ?? [];
+          return {empty: docs.length === 0, size: docs.length, docs};
+        }};
+      }};
     },
   };
   t.mock.method(db, "collection", (path) => {
@@ -187,32 +196,44 @@ test("user deletion removes public profiles and discovery markers atomically", a
       return userRef;
     }};
     assert.equal(path, "profileDiscovery");
-    return {doc: (username) => {
-      assert.equal(username, "ada-lovelace");
-      return {get: async () => ({exists: true, get: (field) => {
-        assert.equal(field, "uid");
-        return markerOwner;
-      }, ref: discoveryRef})};
-    }};
+    return {doc: (username) => discoveryRef(username)};
+  });
+  t.mock.method(db, "getAll", async (...refs) => {
+    getAllCount += 1;
+    return refs.map((ref) => ({exists: true, ref, get: (field) => {
+      assert.equal(field, "uid");
+      return markerOwner;
+    }}));
   });
   t.mock.method(db, "batch", () => ({
-    delete: (ref) => deletes.push(ref),
+    delete: (ref) => deletes.push(ref.path),
     commit: async () => {
-      committed = true;
+      commits += 1;
     },
   }));
 
-  let markerOwner = "owner";
+  // Two full pages and a partial one: three batches, three marker lookups.
+  const names = Array.from({length: 250}, (_, i) => `user-${String(i).padStart(3, "0")}`);
+  pages.push(names.slice(0, 100).map((n) => ({id: n, ref: profileRef(n)})));
+  pages.push(names.slice(100, 200).map((n) => ({id: n, ref: profileRef(n)})));
+  pages.push(names.slice(200).map((n) => ({id: n, ref: profileRef(n)})));
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.deepEqual(deletes, [userRef, profileRef, discoveryRef]);
-  assert.equal(committed, true);
+  assert.equal(userRef.deleted, 1);
+  assert.equal(commits, 3);
+  assert.equal(getAllCount, 3);
+  assert.equal(deletes.length, 500);
+  assert.ok(deletes.includes("profiles/user-249") && deletes.includes("profileDiscovery/user-249"));
 
   // A marker under the same username that another account now owns (the
   // name was freed and re-claimed) is left alone.
   deletes.length = 0;
   markerOwner = "squatter";
+  pages.push([{id: "ada-lovelace", ref: profileRef("ada-lovelace")}]);
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.deepEqual(deletes, [userRef, profileRef]);
+  assert.deepEqual(deletes, ["profiles/ada-lovelace"]);
+
+  // A delivery that fails is retried rather than dropped.
+  assert.equal(functions.deleteUserDocument.__endpoint.eventTrigger.retry, true);
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
@@ -363,4 +384,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
   assert.equal(functions.deletebookupdates.__endpoint.eventTrigger.retry, true);
   // In-flight publicweb requests are part of its memory bound.
   assert.equal(functions.publicweb.__endpoint.concurrency, 16);
+  // The cascade delete is stranger-triggerable at will; its spend rate is capped.
+  assert.equal(functions.deletebookupdates.__endpoint.maxInstances, 5);
 });

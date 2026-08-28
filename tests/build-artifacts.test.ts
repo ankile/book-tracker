@@ -90,6 +90,17 @@ test('tracked index matches the latest build', async () => {
   );
 });
 
+test('tracked profile shell matches the latest build', async () => {
+  const built = await readFile(profileShellUrl, 'utf8');
+  const tracked = trackedFile('functions/assets/profile-shell.html');
+
+  assert.equal(
+    sha256(tracked),
+    sha256(built),
+    'functions/assets/profile-shell.html is stale; run npm run build and commit the generated file',
+  );
+});
+
 test('built deploy entrypoints reference emitted assets', async () => {
   const [index, serviceWorker, profileShell] = await Promise.all([
     readFile(publicIndexUrl, 'utf8'),

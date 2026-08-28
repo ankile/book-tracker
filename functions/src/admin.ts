@@ -1,6 +1,6 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
-import {AggregateField, FieldValue, getFirestore, Timestamp} from "firebase-admin/firestore";
+import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
 import {FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
@@ -40,31 +40,31 @@ const ANON_EVENTS = ["auth.sign_in_failed", "auth.sign_up_failed"];
 const APP_ISSUE_LIMIT = 100;
 const ANON_ISSUE_LIMIT = 25;
 
-// Views append a row each. Denials are one document per caller with a
-// counter: any signed-in account can call this endpoint (sign-up is open),
-// so a per-call row would let one account grow the audit collection — and
-// bury the real denials — without bound.
+// Successful views append an audit row (only the operator can produce
+// one). Denials go to Cloud Logging instead of Firestore: any signed-in
+// account can call this endpoint (sign-up is open), so a Firestore write
+// per denial — a row, or even a per-caller counter — is billed storage and
+// a write hotspot that a stranger controls, and it can bury the rows that
+// matter. Logging keeps the uid and email for forensics, costs nothing per
+// call, and a denial flood shows up in the log-based alerts.
 async function audit(
   type: "view" | "denied",
   caller: {uid: string; email: string | null},
 ): Promise<void> {
-  const now = Timestamp.now();
-  const expiresAt = Timestamp.fromMillis(
-    now.toMillis() + AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-  );
-  const collection = db.collection("adminAudit");
   if (type === "denied") {
-    await collection.doc(`denied-${caller.uid}`).set({
-      type,
-      uid: caller.uid,
-      email: caller.email,
-      at: now,
-      count: FieldValue.increment(1),
-      expiresAt,
-    }, {merge: true});
+    functions.logger.warn("admin.denied", {uid: caller.uid, email: caller.email});
     return;
   }
-  await collection.add({type, uid: caller.uid, email: caller.email, at: now, expiresAt});
+  const now = Timestamp.now();
+  await db.collection("adminAudit").add({
+    type,
+    uid: caller.uid,
+    email: caller.email,
+    at: now,
+    expiresAt: Timestamp.fromMillis(
+      now.toMillis() + AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ),
+  });
 }
 
 // Decides on context.auth only, which the callables runtime populates from
@@ -72,12 +72,10 @@ async function audit(
 // email as defense in depth; and runs before any privileged read, so no
 // cross-user data is touched for a non-admin.
 //
-// Unauthenticated callers are rejected without writing anything. They carry
-// no uid and no email, so the audit row would hold no forensic signal — and
-// writing one on an unauthenticated request means any anonymous flood of
-// this endpoint becomes billed Firestore writes and buries the real denial
-// records. Authenticated denials are the ones worth keeping: those name a
-// real account that went looking.
+// Unauthenticated callers are rejected without logging anything. They carry
+// no uid and no email, so a denial record would hold no forensic signal.
+// Authenticated denials are the ones worth keeping: those name a real
+// account that went looking.
 //
 // Note that rejecting with "not-found" does NOT hide the endpoint's
 // existence — a callable answers a malformed token with a structured 401

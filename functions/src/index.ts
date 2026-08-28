@@ -32,6 +32,11 @@ exports.deletebookupdates = onDocumentDeleted(
     region: "europe-west1",
     timeoutSeconds: 300,
     retry: true,
+    // Any signed-in account can create and delete its own books at will, so
+    // this trigger is a free invocation amplifier; a small instance cap
+    // keeps the spend rate bounded (deliveries queue) while real deletions
+    // are rare.
+    maxInstances: 5,
     serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
     ingressSettings: EVENT_INGRESS,
   },
@@ -65,30 +70,45 @@ exports.createUserDocument = functions
     return null;
   });
 
+// Profiles per account are not capped by rules yet (SEC-032), so deletion
+// pages through them: each page is one bounded batch (1 + 2 × page ops),
+// and the markers of a page are fetched with one getAll. failurePolicy
+// makes a failed delivery retry — every step here is idempotent, and
+// without it a transient error would leave a deleted account's profiles
+// public and in the sitemap forever (no client can delete them once the
+// auth user is gone).
+const PROFILE_DELETE_PAGE = 100;
+
 exports.deleteUserDocument = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, failurePolicy: true})
   .auth.user()
   .onDelete(async (user) => {
     // Account deletion must immediately remove both the public document and
     // its search opt-in. Otherwise a deleted account could remain in Google
     // and in the sitemap indefinitely.
-    // The marker is deleted only when it is still this user's: a freed
-    // username is first-writer-wins, so by now the marker under the same
-    // id may belong to another account (SEC-036).
-    const profiles = await db.collection("profiles")
-      .where("uid", "==", user.uid)
-      .get();
-    const markers = await Promise.all(profiles.docs.map((profile) =>
-      db.collection("profileDiscovery").doc(profile.id).get()));
-    const batch = db.batch();
-    batch.delete(db.collection("users").doc(user.uid));
-    profiles.docs.forEach((profile, index) => {
-      batch.delete(profile.ref);
-      const marker = markers[index];
-      if (marker.exists && marker.get("uid") === user.uid) batch.delete(marker.ref);
-    });
-    await batch.commit();
+    await db.collection("users").doc(user.uid).delete();
+    for (;;) {
+      const page = await db.collection("profiles")
+        .where("uid", "==", user.uid)
+        .limit(PROFILE_DELETE_PAGE)
+        .get();
+      if (page.empty) break;
+      // The marker is deleted only when it is still this user's: a freed
+      // username is first-writer-wins, so by now the marker under the same
+      // id may belong to another account (SEC-036).
+      const markers = await db.getAll(
+        ...page.docs.map((profile) => db.collection("profileDiscovery").doc(profile.id)),
+      );
+      const batch = db.batch();
+      page.docs.forEach((profile, index) => {
+        batch.delete(profile.ref);
+        const marker = markers[index];
+        if (marker.exists && marker.get("uid") === user.uid) batch.delete(marker.ref);
+      });
+      await batch.commit();
+      if (page.size < PROFILE_DELETE_PAGE) break;
+    }
     return null;
   });
 

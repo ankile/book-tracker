@@ -844,7 +844,10 @@ service cloud.firestore {
                     && request.resource.data.keys().hasAll(['uid', 'createdAt'])
                     && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
                     && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.createdAt is timestamp
+                    // Server-pinned: the public sitemap scan orders markers by
+                    // createdAt, oldest first, so a client-chosen (backdated)
+                    // value could sort a seeded marker ahead of real profiles.
+                    && request.resource.data.createdAt == request.time
                     && getAfter(/databases/$(database)/documents/profiles/$(username)).data.uid == request.auth.uid
                     && getAfter(/databases/$(database)/documents/profiles/$(username)).data.public == true;
       allow update: if false;
