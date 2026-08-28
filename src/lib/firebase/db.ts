@@ -146,11 +146,13 @@ function cachedStore<T>(
 // SEC-038). Signed-out clients report nothing (issueReportPayload). Never
 // pass secrets in message/code, and prefer operation names over user
 // content: the operator reads this log, so another user's book titles do
-// not belong in it. Fire-and-forget with a console-only catch: the logger
-// reporting the app's failures must not feed back into addError, or a
-// backend outage would recurse. There is no offline queue — a report made
-// offline is dropped, not retried — and timestamps and retention are
-// server-side.
+// not belong in it. Fire-and-forget with a console-only catch: a telemetry
+// failure must never become user-visible (an addError here would put the
+// callable's rejection text in the banner on every backend hiccup), and
+// tests/issue-report.test.ts pins both this line and the session check
+// below, since nothing else can import this module. There is no offline
+// queue — a report made offline is dropped, not retried — and timestamps
+// and retention are server-side.
 export function logIssue(input: IssueInput): void {
   const payload = issueReportPayload(auth.currentUser !== null, input);
   if (payload === null) return;

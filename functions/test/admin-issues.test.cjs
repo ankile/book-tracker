@@ -3,7 +3,7 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {Timestamp} = require("firebase-admin/firestore");
-const {ANONYMOUS_ISSUE_LIMIT, assembleIssueFeed, ISSUES_PER_UID} = require("../lib/adminIssues");
+const {ANONYMOUS_ISSUE_LIMIT, assembleIssueFeed, FEED_LIMIT, ISSUES_PER_UID} = require("../lib/adminIssues");
 
 const createdAt = Timestamp.fromMillis(1_700_000_000_000);
 const fallbackAt = 1_600_000_000_000;
@@ -32,7 +32,7 @@ const identities = new Map([
 // Rows for one account (or uid-null) as the feed query would return them.
 const group = (uid, documents) => ({uid, documents});
 const feedOf = (documents, limit = 10) =>
-  assembleIssueFeed([group("owner", documents)], limit, limit, identities);
+  assembleIssueFeed([group("owner", documents)], limit, limit, 1000, identities);
 
 test("valid issue rows retain decoded fields and resolve identities", () => {
   const {rows, cappedAccounts, anonymousCapped} = feedOf([
@@ -133,7 +133,7 @@ test("the feed is newest-first across accounts and keeps identity per row", () =
       document("stranger-mid", validIssue({uid: "stranger", createdAt: Timestamp.fromMillis(2_000), message: "stranger"})),
       document("stranger-bad", validIssue({level: "attacker-level", uid: "stranger", createdAt: Timestamp.fromMillis(500)})),
     ]),
-  ], 10, 10, identities);
+  ], 10, 10, 1000, identities);
 
   assert.deepEqual(rows.map((row) => [row.message, row.email, row.at]), [
     ["owner new", "owner@example.test", 3_000],
@@ -165,7 +165,7 @@ test("each account is capped at the per-account limit, uid-null rows at their ow
     group("flooder", flood.slice(0, 11)),
     group("owner", [document("owner-1", validIssue({message: "owner"}))]),
     group(null, anonymous),
-  ], 10, 3, identities);
+  ], 10, 3, 1000, identities);
 
   assert.equal(cappedAccounts, 1);
   assert.equal(anonymousCapped, true);
@@ -174,14 +174,14 @@ test("each account is capped at the per-account limit, uid-null rows at their ow
   assert.equal(rows.filter((row) => row.uid === "owner").length, 1);
   // Exactly at the cap is not capped: the query reads cap + 1 to tell.
   assert.deepEqual(
-    assembleIssueFeed([group("flooder", flood.slice(0, 10))], 10, 3, identities).cappedAccounts,
+    assembleIssueFeed([group("flooder", flood.slice(0, 10))], 10, 3, 1000, identities).cappedAccounts,
     0,
   );
   // A malformed row that still names an account counts against it.
   const capped = assembleIssueFeed([group("flooder", [
     ...flood.slice(0, 10),
     document("bad", validIssue({level: "attacker-level", uid: "flooder"})),
-  ])], 10, 3, identities);
+  ])], 10, 3, 1000, identities);
   assert.equal(capped.cappedAccounts, 1);
   assert.equal(capped.rows.length, 10);
 });
@@ -192,4 +192,23 @@ test("the shipped feed caps are the documented ones", () => {
   // noticing.
   assert.equal(ISSUES_PER_UID, 10);
   assert.equal(ANONYMOUS_ISSUE_LIMIT, 25);
+  assert.equal(FEED_LIMIT, 200);
 });
+
+test("the feed limit bounds the response after the per-account caps and reports the total", () => {
+  const groups = Array.from({length: 30}, (_, account) =>
+    group(`account-${account}`, Array.from({length: 10}, (_, index) =>
+      document(`row-${account}-${index}`, validIssue({
+        uid: `account-${account}`,
+        createdAt: Timestamp.fromMillis(1_000_000 - account * 10 - index),
+        message: `${account}/${index}`,
+      })))));
+  const feed = assembleIssueFeed(groups, 10, 25, 200, identities);
+  assert.equal(feed.total, 300);
+  assert.equal(feed.rows.length, 200);
+  // The cut keeps the newest rows across accounts, not the first accounts.
+  assert.equal(feed.rows[0].message, "0/0");
+  assert.equal(feed.rows[199].at, 1_000_000 - 19 * 10 - 9);
+  assert.equal(feed.cappedAccounts, 0);
+});
+

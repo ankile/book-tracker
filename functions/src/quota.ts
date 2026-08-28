@@ -20,7 +20,11 @@ export type QuotaDecision =
 // retry: the Admin SDK retries transactions only on gRPC contention codes,
 // and a refusal commits nothing. The first refusal of a window is recorded
 // by moving count to limit + 1 (one write per window), which is what lets a
-// caller log it once instead of once per rejected call.
+// caller log it once instead of once per rejected call. That write is also
+// what makes "once" hold under concurrency: two instances that both read
+// count == limit both try to write, Firestore aborts one commit, and its
+// retry reads limit + 1 and reports firstRefusal false. Without the write
+// the two transactions would not conflict and both would log.
 export async function consumeQuota(
   db: Firestore,
   path: string,

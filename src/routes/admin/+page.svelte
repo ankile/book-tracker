@@ -14,10 +14,14 @@
       });
   });
 
+  // The caps block is read through one guarded derived value so a server
+  // that predates it (a rollback of admin-overview while Hosting stays
+  // current) degrades to no note instead of a render error.
+  const caps = $derived(overview?.issueCaps ?? null);
+
   // A capped feed that looks complete is worse than one that admits it is
-  // capped, so every cap that was hit is named with its real number.
+  // capped, so everything that hid a row is named with its real number.
   const capNotes = $derived.by(() => {
-    const caps = overview?.issueCaps;
     if (!caps) return [];
     const notes: string[] = [];
     if (caps.cappedAccounts > 0) {
@@ -27,6 +31,14 @@
     }
     if (caps.anonymousCapped) {
       notes.push(`only the newest ${caps.anonymous} anonymous sign-in failures are listed`);
+    }
+    if (caps.shown < caps.total) {
+      notes.push(`showing the newest ${caps.shown} of ${caps.total} rows`);
+    }
+    if (caps.unreadAccounts > 0) {
+      notes.push(
+        `${caps.unreadAccounts} ${caps.unreadAccounts === 1 ? 'account' : 'accounts'} could not be read; those rows are missing`
+      );
     }
     return notes;
   });
@@ -254,11 +266,12 @@
       <h2>Recent issues</h2>
       <p class="card-subtext">
         Warnings and errors from the last {overview.issueWindowDays} days,
-        newest first. Each account is read separately and shows at most
-        {overview.issueCaps.perAccount} rows, so one account's volume
-        never hides another's. Anonymous rows are no longer written; the
-        ones still listed predate that change and expire with the 90-day
-        retention.
+        newest first.{#if caps}
+          Each account is read separately and shows at most
+          {caps.perAccount} rows, so one account's volume never hides
+          another's.{/if} Anonymous rows are no longer written; the ones
+        still listed predate that change and drop out of this window as it
+        moves (the rows themselves expire with the 90-day retention).
       </p>
       {#if capNotes.length > 0}
         <p class="truncated">

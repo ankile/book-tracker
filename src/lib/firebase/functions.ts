@@ -68,6 +68,11 @@ export interface AdminOverview {
     cappedAccounts: number;
     anonymous: number;
     anonymousCapped: boolean;
+    // Rows shown of the rows that passed the per-account caps.
+    shown: number;
+    total: number;
+    // Accounts whose read failed; their rows are missing from this feed.
+    unreadAccounts: number;
   };
 }
 

@@ -7,6 +7,13 @@ import {decodeStoredIssue, isRecord} from "./decoders";
 // can say which accounts hit them. Documented in README and the admin page.
 export const ISSUES_PER_UID = 10;
 export const ANONYMOUS_ISSUE_LIMIT = 25;
+// Absolute bound on the assembled feed. The per-account caps bound what any
+// one account contributes; this bounds the response itself, which would
+// otherwise grow with the number of accounts — and sign-up is open, so
+// that number is attacker-chosen (round-2 red-team: ~170 flooding accounts
+// × 10 rows × 6 KB messages would push admin-overview past the 10 MB
+// gen-1 response limit and take the users table down with it).
+export const FEED_LIMIT = 200;
 
 export interface IssueIdentity {
   email: string;
@@ -41,7 +48,10 @@ export interface IssueGroup {
 }
 
 export interface IssueFeed {
+  // Newest first, at most feedLimit rows.
   rows: AdminIssueRow[];
+  // Rows that passed the per-group caps, before the feed limit.
+  total: number;
   // Accounts whose rows in the window exceeded the per-account cap.
   cappedAccounts: number;
   // Whether the uid-null group exceeded its own cap.
@@ -108,18 +118,24 @@ function mapIssueDocument(
 }
 
 // The feed is assembled from one query per account (plus one for rows
-// without a uid), each already limited by Firestore to cap + 1 rows. A cap
-// applied at query time is what makes the feed flood-proof: no volume from
-// one account can push another account's rows out of the scan, because
-// there is no shared scan (SEC-038). Rows without a uid — historical
-// anonymous sign-in failures, which no client can produce any more, and
-// malformed rows that lost the field — are read under their own cap. A
-// malformed row that still carries a uid is capped with its account,
-// because the cap is on the stored field, not the decoded one.
+// whose uid field is null), each already limited by Firestore to cap + 1
+// rows. A cap applied at query time is what makes the feed flood-proof: no
+// volume from one account can push another account's rows out of the
+// scan, because there is no shared scan (SEC-038). The uid-null group is
+// historical anonymous sign-in failures, which no client can produce any
+// more. A malformed row that still carries its uid is capped with its
+// account, because the cap is on the stored field, not the decoded one; a
+// row with no uid field, or a non-string one, matches no query at all and
+// is invisible to this feed (Firestore's `== null` is IS_NULL, and the
+// index does not contain documents lacking the field). Only the Admin SDK
+// writes the collection and every writer sets uid, so such a row would be
+// a server bug rather than an attack. After the per-group caps the feed is
+// sorted and cut at feedLimit; `total` says how many rows that cut hid.
 export function assembleIssueFeed(
   groups: readonly IssueGroup[],
   perAccountLimit: number,
   anonymousLimit: number,
+  feedLimit: number,
   identities: ReadonlyMap<string, IssueIdentity>,
 ): IssueFeed {
   const rows: AdminIssueRow[] = [];
@@ -136,5 +152,10 @@ export function assembleIssueFeed(
     }
   }
   rows.sort((a, b) => b.at - a.at);
-  return {rows, cappedAccounts, anonymousCapped};
+  return {
+    rows: rows.slice(0, feedLimit),
+    total: rows.length,
+    cappedAccounts,
+    anonymousCapped,
+  };
 }

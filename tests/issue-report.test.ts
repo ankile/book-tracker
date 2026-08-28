@@ -41,9 +41,36 @@ test('fields are trimmed to the callable caps and an empty code becomes null', (
 
 test('the client event allowlist is the server allowlist', async () => {
   const decoders = await readFile(new URL('../functions/src/decoders.ts', import.meta.url), 'utf8');
-  const start = decoders.indexOf('export const CLIENT_ISSUE_EVENTS = [');
-  assert.notEqual(start, -1);
-  const literal = decoders.slice(start, decoders.indexOf('] as const;', start));
-  const serverEvents = [...literal.matchAll(/"([a-z_.]+)"/g)].map((match) => match[1]);
+  assert.equal(
+    decoders.indexOf('CLIENT_ISSUE_EVENTS = ['),
+    decoders.lastIndexOf('CLIENT_ISSUE_EVENTS = ['),
+    'more than one CLIENT_ISSUE_EVENTS literal in decoders.ts',
+  );
+  // Parse the shape, not the tokens: a one-per-line double-quoted literal,
+  // so a comment, a quote-style change or a spread cannot slip an event
+  // past this test in either direction.
+  const literal = decoders.match(
+    /export const CLIENT_ISSUE_EVENTS = \[\n((?:  "[^"\n]+",\n)+)\] as const;\n/,
+  );
+  assert.ok(literal, 'CLIENT_ISSUE_EVENTS is not a plain one-per-line double-quoted array literal');
+  const serverEvents = literal[1].trimEnd().split('\n').map((line) => {
+    const entry = line.match(/^  "([^"\n]+)",$/);
+    assert.ok(entry, `unparsable entry: ${line}`);
+    return entry[1];
+  });
   assert.deepEqual([...CLIENT_ISSUE_EVENTS], serverEvents);
+});
+
+// db.ts cannot be imported here (it initialises Firestore's persistent
+// cache at module load), so the two lines of logIssue that the pure module
+// cannot see are pinned at the source level: the live session is what
+// decides whether to report, and a failed report is console-only.
+test('logIssue passes the live session and never surfaces its own failure', async () => {
+  const db = await readFile(new URL('../src/lib/firebase/db.ts', import.meta.url), 'utf8');
+  const start = db.indexOf('export function logIssue');
+  assert.notEqual(start, -1);
+  const body = db.slice(start, db.indexOf('\n}\n', start));
+  assert.match(body, /issueReportPayload\(auth\.currentUser !== null, input\)/);
+  assert.match(body, /\.catch\(\(error\) => console\.error\('logIssue failed', error\)\)/);
+  assert.doesNotMatch(body, /addError/);
 });

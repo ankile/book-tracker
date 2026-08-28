@@ -92,9 +92,11 @@ warning per user per window in the function log. Reports made while offline
 are dropped, not queued. No client can write `logEvents` directly, and
 failed sign-ins are not recorded anywhere (SEC-001, SEC-029, SEC-038). The
 admin overview reads each account's rows with its own capped query (ten per
-account, 25 for rows without a uid — index `logEvents(uid, createdAt)`), so
-no account's volume can push another's out of the feed; the page names the
-accounts that hit the cap.
+account, 25 for rows whose uid is null — index `logEvents(uid, createdAt)`,
+which must exist before `admin-overview` is deployed), so no account's
+volume can push another's out of the feed; the feed as a whole is cut at
+200 rows, and the page says how many accounts hit the cap, how many rows
+the cut hid, and how many accounts could not be read.
 
 ### Backfilling existing books
 

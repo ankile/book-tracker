@@ -16,6 +16,8 @@ import {
   getDocFromCache,
   getDocs,
   increment,
+  limit,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -1505,6 +1507,85 @@ test('issue-report quota documents are inaccessible to their owner and to strang
     await assertFails(setDoc(doc(db, 'users', uid, 'functionQuotas', 'issueReports-next'), { junk: true }));
     await assertFails(getDocs(collection(db, 'users', uid, 'functionQuotas')));
     await assertFails(getDocs(query(collectionGroup(db, 'functionQuotas'))));
+  }
+});
+
+test('no bounded or filtered query reaches logEvents either', async () => {
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(
+      doc(context.firestore(), 'logEvents', 'seeded'),
+      issue('issue-owner', 'firestore.decode_failed'),
+    );
+  });
+  for (const db of [
+    environment.authenticatedContext('issue-owner').firestore(),
+    environment.authenticatedContext('issue-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    // An unfiltered list is the easiest thing to deny; a rule written for a
+    // bounded or self-scoped page is the one that would actually ship.
+    for (const source of [collection(db, 'logEvents'), collectionGroup(db, 'logEvents')]) {
+      await assertFails(getDocs(query(source, limit(1))));
+      await assertFails(getDocs(query(source, limit(10))));
+      await assertFails(getDocs(query(source, where('uid', '==', 'issue-owner'))));
+      await assertFails(getDocs(query(source, where('uid', '==', 'issue-owner'), limit(10))));
+      await assertFails(getDocs(query(source, where('event', '==', 'firestore.decode_failed'), limit(10))));
+      await assertFails(getDocs(query(source, orderBy('createdAt', 'desc'), limit(10))));
+    }
+  }
+});
+
+test('no issue-report quota write succeeds whatever the payload looks like', async () => {
+  const uid = 'issue-quota-payload';
+  const now = Timestamp.now();
+  // consumeQuota restarts the window on an old or junk windowStartedAt, so a
+  // grant conditioned on "count never decreases" would still be a full
+  // bypass: the same count with an epoch timestamp resets the counter.
+  const bodies: Record<string, unknown>[] = [
+    { windowStartedAt: now, count: 0 },
+    { windowStartedAt: now, count: 20 },
+    { windowStartedAt: now, count: 21 },
+    { windowStartedAt: Timestamp.fromMillis(0), count: 20 },
+    { windowStartedAt: Timestamp.fromMillis(Date.now() + 864e5), count: 20 },
+    { windowStartedAt: 'not-a-timestamp', count: 20 },
+    { count: 20 },
+  ];
+  for (const body of bodies) {
+    await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      await setDoc(
+        doc(context.firestore(), 'users', uid, 'functionQuotas', 'issueReports'),
+        { windowStartedAt: now, count: 20 },
+      );
+    });
+    for (const db of [
+      environment.authenticatedContext(uid).firestore(),
+      environment.authenticatedContext('issue-quota-stranger').firestore(),
+      environment.unauthenticatedContext().firestore(),
+    ]) {
+      const ref = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
+      await assertFails(setDoc(ref, body));
+      await assertFails(updateDoc(ref, body));
+      await assertFails(setDoc(ref, body, { merge: true }));
+    }
+  }
+});
+
+test('the users parent document is read-only, and rules never cascade into its subcollections', async () => {
+  const uid = 'users-doc-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), { createdAt: Timestamp.now() });
+  });
+  for (const db of [
+    environment.authenticatedContext(uid).firestore(),
+    environment.authenticatedContext('users-doc-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    const ref = doc(db, 'users', uid);
+    await assertFails(setDoc(ref, { forged: true }));
+    await assertFails(setDoc(ref, { forged: true }, { merge: true }));
+    await assertFails(updateDoc(ref, { forged: true }));
+    await assertFails(deleteDoc(ref));
+    await assertFails(getDocs(collection(db, 'users')));
   }
 });
 
