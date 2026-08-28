@@ -1,7 +1,7 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
-import {FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
   IssueIdentity,
@@ -45,8 +45,9 @@ const ANON_ISSUE_LIMIT = 25;
 // account can call this endpoint (sign-up is open), so a Firestore write
 // per denial — a row, or even a per-caller counter — is billed storage and
 // a write hotspot that a stranger controls, and it can bury the rows that
-// matter. Logging keeps the uid and email for forensics, costs nothing per
-// call, and a denial flood shows up in the log-based alerts.
+// matter. Logging keeps the uid and email for forensics and costs only
+// log ingest (~1 KB per call, billed past 50 GiB/month — bounded by the
+// instance cap); a denial flood trips the admin.denied alert.
 async function audit(
   type: "view" | "denied",
   caller: {uid: string; email: string | null},
@@ -107,7 +108,7 @@ function adminCallable(
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
-    .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+    .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: ADMIN_MAX_INSTANCES})
     .https.onCall(async (data: unknown, context) => {
       await requireAdmin(context);
       decodeEmptyCallableRequest(data, invalidArgument);

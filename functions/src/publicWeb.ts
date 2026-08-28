@@ -54,10 +54,13 @@ const RESPONSE_CACHE_STALE_MS = 300_000;
 // default of 80. All against the 256 MiB default.
 const RESPONSE_CACHE_MAX_ENTRIES = 100;
 const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
-// Uncached profile responses each cost one or two Firestore reads plus a
-// decode and render. 300 per minute per instance (2 instances) is far
-// above real traffic and caps a rotating-name flood at ~0.9M reads/day
-// worst case. The sitemap is bounded separately below.
+// Uncached profile responses each cost one Firestore read (unknown or
+// private name) or two (public profile: document + marker) plus a decode
+// and render. 300 per minute per instance (2 instances) is far above real
+// traffic and caps a rotating-name flood at 864k misses/day — up to 1.7M
+// reads (≈ $1/day) when the names are attacker-owned public profiles.
+// The sitemap is bounded separately below. None of this meters CDN hits:
+// a cached 93 KB JSON hit costs egress only, which no cap here bounds.
 const MISS_BUDGET_PER_WINDOW = 300;
 const MISS_BUDGET_WINDOW_MS = 60_000;
 // The sitemap is the one request whose cost scales with data strangers can
@@ -75,8 +78,9 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
 // every 15 minutes through the CDN, so the memo TTL — not the check — sets
-// the floor: one scan per instance per hour, ≤ ~50k reads/day across both
-// instances at the cap. A sitemap can therefore lag a privacy change by
+// the floor: one scan per instance per hour; a scan is up to 1000 marker
+// reads + 1000 profile reads, so ≤ ~96k reads/day across both instances
+// at the cap (≈ 576k if every scan is cut short — see pinnedDegradedTtlMs). A sitemap can therefore lag a privacy change by
 // up to an hour (+ stale allowance + CDN); profiles pages do not. Past the
 // cap the sitemap is deterministically truncated (oldest markers win);
 // past the time budget it is marked partial. Both say so in the log.

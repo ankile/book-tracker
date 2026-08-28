@@ -23,3 +23,15 @@ export const FUNCTIONS_RUNTIME_SERVICE_ACCOUNT =
 // Firestore and Auth events are delivered from Google's network, so the
 // two Eventarc-driven gen2 services need no public ingress at all.
 export const EVENT_INGRESS = "ALLOW_INTERNAL_ONLY" as const;
+
+// Every callable is invokable by anyone (the Firebase SDK checks the ID
+// token inside the handler, after the instance has been billed), and the
+// Auth triggers fire once per sign-up. Without a cap the only ceiling is
+// the region's CPU quota (~500 concurrent gen-1 instances shared by all of
+// them), which an anonymous flood can fill at ~$900/day. Real traffic is a
+// handful of calls per minute; these caps bound the spend rate and, with
+// gen-1 concurrency of 1, also the fan-out any one function can inflict on
+// the others. Raise deliberately.
+export const CALLABLE_MAX_INSTANCES = 10;
+export const ADMIN_MAX_INSTANCES = 2;
+export const AUTH_TRIGGER_MAX_INSTANCES = 10;

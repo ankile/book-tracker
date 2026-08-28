@@ -10,7 +10,7 @@ import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
 import {env} from "node:process";
 import {setTimeout as delay} from "node:timers/promises";
-import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {CALLABLE_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logIssue} from "./logging";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
 import {
@@ -273,7 +273,7 @@ function timerMatchesClaim(
 
 exports.savetoken = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
@@ -323,7 +323,7 @@ exports.savetoken = functions
 
 exports.start = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
@@ -497,7 +497,7 @@ async function transitionStartClaim(
 
 exports.stop = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
@@ -590,7 +590,7 @@ exports.stop = functions
 
 exports.clearstopping = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);

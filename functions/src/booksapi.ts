@@ -7,7 +7,7 @@ import {
   decodeIsbnLookupRequest,
   GoogleVolumeInfo,
 } from "./decoders";
-import {FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 interface FunctionConfig {
   booksapi: {
@@ -57,7 +57,11 @@ async function consumeLookupQuota(uid: string): Promise<void> {
 // country is explicit because Google otherwise geolocates the Cloud
 // Functions egress IP and can 403 volumes it will serve for a real market.
 exports.lookupisbn = functions
-  .runWith({secrets: [runtimeConfig], serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({
+    secrets: [runtimeConfig],
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+  })
   .region("europe-west1")
   .https.onCall(async (
     data: unknown,

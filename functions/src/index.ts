@@ -3,7 +3,7 @@ import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
-import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {AUTH_TRIGGER_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 initializeApp();
 const db = getFirestore();
@@ -48,7 +48,7 @@ exports.deletebookupdates = onDocumentDeleted(
 // Create a user document when a new user signs up
 exports.createUserDocument = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT})
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: AUTH_TRIGGER_MAX_INSTANCES})
   .auth.user()
   .onCreate(async (user) => {
     const userRef = db.collection("users").doc(user.uid);
@@ -81,7 +81,11 @@ const PROFILE_DELETE_PAGE = 100;
 
 exports.deleteUserDocument = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, failurePolicy: true})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    failurePolicy: true,
+    maxInstances: AUTH_TRIGGER_MAX_INSTANCES,
+  })
   .auth.user()
   .onDelete(async (user) => {
     // Account deletion must immediately remove both the public document and

@@ -386,4 +386,22 @@ test("runs every function as its dedicated least-privilege identity", () => {
   assert.equal(functions.publicweb.__endpoint.concurrency, 16);
   // The cascade delete is stranger-triggerable at will; its spend rate is capped.
   assert.equal(functions.deletebookupdates.__endpoint.maxInstances, 5);
+  // Every gen-1 function is invokable (or triggerable) by strangers and is
+  // billed before it rejects them: each carries an explicit instance cap.
+  const caps = {
+    "functions.admin.overview": 2,
+    "functions.booksapi.lookupisbn": 10,
+    "functions.toggl.savetoken": 10,
+    "functions.toggl.start": 10,
+    "functions.toggl.stop": 10,
+    "functions.toggl.clearstopping": 10,
+    "functions.createUserDocument": 10,
+    "functions.deleteUserDocument": 10,
+    "functions.toggl.syncqueue": 5,
+    "functions.deletebookupdates": 5,
+    "functions.publicweb": 2,
+  };
+  for (const [name, deployedFunction] of exported) {
+    assert.equal(deployedFunction.__endpoint.maxInstances, caps[name], `${name} maxInstances`);
+  }
 });

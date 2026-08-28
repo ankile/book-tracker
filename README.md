@@ -489,6 +489,35 @@ publicly reachable `fh-<tag>---…run.app` origin that outlives the channel
 (SEC-020/SEC-022). Test signed-out behaviour with `npm run preview` or the
 emulators, and signed-in behaviour against the emulator suite.
 
+### Abusive traffic and runaway spend
+
+There is no automatic spend guard: the 50 NOK/month budget is an email
+that arrives hours after the fact, and the worst case from one attacker
+is on the order of $150/hour (Hosting egress of the 93 KB profile JSON,
+Firestore write floods through the rules, anonymous calls to the gen-1
+callables — each billed before the handler rejects the caller). The
+`spend:` alert policies watch egress, Firestore reads/writes/storage,
+gen-1 executions and log ingest with ~100× headroom over real traffic and
+fire within ten minutes. When one fires, stop the bleeding in this order,
+from the workstation, with the pinned CLI and `--project` on every gcloud:
+
+1. Egress or public pages: `firebase hosting:disable` (the CDN drains in
+   ≤ 5 min; redeploy Hosting to restore). Origin-only floods: remove
+   `allUsers` from `publicweb`'s `roles/run.invoker`
+   (`gcloud run services remove-iam-policy-binding publicweb --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com --member=allUsers --role=roles/run.invoker`).
+2. Firestore writes or storage: deploy deny-all rules
+   (`firebase deploy --only firestore:rules` from a branch whose
+   `firestore.rules` is `allow read, write: if false;`), then restore.
+3. Callable floods: remove `allUsers` from the six gen-1 callables'
+   `roles/cloudfunctions.invoker` (they are also capped at 10 instances,
+   `admin-overview` at 2).
+4. Never unlink billing: Blaze → Spark disables Cloud Functions and
+   deletes deployments.
+
+Nothing in this list deletes data. Long-term guard (SEC-025): a Monitoring
+Pub/Sub channel → a `spendguard` function that applies steps 2 and 3
+automatically.
+
 ### Abusive or compromised accounts
 
 Deleting an account is the wrong first move: a Firebase ID token stays
