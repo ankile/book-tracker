@@ -867,8 +867,12 @@ service cloud.firestore {
     // an uncached, uncapped ~700 KB read with no credential and exposed the
     // owner's Firebase uid (SEC-019). Any profile that is not the caller's
     // own — public, private, or missing — reads as permission-denied, which
-    // the client renders as not-found so username existence never leaks. (A get on a missing doc also lands here as an
-    // evaluation error → denied, deliberately the same signal.) `list` is
+    // the client renders as not-found so no read path leaks username
+    // existence. (A get on a missing doc also lands here as an evaluation
+    // error → denied, deliberately the same signal.) The write path
+    // necessarily does leak it: a create on a taken name fails and on a
+    // free name succeeds — inherent to a first-writer-wins namespace; the
+    // per-uid cap that bounds squatting is SEC-032. `list` is
     // owner-only — the Me page finds its own doc by querying on uid, and
     // strangers must not be able to enumerate usernames. The username is
     // the doc id, so uniqueness is first-writer-wins: a create against an

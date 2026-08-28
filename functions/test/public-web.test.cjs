@@ -18,6 +18,8 @@ const {
   SITEMAP_MAX_PROFILES,
   SITEMAP_READ_CONCURRENCY,
   SITEMAP_SCAN_BUDGET_MS,
+  SITEMAP_SCAN_DEADLINE_MS,
+  acceptsGzip,
   cachedPublicWebResponse,
   createTtlCache,
   resolvePublicWebRequest,
@@ -788,4 +790,136 @@ test("sitemap renderer is deterministic and XML-safe", () => {
   ]);
   assert.ok(sitemap.indexOf("a-reader") < sitemap.indexOf("z-reader"));
   assert.match(sitemap, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
+});
+
+function sitemapCache(now) {
+  return createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 1_000, windowMs: 60_000,
+    retain: (r) => r.status === 200 && r.partial !== true,
+    pin: (key) => key === "/sitemap.xml", pinnedTtlMs: 3_600_000, pinnedDegradedTtlMs: 300_000,
+    now,
+  });
+}
+
+test("a sitemap scan that fails resolves as a memoised 503 instead of rescanning on every request", async (t) => {
+  let clock = 1_000_000;
+  t.mock.method(Date, "now", () => clock);
+  const count = SITEMAP_READ_CONCURRENCY * 4;
+  const discoveries = Object.fromEntries(
+    Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
+  );
+  let reads = 0;
+  let scans = 0;
+  let failing = true;
+  const faulty = {
+    getProfile: async (username) => {
+      reads += 1;
+      if (failing && reads % (SITEMAP_READ_CONCURRENCY * 2) === 0) throw new Error("UNAVAILABLE");
+      return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
+    },
+    getDiscovery: async () => null,
+    listDiscoveries: async (limit) => {
+      scans += 1;
+      return Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value}));
+    },
+  };
+  const failed = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, faulty, shell);
+  assert.equal(failed.status, 503);
+  assert.equal(failed.headers["Cache-Control"], "no-store");
+  assert.equal(failed.headers["Retry-After"], "300");
+  assert.equal(failed.partial, undefined);
+
+  // Through the cache: 40 requests in the same minute cost one scan, and
+  // the fault is retried after the degraded interval, not before.
+  const cache = sitemapCache(() => clock);
+  scans = 0;
+  for (let i = 0; i < 40; i += 1) {
+    const response = await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, faulty, shell, cache);
+    assert.equal(response.status, 503);
+    clock += 1_000;
+  }
+  assert.equal(scans, 1);
+  clock += 300_000;
+  assert.equal((await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, faulty, shell, cache)).status, 503);
+  assert.equal(scans, 2);
+  // Once Firestore answers again the next retry publishes a complete sitemap and pins it.
+  failing = false;
+  clock += 300_000;
+  const recovered = await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, faulty, shell, cache);
+  assert.equal(recovered.status, 200);
+  assert.equal((recovered.body.match(/<loc>/g) ?? []).length, count);
+  assert.equal(scans, 3);
+  clock += 1_800_000;
+  await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, faulty, shell, cache);
+  assert.equal(scans, 3);
+});
+
+test("a marker list that never answers is cut off at the scan deadline as a 503", async (t) => {
+  t.mock.timers.enable({apis: ["setTimeout"]});
+  const hung = {
+    getProfile: async () => storedProfile(),
+    getDiscovery: async () => null,
+    listDiscoveries: () => new Promise(() => {}),
+  };
+  const pending = resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, hung, shell);
+  t.mock.timers.tick(SITEMAP_SCAN_DEADLINE_MS);
+  const result = await pending;
+  assert.equal(result.status, 503);
+  assert.equal(result.headers["Cache-Control"], "no-store");
+});
+
+test("a scan cut short before its first batch is refused, never published as an empty sitemap", async (t) => {
+  let clock = 1_000_000;
+  t.mock.method(Date, "now", () => clock);
+  const slowList = {
+    getProfile: async () => storedProfile(),
+    getDiscovery: async () => null,
+    listDiscoveries: async () => {
+      clock += SITEMAP_SCAN_BUDGET_MS + 1;
+      return [{id: "ada-lovelace", value: marker}];
+    },
+  };
+  const result = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, slowList, shell);
+  assert.equal(result.status, 503);
+  assert.doesNotMatch(result.body, /<urlset/);
+  // A complete sitemap that has expired is replaced by the refusal for the
+  // degraded interval only, then rescanned.
+  const cache = sitemapCache(() => clock);
+  let mode = "ok";
+  const flaky = {
+    ...slowList,
+    listDiscoveries: async () => {
+      if (mode === "slow") clock += SITEMAP_SCAN_BUDGET_MS + 1;
+      return [{id: "ada-lovelace", value: marker}];
+    },
+  };
+  assert.equal((await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, flaky, shell, cache)).status, 200);
+  mode = "slow";
+  clock += 3_600_001;
+  assert.equal((await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, flaky, shell, cache)).status, 503);
+  mode = "ok";
+  clock += 60_000;
+  assert.equal((await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, flaky, shell, cache)).status, 503);
+  clock += 300_000;
+  assert.equal((await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, flaky, shell, cache)).status, 200);
+});
+
+test("gzip negotiation honours q-values and the wildcard", () => {
+  assert.equal(acceptsGzip("gzip"), true);
+  assert.equal(acceptsGzip("gzip, deflate, br"), true);
+  assert.equal(acceptsGzip("GZIP"), true);
+  assert.equal(acceptsGzip("x-gzip"), true);
+  assert.equal(acceptsGzip("identity, gzip;q=0.5"), true);
+  assert.equal(acceptsGzip("gzip;q=0"), false);
+  assert.equal(acceptsGzip("gzip;q=0, identity"), false);
+  assert.equal(acceptsGzip("gzip; q=0.000"), false);
+  assert.equal(acceptsGzip("deflate"), false);
+  assert.equal(acceptsGzip("br, *"), true);
+  assert.equal(acceptsGzip("*;q=0"), false);
+  assert.equal(acceptsGzip("gzip;q=0, *"), false);
+  assert.equal(acceptsGzip("gzip;q=abc"), false);
+  assert.equal(acceptsGzip(""), false);
+  assert.equal(acceptsGzip(undefined), false);
+  assert.equal(acceptsGzip("notgzip"), false);
 });

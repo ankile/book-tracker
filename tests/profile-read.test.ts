@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ProfileView } from '../src/lib/interfaces/profile.ts';
-import { resolveProfileView } from '../src/lib/utils/profileRead.ts';
+import { assertProfileViewFor, resolveProfileView } from '../src/lib/utils/profileRead.ts';
 
 const view = (username: string, isPublic: boolean): ProfileView => ({
   username,
@@ -33,6 +33,40 @@ test('an anonymous viewer reads only the public projection', async () => {
   const result = await resolveProfileView(false, r.readOwn, r.readPublic);
   assert.equal(result?.public, true);
   assert.deepEqual(r.calls, { own: 0, public: 1 });
+});
+
+test('a signed-in viewer known to own another username never touches Firestore', async () => {
+  const r = readers(view('ada', false), view('ada', true));
+  const result = await resolveProfileView(false, r.readOwn, r.readPublic);
+  assert.equal(result?.public, true);
+  assert.deepEqual(r.calls, { own: 0, public: 1 });
+});
+
+test('an own read that fails for any reason falls through to the projection', async () => {
+  let publicCalls = 0;
+  const result = await resolveProfileView(
+    true,
+    async () => { throw new Error('unavailable'); },
+    async () => { publicCalls += 1; return view('ada', true); },
+  );
+  assert.equal(result?.public, true);
+  assert.equal(publicCalls, 1);
+});
+
+test('the own-read failure surfaces only when the projection has nothing either', async () => {
+  await assert.rejects(
+    resolveProfileView(true, async () => { throw new Error('unavailable'); }, async () => null),
+    /unavailable/,
+  );
+  await assert.rejects(
+    resolveProfileView(true, async () => { throw new Error('unavailable'); }, async () => { throw new Error('offline'); }),
+    /offline/,
+  );
+});
+
+test('a projection for a different username is rejected, never rendered', () => {
+  assert.equal(assertProfileViewFor(view('ada', true), 'ada').username, 'ada');
+  assert.throws(() => assertProfileViewFor(view('someone-else', true), 'ada'), /Requested profiles\/ada\.json but received someone-else/);
 });
 
 test('the owner reads their own document, public or private, and never the projection', async () => {

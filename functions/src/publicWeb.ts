@@ -2,6 +2,7 @@ import {Buffer} from "node:buffer";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {gzipSync} from "node:zlib";
+import {clearTimeout, setTimeout} from "node:timers";
 import {logger} from "firebase-functions";
 import {onRequest} from "firebase-functions/v2/https";
 import {getFirestore} from "firebase-admin/firestore";
@@ -73,12 +74,16 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // profiles that were there before it, never displace them; reads run in
 // small batches so at most a batch of ~0.7 MB documents is in memory at
 // once; the scan gives up after SITEMAP_SCAN_BUDGET_MS and serves what it
-// has rather than time out (a timed-out load is never memoised and would
-// be retried on every request) — a cut-short sitemap never replaces a
+// has rather than time out — a cut-short sitemap never replaces a
 // fresh complete one and on its own is held for five minutes, not the
-// hour, so the degraded worst case is ≈ 288 scans/day/instance (a load
-// that *rejects* — a Firestore fault — is never memoised and is bounded
-// only by the miss budget); and the
+// hour, so the degraded worst case is ≈ 288 scans/day/instance. A scan
+// that *fails* — a Firestore fault, or the marker list itself not
+// answering by SITEMAP_SCAN_DEADLINE_MS — resolves as a 503 that is
+// memoised the same degraded way (SEC-090): every key costs one miss no
+// matter what its load cost, so a failure that was never memoised was
+// retried as a full scan on every request, ≈ 300 scans per budget window
+// instead of one per five minutes. An empty cut-short scan is refused the
+// same way rather than published as an empty sitemap; and the
 // finished sitemap is pinned in its
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
@@ -92,6 +97,9 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 export const SITEMAP_MAX_PROFILES = 1_000;
 export const SITEMAP_READ_CONCURRENCY = 25;
 export const SITEMAP_SCAN_BUDGET_MS = 20_000;
+// Hard ceiling on the whole scan, inside the 30 s function timeout so the
+// failure is this code's deterministic 503, not the platform's.
+export const SITEMAP_SCAN_DEADLINE_MS = 25_000;
 const SITEMAP_MEMO_TTL_MS = 3_600_000;
 const SITEMAP_PARTIAL_MEMO_TTL_MS = 300_000;
 
@@ -129,6 +137,29 @@ export interface PublicWebResponse {
 }
 
 const GZIP_MIN_BYTES = 1024;
+
+// Whether an Accept-Encoding header admits gzip. Honours q-values
+// (`gzip;q=0` refuses it — RFC 9110 §12.5.3) and the `*` wildcard; a
+// bare substring match served gzip to callers that had refused it
+// (SEC-091).
+export function acceptsGzip(acceptEncoding: string | undefined): boolean {
+  if (acceptEncoding === undefined) return false;
+  let wildcard: boolean | null = null;
+  for (const member of acceptEncoding.split(",")) {
+    const [rawCoding, ...params] = member.split(";");
+    const coding = rawCoding.trim().toLowerCase();
+    if (coding === "") continue;
+    let weight = 1;
+    for (const param of params) {
+      const [name, value] = param.split("=");
+      if (name.trim().toLowerCase() === "q" && value !== undefined) weight = Number(value.trim());
+    }
+    const accepted = Number.isFinite(weight) && weight > 0;
+    if (coding === "gzip" || coding === "x-gzip") return accepted;
+    if (coding === "*") wildcard = accepted;
+  }
+  return wildcard === true;
+}
 
 function withGzip(response: PublicWebResponse): PublicWebResponse {
   if (Buffer.byteLength(response.body) < GZIP_MIN_BYTES) return response;
@@ -398,9 +429,18 @@ interface SitemapScan {
   complete: boolean;
 }
 
-async function sitemapProfiles(
-  repository: PublicWebRepository,
-): Promise<SitemapScan> {
+async function sitemapProfiles(repository: PublicWebRepository): Promise<SitemapScan> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`sitemap scan exceeded ${SITEMAP_SCAN_DEADLINE_MS} ms`)),
+      SITEMAP_SCAN_DEADLINE_MS,
+    );
+  });
+  return Promise.race([scanSitemapProfiles(repository), deadline]).finally(() => clearTimeout(timer));
+}
+
+async function scanSitemapProfiles(repository: PublicWebRepository): Promise<SitemapScan> {
   const startedAt = Date.now();
   const discoveries = await repository.listDiscoveries(SITEMAP_MAX_PROFILES);
   if (discoveries.length >= SITEMAP_MAX_PROFILES) {
@@ -543,7 +583,26 @@ export async function resolvePublicWebRequest(
   }
 
   if (request.path === "/sitemap.xml") {
-    const scan = await sitemapProfiles(repository);
+    // A failed or empty scan must resolve, not reject: the response cache
+    // memoises only settled values, and a sitemap miss is the one load
+    // whose cost is not one read (SEC-090).
+    const scan = await sitemapProfiles(repository).catch((error: unknown) => {
+      logger.error("publicweb.sitemap.failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (scan === null || (!scan.complete && scan.entries.length === 0)) {
+      return {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+          "Retry-After": "300",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body: "Sitemap temporarily unavailable.\n",
+      };
+    }
     return {
       status: 200,
       headers: {
@@ -647,7 +706,7 @@ export const publicweb = onRequest(
     const web = {
       method: request.method,
       path: request.path,
-      acceptsGzip: /\bgzip\b/.test(String(request.headers["accept-encoding"] ?? "")),
+      acceptsGzip: acceptsGzip(request.header("accept-encoding")),
     };
     const encoded = encodeResponse(web, await cachedPublicWebResponse(
       web,

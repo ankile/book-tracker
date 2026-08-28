@@ -62,7 +62,7 @@ import type {
   ProfileView,
 } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
-import { resolveProfileView } from '../utils/profileRead.ts';
+import { assertProfileViewFor, resolveProfileView } from '../utils/profileRead.ts';
 import {
   decodeAuthor,
   decodeBook,
@@ -361,7 +361,9 @@ function resolveAuthorIds(batch: WriteBatch, userId: string, chips: AuthorChip[]
 // emulated Hosting stack; the content-type check turns that into a clear
 // error instead of a JSON parse failure.
 async function fetchPublicProfile(username: string): Promise<ProfileView | null> {
-  const response = await fetch(`/profiles/${encodeURIComponent(username)}.json`);
+  // credentials: 'omit' — the CDN varies on cookie, so a first-party cookie
+  // would turn the shared cache entry into one per viewer (SEC-092).
+  const response = await fetch(`/profiles/${encodeURIComponent(username)}.json`, { credentials: 'omit' });
   if (response.status === 404) return null;
   if (!response.ok) {
     throw new Error(`Public profile request failed with status ${response.status}.`);
@@ -378,8 +380,14 @@ async function fetchPublicProfile(username: string): Promise<ProfileView | null>
   // broken (error banner + a firestore.decode_failed row written under the
   // viewer's uid). A stranger's malformed public profile must fail only
   // the page it belongs to — the throw is handled by the profile route.
-  return decodeProfileView(payload, `profiles/${username}.json`);
+  return assertProfileViewFor(decodeProfileView(payload, `profiles/${username}.json`), username);
 }
+
+// The signed-in user's own profile username as last reported by the
+// getMyProfile listener (which the app layout keeps attached): undefined
+// until it has answered, null when they have no profile. Lets getProfile
+// skip a Firestore read that rules would deny for someone else's page.
+const ownProfileUsernames = new Map<string, string | null>();
 
 class Database {
   // Returns a Svelte store that listens to the user document.
@@ -467,6 +475,7 @@ class Database {
 
       return onSnapshot(q, (snapshot) => {
         const profileDoc = snapshot.docs[0];
+        ownProfileUsernames.set(userId, profileDoc ? profileDoc.id : null);
         set(profileDoc
           ? decodeStored(
             () => decodeProfile(profileDoc.id, profileDoc.data(), profileDoc.ref.path),
@@ -478,17 +487,23 @@ class Database {
 
   // One-shot read for the /profiles/<username> page; null when the profile
   // doesn't exist or isn't visible to this viewer, and the two are
-  // deliberately indistinguishable (username existence must not leak).
-  // Public profiles are served by the publicweb function as
-  // /profiles/<username>.json — CDN- and instance-cached, no uid on the
-  // wire — so a viewer never reads the raw document (SEC-019); the rules
-  // allow profile gets only to the owner. A signed-in viewer asks Firestore
-  // first: that succeeds only for their own profile, public or private, and
-  // gives the owner a fresh copy instead of a cached one. No listener — a
-  // shared link is a snapshot view.
+  // deliberately indistinguishable on every read path (a create attempt is
+  // the one place a taken username is distinguishable from a free one —
+  // first-writer-wins needs that). Public profiles are served by the
+  // publicweb function as /profiles/<username>.json — CDN- and
+  // instance-cached, no uid on the wire — so a stranger never reads the
+  // raw document (SEC-019); the rules allow profile gets only to the owner.
+  // A signed-in viewer asks Firestore first unless their own listener has
+  // already shown the username is not theirs: the own read succeeds only
+  // for their own profile, public or private, and gives the owner a fresh
+  // copy instead of a cached one. No listener — a shared link is a snapshot
+  // view.
   static getProfile(username: string): Promise<ProfileView | null> {
+    const viewer = auth.currentUser;
+    const own = viewer === null ? null : ownProfileUsernames.get(viewer.uid);
+    const mayOwn = viewer !== null && (own === undefined || own === username);
     return resolveProfileView(
-      auth.currentUser !== null,
+      mayOwn,
       () => Database.getOwnProfile(username),
       () => fetchPublicProfile(username),
     );
