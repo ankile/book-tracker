@@ -91,7 +91,8 @@
       ".DS_Store",
       "**/.DS_Store",
       ".gitignore",
-      ".env*"
+      ".env*",
+      ".npmrc"
     ]
   },
   "emulators": {

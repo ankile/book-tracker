@@ -196,7 +196,7 @@
 </style>
 
 {#if profileLoadFailed}
-  <p class="status-message">This profile could not be loaded. Try again after reconnecting.</p>
+  <p class="status-message">This profile could not be loaded.</p>
 {:else if profile === undefined}
   <p class="status-message">Loading…</p>
 {:else if profile === null}

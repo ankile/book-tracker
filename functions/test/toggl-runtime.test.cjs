@@ -994,7 +994,12 @@ test("the Functions emulator starts and stops using Firestore state only", async
 
 test("savetoken validates Toggl responses and stores the selected project", async (t) => {
   const writes = [];
-  const userRef = {set: async (value, options) => writes.push({value, options})};
+  let exists = true;
+  const userRef = {
+    get: async () => ({exists}),
+    update: async (value) => writes.push({value}),
+    set: async () => assert.fail("savetoken must not create a user document"),
+  };
   t.mock.method(db, "doc", (path) => {
     assert.equal(path, "users/owner");
     return userRef;
@@ -1018,15 +1023,25 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     value: {
       toggl: {apiToken: "valid-token", workspaceId: 6, projectId: 7},
     },
-    options: {merge: true},
   }]);
   assert.equal(requested.length, 2);
+
+  // A deleted account's still-valid token cannot recreate its user document.
+  exists = false;
+  await assert.rejects(
+    deployed.toggl.savetoken.run({token: "valid-token"}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(writes.length, 1);
 });
 
 test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
   enableFunctionsEmulator(t);
   const writes = [];
-  const userRef = {set: async (value, options) => writes.push({value, options})};
+  const userRef = {
+    get: async () => ({exists: true}),
+    update: async (value) => writes.push({value}),
+  };
   t.mock.method(db, "doc", (path) => {
     assert.equal(path, "users/owner");
     return userRef;
@@ -1044,6 +1059,5 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
         projectId: 900002,
       },
     },
-    options: {merge: true},
   }]);
 });

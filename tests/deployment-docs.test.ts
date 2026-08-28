@@ -153,9 +153,10 @@ test('every gcloud command in the runbooks names the project and the account', a
   const commands = `${readme}\n${migrations}`
     .replace(/\\\n\s*/g, ' ')
     .split('\n')
-    .filter((line) => /(^|[`(\s])gcloud\s+\w/.test(line) && !/^\s*(#|-|\*|>)/.test(line.replace(/^[\s`(]+/, '')));
+    .filter((line) => /(^|[`(\s])gcloud\s+\w/.test(line) && !/^\s*(#|>)/.test(line.replace(/^[\s`(]+/, '')));
   assert.ok(commands.length >= 3, 'expected the runbooks to document gcloud commands');
   for (const line of commands) {
     assert.match(line, /--project book-tracker-d8f24/, `gcloud without --project (the workstation default is another project): ${line.trim()}`);
+    assert.match(line, /--account=lars\.ankile@gmail\.com/, `gcloud without --account: ${line.trim()}`);
   }
 });

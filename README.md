@@ -388,12 +388,14 @@ Detection (2026-08-28): two content-matching uptime checks through
 15 min — it must list `lars`) and alert policies for their failure,
 `publicweb` 5xx (designed 503s separately, once a day at most),
 `PERMISSION_DENIED` at ERROR in any gen-1 or gen-2 function, gen-1 function
-errors, `publicweb.sitemap.truncated`/`.skip`, and Pub/Sub undelivered
-messages on the two Eventarc subscriptions (eight policies) — all to the
-owner's email channel. The uptime and Pub/Sub policies have no
+errors, `publicweb.sitemap.truncated`/`.skip`, `admin-overview` denials,
+and Pub/Sub undelivered messages on the two Eventarc subscriptions (nine
+policies) — all to the owner's email channel. The uptime and Pub/Sub policies have no
 notification rate limit; the log-match ones notify at most hourly (the
 designed-503 one daily). The sitemap check alone costs up to 2 instances ×
-24 scans × 1000 reads ≈ 48k Firestore reads/day at the marker cap. Deploys: build, **commit the artifacts**, then deploy — the Hosting
+24 scans × 1000 reads ≈ 48k Firestore reads/day at the marker cap while
+scans complete; a scan cut short by its 20 s budget is retried every five
+minutes instead (≈ 576k reads/day worst case). Deploys: build, **commit the artifacts**, then deploy — the Hosting
 predeploy re-verifies the committed build and fails on drift; the functions
 predeploy runs `npm ci` first. Always use the pinned CLI (`npm exec
 --package firebase-tools@15.24.0`), never `npx -y firebase-tools`.
@@ -486,6 +488,32 @@ deploys `publicweb` to production (the rewrite is pinned) and leaves a
 publicly reachable `fh-<tag>---…run.app` origin that outlives the channel
 (SEC-020/SEC-022). Test signed-out behaviour with `npm run preview` or the
 emulators, and signed-in behaviour against the emulator suite.
+
+### Abusive or compromised accounts
+
+Deleting an account is the wrong first move: a Firebase ID token stays
+valid for up to an hour after the user is deleted, the rules only require
+a signed-in identity to create public profiles, and once the account is
+gone no client can ever delete what that identity created (only the Admin
+SDK can). Self-service deletion is disabled in Auth
+(`client.permissions.disabledUserDeletion`), so every deletion is an
+operator action, in this order:
+
+1. Disable the account (Firebase console → Authentication → Disable, or
+   `getAuth().updateUser(uid, {disabled: true})`).
+2. Revoke its sessions: `getAuth().revokeRefreshTokens(uid)`.
+3. Wait at least one hour for the last ID token to expire.
+4. Only then delete the account; `deleteUserDocument` removes the user
+   document, its profiles and their markers. Subcollections (`books`,
+   `authors`, `updates`, `togglQueue`, `timerLifecycle`) remain until
+   SEC-006 lands — clean them with the Admin SDK if needed.
+5. Check `/sitemap.xml` and `profiles` for documents whose `uid` no longer
+   exists in Auth (the admin overview does not list them).
+
+An account can also lose `/admin` access by changing its email — the
+verified flag resets and the app has no verification flow yet; re-verify
+with `getAuth().updateUser(uid, {emailVerified: true})` after confirming
+the address out of band.
 
 ### Deploy Functions Only
 

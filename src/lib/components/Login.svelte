@@ -147,12 +147,14 @@
     }}>
     <div class="column hover">
       <label for="email">Email address</label>
-      <input id="email" placeholder="Email" type="email" bind:value={email} required />
+      <input id="email" name="email" placeholder="Email" type="email" autocomplete="email" bind:value={email} required />
       <label for="password">Password</label>
       <input
         id="password"
+        name="password"
         placeholder="Password"
         type="password"
+        autocomplete={login ? 'current-password' : 'new-password'}
         required
         minlength={login ? undefined : 12}
         bind:value={password} />

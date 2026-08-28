@@ -68,19 +68,23 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // small batches so at most a batch of ~0.7 MB documents is in memory at
 // once; the scan gives up after SITEMAP_SCAN_BUDGET_MS and serves what it
 // has rather than time out (a timed-out load is never memoised and would
-// be retried on every request) — a cut-short sitemap is memoised only
-// briefly, never for the hour; and the finished sitemap is pinned in its
+// be retried on every request) — a cut-short sitemap never replaces a
+// fresh complete one and on its own is held for five minutes, not the
+// hour, so the degraded worst case is ≈ 288 scans/day/instance; and the
+// finished sitemap is pinned in its
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
 // every 15 minutes through the CDN, so the memo TTL — not the check — sets
 // the floor: one scan per instance per hour, ≤ ~50k reads/day across both
 // instances at the cap. A sitemap can therefore lag a privacy change by
 // up to an hour (+ stale allowance + CDN); profiles pages do not. Past the
-// cap or the time budget the sitemap is partial and says so in the log.
+// cap the sitemap is deterministically truncated (oldest markers win);
+// past the time budget it is marked partial. Both say so in the log.
 export const SITEMAP_MAX_PROFILES = 1_000;
 export const SITEMAP_READ_CONCURRENCY = 25;
 export const SITEMAP_SCAN_BUDGET_MS = 20_000;
 const SITEMAP_MEMO_TTL_MS = 3_600_000;
+const SITEMAP_PARTIAL_MEMO_TTL_MS = 300_000;
 
 interface StoredDocument {
   id: string;
@@ -103,8 +107,8 @@ export interface PublicWebResponse {
   headers: Record<string, string>;
   body: string;
   // A 200 that does not carry everything it should (a sitemap cut short by
-  // its time budget). Memoised briefly like a 404, never retained, never
-  // pinned — the next miss retries the full scan.
+  // its time budget). Never retained; for the pinned sitemap key it is a
+  // degraded value — see TtlCacheOptions.pinnedDegradedTtlMs.
   partial?: boolean;
 }
 
@@ -158,6 +162,12 @@ export interface TtlCacheOptions<T> {
   // a flood of cheap 200s must not be able to evict. Defaults to none.
   pin?: (_key: string) => boolean;
   pinnedTtlMs?: number;
+  // A pinned key whose load is not retained (a degraded value, such as a
+  // sitemap cut short by its time budget) never displaces a fresh retained
+  // value; on its own it is held for pinnedDegradedTtlMs (default ttlMs)
+  // so a run of degraded loads costs one reload per that interval, not one
+  // per request.
+  pinnedDegradedTtlMs?: number;
   now?: () => number;
 }
 
@@ -170,6 +180,7 @@ export interface TtlCache<T> {
 interface CacheEntry<T> {
   loadedAt: number;
   value: T;
+  degraded?: boolean;
 }
 
 // Per-instance memo. An entry is fresh for ttlMs; a hit refreshes recency
@@ -189,6 +200,9 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
   const retain = options.retain ?? (() => true);
   const pin = options.pin ?? (() => false);
   const pinnedTtlMs = options.pinnedTtlMs ?? options.ttlMs;
+  const pinnedDegradedTtlMs = options.pinnedDegradedTtlMs ?? options.ttlMs;
+  const pinnedFreshMs = (entry: CacheEntry<T>): number =>
+    entry.degraded === true ? pinnedDegradedTtlMs : pinnedTtlMs;
   const staleAllowanceMs = options.staleTtlMs - options.ttlMs;
   const retained = new Map<string, CacheEntry<T>>();
   const pinned = new Map<string, CacheEntry<T>>();
@@ -215,7 +229,7 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
     get(key, load) {
       const at = now();
       const held = pinned.get(key);
-      if (held !== undefined && held.loadedAt + pinnedTtlMs > at) return Promise.resolve(held.value);
+      if (held !== undefined && held.loadedAt + pinnedFreshMs(held) > at) return Promise.resolve(held.value);
       const kept = retained.get(key);
       if (kept !== undefined && kept.loadedAt + options.ttlMs > at) return touch(retained, key, kept);
       const passing = transient.get(key);
@@ -227,7 +241,7 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
         misses = 0;
       }
       if (misses >= options.maxMissesPerWindow) {
-        if (held !== undefined && held.loadedAt + pinnedTtlMs + staleAllowanceMs > at) {
+        if (held !== undefined && held.loadedAt + pinnedFreshMs(held) + staleAllowanceMs > at) {
           return Promise.resolve(held.value);
         }
         if (kept !== undefined && kept.loadedAt + options.staleTtlMs > at) return touch(retained, key, kept);
@@ -240,9 +254,13 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
           transient.delete(key);
           if (pin(key)) pinned.set(key, entry);
           else insert(retained, options.maxEntries, key, entry);
+        } else if (pin(key)) {
+          const current = pinned.get(key);
+          if (current === undefined || current.degraded === true || current.loadedAt + pinnedTtlMs <= at) {
+            pinned.set(key, {...entry, degraded: true});
+          }
         } else {
           retained.delete(key);
-          pinned.delete(key);
           insert(transient, options.maxTransientEntries, key, entry);
         }
         return loaded;
@@ -562,6 +580,7 @@ const responseCache = createTtlCache<PublicWebResponse>({
   windowMs: MISS_BUDGET_WINDOW_MS,
   pin: (path) => path === "/sitemap.xml",
   pinnedTtlMs: SITEMAP_MEMO_TTL_MS,
+  pinnedDegradedTtlMs: SITEMAP_PARTIAL_MEMO_TTL_MS,
 });
 
 // maxInstances bounds what a crawler or request flood can cost in

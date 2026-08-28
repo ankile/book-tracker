@@ -302,13 +302,21 @@ exports.savetoken = functions
       );
     }
 
-    await db.doc(`users/${uid}`).set({
+    // update, never a merge-set: the user document is created only by the
+    // sign-up trigger, and an identity whose account has been deleted keeps
+    // a valid ID token for up to an hour — it must not be able to recreate
+    // its document (and re-enable queue processing) through this callable.
+    const userRef = db.doc(`users/${uid}`);
+    if (!(await userRef.get()).exists) {
+      throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
+    }
+    await userRef.update({
       toggl: {
         apiToken: token,
         workspaceId: project.workspaceId,
         projectId: project.id,
       },
-    }, {merge: true});
+    });
 
     return {workspaceId: project.workspaceId, projectId: project.id};
   });

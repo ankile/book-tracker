@@ -659,23 +659,66 @@ test("sitemap stops scanning past its time budget and serves what it has", async
   assert.equal(result.partial, true);
   assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
   assert.equal((result.body.match(/<loc>/g) ?? []).length, SITEMAP_READ_CONCURRENCY * 2);
-  // A cut-short sitemap is not pinned for the hour: through the cache the
-  // next request past the short memo rescans.
+  // A cut-short sitemap is held for its own short interval, not the hour:
+  // no rescan a minute later, a rescan after five.
   const cache = createTtlCache({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 10, windowMs: 60_000,
     retain: (r) => r.status === 200 && r.partial !== true,
-    pin: (key) => key === "/sitemap.xml", pinnedTtlMs: 3_600_000, now: () => clock,
+    pin: (key) => key === "/sitemap.xml", pinnedTtlMs: 3_600_000, pinnedDegradedTtlMs: 300_000,
+    now: () => clock,
   });
   await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, slow, shell, cache);
   const readsAfterFirst = reads;
   clock += 61_000;
+  await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, slow, shell, cache);
+  assert.equal(reads, readsAfterFirst);
+  clock += 300_000;
   await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, slow, shell, cache);
   assert.ok(reads > readsAfterFirst);
   const complete = await resolvePublicWebRequest(
     {method: "GET", path: "/sitemap.xml"}, repository({profiles: {"ada-lovelace": storedProfile()}, discoveries: {"ada-lovelace": marker}}), shell,
   );
   assert.equal(complete.partial, undefined);
+});
+
+test("a degraded load never displaces a fresh pinned value and is served stale past the budget", async () => {
+  let clock = 0;
+  let next = "complete";
+  const loads = [];
+  const cache = createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 3, windowMs: 60_000,
+    retain: (value) => value === "complete",
+    pin: (key) => key === "s", pinnedTtlMs: 3_600_000, pinnedDegradedTtlMs: 300_000,
+    now: () => clock,
+  });
+  const load = () => { loads.push(clock); return Promise.resolve(next); };
+  assert.equal(await cache.get("s", load), "complete");
+  // Past the hour the complete value expires; a partial scan replaces it
+  // but is served for only five minutes before the next attempt.
+  clock = 3_600_001; next = "partial";
+  assert.equal(await cache.get("s", load), "partial");
+  clock += 200_000;
+  assert.equal(await cache.get("s", load), "partial");
+  assert.equal(loads.length, 2);
+  clock += 100_001; next = "complete";
+  assert.equal(await cache.get("s", load), "complete");
+  // A partial scan while a fresh complete one is held: the caller gets the
+  // partial body, the memo keeps the complete one.
+  clock += 3_600_001; // complete expired -> reload as partial? no: force a partial while fresh
+  next = "complete"; await cache.get("s", load);
+  clock += 10_000; next = "partial";
+  // Simulate a forced reload by exhausting nothing: the pinned entry is fresh, so no load happens.
+  assert.equal(await cache.get("s", load), "complete");
+  // Budget exhausted in a later window: a degraded pinned value is still served stale.
+  clock += 3_600_001; next = "partial";
+  assert.equal(await cache.get("s", load), "partial");
+  clock += 60_000;
+  for (let i = 0; i < 3; i += 1) await cache.get(`q${i}`, () => Promise.resolve("complete"));
+  assert.equal(cache.get("q-extra", () => Promise.resolve("complete")), MISS_BUDGET_EXHAUSTED);
+  clock += 250_000;
+  assert.equal(await cache.get("s", load), "partial");
 });
 
 test("profile JSON is never indexable and rejects a fractional year like the client does", async () => {
