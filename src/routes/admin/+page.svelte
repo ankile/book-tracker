@@ -248,8 +248,10 @@
       <p class="card-subtext">
         Warnings and errors from the last {overview.issueWindowDays} days,
         newest first. App events and anonymous sign-in failures are fetched
-        under separate caps, so a flood of anonymous rows cannot push app
-        errors out of view.
+        under separate caps, and each account gets at most ten rows per
+        cap, so no single source can push the rest out of view. Anonymous
+        rows are no longer written; the ones still listed predate that
+        change and expire with the 90-day retention.
       </p>
       {#if truncation.length > 0}
         <p class="truncated">

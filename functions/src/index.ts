@@ -126,5 +126,6 @@ exports.deleteUserDocument = functions
 
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
+exports.telemetry = require("./telemetry");
 exports.toggl = require("./toggl");
 exports.publicweb = publicweb;

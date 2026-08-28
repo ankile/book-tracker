@@ -416,6 +416,59 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
   );
 });
 
+test("issue reports are shaped, allowlisted and bounded before storage", () => {
+  const valid = {
+    level: "error",
+    event: "firestore.listener_failed",
+    message: "Couldn't load books",
+    code: "permission-denied",
+  };
+  assert.deepEqual(decoders.decodeIssueReport(valid), valid);
+  assert.deepEqual(
+    decoders.decodeIssueReport({...valid, code: null}),
+    {...valid, code: null},
+  );
+  assert.deepEqual(
+    decoders.CLIENT_ISSUE_EVENTS,
+    [
+      "firestore.listener_failed",
+      "firestore.decode_failed",
+      "firestore.write_failed",
+      "toggl.sync_stuck",
+    ],
+  );
+  for (const [label, broken] of [
+    ["server-only event", {...valid, event: "toggl.sync_failed"}],
+    ["retired anonymous event", {...valid, event: "auth.sign_in_failed"}],
+    ["unknown event", {...valid, event: "anything"}],
+    ["non-string event", {...valid, event: 7}],
+    ["level outside warn/error", {...valid, level: "info"}],
+    ["empty message", {...valid, message: ""}],
+    ["oversized message", {...valid, message: "x".repeat(1001)}],
+    ["oversized code", {...valid, code: "x".repeat(101)}],
+    ["undefined code", {...valid, code: undefined}],
+    ["numeric code", {...valid, code: 7}],
+    ["missing code", {level: "warn", event: "toggl.sync_stuck", message: "m"}],
+    ["detail field", {...valid, detail: {email: "a@example.test"}}],
+    ["uid field", {...valid, uid: "someone-else"}],
+    ["createdAt field", {...valid, createdAt: "2999-01-01T00:00:00Z"}],
+    ["array", [valid]],
+    ["null", null],
+  ]) {
+    assert.throws(
+      () => decoders.decodeIssueReport(broken),
+      decoders.DataDecodeError,
+      label,
+    );
+  }
+  assert.throws(
+    () => decoders.decodeIssueReport({...valid, event: "auth.sign_in_failed"}, (message) => {
+      throw new RangeError(message);
+    }),
+    RangeError,
+  );
+});
+
 test("admin issue decoding skips malformed historical rows", () => {
   const createdAt = Timestamp.now();
   assert.deepEqual(decoders.decodeStoredIssue({

@@ -1,7 +1,6 @@
 <script lang="ts">
   import Button from "./Button.svelte";
   import { signIn, signUp } from "$lib/firebase/auth.ts";
-  import { logIssue } from "$lib/firebase/db.ts";
   import {
     runAuthAttempt,
     type AuthAttemptState,
@@ -14,15 +13,11 @@
   let authAttempt = $state<AuthAttemptState>({ pending: false });
 
   async function signInOrUp() {
-    const operation = login ? 'sign_in' : 'sign_up';
     errorMessage = "";
-    const result = await runAuthAttempt(authAttempt, operation, () => (
-      operation === 'sign_in'
-        ? signIn(email, password)
-        : signUp(email, password)
+    const result = await runAuthAttempt(authAttempt, () => (
+      login ? signIn(email, password) : signUp(email, password)
     ));
     if (result.status === 'failed') {
-      if (result.failure.issue) logIssue(result.failure.issue);
       errorMessage = result.failure.userMessage;
     }
   }

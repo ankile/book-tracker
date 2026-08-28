@@ -1,5 +1,5 @@
 import * as functions from "firebase-functions/v1";
-import {getFirestore, Timestamp} from "firebase-admin/firestore";
+import {getFirestore} from "firebase-admin/firestore";
 import {defineJsonSecret} from "firebase-functions/params";
 import {env} from "node:process";
 import {
@@ -7,6 +7,7 @@ import {
   decodeIsbnLookupRequest,
   GoogleVolumeInfo,
 } from "./decoders";
+import {consumeQuota} from "./quota";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 interface FunctionConfig {
@@ -27,28 +28,14 @@ const invalidArgument = (message: string): never => {
   throw new functions.https.HttpsError("invalid-argument", message);
 };
 
-async function consumeLookupQuota(uid: string): Promise<void> {
-  const quotaRef = db.doc(`users/${uid}/functionQuotas/booksApi`);
-  const now = Timestamp.now();
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(quotaRef);
-    const data = snap.data();
-    const windowStartedAt = data?.windowStartedAt;
-    const count = data?.count;
-    if (!(windowStartedAt instanceof Timestamp) ||
-        typeof count !== "number" || !Number.isInteger(count) || count < 0 ||
-        windowStartedAt.toMillis() <= now.toMillis() - LOOKUP_WINDOW_MS) {
-      tx.set(quotaRef, {windowStartedAt: now, count: 1});
-      return;
-    }
-    if (count >= LOOKUPS_PER_WINDOW) {
-      throw new functions.https.HttpsError(
-        "resource-exhausted",
-        "Google Books lookup limit reached. Try again later.",
-      );
-    }
-    tx.update(quotaRef, {count: count + 1});
-  });
+function consumeLookupQuota(uid: string): Promise<void> {
+  return consumeQuota(
+    db,
+    `users/${uid}/functionQuotas/booksApi`,
+    LOOKUPS_PER_WINDOW,
+    LOOKUP_WINDOW_MS,
+    "Google Books lookup limit reached. Try again later.",
+  );
 }
 
 // Callable, not onRequest: this proxies a metered API key, so it must not

@@ -1,18 +1,11 @@
 import { FirebaseError } from 'firebase/app';
 
-export type AuthOperation = 'sign_in' | 'sign_up';
-
-export interface AuthFailureIssue {
-  level: 'warn' | 'error';
-  event: `auth.${AuthOperation}_failed`;
-  message: string;
-  code: string;
-  detail: null;
-}
-
+// Only the copy shown to the user. Failed sign-ins are deliberately not
+// reported anywhere: before a session exists there is no caller to pin a
+// row to, so recording them meant an unauthenticated write path (SEC-001),
+// and the raw error text can carry what the user typed.
 export interface AuthFailureDescription {
   userMessage: string;
-  issue: AuthFailureIssue | null;
 }
 
 export interface AuthAttemptState {
@@ -41,38 +34,15 @@ const AUTH_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
   'auth/wrong-password': 'The email address or password is incorrect.',
 };
 
-export function describeAuthFailure(
-  error: unknown,
-  operation: AuthOperation,
-): AuthFailureDescription {
+export function describeAuthFailure(error: unknown): AuthFailureDescription {
   if (!(error instanceof FirebaseError)) {
-    return {
-      userMessage: GENERIC_AUTH_FAILURE,
-      issue: {
-        level: 'error',
-        event: `auth.${operation}_failed`,
-        message: 'Authentication request failed outside Firebase.',
-        code: 'non-firebase-error',
-        detail: null,
-      },
-    };
+    return { userMessage: GENERIC_AUTH_FAILURE };
   }
-
-  return {
-    userMessage: AUTH_FAILURE_MESSAGES[error.code] ?? GENERIC_AUTH_FAILURE,
-    issue: {
-      level: 'warn',
-      event: `auth.${operation}_failed`,
-      message: 'Authentication request failed.',
-      code: error.code,
-      detail: null,
-    },
-  };
+  return { userMessage: AUTH_FAILURE_MESSAGES[error.code] ?? GENERIC_AUTH_FAILURE };
 }
 
 export async function runAuthAttempt(
   state: AuthAttemptState,
-  operation: AuthOperation,
   authenticate: () => Promise<void>,
 ): Promise<AuthAttemptResult> {
   if (state.pending) return { status: 'ignored' };
@@ -81,7 +51,7 @@ export async function runAuthAttempt(
     await authenticate();
     return { status: 'succeeded' };
   } catch (error) {
-    return { status: 'failed', failure: describeAuthFailure(error, operation) };
+    return { status: 'failed', failure: describeAuthFailure(error) };
   } finally {
     state.pending = false;
   }

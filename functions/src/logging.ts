@@ -1,10 +1,13 @@
 import {getFirestore, Timestamp} from "firebase-admin/firestore";
 
-// Durable issue log shared with the client (src/lib/firebase/db.ts writes
-// the same collection under rules validation): every row is a warn/error
-// worth surfacing, which is what lets the admin overview read the
-// collection wholesale with only a time filter. Never put secrets
-// (passwords, tokens, MFA codes) in message/code/detail.
+// Durable issue log, Admin-SDK-only since SEC-001: firestore.rules has no
+// logEvents match block, so every row comes through here — the triggers
+// directly, clients via the telemetry-reportissue callable (quota-checked
+// and allowlisted before it reaches this function). Every row is a
+// warn/error worth surfacing, which is what lets the admin overview read
+// the collection wholesale with only a time filter. Never put secrets
+// (passwords, tokens, MFA codes) in message/code; detail is always null
+// and exists only so historical rows and this one decode alike.
 interface Issue {
   level: "warn" | "error";
   event: string;
@@ -13,8 +16,8 @@ interface Issue {
   uid?: string;
 }
 
-// Kept in step with ISSUE_RETENTION_DAYS in src/lib/firebase/db.ts; the TTL
-// policy on expiresAt is what actually bounds the collection's growth.
+// The TTL policy on expiresAt is what actually bounds the collection's
+// growth; the per-user callable quota bounds how fast it fills.
 const RETENTION_DAYS = 90;
 
 export async function logIssue(issue: Issue): Promise<void> {

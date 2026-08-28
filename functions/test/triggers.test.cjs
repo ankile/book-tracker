@@ -17,10 +17,12 @@ test("preserves the deployed function export names", () => {
     "deleteUserDocument",
     "deletebookupdates",
     "publicweb",
+    "telemetry",
     "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.admin), ["overview"]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
+  assert.deepEqual(Object.keys(functions.telemetry), ["reportissue"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "clearstopping",
     "cleartoken",
@@ -40,6 +42,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
+    functions.telemetry.reportissue,
     functions.toggl.savetoken,
     functions.toggl.clearstopping,
     functions.toggl.start,
@@ -293,6 +296,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     functions.deleteUserDocument,
     functions.deletebookupdates,
     functions.publicweb,
+    functions.telemetry.reportissue,
     ...Object.values(functions.toggl),
   ];
   const boundKeys = deployedFunctions.flatMap((deployedFunction) =>
@@ -327,6 +331,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     deleteUserDocument: functions.deleteUserDocument,
     "admin.overview": functions.admin.overview,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
+    "telemetry.reportissue": functions.telemetry.reportissue,
     "toggl.savetoken": functions.toggl.savetoken,
     "toggl.start": functions.toggl.start,
     "toggl.stop": functions.toggl.stop,
@@ -395,6 +400,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
   const caps = {
     "functions.admin.overview": 2,
     "functions.booksapi.lookupisbn": 10,
+    "functions.telemetry.reportissue": 10,
     "functions.toggl.savetoken": 10,
     "functions.toggl.start": 10,
     "functions.toggl.stop": 10,

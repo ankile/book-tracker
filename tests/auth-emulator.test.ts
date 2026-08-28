@@ -31,8 +31,7 @@ test('a real Auth emulator rejection reaches the safe failure classifier', async
   );
 
   assert.ok(failure);
-  const description = describeAuthFailure(failure, 'sign_in');
-  assert.equal(description.userMessage, 'The email address or password is incorrect.');
-  assert.equal(description.issue?.event, 'auth.sign_in_failed');
-  assert.equal(description.issue?.detail, null);
+  assert.deepEqual(describeAuthFailure(failure), {
+    userMessage: 'The email address or password is incorrect.',
+  });
 });

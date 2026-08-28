@@ -29,6 +29,7 @@ import { derived, type Readable, type Unsubscriber } from 'svelte/store';
 import { FirebaseError } from 'firebase/app';
 import { app } from './index.ts';
 import { auth } from './auth.ts';
+import { reportIssue, type ClientIssueEvent } from './functions.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { isFinished } from '../utils/finished.ts';
@@ -136,55 +137,35 @@ function cachedStore<T>(
   return store;
 }
 
-// How long a logged issue is kept. Written as an absolute expiry because
-// that is what a Firestore TTL policy consumes: the policy deletes a doc
-// once the timestamp in its TTL field has passed.
-const ISSUE_RETENTION_DAYS = 90;
-
-// Persist a warn/error event to the logEvents collection, where the admin
-// overview surfaces it. Rules pin uid to the current session (null when
-// signed out). Pre-auth failures carry no user-entered identifier because an
-// address-shaped value could still be a password. Never pass secrets in
-// message/code/detail, and prefer operation
-// names over user content: the operator reads this log, so another user's
-// book titles do not belong in it. Fire-and-forget with a console-only
-// catch: the logger reporting the app's failures must not feed back into
-// addError, or a Firestore outage would recurse.
-//
-// createdAt is serverTimestamp(), not a device clock, because the admin
-// panel orders by it: a client-chosen value lets anyone pin rows to the top
-// of that view forever, and a skewed clock silently drops honest rows out
-// of the query window. The cost is that an issue logged offline is stamped
-// when the queue flushes rather than when it happened — the right trade for
-// a feed whose ordering has to be trustworthy.
 interface IssueInput {
   level: 'warn' | 'error';
-  event: string;
+  event: ClientIssueEvent;
   message: string;
   code?: string | null;
-  detail?: { email: string } | null;
 }
 
-export function logIssue({
-  level,
-  event,
-  message,
-  code = null,
-  detail = null,
-}: IssueInput): void {
-  addDoc(collection(db, 'logEvents'), {
+// Report a warn/error event to the durable issue log the admin overview
+// surfaces. The row is written by the telemetry-reportissue callable, not
+// by this client: the callable pins uid to the caller, allowlists the event,
+// bounds every field and counts reports per user (twenty an hour), so
+// nothing here can flood the collection or the operator's feed (SEC-001,
+// SEC-038). Signed-out clients report nothing — the only thing they could
+// truthfully say is that their own sign-in failed, and keeping an
+// unauthenticated write path open for that was the SEC-001 hole. Never
+// pass secrets in message/code, and prefer operation names over user
+// content: the operator reads this log, so another user's book titles do
+// not belong in it. Fire-and-forget with a console-only catch: the logger
+// reporting the app's failures must not feed back into addError, or a
+// backend outage would recurse. Timestamps and retention are server-side.
+export function logIssue({ level, event, message, code = null }: IssueInput): void {
+  if (auth.currentUser === null) return;
+  reportIssue({
     level,
-    // Every field is truncated to the cap the rules enforce; one oversized
-    // value would otherwise reject the whole row and lose the event.
-    event: event.slice(0, 100),
+    event,
+    // Truncated to the caps the callable enforces; one oversized value
+    // would otherwise reject the whole report and lose the event.
     message: message.slice(0, 1000),
     code: code === null ? null : String(code).slice(0, 100),
-    uid: auth.currentUser?.uid ?? null,
-    detail: detail?.email ? { email: detail.email.slice(0, 320) } : null,
-    createdAt: serverTimestamp(),
-    expiresAt: Timestamp.fromMillis(
-      Date.now() + ISSUE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-    ),
   }).catch((error) => console.error('logIssue failed', error));
 }
 
@@ -198,15 +179,13 @@ function decodeStored<T>(decode: () => T): T {
     return decode();
   } catch (error) {
     addError('Invalid data.');
-    // Anonymous clients decode public profile JSON, but allowing anonymous
-    // decode telemetry would give anyone a free write-spam endpoint.
-    if (auth.currentUser !== null) {
-      logIssue({
-        level: 'error',
-        event: 'firestore.decode_failed',
-        message: 'Invalid data.',
-      });
-    }
+    // Anonymous clients decode public profile JSON too; logIssue drops the
+    // report when there is no session.
+    logIssue({
+      level: 'error',
+      event: 'firestore.decode_failed',
+      message: 'Invalid data.',
+    });
     throw error;
   }
 }

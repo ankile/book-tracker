@@ -82,6 +82,17 @@ not be reachable unauthenticated. A failure of any single source degrades to
 Goodreads is **not** in the app and should not be added: it sends no CORS
 headers, so a browser cannot call it at all.
 
+Client telemetry takes the same route. Warn/error events (`firestore.*`,
+`toggl.sync_stuck`) go through the `telemetry-reportissue` callable, which
+requires a signed-in caller, allowlists the event, bounds every field, pins
+the uid and allows twenty reports per user per hour
+(`users/{uid}/functionQuotas/issueReports`, Admin-SDK-only); excess is
+refused with `resource-exhausted` and a `telemetry.quota_exceeded` warning
+in the function log. No client can write `logEvents` directly, and failed
+sign-ins are not recorded anywhere (SEC-001, SEC-029, SEC-038). The admin
+overview shows at most ten rows per account within each of its two feed
+budgets.
+
 ### Backfilling existing books
 
 One migration per source, run in numeric order and following the
@@ -400,6 +411,8 @@ errors, `publicweb.sitemap.truncated`/`.skip`, `admin-overview` denials,
 (`publicweb.sitemap.failed` at ERROR marks a refused sitemap — one line
 per five minutes of 503s because the refusal is memoised; the sitemap uptime
 check is the signal that fires, since it fails on any sitemap 503),
+`telemetry.quota_exceeded` at WARN (one account has sent twenty issue
+reports in an hour — a broken client or a deliberate flood; no policy yet),
 and Pub/Sub undelivered messages on the two Eventarc subscriptions (nine
 policies) — all to the owner's email channel. The uptime and Pub/Sub policies have no
 notification rate limit; the log-match ones notify at most hourly (the

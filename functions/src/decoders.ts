@@ -220,6 +220,50 @@ export function decodeIsbnLookupRequest(
   return {isbn: decoded.isbn};
 }
 
+// Client-reported issue (telemetry-reportissue). The event allowlist is the
+// set of subsystems a signed-in client can actually reach; the server-only
+// toggl.sync_failed is written by the trigger itself and would let a client
+// forge a sync failure the operator then investigates. No free-form detail
+// field: an address-shaped value typed before authentication could be a
+// password, and nothing the client knows is worth that risk (SEC-029).
+export const CLIENT_ISSUE_EVENTS = [
+  "firestore.listener_failed",
+  "firestore.decode_failed",
+  "firestore.write_failed",
+  "toggl.sync_stuck",
+] as const;
+
+export type ClientIssueEvent = typeof CLIENT_ISSUE_EVENTS[number];
+
+export interface IssueReport {
+  level: "warn" | "error";
+  event: ClientIssueEvent;
+  message: string;
+  code: string | null;
+}
+
+export function decodeIssueReport(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): IssueReport {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["level", "event", "message", "code"], "request data", fail);
+  const level = decoded.level;
+  if (level !== "warn" && level !== "error") {
+    fail("level must be \"warn\" or \"error\".");
+  }
+  const event = decoded.event;
+  if (typeof event !== "string" ||
+      !(CLIENT_ISSUE_EVENTS as readonly string[]).includes(event)) {
+    fail("event must be one of the client issue events.");
+  }
+  const message = string(decoded.message, "message", fail, 1000);
+  const code = decoded.code === null ?
+    null :
+    string(decoded.code, "code", fail, 100);
+  return {level, event: event as ClientIssueEvent, message, code};
+}
+
 const PROFILE_LINK_TYPES = [
   "twitter", "github", "linkedin", "instagram", "scholar", "goodreads",
   "strava", "homepage", "other",

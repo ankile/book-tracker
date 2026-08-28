@@ -979,62 +979,22 @@ service cloud.firestore {
                      && records.fastestFinish.pageCount is number));
     }
 
-    // Durable issue log read by the admin overview (Admin SDK only — no
-    // client read, so one user's failures are never visible to another).
-    // Create-only so telemetry cannot be scrubbed, and uid is pinned to the
-    // session so rows cannot be attributed to someone else. Anonymous
-    // creates are allowed with uid == null so failed sign-ins before any
-    // session exists still land. They cannot carry detail because an
-    // address-shaped value entered before authentication could be a password.
-    // That path is unauthenticated and therefore spammable, so everything it
-    // can influence is constrained:
-    //
-    //   - createdAt == request.time. The admin panel orders by this field
-    //     and shows a fixed number of rows, so a client-chosen timestamp
-    //     was a blinding attack: rows dated year 9999 pin every slot
-    //     permanently (no client delete exists), and back-dated rows fall
-    //     out of the query window unseen.
-    //   - expiresAt is bounded, so the TTL policy on it caps retention and
-    //     the collection cannot grow without limit. The window is wide
-    //     because a device with a skewed clock must still be able to log.
-    //   - event is an allowlist, and the anonymous set is narrower than
-    //     the authenticated one, so forged rows cannot impersonate app
-    //     subsystems the caller could not actually have reached.
-    //
-    // adminAudit intentionally has no match block: it is written and read
-    // exclusively by the Admin SDK.
-    match /logEvents/{eventId} {
-      allow create: if validIssue()
-                    && (request.auth == null
-                          ? (request.resource.data.uid == null
-                             && request.resource.data.detail == null
-                             && request.resource.data.event in ['auth.sign_in_failed', 'auth.sign_up_failed'])
-                          : (request.resource.data.uid == request.auth.uid
-                             && request.resource.data.event in ['firestore.listener_failed',
-                                                                'firestore.decode_failed',
-                                                                'firestore.write_failed',
-                                                                'toggl.sync_stuck']));
-    }
-
-    function validIssue() {
-      let issue = request.resource.data;
-      return issue.keys().hasAll(['level', 'event', 'message', 'code', 'uid', 'detail', 'createdAt', 'expiresAt'])
-             && issue.keys().hasOnly(['level', 'event', 'message', 'code', 'uid', 'detail', 'createdAt', 'expiresAt'])
-             && issue.level in ['warn', 'error']
-             && issue.event is string
-             && issue.message is string
-             && issue.message.size() <= 1000
-             && (issue.code == null || (issue.code is string && issue.code.size() <= 100))
-             && (issue.detail == null
-                 || (issue.detail is map
-                     && issue.detail.keys().hasOnly(['email'])
-                     && (!issue.detail.keys().hasAny(['email'])
-                         || (issue.detail.email is string && issue.detail.email.size() <= 320))))
-             && issue.createdAt == request.time
-             && issue.expiresAt is timestamp
-             && issue.expiresAt > request.time
-             && issue.expiresAt < request.time + duration.value(120, 'd');
-    }
+    // logEvents (the durable issue log the admin overview reads) and
+    // adminAudit intentionally have no match blocks: both are written and
+    // read exclusively by the Admin SDK. Clients used to create logEvents
+    // rows directly — anonymously for failed sign-ins, and under their own
+    // uid once signed in. The anonymous branch was an unauthenticated write
+    // endpoint anyone could flood (billed writes, billed storage mirrored by
+    // PITR and every backup, billed TTL deletes), and the authenticated one
+    // had no rate limit, so one account could bury the operator's feed
+    // (SEC-001, SEC-038). Signed-in clients now report through the
+    // telemetry-reportissue callable, which allowlists the event, bounds
+    // every field, pins the uid, refuses any free-form detail (SEC-029) and
+    // counts reports per user in users/{uid}/functionQuotas/issueReports —
+    // a document no client rule reaches. Anonymous sign-in failures are no
+    // longer recorded at all: the only thing a signed-out client could
+    // truthfully report was that its own attempt failed, and that signal
+    // was not worth an open write path.
 
     match /{path=**}/updates/{updateId} {
       allow read: if request.auth != null &&

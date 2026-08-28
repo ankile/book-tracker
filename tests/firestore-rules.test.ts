@@ -1451,37 +1451,36 @@ const issue = (uid: string | null, event: string) => ({
   expiresAt: Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000),
 });
 
-test('authenticated clients can report decode failures without opening anonymous telemetry', async () => {
+test('logEvents has no client path at all: telemetry goes through the callable', async () => {
   const owner = environment.authenticatedContext('issue-owner').firestore();
-  await assertSucceeds(setDoc(
+  // The exact row the old rules accepted from a signed-in client.
+  await assertFails(setDoc(
     doc(owner, 'logEvents', 'decode-failure'),
     issue('issue-owner', 'firestore.decode_failed'),
   ));
-  await assertFails(setDoc(
-    doc(owner, 'logEvents', 'forged-decode-failure'),
-    issue('another-owner', 'firestore.decode_failed'),
-  ));
+  await assertFails(getDoc(doc(owner, 'logEvents', 'decode-failure')));
+  await assertFails(getDocs(collection(owner, 'logEvents')));
 
   const anonymous = environment.unauthenticatedContext().firestore();
+  // The exact row the old rules accepted from a signed-out client.
   await assertFails(setDoc(
-    doc(anonymous, 'logEvents', 'anonymous-decode-failure'),
-    issue(null, 'firestore.decode_failed'),
-  ));
-});
-
-test('anonymous auth telemetry contains no pre-auth user input', async () => {
-  const anonymous = environment.unauthenticatedContext().firestore();
-  await assertSucceeds(setDoc(
     doc(anonymous, 'logEvents', 'sign-in-failure'),
     issue(null, 'auth.sign_in_failed'),
   ));
   await assertFails(setDoc(
-    doc(anonymous, 'logEvents', 'sign-up-failure-with-input'),
-    {
-      ...issue(null, 'auth.sign_up_failed'),
-      detail: { email: 'Secret1@example.com' },
-    },
+    doc(anonymous, 'logEvents', 'sign-up-failure'),
+    issue(null, 'auth.sign_up_failed'),
   ));
+  await assertFails(getDocs(collection(anonymous, 'logEvents')));
+});
+
+test('the issue-report quota document is inaccessible to its owner', async () => {
+  const uid = 'issue-quota-owner';
+  const db = environment.authenticatedContext(uid).firestore();
+  const ref = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
+  await assertFails(getDoc(ref));
+  await assertFails(setDoc(ref, {windowStartedAt: Timestamp.now(), count: 0}));
+  await assertFails(deleteDoc(ref));
 });
 
 test('owners can create and read only exact pending Toggl queue payloads', async () => {

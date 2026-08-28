@@ -34,7 +34,7 @@ test("valid issue rows retain decoded fields and resolve identities", () => {
     document("known", validIssue({code: "deadline-exceeded"})),
     document("deleted", validIssue({uid: "deleted"})),
     document("anonymous", validIssue({uid: null, detail: {email: "claim@example.test"}})),
-  ], 10, identities);
+  ], 10, identities, 10);
 
   assert.equal(truncated, false);
   assert.deepEqual(rows.map(({email, emailVerified, malformed}) => ({
@@ -86,6 +86,7 @@ test("every malformed field shape becomes the same fixed placeholder", () => {
     malformedValues.map((value, index) => document(`malformed-${index}`, value)),
     malformedValues.length,
     identities,
+    10,
   ).rows;
 
   assert.equal(rows.length, malformedValues.length);
@@ -123,7 +124,7 @@ test("mapping preserves snapshot order, cardinality, identity, and truncation", 
     document("newest", validIssue({message: "newest"})),
     document("malformed-middle", validIssue({level: "attacker-level"})),
     document("older", validIssue({message: "older"})),
-  ], 2, identities);
+  ], 2, identities, 10);
 
   assert.equal(truncated, true);
   assert.equal(rows[0].message, "newest");
@@ -136,9 +137,48 @@ test("caller-controlled document ids never cross the callable boundary", () => {
   const secretId = "password=Secret1@example.com";
   const rows = mapIssueDocuments([
     document(secretId, validIssue({level: "attacker-level"})),
-  ], 1, identities).rows;
+  ], 1, identities, 10).rows;
 
   assert.equal(rows.length, 1);
   assert.match(rows[0].id, /^[a-f0-9]{64}$/);
   assert.doesNotMatch(JSON.stringify(rows), /Secret1@example\.com/);
+});
+
+test("each account is capped inside a budget and rows without a uid are not", () => {
+  const flood = Array.from({length: 12}, (_, index) =>
+    document(`flood-${index}`, validIssue({uid: "flooder", message: `flood ${index}`})));
+  const {rows, truncated} = mapIssueDocuments([
+    ...flood.slice(0, 6),
+    document("owner-1", validIssue({message: "owner first"})),
+    ...flood.slice(6),
+    document("server", validIssue({uid: null, message: "server row"})),
+    document("owner-2", validIssue({message: "owner second"})),
+    document("malformed", validIssue({level: "attacker-level", uid: "flooder"})),
+  ], 100, identities, 10);
+
+  assert.equal(truncated, true);
+  assert.deepEqual(rows.map((row) => row.message), [
+    ...flood.slice(0, 6).map((_, index) => `flood ${index}`),
+    "owner first",
+    ...flood.slice(6, 10).map((_, index) => `flood ${index + 6}`),
+    "server row",
+    "owner second",
+    "Stored issue record is malformed. Its fields were hidden.",
+  ]);
+  assert.equal(rows.filter((row) => row.uid === "flooder").length, 10);
+});
+
+test("the total limit stops the scan and reports truncation", () => {
+  const {rows, truncated} = mapIssueDocuments([
+    document("a", validIssue({uid: "one"})),
+    document("b", validIssue({uid: "two"})),
+    document("c", validIssue({uid: "three"})),
+  ], 2, identities, 1);
+
+  assert.equal(truncated, true);
+  assert.deepEqual(rows.map((row) => row.uid), ["one", "two"]);
+  assert.equal(mapIssueDocuments([
+    document("a", validIssue({uid: "one"})),
+    document("b", validIssue({uid: "one"})),
+  ], 5, identities, 5).truncated, false);
 });

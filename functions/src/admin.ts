@@ -25,10 +25,15 @@ const ISSUE_WINDOW_DAYS = 14;
 const AUDIT_RETENTION_DAYS = 365;
 
 // Issues are fetched in two independent budgets rather than one ranked
-// list. Anonymous rows come from an unauthenticated write path, so a flood
-// of them would otherwise evict every authenticated row from a single
-// shared limit and blind the panel — which is the one thing it exists to
-// prevent. The event names mirror the allowlists in firestore.rules.
+// list. Anonymous rows came from an unauthenticated write path (closed in
+// SEC-001; the budget stays until the last such row expires under the
+// 90-day TTL, 2026-11-26), so a flood of them would otherwise evict every
+// authenticated row from a single shared limit and blind the panel —
+// which is the one thing it exists to prevent. Within a budget each
+// account is capped as well (ISSUES_PER_UID), and the query scans a
+// window wider than the budget so the cap has rows to fall back on. The
+// event names mirror CLIENT_ISSUE_EVENTS in decoders.ts plus the
+// server-written toggl.sync_failed.
 const APP_EVENTS = [
   "firestore.listener_failed",
   "firestore.decode_failed",
@@ -39,6 +44,8 @@ const APP_EVENTS = [
 const ANON_EVENTS = ["auth.sign_in_failed", "auth.sign_up_failed"];
 const APP_ISSUE_LIMIT = 100;
 const ANON_ISSUE_LIMIT = 25;
+const ISSUES_PER_UID = 10;
+const ISSUE_SCAN_LIMIT = 500;
 
 // Successful views append an audit row (only the operator can produce
 // one). Denials go to Cloud Logging instead of Firestore: any signed-in
@@ -174,8 +181,9 @@ async function domainStats(uid: string) {
   };
 }
 
-// Reads one issue budget. Returns the rows plus whether the limit was hit,
-// so the page can say so instead of silently showing a truncated feed.
+// Reads one issue budget. Returns the rows plus whether anything in the
+// scanned window was left out (budget or per-account cap), so the page
+// can say so instead of silently showing a truncated feed.
 async function readIssues(
   events: string[],
   limit: number,
@@ -186,7 +194,7 @@ async function readIssues(
     .where("event", "in", events)
     .where("createdAt", ">=", cutoff)
     .orderBy("createdAt", "desc")
-    .limit(limit + 1)
+    .limit(ISSUE_SCAN_LIMIT)
     .get();
   return mapIssueDocuments(
     snap.docs.map((doc) => ({
@@ -196,6 +204,7 @@ async function readIssues(
     })),
     limit,
     identities,
+    ISSUES_PER_UID,
   );
 }
 

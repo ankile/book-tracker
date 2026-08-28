@@ -90,14 +90,33 @@ function mapIssueDocument(
   };
 }
 
+// Newest-first rows, at most `limit` in total and `perUidLimit` per account.
+// The per-account cap is what keeps the feed readable now that the
+// callable quota bounds a single account to a rate rather than a total:
+// twenty rows an hour still fills a hundred-row feed in five hours, but
+// ten rows per account means blinding it costs ten accounts (SEC-038).
+// Rows without a uid (server rows for deleted users, historical anonymous
+// sign-in failures, malformed rows) are outside the cap: none of them can
+// be produced by a client any more. `truncated` is true when any row in
+// the scanned window was left out, for either reason, so the panel can say
+// the feed is incomplete instead of looking finished.
 export function mapIssueDocuments(
   documents: readonly StoredIssueDocument[],
   limit: number,
   identities: ReadonlyMap<string, IssueIdentity>,
+  perUidLimit: number,
 ): MappedIssues {
-  return {
-    rows: documents.slice(0, limit)
-      .map((document) => mapIssueDocument(document, identities)),
-    truncated: documents.length > limit,
-  };
+  const rows: AdminIssueRow[] = [];
+  const shownPerUid = new Map<string, number>();
+  for (const document of documents) {
+    if (rows.length >= limit) break;
+    const row = mapIssueDocument(document, identities);
+    if (row.uid !== null) {
+      const shown = shownPerUid.get(row.uid) ?? 0;
+      if (shown >= perUidLimit) continue;
+      shownPerUid.set(row.uid, shown + 1);
+    }
+    rows.push(row);
+  }
+  return {rows, truncated: rows.length < documents.length};
 }

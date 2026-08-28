@@ -26,6 +26,20 @@ export interface GoogleVolumeInfo {
   imageLinks?: { thumbnail?: string };
 }
 
+// Mirrors CLIENT_ISSUE_EVENTS / decodeIssueReport in functions/src/decoders.ts.
+export type ClientIssueEvent =
+  | 'firestore.listener_failed'
+  | 'firestore.decode_failed'
+  | 'firestore.write_failed'
+  | 'toggl.sync_stuck';
+
+export interface IssueReport {
+  level: 'warn' | 'error';
+  event: ClientIssueEvent;
+  message: string;
+  code: string | null;
+}
+
 export interface AdminUserRow {
   uid: string;
   email: string | null;
@@ -76,3 +90,4 @@ export const togglClearStopping = httpsCallable<{ bookId: string }, { cleared: t
 export const togglClearToken = httpsCallable<Record<string, never>, { cleared: true }>(fns, 'toggl-cleartoken');
 export const adminOverview = httpsCallable<Record<string, never>, AdminOverview>(fns, 'admin-overview');
 export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolumeInfo | null }>(fns, 'booksapi-lookupisbn');
+export const reportIssue = httpsCallable<IssueReport, { recorded: true }>(fns, 'telemetry-reportissue');
