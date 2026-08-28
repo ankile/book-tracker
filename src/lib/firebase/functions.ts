@@ -73,5 +73,6 @@ export const togglSaveToken = httpsCallable<{ token: string }, TogglConfigRespon
 export const togglStart = httpsCallable<{ bookId: string }, TogglStartResponse>(fns, 'toggl-start');
 export const togglStop = httpsCallable<{ bookId: string }, TogglStopResponse>(fns, 'toggl-stop');
 export const togglClearStopping = httpsCallable<{ bookId: string }, { cleared: true }>(fns, 'toggl-clearstopping');
+export const togglClearToken = httpsCallable<Record<string, never>, { cleared: true }>(fns, 'toggl-cleartoken');
 export const adminOverview = httpsCallable<Record<string, never>, AdminOverview>(fns, 'admin-overview');
 export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolumeInfo | null }>(fns, 'booksapi-lookupisbn');

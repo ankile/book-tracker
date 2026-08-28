@@ -73,14 +73,16 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // has rather than time out (a timed-out load is never memoised and would
 // be retried on every request) — a cut-short sitemap never replaces a
 // fresh complete one and on its own is held for five minutes, not the
-// hour, so the degraded worst case is ≈ 288 scans/day/instance; and the
+// hour, so the degraded worst case is ≈ 288 scans/day/instance (a load
+// that *rejects* — a Firestore fault — is never memoised and is bounded
+// only by the miss budget); and the
 // finished sitemap is pinned in its
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
 // every 15 minutes through the CDN, so the memo TTL — not the check — sets
 // the floor: one scan per instance per hour; a scan is up to 1000 marker
 // reads + 1000 profile reads, so ≤ ~96k reads/day across both instances
-// at the cap (≈ 576k if every scan is cut short — see pinnedDegradedTtlMs). A sitemap can therefore lag a privacy change by
+// at the cap (≈ 1.15M if every scan is cut short — see pinnedDegradedTtlMs). A sitemap can therefore lag a privacy change by
 // up to an hour (+ stale allowance + CDN); profiles pages do not. Past the
 // cap the sitemap is deterministically truncated (oldest markers win);
 // past the time budget it is marked partial. Both say so in the log.

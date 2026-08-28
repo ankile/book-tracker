@@ -654,7 +654,7 @@
                  The placeholder keeps the column width uniform for the books
                  without one, so the list's left edge never goes ragged. -->
             {#if book.coverUrl}
-              <img class="cover" src={book.coverUrl} alt="" loading="lazy" />
+              <img class="cover" src={book.coverUrl} alt="" loading="lazy" referrerpolicy="no-referrer" />
             {:else}
               <div class="cover cover-placeholder" aria-hidden="true">{book.title.slice(0, 1)}</div>
             {/if}

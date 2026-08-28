@@ -1,11 +1,6 @@
 import * as functions from "firebase-functions/v1";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
-import {
-  DocumentReference,
-  FieldValue,
-  getFirestore,
-  Timestamp,
-} from "firebase-admin/firestore";
+import {DocumentReference, FieldValue, Timestamp, getFirestore} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
 import {env} from "node:process";
@@ -15,10 +10,15 @@ import {logIssue} from "./logging";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
 import {
   ActiveTimer,
+  TimerClaim,
+  TogglConfig,
+  TogglQueueDocument,
+  TogglQueuePayload,
   decodeActiveTimerFromBook,
   decodeBookCallableRequest,
   decodeBookForTimer,
   decodeCreatedTogglEntryId,
+  decodeEmptyCallableRequest,
   decodeSaveTokenRequest,
   decodeStartedTogglEntry,
   decodeStoppedTogglDuration,
@@ -26,10 +26,6 @@ import {
   decodeTogglConfig,
   decodeTogglProjects,
   decodeTogglQueueDocument,
-  TogglConfig,
-  TogglQueueDocument,
-  TogglQueuePayload,
-  TimerClaim,
 } from "./decoders";
 
 const db = getFirestore();
@@ -319,6 +315,24 @@ exports.savetoken = functions
     });
 
     return {workspaceId: project.workspaceId, projectId: project.id};
+  });
+
+// The stored token is a live credential for the user's whole Toggl
+// account, and users/{uid} is read-only to its owner, so without this the
+// only way to withdraw it was an operator with the Admin SDK. Clearing the
+// copy does not invalidate the credential at Toggl — the UI says so.
+exports.cleartoken = functions
+  .region("europe-west1")
+  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .https.onCall(async (data: unknown, context) => {
+    const uid = requireUid(context);
+    decodeEmptyCallableRequest(data, invalidArgument);
+    const userRef = db.doc(`users/${uid}`);
+    if (!(await userRef.get()).exists) {
+      throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
+    }
+    await userRef.update({toggl: FieldValue.delete()});
+    return {cleared: true};
   });
 
 exports.start = functions

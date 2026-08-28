@@ -14,7 +14,7 @@
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
   import { Database } from '$lib/firebase/db.ts';
-  import { togglSaveToken } from '$lib/firebase/functions.ts';
+  import { togglClearToken, togglSaveToken } from '$lib/firebase/functions.ts';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.ts';
   import { countIsbnProblems } from '$lib/utils/metadataHealth.ts';
   import {
@@ -170,6 +170,18 @@
 
   let togglToken = $state('');
   let savingToken = $state(false);
+
+  let clearingToken = $state(false);
+  async function clearTogglToken() {
+    clearingToken = true;
+    try {
+      await togglClearToken({});
+    } catch (error) {
+      alert(errorMessage(error));
+    } finally {
+      clearingToken = false;
+    }
+  }
 
   async function saveTogglToken() {
     savingToken = true;
@@ -1117,7 +1129,7 @@
           {#if myProfile}
             {#if myProfile.public}
               <p class="profile-description">
-                Anyone with the link can see your reading totals and activity. Book titles and individual sessions stay private.
+                Anyone who visits the address can see your reading totals, day-by-day activity and reading records. Book titles stay private; the address is short and can be guessed.
               </p>
             {:else}
               <p class="profile-description">
@@ -1252,7 +1264,7 @@
                     onchange={(event) => void setProfileVisibility(event.currentTarget)} />
                   <span class="visibility-copy">
                     <span class="visibility-title">Public profile</span>
-                    <span class="visibility-detail">Anyone with the link can view your stats.</span>
+                    <span class="visibility-detail">Anyone who visits the address can view your stats.</span>
                   </span>
                 </label>
                 <label class="visibility-control">
@@ -1279,7 +1291,15 @@
           <h2>Toggl Track</h2>
           {#if userDoc?.toggl}
             <p class="toggl-status connected">
-              Connected. Timers log to your "Reading" project in Toggl.
+              Connected. Timers log to your "Reading" project in Toggl, with the
+              book's title as the entry description. Your token is stored on the
+              server for that purpose.
+            </p>
+            <button type="button" disabled={clearingToken} onclick={clearTogglToken}>
+              {clearingToken ? 'Disconnecting…' : 'Disconnect Toggl'}
+            </button>
+            <p class="toggl-status">
+              Disconnecting deletes the stored copy; revoke the token in Toggl too.
             </p>
           {:else}
             <p class="toggl-status">

@@ -31,7 +31,10 @@ export const EVENT_INGRESS = "ALLOW_INTERNAL_ONLY" as const;
 // them), which an anonymous flood can fill at ~$900/day. Real traffic is a
 // handful of calls per minute; these caps bound the spend rate and, with
 // gen-1 concurrency of 1, also the fan-out any one function can inflict on
-// the others. Raise deliberately.
+// the others. The trade is availability: once the cap is busy, further
+// calls queue (gen-1 queues rather than rejecting, and still bills them),
+// so an anonymous flood can hold admin-overview's two instances and delay
+// the owner's own call. Raise deliberately.
 export const CALLABLE_MAX_INSTANCES = 10;
 export const ADMIN_MAX_INSTANCES = 2;
 export const AUTH_TRIGGER_MAX_INSTANCES = 10;

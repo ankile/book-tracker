@@ -23,6 +23,7 @@ test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "clearstopping",
+    "cleartoken",
     "savetoken",
     "start",
     "stop",
@@ -232,8 +233,10 @@ test("user deletion pages through profiles, deletes only markers it still owns, 
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.deepEqual(deletes, ["profiles/ada-lovelace"]);
 
-  // A delivery that fails is retried rather than dropped.
+  // A delivery that fails is retried rather than dropped — for both Auth
+  // triggers: nothing else can create users/{uid}.
   assert.equal(functions.deleteUserDocument.__endpoint.eventTrigger.retry, true);
+  assert.equal(functions.createUserDocument.__endpoint.eventTrigger.retry, true);
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
@@ -328,6 +331,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "toggl.start": functions.toggl.start,
     "toggl.stop": functions.toggl.stop,
     "toggl.clearstopping": functions.toggl.clearstopping,
+    "toggl.cleartoken": functions.toggl.cleartoken,
     "toggl.syncqueue": functions.toggl.syncqueue,
   };
   for (const [name, deployedFunction] of Object.entries(authenticated)) {
@@ -395,6 +399,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.toggl.start": 10,
     "functions.toggl.stop": 10,
     "functions.toggl.clearstopping": 10,
+    "functions.toggl.cleartoken": 10,
     "functions.createUserDocument": 10,
     "functions.deleteUserDocument": 10,
     "functions.toggl.syncqueue": 5,

@@ -524,7 +524,7 @@
   {#if metadata.coverUrl || metadata.subjects.length > 0}
     <div class="metadata-preview">
       {#if metadata.coverUrl}
-        <img class="cover-thumb" src={metadata.coverUrl} alt="Cover of {title}" />
+        <img class="cover-thumb" src={metadata.coverUrl} alt="Cover of {title}" referrerpolicy="no-referrer" />
       {/if}
       <div class="metadata-text">
         {#if metadata.fiction !== null}

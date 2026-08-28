@@ -492,22 +492,27 @@ emulators, and signed-in behaviour against the emulator suite.
 ### Abusive traffic and runaway spend
 
 There is no automatic spend guard: the 50 NOK/month budget is an email
-that arrives hours after the fact, and the worst case from one attacker
-is on the order of $150/hour (Hosting egress of the 93 KB profile JSON,
-Firestore write floods through the rules, anonymous calls to the gen-1
-callables — each billed before the handler rejects the caller). The
+that arrives hours after the fact. Before 2026-08-28 the worst case from
+one attacker was on the order of $165/hour; with the instance caps it is
+≈ $1,700/day at 1 Gbps, 90 % of it Hosting egress of the 93 KB profile
+JSON, which nothing caps (Firestore write floods through the rules and
+anonymous calls to the gen-1 callables — billed before the handler
+rejects the caller, now capped at 10 instances — are the rest). The
 `spend:` alert policies watch egress, Firestore reads/writes/storage,
 gen-1 executions and log ingest with ~100× headroom over real traffic and
 fire within ten minutes. When one fires, stop the bleeding in this order,
 from the workstation, with the pinned CLI and `--project` on every gcloud:
 
-1. Egress or public pages: `firebase hosting:disable` (the CDN drains in
-   ≤ 5 min; redeploy Hosting to restore). Origin-only floods: remove
+1. Egress or public pages:
+   `npm exec --yes --package firebase-tools@15.24.0 -- firebase hosting:disable -f --project book-tracker-d8f24`
+   (the CDN keeps serving cached profile JSON for up to 5 min; redeploy
+   Hosting to restore). Origin-only floods: remove
    `allUsers` from `publicweb`'s `roles/run.invoker`
    (`gcloud run services remove-iam-policy-binding publicweb --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com --member=allUsers --role=roles/run.invoker`).
-2. Firestore writes or storage: deploy deny-all rules
-   (`firebase deploy --only firestore:rules` from a branch whose
-   `firestore.rules` is `allow read, write: if false;`), then restore.
+2. Firestore writes or storage: deploy the committed deny-all ruleset —
+   `cp firestore.rules.lockdown firestore.rules && npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore:rules --project book-tracker-d8f24 && git checkout -- firestore.rules`
+   — and redeploy the real rules to restore. Signed-in users lose access
+   while it is in force; nothing is deleted.
 3. Callable floods: remove `allUsers` from the six gen-1 callables'
    `roles/cloudfunctions.invoker` (they are also capped at 10 instances,
    `admin-overview` at 2).
@@ -532,8 +537,11 @@ operator action, in this order:
    `getAuth().updateUser(uid, {disabled: true})`).
 2. Revoke its sessions: `getAuth().revokeRefreshTokens(uid)`.
 3. Wait at least one hour for the last ID token to expire.
-4. Only then delete the account; `deleteUserDocument` removes the user
-   document, its profiles and their markers. Subcollections (`books`,
+4. Only then delete the account — one at a time with `deleteUser(uid)`.
+   `deleteUsers([...])` (bulk) does **not** fire the deletion trigger, so
+   `deleteUserDocument` would never run and the public profiles would stay
+   live. `deleteUserDocument` removes the user document, its profiles and
+   their markers. Subcollections (`books`,
    `authors`, `updates`, `togglQueue`, `timerLifecycle`) remain until
    SEC-006 lands — clean them with the Admin SDK if needed.
 5. Check `/sitemap.xml` and `profiles` for documents whose `uid` no longer

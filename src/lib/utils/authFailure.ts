@@ -35,6 +35,8 @@ const AUTH_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
   'auth/password-does-not-meet-requirements': 'The password does not meet the account requirements.',
   'auth/too-many-requests': 'Too many attempts. Please wait and try again.',
   'auth/user-disabled': 'This account has been disabled. Contact the administrator for help.',
+
+  'auth/admin-restricted-operation': 'This action is not available. Contact the administrator for help.',
   'auth/user-not-found': 'The email address or password is incorrect.',
   'auth/weak-password': 'Choose a stronger password and try again.',
   'auth/wrong-password': 'The email address or password is incorrect.',

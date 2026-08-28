@@ -1061,3 +1061,29 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
     },
   }]);
 });
+
+test("cleartoken removes the stored Toggl credential and nothing else", async (t) => {
+  const writes = [];
+  let exists = true;
+  const userRef = {
+    get: async () => ({exists}),
+    update: async (value) => writes.push(value),
+  };
+  t.mock.method(db, "doc", (path) => {
+    assert.equal(path, "users/owner");
+    return userRef;
+  });
+  assert.deepEqual(await deployed.toggl.cleartoken.run(undefined, authContext), {cleared: true});
+  assert.equal(writes.length, 1);
+  assert.deepEqual(Object.keys(writes[0]), ["toggl"]);
+  await assert.rejects(
+    deployed.toggl.cleartoken.run({extra: 1}, authContext),
+    (error) => error.code === "invalid-argument",
+  );
+  exists = false;
+  await assert.rejects(
+    deployed.toggl.cleartoken.run(undefined, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(writes.length, 1);
+});

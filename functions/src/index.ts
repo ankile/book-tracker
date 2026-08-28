@@ -48,7 +48,15 @@ exports.deletebookupdates = onDocumentDeleted(
 // Create a user document when a new user signs up
 exports.createUserDocument = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: AUTH_TRIGGER_MAX_INSTANCES})
+  // failurePolicy: the user document is created only here (users/{uid} has
+  // no client write rule and savetoken refuses to create it), so a dropped
+  // sign-up event would leave an account that can never connect Toggl. The
+  // handler is idempotent (merge-set + conditional lifecycle create).
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: AUTH_TRIGGER_MAX_INSTANCES,
+    failurePolicy: true,
+  })
   .auth.user()
   .onCreate(async (user) => {
     const userRef = db.collection("users").doc(user.uid);
