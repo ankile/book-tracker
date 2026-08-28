@@ -1,5 +1,7 @@
+import {Buffer} from "node:buffer";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
+import {gzipSync} from "node:zlib";
 import {logger} from "firebase-functions";
 import {onRequest} from "firebase-functions/v2/https";
 import {getFirestore} from "firebase-admin/firestore";
@@ -46,8 +48,9 @@ const RESPONSE_CACHE_STALE_MS = 300_000;
 // Bounds cached bodies, not just entries. Size from what firestore.rules
 // lets a stranger store, not from today's data: a profile at the rules
 // ceiling (days ≤ 4000, years ≤ 200, numbers unbounded) serialises to
-// ~520 KB on the JSON route and ~275 KB as HTML (measured), so the
-// retained pool is up to ~51 MB, and the transient pool holds 404s —
+// ~520 KB on the JSON route and ~275 KB as HTML (measured), plus a gzip
+// copy of each (~11 %), so the retained pool is up to ~57 MB, and the
+// transient pool holds 404s —
 // ~22 bytes for JSON, ~6.5 KB rendered — at most ~7 MB more. In-flight
 // requests hold raw + decoded + rendered copies (~1.4 MB each at the
 // ceiling), which is why the handler caps concurrency below the gen-2
@@ -106,6 +109,9 @@ export interface PublicWebRepository {
 export interface PublicWebRequest {
   method: string;
   path: string;
+  // Whether the caller advertised gzip; the memo key is the path alone, so
+  // both encodings share one entry and one Firestore load.
+  acceptsGzip?: boolean;
 }
 
 export interface PublicWebResponse {
@@ -116,6 +122,37 @@ export interface PublicWebResponse {
   // its time budget). Never retained; for the pinned sitemap key it is a
   // degraded value — see TtlCacheOptions.pinnedDegradedTtlMs.
   partial?: boolean;
+  // gzip of body, computed once when the response is memoised (bodies of
+  // at least GZIP_MIN_BYTES). A profile JSON is ~93 KB raw, ~10 KB gzipped;
+  // Hosting compresses static files but not function responses.
+  gzipped?: Buffer;
+}
+
+const GZIP_MIN_BYTES = 1024;
+
+function withGzip(response: PublicWebResponse): PublicWebResponse {
+  if (Buffer.byteLength(response.body) < GZIP_MIN_BYTES) return response;
+  return {...response, gzipped: gzipSync(response.body)};
+}
+
+export interface EncodedResponse {
+  status: number;
+  headers: Record<string, string>;
+  payload: string | Buffer;
+}
+
+// Chooses the representation for one caller: compressed when advertised and
+// available, always with Vary so shared caches keep both. HEAD carries no
+// payload either way.
+export function encodeResponse(request: PublicWebRequest, response: PublicWebResponse): EncodedResponse {
+  const headers = {...response.headers};
+  if (response.gzipped !== undefined) headers["Vary"] = "Accept-Encoding";
+  if (request.method === "HEAD") return {status: response.status, headers, payload: ""};
+  if (request.acceptsGzip === true && response.gzipped !== undefined) {
+    headers["Content-Encoding"] = "gzip";
+    return {status: response.status, headers, payload: response.gzipped};
+  }
+  return {status: response.status, headers, payload: response.body};
 }
 
 // The wire shape of /profiles/<username>.json, consumed by the SPA route.
@@ -552,7 +589,7 @@ export async function cachedPublicWebResponse(
   }
   const cached = cache.get(
     request.path,
-    () => resolvePublicWebRequest({method: "GET", path: request.path}, repository, shell),
+    () => resolvePublicWebRequest({method: "GET", path: request.path}, repository, shell).then(withGzip),
   );
   if (cached === MISS_BUDGET_EXHAUSTED) {
     return {
@@ -607,16 +644,21 @@ export const publicweb = onRequest(
     serviceAccount: PUBLICWEB_RUNTIME_SERVICE_ACCOUNT,
   },
   async (request, response) => {
-    const result = await cachedPublicWebResponse(
-      {method: request.method, path: request.path},
+    const web = {
+      method: request.method,
+      path: request.path,
+      acceptsGzip: /\bgzip\b/.test(String(request.headers["accept-encoding"] ?? "")),
+    };
+    const encoded = encodeResponse(web, await cachedPublicWebResponse(
+      web,
       firestoreRepository,
       profileShell(),
       responseCache,
-    );
-    response.status(result.status);
-    for (const [name, value] of Object.entries(result.headers)) {
+    ));
+    response.status(encoded.status);
+    for (const [name, value] of Object.entries(encoded.headers)) {
       response.set(name, value);
     }
-    response.send(result.body);
+    response.send(encoded.payload);
   },
 );

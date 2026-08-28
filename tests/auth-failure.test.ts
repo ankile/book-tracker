@@ -50,7 +50,7 @@ test('password input and policy failures have actionable copy', () => {
       new FirebaseError('auth/password-does-not-meet-requirements', 'unsafe raw text'),
       'sign_up',
     ).userMessage,
-    'The password does not meet the account requirements.',
+    'Passwords must be at least 12 characters.',
   );
 });
 

@@ -317,6 +317,7 @@
     if (currentUser === null || currentUser === undefined || !myProfile) {
       throw new Error('Profile deletion requires an authenticated user and loaded profile.');
     }
+    if (!confirm('Delete your public profile? Copies already cached can stay visible for up to 10 minutes, and search engines may take up to an hour to notice.')) return;
     savingProfile = true;
     profileError = '';
     try {
@@ -1133,7 +1134,7 @@
               </p>
             {:else}
               <p class="profile-description">
-                Only you can view this profile. Turn on public access below when you are ready to share it.
+                Only you can view this profile. Turn on public access below when you are ready to share it. Turning it off again takes up to 10 minutes to reach everyone, and up to an hour for search engines.
               </p>
             {/if}
           {:else if myProfile === null}
@@ -1264,7 +1265,7 @@
                     onchange={(event) => void setProfileVisibility(event.currentTarget)} />
                   <span class="visibility-copy">
                     <span class="visibility-title">Public profile</span>
-                    <span class="visibility-detail">Anyone who visits the address can view your stats.</span>
+                    <span class="visibility-detail">Anyone who visits the address can view your stats. Turning this off takes up to 10 minutes to reach everyone.</span>
                   </span>
                 </label>
                 <label class="visibility-control">
@@ -1299,7 +1300,7 @@
               {clearingToken ? 'Disconnecting…' : 'Disconnect Toggl'}
             </button>
             <p class="toggl-status">
-              Disconnecting deletes the stored copy; revoke the token in Toggl too.
+              Disconnecting deletes the stored copy; revoke the token in Toggl too. Stop any running timer first.
             </p>
           {:else}
             <p class="toggl-status">

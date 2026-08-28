@@ -11,8 +11,10 @@ const {
   renderProfileDocument,
   renderSitemap,
 } = require("../lib/publicProfileRenderer");
+const {gunzipSync} = require("node:zlib");
 const {
   MISS_BUDGET_EXHAUSTED,
+  encodeResponse,
   SITEMAP_MAX_PROFILES,
   SITEMAP_READ_CONCURRENCY,
   SITEMAP_SCAN_BUDGET_MS,
@@ -742,6 +744,41 @@ test("profile JSON is never indexable and rejects a fractional year like the cli
     shell,
   );
   assert.equal(fractional.status, 404);
+});
+
+test("memoised responses carry a gzip copy that is served only to callers who accept it", async () => {
+  const cache = createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 10, windowMs: 60_000, retain: (r) => r.status === 200,
+  });
+  // A profile with a real reading history: the fixture's one-day body is
+  // under the 1 KB compression floor.
+  const days = Array.from({length: 200}, (_, i) => ({
+    day: `2025-${String(1 + (i % 12)).padStart(2, "0")}-${String(1 + (i % 28)).padStart(2, "0")}`,
+    pagesRead: 10 + i, timeRead: 20 + i, sessions: 1,
+  }));
+  const repo = repository({profiles: {"ada-lovelace": storedProfile({days})}, discoveries: {"ada-lovelace": marker}});
+  const plain = await cachedPublicWebResponse(
+    {method: "GET", path: "/profiles/ada-lovelace.json"}, repo, shell, cache,
+  );
+  assert.ok(plain.gzipped instanceof Buffer);
+  const asPlain = encodeResponse({method: "GET", path: "/profiles/ada-lovelace.json"}, plain);
+  assert.equal(asPlain.headers["Content-Encoding"], undefined);
+  assert.equal(asPlain.headers["Vary"], "Accept-Encoding");
+  assert.equal(asPlain.payload, plain.body);
+  const asGzip = encodeResponse({method: "GET", path: "/profiles/ada-lovelace.json", acceptsGzip: true}, plain);
+  assert.equal(asGzip.headers["Content-Encoding"], "gzip");
+  assert.equal(gunzipSync(asGzip.payload).toString("utf8"), plain.body);
+  assert.ok(asGzip.payload.length < plain.body.length / 3);
+  const head = encodeResponse({method: "HEAD", path: "/profiles/ada-lovelace.json", acceptsGzip: true}, plain);
+  assert.equal(head.payload, "");
+  assert.equal(head.headers["Content-Encoding"], undefined);
+  // Tiny bodies (the JSON 404) are not compressed and carry no Vary.
+  const missing = await cachedPublicWebResponse(
+    {method: "GET", path: "/profiles/nobody.json", acceptsGzip: true}, repo, shell, cache,
+  );
+  assert.equal(missing.gzipped, undefined);
+  assert.equal(encodeResponse({method: "GET", path: "/profiles/nobody.json", acceptsGzip: true}, missing).headers["Vary"], undefined);
 });
 
 test("sitemap renderer is deterministic and XML-safe", () => {

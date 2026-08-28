@@ -1065,17 +1065,31 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
 test("cleartoken removes the stored Toggl credential and nothing else", async (t) => {
   const writes = [];
   let exists = true;
+  let claimState = "idle";
   const userRef = {
     get: async () => ({exists}),
     update: async (value) => writes.push(value),
   };
+  const claimRef = {get: async () => ({exists: true, get: (field) => {
+    assert.equal(field, "state");
+    return claimState;
+  }})};
   t.mock.method(db, "doc", (path) => {
+    if (path === "users/owner/timerLifecycle/current") return claimRef;
     assert.equal(path, "users/owner");
     return userRef;
   });
   assert.deepEqual(await deployed.toggl.cleartoken.run(undefined, authContext), {cleared: true});
   assert.equal(writes.length, 1);
   assert.deepEqual(Object.keys(writes[0]), ["toggl"]);
+  // A running timer can only be stopped through Toggl: refuse to disconnect.
+  claimState = "claimed";
+  await assert.rejects(
+    deployed.toggl.cleartoken.run(undefined, authContext),
+    (error) => error.code === "failed-precondition" && /running timer/.test(error.message),
+  );
+  assert.equal(writes.length, 1);
+  claimState = "idle";
   await assert.rejects(
     deployed.toggl.cleartoken.run({extra: 1}, authContext),
     (error) => error.code === "invalid-argument",

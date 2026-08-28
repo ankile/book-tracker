@@ -859,9 +859,8 @@ service cloud.firestore {
     }
 
     // Opt-in public profile pages: /profiles/<username> renders this doc.
-    // `get` is open only while the owner has explicitly flipped the doc's
-    // `public` flag decides whether the publicweb function will serve it;
-    // the document itself is readable only by its owner. Public profiles
+    // The `public` flag decides whether the publicweb function will serve
+    // it; the document itself is readable only by its owner. Public profiles
     // reach everyone through that function (Admin SDK, CDN- and
     // instance-cached HTML plus /profiles/<username>.json without the
     // uid). Letting anonymous clients get the raw doc handed any requester

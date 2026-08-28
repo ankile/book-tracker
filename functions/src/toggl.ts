@@ -304,7 +304,10 @@ exports.savetoken = functions
     // its document (and re-enable queue processing) through this callable.
     const userRef = db.doc(`users/${uid}`);
     if (!(await userRef.get()).exists) {
-      throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Your account is still being set up. Wait a few seconds and try again.",
+      );
     }
     await userRef.update({
       toggl: {
@@ -330,6 +333,15 @@ exports.cleartoken = functions
     const userRef = db.doc(`users/${uid}`);
     if (!(await userRef.get()).exists) {
       throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
+    }
+    // A running remote timer can only be stopped through Toggl; without the
+    // token the stop callable fails and every other timer stays blocked.
+    const claimSnap = await db.doc(`users/${uid}/timerLifecycle/current`).get();
+    if (claimSnap.exists && claimSnap.get("state") !== "idle") {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Stop your running timer before disconnecting Toggl.",
+      );
     }
     await userRef.update({toggl: FieldValue.delete()});
     return {cleared: true};

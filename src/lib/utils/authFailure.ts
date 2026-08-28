@@ -26,17 +26,16 @@ export type AuthAttemptResult =
 
 const GENERIC_AUTH_FAILURE = 'Something went wrong. Please try again.';
 const AUTH_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
+  'auth/admin-restricted-operation': 'This action is not available. Contact the administrator for help.',
   'auth/email-already-in-use': 'An account already exists for this email address.',
   'auth/invalid-credential': 'The email address or password is incorrect.',
   'auth/invalid-email': 'Enter a valid email address.',
   'auth/network-request-failed': 'Could not reach the authentication service. Please try again.',
   'auth/missing-password': 'Enter a password.',
   'auth/operation-not-allowed': 'This authentication method is not available.',
-  'auth/password-does-not-meet-requirements': 'The password does not meet the account requirements.',
+  'auth/password-does-not-meet-requirements': 'Passwords must be at least 12 characters.',
   'auth/too-many-requests': 'Too many attempts. Please wait and try again.',
   'auth/user-disabled': 'This account has been disabled. Contact the administrator for help.',
-
-  'auth/admin-restricted-operation': 'This action is not available. Contact the administrator for help.',
   'auth/user-not-found': 'The email address or password is incorrect.',
   'auth/weak-password': 'Choose a stronger password and try again.',
   'auth/wrong-password': 'The email address or password is incorrect.',
