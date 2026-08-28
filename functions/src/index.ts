@@ -73,15 +73,21 @@ exports.deleteUserDocument = functions
     // Account deletion must immediately remove both the public document and
     // its search opt-in. Otherwise a deleted account could remain in Google
     // and in the sitemap indefinitely.
+    // The marker is deleted only when it is still this user's: a freed
+    // username is first-writer-wins, so by now the marker under the same
+    // id may belong to another account (SEC-036).
     const profiles = await db.collection("profiles")
       .where("uid", "==", user.uid)
       .get();
+    const markers = await Promise.all(profiles.docs.map((profile) =>
+      db.collection("profileDiscovery").doc(profile.id).get()));
     const batch = db.batch();
     batch.delete(db.collection("users").doc(user.uid));
-    for (const profile of profiles.docs) {
+    profiles.docs.forEach((profile, index) => {
       batch.delete(profile.ref);
-      batch.delete(db.collection("profileDiscovery").doc(profile.id));
-    }
+      const marker = markers[index];
+      if (marker.exists && marker.get("uid") === user.uid) batch.delete(marker.ref);
+    });
     await batch.commit();
     return null;
   });

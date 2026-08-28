@@ -45,24 +45,35 @@ const RESPONSE_CACHE_TTL_MS = 60_000;
 const RESPONSE_CACHE_STALE_MS = 300_000;
 // Bounds cached bodies, not just entries. Size from what firestore.rules
 // lets a stranger store, not from today's data: a profile at the rules
-// ceiling (days ≤ 4000, years ≤ 200) serialises to ~470 KB on the JSON
-// route (~30 KB as HTML), so the retained pool is up to ~45 MB, and the
-// transient pool holds 404s — ~22 bytes for JSON, ~6.5 KB rendered — at
-// most ~7 MB more, against the 256 MiB default.
+// ceiling (days ≤ 4000, years ≤ 200, numbers unbounded) serialises to
+// ~520 KB on the JSON route and ~275 KB as HTML (measured), so the
+// retained pool is up to ~51 MB, and the transient pool holds 404s —
+// ~22 bytes for JSON, ~6.5 KB rendered — at most ~7 MB more. In-flight
+// requests hold raw + decoded + rendered copies (~1.4 MB each at the
+// ceiling), which is why the handler caps concurrency below the gen-2
+// default of 80. All against the 256 MiB default.
 const RESPONSE_CACHE_MAX_ENTRIES = 100;
 const RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES = 1000;
-// Uncached responses each cost one or two Firestore reads plus a decode and
-// render. 300 per minute per instance (2 instances) is far above real
-// traffic and caps a rotating-name flood at ~0.9M reads/day worst case.
+// Uncached profile responses each cost one or two Firestore reads plus a
+// decode and render. 300 per minute per instance (2 instances) is far
+// above real traffic and caps a rotating-name flood at ~0.9M reads/day
+// worst case. The sitemap is bounded separately below.
 const MISS_BUDGET_PER_WINDOW = 300;
 const MISS_BUDGET_WINDOW_MS = 60_000;
 // The sitemap is the one request whose cost scales with data strangers can
-// create (SEC-032): one miss, but a profile read per discovery marker. Both
-// the scan and the fan-out are bounded so a seeded collection can neither
-// hold hundreds of ~470 KB documents in memory at once nor read without
-// end; past the cap the sitemap is silently partial (logged).
-export const SITEMAP_MAX_PROFILES = 5_000;
+// create (SEC-032): one miss, but a profile read per discovery marker. The
+// scan is capped (oldest markers first, so a seeded collection appends
+// after real profiles rather than displacing them — until the marker
+// timestamp is server-pinned, a backdated marker can still sort earlier),
+// reads run in small batches so at most a batch of ~0.7 MB documents is in
+// memory at once, and the finished sitemap is pinned in its own memo slot
+// for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot evict it and
+// force a rescan: worst case is one scan per instance per 5 minutes,
+// ~0.6M reads/day across both instances. Past the cap the sitemap is
+// partial and says so in the log.
+export const SITEMAP_MAX_PROFILES = 1_000;
 export const SITEMAP_READ_CONCURRENCY = 25;
+const SITEMAP_MEMO_TTL_MS = 300_000;
 
 interface StoredDocument {
   id: string;
@@ -130,6 +141,12 @@ export interface TtlCacheOptions<T> {
   // in their own pool bounded by maxTransientEntries. Defaults to retaining
   // everything.
   retain?: (_value: T) => boolean;
+  // Keys whose retained values live outside the LRU, uncapped and fresh for
+  // pinnedTtlMs (default ttlMs), with the same stale allowance past that as
+  // ordinary retained entries. For the few expensive, well-known keys that
+  // a flood of cheap 200s must not be able to evict. Defaults to none.
+  pin?: (_key: string) => boolean;
+  pinnedTtlMs?: number;
   now?: () => number;
 }
 
@@ -159,7 +176,11 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
   if (options.staleTtlMs <= options.ttlMs) throw new Error("staleTtlMs must exceed ttlMs");
   const now = options.now ?? Date.now;
   const retain = options.retain ?? (() => true);
+  const pin = options.pin ?? (() => false);
+  const pinnedTtlMs = options.pinnedTtlMs ?? options.ttlMs;
+  const staleAllowanceMs = options.staleTtlMs - options.ttlMs;
   const retained = new Map<string, CacheEntry<T>>();
+  const pinned = new Map<string, CacheEntry<T>>();
   const transient = new Map<string, CacheEntry<T>>();
   const inflight = new Map<string, Promise<T>>();
   let windowStart = now();
@@ -182,6 +203,8 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
   return {
     get(key, load) {
       const at = now();
+      const held = pinned.get(key);
+      if (held !== undefined && held.loadedAt + pinnedTtlMs > at) return Promise.resolve(held.value);
       const kept = retained.get(key);
       if (kept !== undefined && kept.loadedAt + options.ttlMs > at) return touch(retained, key, kept);
       const passing = transient.get(key);
@@ -193,6 +216,9 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
         misses = 0;
       }
       if (misses >= options.maxMissesPerWindow) {
+        if (held !== undefined && held.loadedAt + pinnedTtlMs + staleAllowanceMs > at) {
+          return Promise.resolve(held.value);
+        }
         if (kept !== undefined && kept.loadedAt + options.staleTtlMs > at) return touch(retained, key, kept);
         return MISS_BUDGET_EXHAUSTED;
       }
@@ -201,9 +227,11 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
         const entry = {loadedAt: at, value: loaded};
         if (retain(loaded)) {
           transient.delete(key);
-          insert(retained, options.maxEntries, key, entry);
+          if (pin(key)) pinned.set(key, entry);
+          else insert(retained, options.maxEntries, key, entry);
         } else {
           retained.delete(key);
+          pinned.delete(key);
           insert(transient, options.maxTransientEntries, key, entry);
         }
         return loaded;
@@ -224,7 +252,8 @@ const firestoreRepository: PublicWebRepository = {
     return snapshot.exists ? snapshot.data() ?? null : null;
   },
   async listDiscoveries(limit) {
-    const snapshot = await getFirestore().collection("profileDiscovery").limit(limit).get();
+    const snapshot = await getFirestore().collection("profileDiscovery")
+      .orderBy("createdAt").limit(limit).get();
     return snapshot.docs.map((document) => ({
       id: document.id,
       value: document.data(),
@@ -261,9 +290,15 @@ interface SitemapEntry {
 // validate every nested value (SEC-009), and the sitemap is the one place
 // a single bad document is rendered alongside everyone else's. Firestore
 // read failures still propagate — those are infrastructure, not data.
+interface SitemapSkip {
+  username: string;
+  reason: string;
+}
+
 function sitemapEntry(
   document: StoredDocument,
   storedProfile: unknown | null,
+  skipped: SitemapSkip[],
 ): SitemapEntry | null {
   if (storedProfile === null || !profileIsPublic(storedProfile)) return null;
   let markerUid: string;
@@ -272,7 +307,7 @@ function sitemapEntry(
     markerUid = decodeProfileDiscoveryMarker(document.value).uid;
     profile = decodePublicProfile(document.id, storedProfile);
   } catch (error) {
-    logger.warn("publicweb.sitemap.skip", {
+    skipped.push({
       username: document.id,
       reason: error instanceof Error ? error.message : String(error),
     });
@@ -290,21 +325,39 @@ async function sitemapProfiles(
     logger.warn("publicweb.sitemap.truncated", {limit: SITEMAP_MAX_PROFILES});
   }
   const entries: SitemapEntry[] = [];
+  // Skips are attacker-seedable data, so they are reported once per scan,
+  // not once per document.
+  const skipped: SitemapSkip[] = [];
   for (let start = 0; start < discoveries.length; start += SITEMAP_READ_CONCURRENCY) {
     const batch = discoveries.slice(start, start + SITEMAP_READ_CONCURRENCY);
     const resolved = await Promise.all(batch.map(async (document) => {
       if (!USERNAME_PATTERN.test(document.id)) {
-        logger.warn("publicweb.sitemap.skip", {
-          username: document.id,
-          reason: "invalid profile discovery id",
-        });
+        skipped.push({username: document.id, reason: "invalid profile discovery id"});
         return null;
       }
-      return sitemapEntry(document, await repository.getProfile(document.id));
+      return sitemapEntry(document, await repository.getProfile(document.id), skipped);
     }));
     for (const entry of resolved) if (entry !== null) entries.push(entry);
   }
+  if (skipped.length > 0) {
+    logger.warn("publicweb.sitemap.skip", {skipped: skipped.length, sample: skipped.slice(0, 5)});
+  }
   return entries;
+}
+
+// The marker is the owner's own document too (rules pin its shape, so a
+// malformed one is not reachable today); a profile whose marker fails to
+// decode is simply not searchable, never a throw.
+function decodeMarkerUid(username: string, stored: unknown): string | null {
+  try {
+    return decodeProfileDiscoveryMarker(stored).uid;
+  } catch (error) {
+    logger.warn("publicweb.marker.skip", {
+      username,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 // A public profile that fails to decode is the owner's own malformed data
@@ -347,7 +400,7 @@ async function profileResponse(
   const storedDiscovery = await repository.getDiscovery(username);
   const searchable = storedDiscovery === null
     ? false
-    : decodeProfileDiscoveryMarker(storedDiscovery).uid === profile.uid;
+    : decodeMarkerUid(username, storedDiscovery) === profile.uid;
   return {
     status: 200,
     headers: htmlHeaders(PROFILE_CACHE_CONTROL),
@@ -477,11 +530,16 @@ const responseCache = createTtlCache<PublicWebResponse>({
   maxTransientEntries: RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES,
   maxMissesPerWindow: MISS_BUDGET_PER_WINDOW,
   windowMs: MISS_BUDGET_WINDOW_MS,
+  pin: (path) => path === "/sitemap.xml",
+  pinnedTtlMs: SITEMAP_MEMO_TTL_MS,
 });
 
 // maxInstances bounds what a crawler or request flood can cost in
-// invocations: two instances at the gen-2 default concurrency (80) is far
-// above real traffic. Firestore reads and render work are bounded
+// invocations, and concurrency bounds what in-flight requests can hold in
+// memory: sixteen ceiling-sized profiles in flight is ~22 MB, eighty (the
+// gen-2 default) would exceed the 256 MiB instance together with the
+// caches. Two instances × 16 is still far above real traffic because
+// repeats are memo hits. Firestore reads and render work are bounded
 // separately by the per-instance response cache and its miss budget. Raise
 // deliberately if legitimate traffic ever queues — the trade is
 // availability under a flood, not correctness.
@@ -490,6 +548,7 @@ export const publicweb = onRequest(
     region: "europe-west1",
     timeoutSeconds: 30,
     maxInstances: 2,
+    concurrency: 16,
     serviceAccount: PUBLICWEB_RUNTIME_SERVICE_ACCOUNT,
   },
   async (request, response) => {

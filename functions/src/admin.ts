@@ -1,6 +1,6 @@
 import * as functions from "firebase-functions/v1";
 import {getAuth, UserRecord} from "firebase-admin/auth";
-import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
+import {AggregateField, FieldValue, getFirestore, Timestamp} from "firebase-admin/firestore";
 import {FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
@@ -40,20 +40,31 @@ const ANON_EVENTS = ["auth.sign_in_failed", "auth.sign_up_failed"];
 const APP_ISSUE_LIMIT = 100;
 const ANON_ISSUE_LIMIT = 25;
 
+// Views append a row each. Denials are one document per caller with a
+// counter: any signed-in account can call this endpoint (sign-up is open),
+// so a per-call row would let one account grow the audit collection — and
+// bury the real denials — without bound.
 async function audit(
   type: "view" | "denied",
   caller: {uid: string; email: string | null},
 ): Promise<void> {
   const now = Timestamp.now();
-  await db.collection("adminAudit").add({
-    type,
-    uid: caller.uid,
-    email: caller.email,
-    at: now,
-    expiresAt: Timestamp.fromMillis(
-      now.toMillis() + AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-    ),
-  });
+  const expiresAt = Timestamp.fromMillis(
+    now.toMillis() + AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const collection = db.collection("adminAudit");
+  if (type === "denied") {
+    await collection.doc(`denied-${caller.uid}`).set({
+      type,
+      uid: caller.uid,
+      email: caller.email,
+      at: now,
+      count: FieldValue.increment(1),
+      expiresAt,
+    }, {merge: true});
+    return;
+  }
+  await collection.add({type, uid: caller.uid, email: caller.email, at: now, expiresAt});
 }
 
 // Decides on context.auth only, which the callables runtime populates from

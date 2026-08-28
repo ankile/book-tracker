@@ -189,7 +189,10 @@ test("user deletion removes public profiles and discovery markers atomically", a
     assert.equal(path, "profileDiscovery");
     return {doc: (username) => {
       assert.equal(username, "ada-lovelace");
-      return discoveryRef;
+      return {get: async () => ({exists: true, get: (field) => {
+        assert.equal(field, "uid");
+        return markerOwner;
+      }, ref: discoveryRef})};
     }};
   });
   t.mock.method(db, "batch", () => ({
@@ -199,10 +202,17 @@ test("user deletion removes public profiles and discovery markers atomically", a
     },
   }));
 
+  let markerOwner = "owner";
   await functions.deleteUserDocument.run({uid: "owner"});
-
   assert.deepEqual(deletes, [userRef, profileRef, discoveryRef]);
   assert.equal(committed, true);
+
+  // A marker under the same username that another account now owns (the
+  // name was freed and re-claimed) is left alone.
+  deletes.length = 0;
+  markerOwner = "squatter";
+  await functions.deleteUserDocument.run({uid: "owner"});
+  assert.deepEqual(deletes, [userRef, profileRef]);
 });
 
 test("binds the migrated Runtime Config secret only to booksapi", () => {
@@ -351,4 +361,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
   // The cascade delete is idempotent and must not orphan a subcollection
   // on one failed delivery.
   assert.equal(functions.deletebookupdates.__endpoint.eventTrigger.retry, true);
+  // In-flight publicweb requests are part of its memory bound.
+  assert.equal(functions.publicweb.__endpoint.concurrency, 16);
 });

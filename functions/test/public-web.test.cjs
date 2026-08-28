@@ -591,6 +591,50 @@ test("sitemap bounds its scan and reads profiles in batches, never all at once",
   assert.equal((result.body.match(/<loc>/g) ?? []).length, count);
 });
 
+test("a pinned key survives a flood of retained 200s, stays fresh for its own ttl, and is served stale past the budget", async () => {
+  let clock = 0;
+  const loads = {s: 0, other: 0};
+  const cache = createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 500, windowMs: 60_000, retain: () => true,
+    pin: (key) => key === "s", pinnedTtlMs: 300_000, now: () => clock,
+  });
+  const load = (key) => () => {
+    if (key === "s") loads.s += 1; else loads.other += 1;
+    return Promise.resolve(`${key}@${clock}`);
+  };
+  assert.equal(await cache.get("s", load("s")), "s@0");
+  for (let i = 0; i < 100; i += 1) await cache.get(`p${i}`, load("p"));
+  assert.equal(loads.other, 100);
+  assert.equal(await cache.get("s", load("s")), "s@0");
+  clock = 200_000;
+  assert.equal(await cache.get("s", load("s")), "s@0");
+  assert.equal(loads.s, 1);
+  clock = 300_001;
+  assert.equal(await cache.get("s", load("s")), "s@300001");
+  assert.equal(loads.s, 2);
+  // Budget exhausted in a later window: served stale within the allowance.
+  clock = 660_000;
+  for (let i = 0; i < 500; i += 1) await cache.get(`q${i}`, load("q"));
+  assert.equal(cache.get("q-extra", load("q")), MISS_BUDGET_EXHAUSTED);
+  assert.equal(await cache.get("s", load("s")), "s@300001");
+  // Past the pinned allowance (300 s fresh + 240 s stale) in a window whose
+  // budget is spent again, the pinned key is refused like any other.
+  clock = 900_002;
+  for (let i = 0; i < 500; i += 1) await cache.get(`r${i}`, load("r"));
+  assert.equal(cache.get("s", load("s")), MISS_BUDGET_EXHAUSTED);
+});
+
+test("a public profile with a malformed discovery marker renders unlisted instead of failing", async () => {
+  const result = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace"},
+    repository({profiles: {"ada-lovelace": storedProfile()}, discoveries: {"ada-lovelace": {uid: 42}}}),
+    shell,
+  );
+  assert.equal(result.status, 200);
+  assert.match(result.body, /name="robots" content="noindex/);
+});
+
 test("sitemap renderer is deterministic and XML-safe", () => {
   const sitemap = renderSitemap([
     {username: "z-reader", updatedAt: new Date("2026-08-25T00:00:00.000Z")},

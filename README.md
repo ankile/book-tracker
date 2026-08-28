@@ -180,7 +180,7 @@ If this is your first time setting up the project:
 
 ```bash
 # Login to Firebase
-npm exec --yes --package firebase-tools@15.24.0 -- firebase login
+npm exec --yes --package firebase-tools@15.24.0 -- firebase login --reauth
 
 # Initialize Firebase (if not already done)
 npm exec --yes --package firebase-tools@15.24.0 -- firebase init
@@ -311,7 +311,7 @@ npm run test:e2e
 
 1. Make sure you're logged into Firebase:
    ```bash
-   npm exec --yes --package firebase-tools@15.24.0 -- firebase login
+   npm exec --yes --package firebase-tools@15.24.0 -- firebase login --reauth
    ```
 
 2. Verify you're deploying to the correct project:
@@ -367,11 +367,20 @@ revision tagged and publicly reachable at its `fh-<tag>---…run.app` URL;
 after a deploy, drop stale tags and delete retired revisions
 (`gcloud run services update-traffic publicweb --remove-tags …`,
 `gcloud run revisions delete …`) so only revisions on the current identity
-stay addressable. That cleanup also means **never roll Hosting back through
-the console**: every earlier release's rewrite points at a tag that no
-longer exists, so a rollback breaks every profile page and the sitemap.
-Recover from a bad release with a fresh
-`firebase deploy --only functions:publicweb,hosting` instead.
+stay addressable. That cleanup also means **never roll back through the
+console** — neither Hosting nor any gen-2 Cloud Run service: every earlier
+Hosting release's rewrite points at a tag that no longer exists, and retired
+revisions of every service have been deleted, so a rollback breaks the
+public pages (or, for the Eventarc services, fails deliveries silently for
+24 h before they are dropped). Recover from a bad release with a fresh
+`firebase deploy` of the affected targets instead. `firebase login` must be
+`login --reauth` after any Google-account grant change: plain `login`
+trusts a stale cached credential.
+
+Detection (2026-08-27): two content-matching uptime checks through
+`book.ankile.com` (`/profiles/lars`, `/sitemap.xml`) and alert policies for
+their failure, `publicweb` 5xx, any `PERMISSION_DENIED` in a function, and
+`publicweb.sitemap.truncated`/`.skip` — all to the owner's email channel.
 
 ### Deploy Everything
 
@@ -440,17 +449,25 @@ npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functi
 
 ### Deploy to Preview Channel
 
-Test your changes on a temporary URL before deploying to production:
+Preview channels are not part of the normal workflow any more: Firebase Auth
+only accepts the four production `authorizedDomains` (SEC-021), so sign-in
+does not work on a channel URL, and a channel release pins a `publicweb`
+Cloud Run revision by tag on the **production** service — a publicly
+reachable `fh-<tag>---…run.app` origin that outlives the channel's expiry
+and bypasses the CDN (SEC-020/SEC-022). If one is ever needed for a
+signed-out check, deploy it and clean up afterwards:
 
 ```bash
-# Build the app
 npm run build
-
-# Publish the matching renderer revision, then pin it to the preview release.
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb
 npm exec --yes --package firebase-tools@15.24.0 -- \
-  firebase hosting:channel:deploy preview --expires 30d
+  firebase hosting:channel:deploy preview --expires 1d
+# afterwards: delete the channel and the tag it pinned
+npm exec --yes --package firebase-tools@15.24.0 -- firebase hosting:channel:delete preview
+gcloud run services update-traffic publicweb --region europe-west1 --remove-tags <fh-tag>
 ```
+
+Never add the channel host to `authorizedDomains`.
 
 ### Deploy Functions Only
 
