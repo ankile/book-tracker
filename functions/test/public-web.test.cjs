@@ -656,8 +656,49 @@ test("sitemap stops scanning past its time budget and serves what it has", async
   };
   const result = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, slow, shell);
   assert.equal(result.status, 200);
+  assert.equal(result.partial, true);
   assert.equal(reads, SITEMAP_READ_CONCURRENCY * 2);
   assert.equal((result.body.match(/<loc>/g) ?? []).length, SITEMAP_READ_CONCURRENCY * 2);
+  // A cut-short sitemap is not pinned for the hour: through the cache the
+  // next request past the short memo rescans.
+  const cache = createTtlCache({
+    ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 10, windowMs: 60_000,
+    retain: (r) => r.status === 200 && r.partial !== true,
+    pin: (key) => key === "/sitemap.xml", pinnedTtlMs: 3_600_000, now: () => clock,
+  });
+  await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, slow, shell, cache);
+  const readsAfterFirst = reads;
+  clock += 61_000;
+  await cachedPublicWebResponse({method: "GET", path: "/sitemap.xml"}, slow, shell, cache);
+  assert.ok(reads > readsAfterFirst);
+  const complete = await resolvePublicWebRequest(
+    {method: "GET", path: "/sitemap.xml"}, repository({profiles: {"ada-lovelace": storedProfile()}, discoveries: {"ada-lovelace": marker}}), shell,
+  );
+  assert.equal(complete.partial, undefined);
+});
+
+test("profile JSON is never indexable and rejects a fractional year like the client does", async () => {
+  const ok = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace.json"},
+    repository({profiles: {"ada-lovelace": storedProfile()}, discoveries: {"ada-lovelace": marker}}),
+    shell,
+  );
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers["X-Robots-Tag"], "noindex");
+  const missing = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/nobody.json"}, repository(), shell,
+  );
+  assert.equal(missing.headers["X-Robots-Tag"], "noindex");
+  // Decoder parity with src/lib/firebase/decoders.ts: a value the client
+  // rejects must not be served as a 200, or every signed-in viewer's
+  // browser reports the stranger's defect as its own.
+  const fractional = await resolvePublicWebRequest(
+    {method: "GET", path: "/profiles/ada-lovelace.json"},
+    repository({profiles: {"ada-lovelace": storedProfile({years: [{year: 2024.5, count: 1, hours: 1, pages: 1}]})}}),
+    shell,
+  );
+  assert.equal(fractional.status, 404);
 });
 
 test("sitemap renderer is deterministic and XML-safe", () => {

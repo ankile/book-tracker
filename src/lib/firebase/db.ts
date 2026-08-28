@@ -374,7 +374,11 @@ async function fetchPublicProfile(username: string): Promise<ProfileView | null>
     );
   }
   const payload: unknown = await response.json();
-  return decodeStored(() => decodeProfileView(payload, `profiles/${username}.json`));
+  // Not decodeStored: that wrapper reports *this* user's own data as
+  // broken (error banner + a firestore.decode_failed row written under the
+  // viewer's uid). A stranger's malformed public profile must fail only
+  // the page it belongs to — the throw is handled by the profile route.
+  return decodeProfileView(payload, `profiles/${username}.json`);
 }
 
 class Database {

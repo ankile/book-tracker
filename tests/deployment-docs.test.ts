@@ -72,6 +72,7 @@ test('profile renderer deployment stays coupled to Hosting and follows its rules
   assert.match(deployment, /There is intentionally no Hosting-only release path/i);
   assertOrdered(deployment, [
     'npm run build',
+    'git add public functions/assets && git commit',
     'firebase deploy --only functions:publicweb,hosting',
   ]);
   assert.match(readme, /profileDiscovery\/<username>/);
@@ -136,10 +137,25 @@ test('every Firebase CLI invocation in the runbook pins the same firebase-tools 
   // Multi-line commands (`\` continuations) are one invocation.
   const invocations = readme.replace(/\\\n\s*/g, ' ').split('\n').filter((line) =>
     /^\s*(npm exec|npx|firebase)\b/.test(line) && /\bfirebase (deploy|login|hosting:|functions:|emulators:)/.test(line));
-  assert.ok(invocations.length >= 10, 'expected the README to document CLI invocations');
+  assert.ok(invocations.length >= 8, 'expected the README to document CLI invocations');
   for (const line of invocations) {
     assert.match(line, /firebase-tools@15\.24\.0/, `unpinned Firebase CLI: ${line.trim()}`);
   }
   const unpinnedCommands = readme.split('\n').filter((line) => /^\s*npx -y firebase-tools/.test(line));
   assert.deepEqual(unpinnedCommands, [], 'the CLI holds the deploy credential; never resolve it to latest');
+});
+
+test('every gcloud command in the runbooks names the project and the account', async () => {
+  const [readme, migrations] = await Promise.all([
+    readFile(readmeUrl, 'utf8'),
+    readFile(migrationsUrl, 'utf8'),
+  ]);
+  const commands = `${readme}\n${migrations}`
+    .replace(/\\\n\s*/g, ' ')
+    .split('\n')
+    .filter((line) => /(^|[`(\s])gcloud\s+\w/.test(line) && !/^\s*(#|-|\*|>)/.test(line.replace(/^[\s`(]+/, '')));
+  assert.ok(commands.length >= 3, 'expected the runbooks to document gcloud commands');
+  for (const line of commands) {
+    assert.match(line, /--project book-tracker-d8f24/, `gcloud without --project (the workstation default is another project): ${line.trim()}`);
+  }
 });

@@ -353,7 +353,7 @@ function publicProfileYears(
     const decoded = record(entry, label, fail);
     exactKeys(decoded, ["year", "count", "hours", "pages"], label, fail);
     return {
-      year: finiteNumber(decoded.year, `${label} year`, fail),
+      year: nonNegativeInteger(decoded.year, `${label} year`, fail),
       count: finiteNumber(decoded.count, `${label} count`, fail),
       hours: finiteNumber(decoded.hours, `${label} hours`, fail),
       pages: finiteNumber(decoded.pages, `${label} pages`, fail),

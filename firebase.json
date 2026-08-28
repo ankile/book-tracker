@@ -86,8 +86,12 @@
     "ignore": [
       "node_modules",
       ".git",
-      "**/.*",
-      "*.log"
+      "*.log",
+      ".secret*",
+      ".DS_Store",
+      "**/.DS_Store",
+      ".gitignore",
+      ".env*"
     ]
   },
   "emulators": {

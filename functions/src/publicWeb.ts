@@ -68,7 +68,8 @@ const MISS_BUDGET_WINDOW_MS = 60_000;
 // small batches so at most a batch of ~0.7 MB documents is in memory at
 // once; the scan gives up after SITEMAP_SCAN_BUDGET_MS and serves what it
 // has rather than time out (a timed-out load is never memoised and would
-// be retried on every request); and the finished sitemap is pinned in its
+// be retried on every request) — a cut-short sitemap is memoised only
+// briefly, never for the hour; and the finished sitemap is pinned in its
 // own memo slot for SITEMAP_MEMO_TTL_MS so attacker-owned profiles cannot
 // evict it and force a rescan. The uptime check fetches the sitemap
 // every 15 minutes through the CDN, so the memo TTL — not the check — sets
@@ -101,6 +102,10 @@ export interface PublicWebResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  // A 200 that does not carry everything it should (a sitemap cut short by
+  // its time budget). Memoised briefly like a 404, never retained, never
+  // pinned — the next miss retries the full scan.
+  partial?: boolean;
 }
 
 // The wire shape of /profiles/<username>.json, consumed by the SPA route.
@@ -274,10 +279,14 @@ function htmlHeaders(cacheControl: string): Record<string, string> {
   };
 }
 
+// The JSON projection is for the SPA, never for crawlers: the HTML page
+// carries the owner's search opt-in as a robots meta tag, and the JSON
+// twin (which holds strictly more data) must not be indexable regardless.
 function jsonHeaders(): Record<string, string> {
   return {
     "Cache-Control": PROFILE_CACHE_CONTROL,
     "Content-Type": "application/json; charset=utf-8",
+    "X-Robots-Tag": "noindex",
   };
 }
 
@@ -323,15 +332,21 @@ function sitemapEntry(
   return {username: document.id, updatedAt: profile.updatedAt.toDate()};
 }
 
+interface SitemapScan {
+  entries: SitemapEntry[];
+  complete: boolean;
+}
+
 async function sitemapProfiles(
   repository: PublicWebRepository,
-): Promise<SitemapEntry[]> {
+): Promise<SitemapScan> {
   const startedAt = Date.now();
   const discoveries = await repository.listDiscoveries(SITEMAP_MAX_PROFILES);
   if (discoveries.length >= SITEMAP_MAX_PROFILES) {
     logger.warn("publicweb.sitemap.truncated", {limit: SITEMAP_MAX_PROFILES});
   }
   const entries: SitemapEntry[] = [];
+  let complete = true;
   // Skips are attacker-seedable data, so they are reported once per scan,
   // not once per document.
   const skipped: SitemapSkip[] = [];
@@ -340,6 +355,7 @@ async function sitemapProfiles(
       logger.warn("publicweb.sitemap.truncated", {
         budgetMs: SITEMAP_SCAN_BUDGET_MS, scanned: start, of: discoveries.length,
       });
+      complete = false;
       break;
     }
     const batch = discoveries.slice(start, start + SITEMAP_READ_CONCURRENCY);
@@ -355,7 +371,7 @@ async function sitemapProfiles(
   if (skipped.length > 0) {
     logger.warn("publicweb.sitemap.skip", {skipped: skipped.length, sample: skipped.slice(0, 5)});
   }
-  return entries;
+  return {entries, complete};
 }
 
 // The marker is the owner's own document too (rules pin its shape, so a
@@ -466,14 +482,15 @@ export async function resolvePublicWebRequest(
   }
 
   if (request.path === "/sitemap.xml") {
-    const profiles = await sitemapProfiles(repository);
+    const scan = await sitemapProfiles(repository);
     return {
       status: 200,
       headers: {
         "Cache-Control": SITEMAP_CACHE_CONTROL,
         "Content-Type": "application/xml; charset=utf-8",
       },
-      body: request.method === "HEAD" ? "" : renderSitemap(profiles),
+      body: request.method === "HEAD" ? "" : renderSitemap(scan.entries),
+      ...(scan.complete ? {} : {partial: true}),
     };
   }
 
@@ -538,7 +555,7 @@ function profileShell(): string {
 const responseCache = createTtlCache<PublicWebResponse>({
   ttlMs: RESPONSE_CACHE_TTL_MS,
   staleTtlMs: RESPONSE_CACHE_STALE_MS,
-  retain: (response) => response.status === 200,
+  retain: (response) => response.status === 200 && response.partial !== true,
   maxEntries: RESPONSE_CACHE_MAX_ENTRIES,
   maxTransientEntries: RESPONSE_CACHE_MAX_TRANSIENT_ENTRIES,
   maxMissesPerWindow: MISS_BUDGET_PER_WINDOW,

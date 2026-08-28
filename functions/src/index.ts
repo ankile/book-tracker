@@ -71,7 +71,7 @@ exports.createUserDocument = functions
   });
 
 // Profiles per account are not capped by rules yet (SEC-032), so deletion
-// pages through them: each page is one bounded batch (1 + 2 × page ops),
+// pages through them: each page is one bounded batch (≤ 2 × page ops),
 // and the markers of a page are fetched with one getAll. failurePolicy
 // makes a failed delivery retry — every step here is idempotent, and
 // without it a transient error would leave a deleted account's profiles

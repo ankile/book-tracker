@@ -105,7 +105,7 @@ more trustworthy source should own.
 The Google Books key comes from the same secret the Cloud Function reads:
 
 ```bash
-export GOOGLE_BOOKS_KEY=$(gcloud secrets versions access latest \
+export GOOGLE_BOOKS_KEY=$(gcloud secrets versions access latest --project book-tracker-d8f24 --account=lars.ankile@gmail.com \
   --secret=FUNCTIONS_CONFIG_EXPORT --project book-tracker-d8f24 \
   --account=lars.ankile@gmail.com \
   | python3 -c "import json,sys;print(json.load(sys.stdin)['booksapi']['key'])")
@@ -253,7 +253,11 @@ evict real profiles, and while the budget is exhausted a memoised profile (or
 the sitemap) is served stale (up to 5 min old) rather than refused; a profile
 the origin has since seen as private is not revived. A profile flipped private can therefore stay served for up to 60 s
 (function; 300 s while the origin is being flooded) + 300 s (shared CDN) +
-60 s (browser); there is no purge path.
+60 s (browser); there is no purge path. The sitemap is memoised for an
+hour in its own slot (so a flood of strangers' profiles cannot force a
+rescan), covers at most the 1000 oldest discovery markers, and can lag a
+privacy change by up to 1 h + 240 s + 300 s; it never lists a private
+profile that the origin has re-read.
 
 `npm run build` creates both `public/index.html` and
 `functions/assets/profile-shell.html`. They deliberately contain the same
@@ -345,11 +349,13 @@ one function strangers reach can only read Firestore, nothing else) and
 Eventarc-fed services, and `secretmanager.secretAccessor` on
 `FUNCTIONS_CONFIG_EXPORT`). `datastore.viewer` is read access to the whole
 database (Firestore IAM cannot scope to collections), so the reduction is
-"read-only, nothing else", not "public data only". The deployer needs
-`iam.serviceAccountUser` on both accounts — a project Owner has it; any
-other deployer (for example the `firebase-adminsdk` key used for headless
-Hosting deploys) would need that role granted on these two accounts, not
-on the App Engine default. `triggers.test.cjs` fails if any exported function lacks one of these
+"read-only, nothing else", not "public data only". Only a project Owner
+deploys today: the CLI needs `iam.serviceAccounts.actAs` on both runtime
+accounts *and* (a pre-flight check in firebase-tools) on the App Engine
+default account, plus `cloudfunctions.*` — and because the Hosting rewrite
+is pinned, every Hosting deploy is also a functions deploy. The
+`firebase-adminsdk` key cannot deploy anything (no `actAs`, no
+`cloudfunctions.*`); there is no headless deploy path. `triggers.test.cjs` fails if any exported function lacks one of these
 identities, and the two Firestore-triggered gen2 services are
 `ALLOW_INTERNAL_ONLY`. A new function that needs another Google API gets
 its role added to the matching account — never `roles/editor`.
@@ -365,12 +371,12 @@ latest revision and passed while the pinned one was returning 500
 (2026-08-27, see MIGRATIONS). Hosting leaves every previously pinned
 revision tagged and publicly reachable at its `fh-<tag>---…run.app` URL;
 after a deploy, drop stale tags and delete retired revisions
-(`gcloud run services update-traffic publicweb --remove-tags …`,
-`gcloud run revisions delete …`) so only revisions on the current identity
-stay addressable. That cleanup also means **never roll back through the
+(`gcloud run services update-traffic publicweb --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com --remove-tags …`,
+then `gcloud run revisions delete <revision> --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com`)
+so only revisions on the current identity stay addressable. That cleanup also means **never roll back through the
 console** — neither Hosting nor any gen-2 Cloud Run service: every earlier
-Hosting release's rewrite points at a tag that no longer exists, and retired
-revisions of every service have been deleted, so a rollback breaks the
+Hosting release's rewrite points at a tag that no longer exists, and
+superseded revisions are deleted after each deploy, so a rollback breaks the
 public pages (or, for the Eventarc services, fails deliveries silently for
 24 h before they are dropped). Recover from a bad release with a fresh
 `firebase deploy` of the affected targets instead. `firebase login` must be
@@ -382,8 +388,12 @@ Detection (2026-08-28): two content-matching uptime checks through
 15 min — it must list `lars`) and alert policies for their failure,
 `publicweb` 5xx (designed 503s separately, once a day at most),
 `PERMISSION_DENIED` at ERROR in any gen-1 or gen-2 function, gen-1 function
-errors, and `publicweb.sitemap.truncated`/`.skip` — all to the owner's email
-channel. Deploys: build, **commit the artifacts**, then deploy — the Hosting
+errors, `publicweb.sitemap.truncated`/`.skip`, and Pub/Sub undelivered
+messages on the two Eventarc subscriptions (eight policies) — all to the
+owner's email channel. The uptime and Pub/Sub policies have no
+notification rate limit; the log-match ones notify at most hourly (the
+designed-503 one daily). The sitemap check alone costs up to 2 instances ×
+24 scans × 1000 reads ≈ 48k Firestore reads/day at the marker cap. Deploys: build, **commit the artifacts**, then deploy — the Hosting
 predeploy re-verifies the committed build and fails on drift; the functions
 predeploy runs `npm ci` first. Always use the pinned CLI (`npm exec
 --package firebase-tools@15.24.0`), never `npx -y firebase-tools`.
@@ -418,6 +428,7 @@ node db-audit.ts --prod
 
 # 4. Expose the claim-aware, progress-source-compatible client and its matching profile renderer.
 npm run build
+git add public functions/assets && git commit -m "Build artifacts"
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
 
 # 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
@@ -449,31 +460,32 @@ Function embeds that shell. Deploy both targets from one build:
 # Build the web app
 npm run build
 
+# Commit the generated artifacts: the Hosting predeploy rebuilds pinned to
+# HEAD's version and refuses to ship anything the commit does not match.
+git add public functions/assets && git commit -m "Build artifacts"
+
 # Deploy the matching renderer revision and Hosting release together
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
 ```
 
+`--force` is not part of any routine deploy. The CLI asks for it once when
+a function first gains a failure policy; used habitually it also silences
+the prompts that protect you — deleting any function missing from source,
+proceeding through unsafe trigger migrations — and on 2026-08-28 it
+silently created a 1-day image cleanup policy on `gcf-artifacts`. Every
+`gcloud` command in this repository's runbooks needs
+`--project book-tracker-d8f24 --account=lars.ankile@gmail.com`: the
+workstation's default `gcloud` project is a different one.
+
 ### Deploy to Preview Channel
 
-Preview channels are not part of the normal workflow any more: Firebase Auth
-only accepts the four production `authorizedDomains` (SEC-021), so sign-in
-does not work on a channel URL, and a channel release pins a `publicweb`
-Cloud Run revision by tag on the **production** service — a publicly
-reachable `fh-<tag>---…run.app` origin that outlives the channel's expiry
-and bypasses the CDN (SEC-020/SEC-022). If one is ever needed for a
-signed-out check, deploy it and clean up afterwards:
-
-```bash
-npm run build
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb
-npm exec --yes --package firebase-tools@15.24.0 -- \
-  firebase hosting:channel:deploy preview --expires 1d
-# afterwards: delete the channel and the tag it pinned
-npm exec --yes --package firebase-tools@15.24.0 -- firebase hosting:channel:delete preview
-gcloud run services update-traffic publicweb --region europe-west1 --remove-tags <fh-tag>
-```
-
-Never add the channel host to `authorizedDomains`.
+There are no preview channels. Firebase Auth accepts only the four
+production `authorizedDomains` (SEC-021) — and `hosting:channel:deploy`
+would add the channel host to that list by default; a channel release also
+deploys `publicweb` to production (the rewrite is pinned) and leaves a
+publicly reachable `fh-<tag>---…run.app` origin that outlives the channel
+(SEC-020/SEC-022). Test signed-out behaviour with `npm run preview` or the
+emulators, and signed-in behaviour against the emulator suite.
 
 ### Deploy Functions Only
 
