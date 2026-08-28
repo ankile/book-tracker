@@ -1,0 +1,58 @@
+svg,
+.label,
+.nodeLabel,
+.edgeLabel,
+.cluster-label {
+  font-family: Arial, Helvetica, sans-serif !important;
+}
+
+.titleText {
+  fill: #173f41 !important;
+  font-family: Arial, Helvetica, sans-serif !important;
+  font-size: 28px !important;
+  font-weight: 700 !important;
+}
+
+.nodeLabel p {
+  line-height: 1.35 !important;
+  margin: 0 !important;
+  text-align: left !important;
+}
+
+.edgeLabel p {
+  background: #fffdf8 !important;
+  border: 1px solid #e5e8e7;
+  border-radius: 4px;
+  color: #40504d !important;
+  font-size: 14px !important;
+  line-height: 1.25 !important;
+  padding: 2px 6px !important;
+}
+
+.cluster-label span,
+.cluster-label text {
+  color: #40504d !important;
+  fill: #40504d !important;
+  font-size: 17px !important;
+  font-weight: 700 !important;
+}
+
+g.node > rect,
+g.node > polygon {
+  rx: 10px;
+  ry: 10px;
+}
+
+.flowchart-link {
+  stroke-width: 2px !important;
+}
+
+.marker {
+  fill: #667572 !important;
+  stroke: #667572 !important;
+}
+
+code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace !important;
+  font-size: 0.9em !important;
+}

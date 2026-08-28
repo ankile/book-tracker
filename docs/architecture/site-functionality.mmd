@@ -1,0 +1,74 @@
+---
+title: Pages, navigation, and page-local actions
+---
+flowchart LR
+  accTitle: Book Tracker pages, navigation, and page-local actions
+  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Shared links and search results can enter the public profile directly. The admin overview is reachable only by direct URL. Dotted links open write dialogs or page-local actions rather than new routes.
+
+  classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
+  classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
+  classDef page fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:2px;
+  classDef public fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
+  classDef action fill:#f4eef8,stroke:#7d5b91,color:#40284e,stroke-width:2px;
+  classDef admin fill:#fff7f6,stroke:#b42318,color:#651c15,stroke-width:2px;
+  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
+
+  subgraph entry[How people enter]
+    direction TB
+    signedout["<b>Signed-out visitor</b><br/>Private URL or app home"]:::person
+    owner["<b>Signed-in reader</b><br/>Restored browser session"]:::person
+    publicentry["<b>Public visitor</b><br/>Shared link · search result<br/>or direct profile URL"]:::person
+    operator["<b>Verified operator</b><br/>Direct <code>/admin</code> URL"]:::person
+  end
+
+  subgraph routes[Application routes]
+    direction TB
+    auth["<b>Login or register</b><br/>Rendered at <code>/</code> or the requested<br/>private route, then resumes it"]:::gate
+    shell["<b>Signed-in shell</b><br/>Primary navbar"]:::gate
+
+    current["<b>Currently Reading</b><br/><code>/</code><br/>Books in progress · pages · timers"]:::page
+    finished["<b>Finished</b><br/><code>/finished</code><br/>Search · sort · year filter · totals"]:::page
+    me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · integrations"]:::page
+
+    authors["<b>Authors</b><br/><code>/authors</code><br/>Rename · classify · merge · delete"]:::page
+    isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
+    profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
+    admin["<b>Admin overview</b><br/><code>/admin</code><br/>Account activity · recent issues"]:::admin
+  end
+
+  subgraph actions[Dialogs and page-local writes]
+    direction TB
+    bookaction["<b>Add or edit book</b><br/>Metadata lookup · authors · delete"]:::action
+    sessionaction["<b>Progress and sessions</b><br/>Set page · log, edit, or delete session"]:::action
+    timeraction["<b>Reading timers</b><br/>Local or Toggl start/stop<br/>offline queue and stalled recovery"]:::action
+    authoraction["<b>Author editor</b><br/>Rename · kind · merge · soft delete"]:::action
+    profileaction["<b>Profile settings</b><br/>Create · rename · publish · discovery<br/>links · delete"]:::action
+    togglaction["<b>Toggl settings</b><br/>Connect · replace · disconnect token"]:::action
+  end
+
+  signedout --> auth --> shell
+  owner --> shell
+  publicentry --> profile
+  operator --> admin
+
+  shell -->|"Currently Reading"| current
+  shell -->|"Finished"| finished
+  shell -->|"My site"| me
+  me -->|"Authors card"| authors
+  me -->|"Needs an ISBN card"| isbns
+  me -->|"Profile link"| profile
+  profile -->|"Go to app"| auth
+
+  current -.-> bookaction
+  finished -.-> bookaction
+  me -.-> bookaction
+  isbns -.-> bookaction
+  current -.-> sessionaction
+  finished -.-> sessionaction
+  current -.-> timeraction
+  authors -.-> authoraction
+  me -.-> profileaction
+  me -.-> togglaction
+
+  legend["<b>Legend</b><br/>Solid = route navigation · Dotted = dialog or local action<br/>Teal = signed-in page · Blue = profile · Red = privileged route"]:::legend
+  togglaction ~~~ legend

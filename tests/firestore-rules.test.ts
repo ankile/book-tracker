@@ -1,4 +1,4 @@
-import test, { after, before } from 'node:test';
+import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -128,6 +128,10 @@ before(async () => {
 });
 
 after(async () => environment.cleanup());
+
+// Every test starts from an empty database, so isolation is structural
+// rather than a convention of unique uids per test.
+beforeEach(async () => environment.clearFirestore());
 
 test('the owner can create and update a valid profile', async () => {
   const db = environment.authenticatedContext('owner').firestore();
@@ -1570,23 +1574,149 @@ test('no issue-report quota write succeeds whatever the payload looks like', asy
   }
 });
 
-test('the users parent document is read-only, and rules never cascade into its subcollections', async () => {
-  const uid = 'users-doc-owner';
+test('no logEvents row is readable whatever its id, age or shape', async () => {
+  // A grant written for one id, one age or one flag would pass a fixture
+  // of a single fresh row; the whole collection has to be unreadable.
+  const rows: [string, Record<string, unknown>][] = [
+    ['seeded', issue('issue-owner', 'firestore.decode_failed')],
+    ['other-row', issue('issue-victim', 'firestore.decode_failed')],
+    ['aged-row', { ...issue('issue-victim', 'auth.sign_in_failed'), createdAt: Timestamp.fromMillis(Date.now() - 86_400_000) }],
+    ['uidless-row', issue(null, 'auth.sign_in_failed')],
+    ['flagged-row', { ...issue('issue-victim', 'firestore.decode_failed'), public: true, level: 'info' }],
+  ];
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
-    await setDoc(doc(context.firestore(), 'users', uid), { createdAt: Timestamp.now() });
+    for (const [id, body] of rows) await setDoc(doc(context.firestore(), 'logEvents', id), body);
+  });
+  for (const db of [
+    environment.authenticatedContext('issue-owner').firestore(),
+    environment.authenticatedContext('issue-victim').firestore(),
+    environment.authenticatedContext('issue-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    for (const [id] of rows) await assertFails(getDoc(doc(db, 'logEvents', id)));
+    await assertFails(getDoc(doc(db, 'logEvents', 'no-such-row')));
+  }
+});
+
+test('no issue-report quota write succeeds with a server timestamp either, seeded or not', async () => {
+  const uid = 'issue-quota-clock';
+  // serverTimestamp() is what a real client sends at a rule that requires
+  // request.time; Timestamp.now() can never satisfy one, so the
+  // client-clock bodies in the previous test cannot see such a grant.
+  const bodies: Record<string, unknown>[] = [
+    { windowStartedAt: serverTimestamp(), count: 0 },
+    { windowStartedAt: serverTimestamp(), count: 1 },
+    { windowStartedAt: serverTimestamp(), count: 20 },
+    { windowStartedAt: serverTimestamp() },
+    { count: 0, windowStartedAt: serverTimestamp(), extra: null },
+  ];
+  for (const body of bodies) {
+    for (const preSeed of [true, false]) {
+      await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+        const ref = doc(context.firestore(), 'users', uid, 'functionQuotas', 'issueReports');
+        if (preSeed) await setDoc(ref, { windowStartedAt: Timestamp.now(), count: 20 });
+        else await deleteDoc(ref);
+      });
+      for (const db of [
+        environment.authenticatedContext(uid).firestore(),
+        environment.authenticatedContext('issue-quota-stranger').firestore(),
+        environment.unauthenticatedContext().firestore(),
+      ]) {
+        const ref = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
+        await assertFails(setDoc(ref, body));
+        await assertFails(setDoc(ref, body, { merge: true }));
+        if (preSeed) await assertFails(updateDoc(ref, body));
+      }
+    }
+  }
+});
+
+test('no bounded or filtered query reaches functionQuotas either', async () => {
+  const uid = 'issue-quota-list';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid, 'functionQuotas', 'issueReports'), {
+      windowStartedAt: Timestamp.now(),
+      count: 20,
+    });
   });
   for (const db of [
     environment.authenticatedContext(uid).firestore(),
-    environment.authenticatedContext('users-doc-stranger').firestore(),
+    environment.authenticatedContext('issue-quota-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    for (const source of [collection(db, 'users', uid, 'functionQuotas'), collectionGroup(db, 'functionQuotas')]) {
+      await assertFails(getDocs(query(source, limit(1))));
+      await assertFails(getDocs(query(source, limit(5))));
+      await assertFails(getDocs(query(source, where('count', '>=', 0), limit(5))));
+      await assertFails(getDocs(query(source, orderBy('count', 'desc'), limit(5))));
+    }
+  }
+});
+
+test('logEvents is not reachable under any writable parent path', async () => {
+  const uid = 'issue-nest-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'users', uid), { uid, email: `${uid}@example.test` });
+    await setDoc(doc(db, 'users', uid, 'books', 'b1'), { title: 'The Book', owner: doc(db, 'users', uid) });
+    await setDoc(doc(db, 'users', uid, 'togglQueue', 'q1'), { status: 'pending' });
+    await setDoc(doc(db, 'users', uid, 'authors', 'a1'), { name: 'Ada' });
+    await setDoc(doc(db, 'users', uid, 'timerLifecycle', 'current'), { version: 1, state: 'idle', cleared: null });
+    await setDoc(doc(db, 'profiles', 'nest-profile'), { uid, public: true });
+  });
+  // Every parent a client can write, plus the two the earlier test covers.
+  const parents: string[][] = [
+    ['users', uid],
+    ['users', uid, 'books', 'b1'],
+    ['users', uid, 'books', 'b1', 'updates', 'u1'],
+    ['users', uid, 'togglQueue', 'q1'],
+    ['users', uid, 'authors', 'a1'],
+    ['users', uid, 'timerLifecycle', 'current'],
+    ['profiles', 'nest-profile'],
+  ];
+  for (const db of [
+    environment.authenticatedContext(uid).firestore(),
+    environment.authenticatedContext('issue-nest-stranger').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    for (const parent of parents) {
+      const [head, ...rest] = [...parent, 'logEvents', 'planted'];
+      await assertFails(setDoc(doc(db, head, ...rest), issue(uid, 'firestore.decode_failed')));
+    }
+    await assertFails(getDocs(query(collectionGroup(db, 'logEvents'), limit(1))));
+  }
+});
+
+test('the users document cannot be created, rewritten or nudged one field by any client', async () => {
+  const uid = 'users-doc-shape';
+  const body = { uid, email: `${uid}@example.test`, toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 } };
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), body);
+  });
+  for (const db of [
+    environment.authenticatedContext(uid).firestore(),
+    environment.authenticatedContext('users-doc-shape-stranger').firestore(),
     environment.unauthenticatedContext().firestore(),
   ]) {
     const ref = doc(db, 'users', uid);
-    await assertFails(setDoc(ref, { forged: true }));
-    await assertFails(setDoc(ref, { forged: true }, { merge: true }));
+    // An identical rewrite changes no key at all, so it satisfies every
+    // affectedKeys().hasOnly([...]) grant that could be written here.
+    await assertFails(setDoc(ref, body));
+    await assertFails(setDoc(ref, body, { merge: true }));
+    for (const key of ['uid', 'email', 'toggl', 'createdAt', 'displayName']) {
+      await assertFails(updateDoc(ref, { [key]: 'forged' }));
+    }
     await assertFails(updateDoc(ref, { forged: true }));
     await assertFails(deleteDoc(ref));
     await assertFails(getDocs(collection(db, 'users')));
+    // Nothing may open an account document either, not even its own owner.
+    await assertFails(setDoc(doc(db, 'users', 'users-doc-absent'), body));
+    // Rules do not cascade: the parent's read grant reaches no subcollection write.
+    await assertFails(setDoc(doc(db, 'users', uid, 'logEvents', 'nested'), issue(uid, 'firestore.decode_failed')));
+    await assertFails(setDoc(doc(db, 'users', uid, 'functionQuotas', 'issueReports'), { windowStartedAt: Timestamp.now(), count: 0 }));
   }
+  const absent = environment.authenticatedContext('users-doc-absent').firestore();
+  await assertFails(setDoc(doc(absent, 'users', 'users-doc-absent'), body));
 });
 
 test('owners can create and read only exact pending Toggl queue payloads', async () => {

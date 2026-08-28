@@ -195,7 +195,41 @@ test("the shipped feed caps are the documented ones", () => {
   assert.equal(FEED_LIMIT, 200);
 });
 
-test("the feed limit bounds the response after the per-account caps and reports the total", () => {
+test("the feed limit is shared round-robin, so a flood at the cap cannot erase an honest account", () => {
+  // Twenty flooding accounts writing exactly the cap each (so none is
+  // reported as capped) and one honest account whose rows are all older —
+  // the round-3 red-team case in which a newest-first cut showed zero
+  // honest rows.
+  const flooders = Array.from({length: 20}, (_, account) =>
+    group(`flooder-${account}`, Array.from({length: 10}, (_, index) =>
+      document(`flood-${account}-${index}`, validIssue({
+        uid: `flooder-${account}`,
+        createdAt: Timestamp.fromMillis(2_000_000 - account * 10 - index),
+        message: `flood ${account}/${index}`,
+      })))));
+  const honest = group("owner", Array.from({length: 10}, (_, index) =>
+    document(`honest-${index}`, validIssue({
+      createdAt: Timestamp.fromMillis(1_000_000 - index),
+      message: `honest ${index}`,
+    }))));
+  const feed = assembleIssueFeed([...flooders, honest], 10, 25, 200, identities);
+
+  assert.equal(feed.total, 210);
+  assert.equal(feed.rows.length, 200);
+  assert.equal(feed.cappedAccounts, 0);
+  const honestShown = feed.rows.filter((row) => row.uid === "owner");
+  // 21 groups: nine full rounds (189 rows) and eleven of the tenth.
+  assert.ok(honestShown.length >= 9, `honest rows shown: ${honestShown.length}`);
+  assert.equal(honestShown[0].message, "honest 0");
+  // Display order is still newest first.
+  for (let index = 1; index < feed.rows.length; index += 1) {
+    assert.ok(feed.rows[index - 1].at >= feed.rows[index].at);
+  }
+  // Every group is represented.
+  assert.equal(new Set(feed.rows.map((row) => row.uid)).size, 21);
+});
+
+test("the round-robin cut keeps every account's newest rows and reports the total", () => {
   const groups = Array.from({length: 30}, (_, account) =>
     group(`account-${account}`, Array.from({length: 10}, (_, index) =>
       document(`row-${account}-${index}`, validIssue({
@@ -206,9 +240,20 @@ test("the feed limit bounds the response after the per-account caps and reports 
   const feed = assembleIssueFeed(groups, 10, 25, 200, identities);
   assert.equal(feed.total, 300);
   assert.equal(feed.rows.length, 200);
-  // The cut keeps the newest rows across accounts, not the first accounts.
-  assert.equal(feed.rows[0].message, "0/0");
-  assert.equal(feed.rows[199].at, 1_000_000 - 19 * 10 - 9);
-  assert.equal(feed.cappedAccounts, 0);
+  const perAccount = new Map();
+  for (const row of feed.rows) perAccount.set(row.uid, (perAccount.get(row.uid) ?? 0) + 1);
+  assert.equal(perAccount.size, 30);
+  // 200 / 30: six full rounds plus twenty of the seventh.
+  assert.equal(Math.min(...perAccount.values()), 6);
+  assert.equal(Math.max(...perAccount.values()), 7);
+  // What each account shows is its newest rows, not an arbitrary subset.
+  for (const [uid, shown] of perAccount) {
+    const messages = feed.rows.filter((row) => row.uid === uid).map((row) => row.message);
+    const account = uid.replace("account-", "");
+    assert.deepEqual(messages, Array.from({length: shown}, (_, index) => `${account}/${index}`));
+  }
+  // Below the limit nothing is cut.
+  const small = assembleIssueFeed(groups.slice(0, 5), 10, 25, 200, identities);
+  assert.equal(small.rows.length, 50);
+  assert.equal(small.total, 50);
 });
-

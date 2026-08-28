@@ -1091,7 +1091,9 @@ export interface StoredIssue {
 export function decodeStoredIssue(value: unknown): StoredIssue | null {
   if (!isRecord(value) || !(value.createdAt instanceof Timestamp)) return null;
   if (value.level !== "warn" && value.level !== "error") return null;
-  if (typeof value.event !== "string" ||
+  // event is bounded here too, so the feed's per-row size is a guarantee of
+  // this decoder rather than an inference about every writer's allowlist.
+  if (typeof value.event !== "string" || value.event.length > 100 ||
       typeof value.message !== "string" || value.message.length > 1000) {
     return null;
   }

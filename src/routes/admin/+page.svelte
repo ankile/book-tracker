@@ -20,28 +20,38 @@
   const caps = $derived(overview?.issueCaps ?? null);
 
   // A capped feed that looks complete is worse than one that admits it is
-  // capped, so everything that hid a row is named with its real number.
-  const capNotes = $derived.by(() => {
+  // incomplete, so everything that hid a row is named with its real number.
+  const feedNotes = $derived.by(() => {
     if (!caps) return [];
     const notes: string[] = [];
     if (caps.cappedAccounts > 0) {
       notes.push(
-        `${caps.cappedAccounts} ${caps.cappedAccounts === 1 ? 'account has' : 'accounts have'} more than ${caps.perAccount} rows in this window; only the newest ${caps.perAccount} of each are listed`
+        `${caps.cappedAccounts} ${caps.cappedAccounts === 1 ? 'account has' : 'accounts have'} more than ${caps.perAccount} rows in this window — only the newest ${caps.perAccount} of each are listed`
       );
     }
     if (caps.anonymousCapped) {
       notes.push(`only the newest ${caps.anonymous} anonymous sign-in failures are listed`);
     }
     if (caps.shown < caps.total) {
-      notes.push(`showing the newest ${caps.shown} of ${caps.total} rows`);
+      notes.push(`showing ${caps.shown} of ${caps.total} rows, shared evenly between accounts`);
     }
     if (caps.unreadAccounts > 0) {
       notes.push(
-        `${caps.unreadAccounts} ${caps.unreadAccounts === 1 ? 'account' : 'accounts'} could not be read; those rows are missing`
+        `${caps.unreadAccounts} ${caps.unreadAccounts === 1 ? 'account' : 'accounts'} could not be read — ${caps.unreadAccounts === 1 ? 'its' : 'their'} rows are missing`
       );
+    }
+    if (caps.anonymousUnread) {
+      notes.push('the anonymous sign-in failures could not be read');
     }
     return notes;
   });
+
+  // An empty feed means "nothing happened" only when every read succeeded;
+  // after a total read failure (a missing index, an IAM change) it would
+  // otherwise render as a green all-clear.
+  const readFailed = $derived(
+    caps !== null && (caps.unreadAccounts > 0 || caps.anonymousUnread)
+  );
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
@@ -192,6 +202,10 @@
     font-size: 1.1rem;
     margin: 0;
   }
+  .unreadable {
+    color: #b02a37;
+    font-size: 1.1rem;
+  }
 
   .loading {
     color: #999;
@@ -268,17 +282,26 @@
         Warnings and errors from the last {overview.issueWindowDays} days,
         newest first.{#if caps}
           Each account is read separately and shows at most
-          {caps.perAccount} rows, so one account's volume never hides
-          another's.{/if} Anonymous rows are no longer written; the ones
-        still listed predate that change and drop out of this window as it
-        moves (the rows themselves expire with the 90-day retention).
+          {caps.perAccount} rows, and the {caps.shown < caps.total ? caps.shown : 'feed'}
+          cut is shared evenly between accounts, so one account's volume
+          never hides another's.{/if} Anonymous rows are no longer written;
+        the ones still listed predate that change and drop out of this
+        window as it moves (the rows themselves expire with the 90-day
+        retention).
       </p>
-      {#if capNotes.length > 0}
-        <p class="truncated">
-          Capped: {capNotes.join('; ')}.
-        </p>
+      {#if feedNotes.length > 0}
+        <div class="truncated">
+          <strong>Incomplete feed:</strong>
+          <ul>
+            {#each feedNotes as note}
+              <li>{note}.</li>
+            {/each}
+          </ul>
+        </div>
       {/if}
-      {#if overview.issues.length === 0}
+      {#if overview.issues.length === 0 && readFailed}
+        <p class="unreadable">No rows could be read for this window.</p>
+      {:else if overview.issues.length === 0}
         <p class="empty">No warnings or errors — all clear.</p>
       {:else}
         <div class="table-scroll">

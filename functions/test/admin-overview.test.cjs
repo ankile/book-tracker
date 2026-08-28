@@ -3,7 +3,7 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {getAuth} = require("firebase-admin/auth");
-const {getFirestore} = require("firebase-admin/firestore");
+const {getFirestore, Timestamp} = require("firebase-admin/firestore");
 const {logger} = require("firebase-functions");
 
 const deployed = require("../lib");
@@ -35,7 +35,7 @@ const emptyQuery = () => {
 // sends to Firestore are the thing under test, not just how the rows are
 // assembled afterwards (round-2 red-team: dropping the uid filter or the
 // +1 survived the suite before this file existed).
-function installOverviewStore(t, uids, {failFor = []} = {}) {
+function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonymous = false} = {}) {
   const issueQueries = [];
   t.mock.method(auth, "listUsers", async () => ({
     users: uids.map((uid) => ({
@@ -75,7 +75,23 @@ function installOverviewStore(t, uids, {failFor = []} = {}) {
         get: async () => {
           const uid = call.filters.find(([field]) => field === "uid")?.[2];
           if (failFor.includes(uid)) throw new Error(`simulated failure for ${uid}`);
-          return {docs: []};
+          if (uid === null && failAnonymous) throw new Error("simulated anonymous failure");
+          if (uid === null || rowsPerUid === 0) return {docs: []};
+          // Newest first, as Firestore would return them; the limit is honoured
+          // so the test sees exactly what the callable asked for.
+          return {docs: Array.from({length: Math.min(rowsPerUid, call.limit)}, (_, index) => ({
+            id: `${uid}-${index}`,
+            createTime: Timestamp.fromMillis(1),
+            data: () => ({
+              createdAt: Timestamp.fromMillis(2_000_000 - uids.indexOf(uid) * 100 - index),
+              level: "error",
+              event: "firestore.write_failed",
+              message: `${uid}/${index}`,
+              code: null,
+              uid,
+              detail: null,
+            }),
+          }))};
         },
       };
       return query;
@@ -119,8 +135,36 @@ test("the issue feed reads one uid-pinned, cap+1 query per account", async (t) =
     shown: 0,
     total: 0,
     unreadAccounts: 0,
+    anonymousUnread: false,
   });
   assert.ok(FEED_LIMIT >= ISSUES_PER_UID);
+});
+
+test("the callable applies the shipped caps and the shipped feed limit to the wire", async (t) => {
+  // 30 accounts x cap+1 rows read: over the per-account cap (so
+  // cappedAccounts must count all 30) and over FEED_LIMIT once capped
+  // (300 > 200), so the wire has to show the cut. The empty-feed test
+  // above cannot see any of this: with zero documents, passing a literal
+  // instead of FEED_LIMIT, swapping the two cap arguments, and reporting
+  // `shown: feed.total` all produce the same wire (round-3 red-team).
+  const uids = Array.from({length: 30}, (_, index) => `account-${index}`);
+  installOverviewStore(t, uids, {rowsPerUid: ISSUES_PER_UID + 1});
+
+  const result = await deployed.admin.overview.run({}, adminContext);
+
+  assert.equal(result.issues.length, FEED_LIMIT);
+  assert.equal(result.issueCaps.shown, FEED_LIMIT);
+  assert.equal(result.issueCaps.total, uids.length * ISSUES_PER_UID);
+  assert.equal(result.issueCaps.cappedAccounts, uids.length);
+  assert.equal(result.issueCaps.anonymousCapped, false);
+  const perUid = new Map();
+  for (const row of result.issues) perUid.set(row.uid, (perUid.get(row.uid) ?? 0) + 1);
+  // Round-robin: every account is present and none exceeds its cap.
+  assert.equal(perUid.size, uids.length);
+  assert.ok(Math.max(...perUid.values()) <= ISSUES_PER_UID);
+  for (let index = 1; index < result.issues.length; index += 1) {
+    assert.ok(result.issues[index - 1].at >= result.issues[index].at);
+  }
 });
 
 test("one failed per-account read is dropped, logged and counted, not fatal", async (t) => {
@@ -133,8 +177,31 @@ test("one failed per-account read is dropped, logged and counted, not fatal", as
 
   assert.equal(result.users.length, 3);
   assert.equal(result.issueCaps.unreadAccounts, 1);
+  assert.equal(result.issueCaps.anonymousUnread, false);
   assert.deepEqual(errors, [[
     "admin.issues.read_failed",
     {uid: "broken", message: "simulated failure for broken"},
   ]]);
+});
+
+test("a failed uid-null read is reported separately from failed accounts", async (t) => {
+  installOverviewStore(t, ["owner"], {failAnonymous: true});
+  t.mock.method(logger, "error", () => undefined);
+  const result = await deployed.admin.overview.run({}, adminContext);
+  assert.equal(result.issueCaps.unreadAccounts, 0);
+  assert.equal(result.issueCaps.anonymousUnread, true);
+});
+
+test("when every read fails the feed is empty but the wire says why", async (t) => {
+  // A missing composite index fails every per-account read at once; the
+  // page must not read that as "all clear" (round-3 red-team).
+  const uids = ["owner", "stranger", "third"];
+  installOverviewStore(t, uids, {failFor: uids, failAnonymous: true});
+  const errors = [];
+  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const result = await deployed.admin.overview.run({}, adminContext);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.issueCaps.unreadAccounts, uids.length);
+  assert.equal(result.issueCaps.anonymousUnread, true);
+  assert.equal(errors.length, uids.length + 1);
 });

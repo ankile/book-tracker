@@ -73,6 +73,8 @@ export interface AdminOverview {
     total: number;
     // Accounts whose read failed; their rows are missing from this feed.
     unreadAccounts: number;
+    // Whether the read for rows without a uid failed.
+    anonymousUnread: boolean;
   };
 }
 

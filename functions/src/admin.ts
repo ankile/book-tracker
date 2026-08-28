@@ -38,7 +38,8 @@ const AUDIT_RETENTION_DAYS = 365;
 // per-account cap applied after a shared scan stops doing anything at all
 // (SEC-038 red-team, 2026-08-28). With a query per account, the most any
 // account can contribute is its cap, and no account's volume affects what
-// is read for another; FEED_LIMIT then bounds the response as a whole.
+// is read for another; FEED_LIMIT then bounds the response as a whole,
+// shared round-robin between accounts so the cut cannot re-couple them.
 // What this feed does not see: rows of a uid that exists in neither Auth
 // nor users/ (a fully purged account — today deleted accounts survive in
 // the union through their orphaned subcollections; if account deletion
@@ -47,7 +48,9 @@ const AUDIT_RETENTION_DAYS = 365;
 // event allowlist on the read side any more: every logEvents row for an
 // account is feed material, which is the contract logging.ts states.
 // One failed per-account read no longer fails the page: the group is
-// dropped, logged, and counted on the wire as unreadAccounts.
+// dropped, logged, and counted on the wire (unreadAccounts for accounts,
+// anonymousUnread for the uid-null read) so the page can distinguish an
+// empty feed from an unreadable one.
 // The caps themselves live in adminIssues.ts (a plain module, so tests can
 // pin them without loading the callable exports).
 
@@ -276,14 +279,17 @@ exports.overview = adminCallable(async () => {
   ]);
   const groups: IssueGroup[] = [];
   let unreadAccounts = 0;
+  let anonymousUnread = false;
   reads.forEach((read, index) => {
     if (read.status === "fulfilled") {
       groups.push(read.value);
       return;
     }
-    unreadAccounts += 1;
+    const uid = index < uids.length ? uids[index] : null;
+    if (uid === null) anonymousUnread = true;
+    else unreadAccounts += 1;
     logger.error("admin.issues.read_failed", {
-      uid: index < uids.length ? uids[index] : null,
+      uid,
       message: read.reason instanceof Error ? read.reason.message : String(read.reason),
     });
   });
@@ -307,6 +313,7 @@ exports.overview = adminCallable(async () => {
       shown: feed.rows.length,
       total: feed.total,
       unreadAccounts,
+      anonymousUnread,
     },
   };
 });

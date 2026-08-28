@@ -1,0 +1,80 @@
+---
+title: Book Tracker container and trust boundaries
+---
+flowchart LR
+  accTitle: Book Tracker container and trust boundaries
+  accDescr: The browser and Firebase Hosting form the delivery edge. Browser Firestore access is checked by Security Rules. Cloud Functions use Admin SDK access governed by two IAM service accounts. Direct catalog requests stay in the browser, while Google Books and Toggl requests run through Cloud Functions.
+
+  classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
+  classDef client fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:2px;
+  classDef edge fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
+  classDef firebase fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
+  classDef data fill:#eaf7ef,stroke:#2e7d55,color:#17482f,stroke-width:2px;
+  classDef external fill:#f7f3ed,stroke:#9b7b52,color:#4c3926,stroke-width:2px;
+  classDef security fill:#fff1f0,stroke:#b42318,color:#651c15,stroke-width:2px;
+  classDef neutral fill:#ffffff,stroke:#8b9691,color:#263331,stroke-width:1.5px;
+  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
+
+  people["<b>People and crawlers</b><br/>Reader · profile visitor<br/>operator · search crawler"]:::person
+
+  subgraph booktracker[Book Tracker system]
+    direction LR
+
+    subgraph device[User device]
+      direction TB
+      browser["<b>Browser or installed PWA</b><br/>SvelteKit 2 · Svelte 5<br/>Firebase web SDKs"]:::client
+      local["<b>Local persistence</b><br/>Service worker + Cache Storage<br/>Firestore IndexedDB · multi-tab"]:::client
+      browser -->|"app shell and queued writes"| local
+    end
+
+    subgraph firebase[Firebase project · book-tracker-d8f24]
+      direction TB
+      hosting["<b>Hosting + CDN</b><br/>Static SPA and immutable assets<br/>Pinned rewrite for public web"]:::edge
+      auth["<b>Firebase Authentication</b><br/>Email/password sessions<br/>Auth lifecycle events"]:::firebase
+      rules["<b>Firestore Security Rules</b><br/>Owner checks and write invariants"]:::security
+      firestore[("<b>Cloud Firestore · eur3</b><br/>Private libraries · profiles<br/>queues · quotas · operations")]:::data
+      publicweb["<b>publicweb · Gen 2</b><br/>Pinned Cloud Run revision<br/><code>publicweb-runtime</code> · read-only IAM"]:::edge
+      callables["<b>Callable functions · Gen 1</b><br/>Public endpoints, handlers authorize<br/><code>functions-runtime</code> · max instances"]:::firebase
+      eventarc["<b>Event delivery</b><br/>Auth events + Eventarc<br/>Firestore ingress is internal-only"]:::neutral
+      background["<b>Background functions</b><br/>Gen 1 Auth + Gen 2 Firestore triggers<br/><code>functions-runtime</code>"]:::firebase
+      secrets["<b>Secret Manager</b><br/><code>FUNCTIONS_CONFIG_EXPORT</code>"]:::security
+      logs["<b>Cloud Logging + Monitoring</b><br/>Function logs, uptime checks,<br/>error and delivery alerts"]:::neutral
+    end
+  end
+
+  subgraph providers[External systems]
+    direction TB
+    directCatalogs["<b>Direct catalog APIs</b><br/>Open Library<br/>Nasjonalbiblioteket"]:::external
+    google["<b>Google Books API</b><br/>Metered ISBN metadata"]:::external
+    toggl["<b>Toggl Track API v9</b><br/>Reading project and time entries"]:::external
+  end
+
+  people -->|"HTTPS"| hosting
+  hosting -->|"static app"| browser
+  hosting -->|"<code>/profiles/**</code> and <code>/sitemap.xml</code>"| publicweb
+
+  browser -->|"sign in and restore session"| auth
+  browser -->|"Firebase ID token"| callables
+  browser -->|"owner reads and writes"| rules
+  rules -->|"allow or reject"| firestore
+  browser -->|"CORS requests"| directCatalogs
+
+  publicweb -->|"Admin SDK + read-only IAM"| firestore
+  callables -->|"Admin SDK + IAM, bypasses Rules"| firestore
+  callables -->|"list users for admin"| auth
+  secrets -. "Google API key" .-> callables
+  callables -->|"keyed lookup"| google
+  callables -->|"token and timer requests"| toggl
+
+  auth -->|"create or delete event"| eventarc
+  firestore -->|"book delete or queue write"| eventarc
+  eventarc --> background
+  background -->|"Admin SDK + IAM"| firestore
+  background -->|"queued time entry"| toggl
+
+  publicweb -.-> logs
+  callables -.-> logs
+  background -.-> logs
+
+  legend["<b>Legend</b><br/>Solid = request or data access · Dotted = config or observability<br/>Red = enforcement boundary · Sand = delivery edge or external system"]:::legend
+  logs ~~~ legend

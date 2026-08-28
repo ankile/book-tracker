@@ -95,8 +95,10 @@ admin overview reads each account's rows with its own capped query (ten per
 account, 25 for rows whose uid is null — index `logEvents(uid, createdAt)`,
 which must exist before `admin-overview` is deployed), so no account's
 volume can push another's out of the feed; the feed as a whole is cut at
-200 rows, and the page says how many accounts hit the cap, how many rows
-the cut hid, and how many accounts could not be read.
+200 rows shared round-robin between accounts (so the cut cannot re-couple
+them either), and the page says how many accounts hit the cap, how many
+rows the cut hid, and how many reads failed — an empty feed after a failed
+read is shown as unreadable, never as all clear.
 
 ### Backfilling existing books
 

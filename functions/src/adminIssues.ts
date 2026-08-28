@@ -48,7 +48,7 @@ export interface IssueGroup {
 }
 
 export interface IssueFeed {
-  // Newest first, at most feedLimit rows.
+  // Newest first, at most feedLimit rows, chosen round-robin across groups.
   rows: AdminIssueRow[];
   // Rows that passed the per-group caps, before the feed limit.
   total: number;
@@ -129,8 +129,19 @@ function mapIssueDocument(
 // is invisible to this feed (Firestore's `== null` is IS_NULL, and the
 // index does not contain documents lacking the field). Only the Admin SDK
 // writes the collection and every writer sets uid, so such a row would be
-// a server bug rather than an attack. After the per-group caps the feed is
-// sorted and cut at feedLimit; `total` says how many rows that cut hid.
+// a server bug rather than an attack.
+//
+// The cut to feedLimit is round-robin, not newest-first: the newest row of
+// every group, then the second newest of every group, until the budget is
+// spent, and only then sorted by time for display. A newest-first cut
+// re-coupled the accounts the per-group queries had just separated — twenty
+// accounts writing exactly the cap each (so nothing reported them as
+// capped) pushed an honest account's rows below the cut entirely (round-3
+// red-team). Round-robin guarantees every group at least
+// floor(feedLimit / groups) of its rows; at twenty groups or fewer nothing
+// is cut at all, and at two hundred every account still shows its newest
+// row. `total` is how many rows passed the per-group caps, so the page can
+// say how many the cut hid.
 export function assembleIssueFeed(
   groups: readonly IssueGroup[],
   perAccountLimit: number,
@@ -138,24 +149,27 @@ export function assembleIssueFeed(
   feedLimit: number,
   identities: ReadonlyMap<string, IssueIdentity>,
 ): IssueFeed {
-  const rows: AdminIssueRow[] = [];
   let cappedAccounts = 0;
   let anonymousCapped = false;
-  for (const group of groups) {
+  const perGroup = groups.map((group) => {
     const limit = group.uid === null ? anonymousLimit : perAccountLimit;
     if (group.documents.length > limit) {
       if (group.uid === null) anonymousCapped = true;
       else cappedAccounts += 1;
     }
-    for (const document of group.documents.slice(0, limit)) {
-      rows.push(mapIssueDocument(document, identities));
+    return group.documents.slice(0, limit)
+      .map((document) => mapIssueDocument(document, identities))
+      .sort((a, b) => b.at - a.at);
+  });
+  const total = perGroup.reduce((sum, groupRows) => sum + groupRows.length, 0);
+  const deepest = Math.max(0, ...perGroup.map((groupRows) => groupRows.length));
+  const rows: AdminIssueRow[] = [];
+  for (let rank = 0; rank < deepest && rows.length < feedLimit; rank += 1) {
+    for (const groupRows of perGroup) {
+      if (rows.length >= feedLimit) break;
+      if (rank < groupRows.length) rows.push(groupRows[rank]);
     }
   }
   rows.sort((a, b) => b.at - a.at);
-  return {
-    rows: rows.slice(0, feedLimit),
-    total: rows.length,
-    cappedAccounts,
-    anonymousCapped,
-  };
+  return {rows, total, cappedAccounts, anonymousCapped};
 }

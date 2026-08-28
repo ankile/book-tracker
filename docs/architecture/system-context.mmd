@@ -1,0 +1,36 @@
+---
+title: Book Tracker system context
+---
+flowchart LR
+  accTitle: Book Tracker system context
+  accDescr: Readers, public profile visitors, the operator, and search crawlers use Book Tracker. Book Tracker reads book metadata from Open Library, Google Books, and Nasjonalbiblioteket, and optionally synchronizes reading timers with Toggl Track.
+
+  classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
+  classDef system fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:3px;
+  classDef external fill:#f7f3ed,stroke:#9b7b52,color:#4c3926,stroke-width:2px;
+  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
+
+  subgraph people[People]
+    direction TB
+    reader["<b>Reader</b><br/>Tracks books, progress, sessions,<br/>authors, and reading statistics"]:::person
+    visitor["<b>Profile visitor</b><br/>Reads a shared public profile"]:::person
+    operator["<b>Operator</b><br/>Reviews account activity and issues"]:::person
+    crawler["<b>Search crawler</b><br/>Indexes opted-in public profiles"]:::person
+  end
+
+  app["<b>Book Tracker</b><br/>Private, offline-capable reading tracker<br/>with opt-in public profiles and optional Toggl sync"]:::system
+
+  subgraph providers[External systems]
+    direction TB
+    catalogs["<b>Book metadata providers</b><br/>Open Library · Google Books<br/>Nasjonalbiblioteket"]:::external
+    toggl["<b>Toggl Track</b><br/>Reading project and time entries"]:::external
+  end
+
+  reader -->|"uses"| app
+  visitor -->|"opens shared profile"| app
+  operator -->|"opens restricted overview"| app
+  crawler -->|"reads sitemap and profile HTML"| app
+  app -->|"looks up ISBN metadata"| catalogs
+  app -->|"creates and stops timers"| toggl
+
+  legend["<b>Legend</b><br/>Teal = Book Tracker · Gray = people · Sand = external system"]:::legend
