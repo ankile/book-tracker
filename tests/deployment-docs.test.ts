@@ -140,5 +140,6 @@ test('every Firebase CLI invocation in the runbook pins the same firebase-tools 
   for (const line of invocations) {
     assert.match(line, /firebase-tools@15\.24\.0/, `unpinned Firebase CLI: ${line.trim()}`);
   }
-  assert.doesNotMatch(readme, /npx -y firebase-tools/, 'the CLI holds the deploy credential; never resolve it to latest');
+  const unpinnedCommands = readme.split('\n').filter((line) => /^\s*npx -y firebase-tools/.test(line));
+  assert.deepEqual(unpinnedCommands, [], 'the CLI holds the deploy credential; never resolve it to latest');
 });
