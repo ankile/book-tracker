@@ -193,11 +193,16 @@ test("user deletion pages through profiles, deletes only markers it still owns, 
       }};
     },
   };
+  const ownerRef = {path: "profileOwners/owner", deleted: 0, delete: async function() { this.deleted += 1; }};
   t.mock.method(db, "collection", (path) => {
     if (path === "profiles") return profiles;
     if (path === "users") return {doc: (uid) => {
       assert.equal(uid, "owner");
       return userRef;
+    }};
+    if (path === "profileOwners") return {doc: (uid) => {
+      assert.equal(uid, "owner");
+      return ownerRef;
     }};
     assert.equal(path, "profileDiscovery");
     return {doc: (username) => discoveryRef(username)};
@@ -223,6 +228,8 @@ test("user deletion pages through profiles, deletes only markers it still owns, 
   pages.push(names.slice(200).map((n) => ({id: n, ref: profileRef(n)})));
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.equal(userRef.deleted, 1);
+  // The one-profile-per-account record goes with the user document.
+  assert.equal(ownerRef.deleted, 1);
   assert.equal(commits, 3);
   assert.equal(getAllCount, 3);
   assert.equal(deletes.length, 500);

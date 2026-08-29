@@ -78,9 +78,10 @@ exports.createUserDocument = functions
     return null;
   });
 
-// Profiles per account are not capped by rules yet (SEC-032), so deletion
-// pages through them: each page is one bounded batch (≤ 2 × page ops),
-// and the markers of a page are fetched with one getAll. failurePolicy
+// Rules now allow one profile per account (SEC-032, profileOwners/{uid}),
+// but accounts from before that cap may hold more, so deletion still
+// pages: each page is one bounded batch (≤ 2 × page ops), and the markers
+// of a page are fetched with one getAll. failurePolicy
 // makes a failed delivery retry — every step here is idempotent, and
 // without it a transient error would leave a deleted account's profiles
 // public and in the sitemap forever (no client can delete them once the
@@ -100,6 +101,7 @@ exports.deleteUserDocument = functions
     // its search opt-in. Otherwise a deleted account could remain in Google
     // and in the sitemap indefinitely.
     await db.collection("users").doc(user.uid).delete();
+    await db.collection("profileOwners").doc(user.uid).delete();
     for (;;) {
       const page = await db.collection("profiles")
         .where("uid", "==", user.uid)

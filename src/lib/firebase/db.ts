@@ -453,9 +453,15 @@ class Database {
         if (!snapshot.metadata.fromCache) {
           ownProfileUsernames.set(userId, new Set(snapshot.docs.map((d) => d.id)));
         }
+        // updatedAt is a serverTimestamp(); the optimistic local snapshot
+        // would otherwise carry null until the server acknowledges.
         set(profileDoc
           ? decodeStored(
-            () => decodeProfile(profileDoc.id, profileDoc.data(), profileDoc.ref.path),
+            () => decodeProfile(
+              profileDoc.id,
+              profileDoc.data({ serverTimestamps: 'estimate' }),
+              profileDoc.ref.path,
+            ),
           )
           : null);
       }, listenError('load your public profile'));
@@ -524,8 +530,13 @@ class Database {
   // doc and reject it, so the caller sees permission-denied and reports
   // "taken" inline — which is why this method is not in writeLabels.
   // isPublic is the explicit share checkbox; profiles are born private.
+  // updatedAt is serverTimestamp(): the rules pin it to request.time
+  // because the shared sitemap publishes it as <lastmod>. The ownership
+  // record travels in the same batch — the rules allow one profile per
+  // account, keyed by that record (SEC-032).
   static async createProfile({ userId, username, givenName, familyName, links, isPublic, stats, records, years, days }: ProfileWrite): Promise<void> {
-    await setDoc(doc(db, 'profiles', username), {
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'profiles', username), {
       uid: userId,
       public: isPublic,
       givenName,
@@ -535,8 +546,10 @@ class Database {
       records,
       years,
       days,
-      updatedAt: Timestamp.now(),
+      updatedAt: serverTimestamp(),
     });
+    batch.set(doc(db, 'profileOwners', userId), { username });
+    await batch.commit();
   }
 
   // Full overwrite with the freshly computed payload (the Me page keeps the
@@ -554,7 +567,7 @@ class Database {
       records,
       years,
       days,
-      updatedAt: Timestamp.now(),
+      updatedAt: serverTimestamp(),
     };
     if (!removeDiscovery) {
       await setDoc(profileRef, profile);
@@ -583,7 +596,7 @@ class Database {
   static addProfileLink({ username, link }: AddProfileLinkInput): Promise<void> {
     return updateDoc(doc(db, 'profiles', username), {
       links: arrayUnion(link),
-      updatedAt: Timestamp.now(),
+      updatedAt: serverTimestamp(),
     });
   }
 
@@ -604,9 +617,10 @@ class Database {
       records,
       years,
       days,
-      updatedAt: Timestamp.now(),
+      updatedAt: serverTimestamp(),
     });
     batch.delete(doc(db, 'profiles', oldUsername));
+    batch.set(doc(db, 'profileOwners', userId), { username: newUsername });
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
         uid: userId,
@@ -619,10 +633,11 @@ class Database {
     await batch.commit();
   }
 
-  static async deleteProfile({ username }: ProfileDiscoveryWrite): Promise<void> {
+  static async deleteProfile({ userId, username }: ProfileDiscoveryWrite): Promise<void> {
     const batch = writeBatch(db);
     batch.delete(doc(db, 'profiles', username));
     batch.delete(doc(db, 'profileDiscovery', username));
+    batch.delete(doc(db, 'profileOwners', userId));
     await batch.commit();
   }
 

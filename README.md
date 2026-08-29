@@ -247,6 +247,19 @@ they do not need to be generated as one static file per username. Firebase
 Hosting sends `/profiles/**` and `/sitemap.xml` to that Function, while the
 Svelte app still hydrates the profile page for interactive visitors.
 
+Publishing is for verified accounts whose `users/{uid}` document still
+exists: the rules refuse profile and discovery-marker writes from an
+unverified token (sign-up is open and unverified, and the app has no
+verification flow yet — the owner's flag was set out of band, see the
+account-deletion runbook) and from an account deleted in Auth (its ID token
+stays valid for up to an hour). Each account holds one profile, recorded in
+`profileOwners/{uid}`, which the client moves in the same batch as every
+profile create, rename and delete; a profile delete also removes its own
+discovery marker, so a freed username never inherits a stale marker. Names
+the site uses for itself (`admin`, `api`, `profiles`, `sitemap`, …) are
+reserved, and `profiles.updatedAt` is server-pinned because the shared
+sitemap publishes it as `<lastmod>` (SEC-032/033/035/036/062).
+
 Search discovery is a separate, explicit opt-in from public sharing. A profile
 owner first enables **Public profile**, then enables **Appear in search
 engines**. The second switch creates `profileDiscovery/<username>` with the
@@ -309,6 +322,14 @@ use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
 production tokens are never sent to Toggl, and start, stop, token, and queue
 flows still exercise their real Firestore state transitions. The metered Google
 Books proxy also returns a local miss instead of consuming its production key.
+Book and author documents are field-allowlisted and byte-capped by the
+rules (a document is a few KB, not the 1 MiB Firestore allows — storage
+that PITR and 98 daily backups multiply, and that a delete event carries in
+full into Pub/Sub; SEC-039/071). Progress and timer updates skip the shape
+check, so a document with an unknown field from before the rule stays
+readable; the next edit sheds the field. Connecting Toggl (`savetoken`)
+requires a verified account and is metered at five attempts per user per
+hour (`functionQuotas/togglToken`, SEC-024).
 Queued Toggl work is claimed under a server-owned ten-per-hour user quota;
 an over-quota `create` row is stamped with the end of the window
 (`deferredUntil`) and left pending — the trigger never throws for overflow,

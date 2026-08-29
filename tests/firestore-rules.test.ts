@@ -27,6 +27,7 @@ import {
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
+import { FirebaseError } from 'firebase/app';
 import { togglQueueId } from '../src/lib/utils/toggl.ts';
 import {
   queueReadingSessionDelete,
@@ -65,6 +66,28 @@ const profile = (uid: string, overrides: Record<string, unknown> = {}) => ({
   updatedAt: serverTimestamp(),
   ...overrides,
 });
+
+// Publishing needs a verified account whose users document exists
+// (SEC-033, SEC-062); the client creates a profile together with its
+// ownership record (SEC-032). These helpers are that shape.
+const verified = (uid: string) =>
+  environment.authenticatedContext(uid, { email_verified: true }).firestore();
+const seedAccount = (uid: string) =>
+  environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), { uid, email: `${uid}@example.test` });
+  });
+const createProfileBatch = (
+  db: ReturnType<RulesTestContext['firestore']>,
+  uid: string,
+  username: string,
+  overrides: Record<string, unknown> = {},
+) => {
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'profiles', username), profile(uid, overrides));
+  batch.set(doc(db, 'profileOwners', uid), { username });
+  return batch.commit();
+};
+const marker = (uid: string) => ({ uid, createdAt: serverTimestamp() });
 
 const readingBook = (overrides: Record<string, unknown> = {}) => ({
   title: 'Reading book',
@@ -134,17 +157,191 @@ after(async () => environment.cleanup());
 beforeEach(async () => environment.clearFirestore());
 
 test('the owner can create and update a valid profile', async () => {
-  const db = environment.authenticatedContext('owner').firestore();
+  await seedAccount('owner');
+  const db = verified('owner');
   const ref = doc(db, 'profiles', 'ada-lovelace');
-  await assertSucceeds(setDoc(ref, profile('owner')));
+  await assertSucceeds(createProfileBatch(db, 'owner', 'ada-lovelace'));
   await assertSucceeds(setDoc(ref, profile('owner', { familyName: 'Byron' })));
+  assert.deepEqual((await getDoc(doc(db, 'profileOwners', 'owner'))).data(), { username: 'ada-lovelace' });
+});
+
+test('publishing needs a verified account whose users document still exists', async () => {
+  // Unverified token, account exists.
+  await seedAccount('unverified');
+  const unverified = environment.authenticatedContext('unverified').firestore();
+  await assertFails(createProfileBatch(unverified, 'unverified', 'unverified-reader'));
+  const claimsFalse = environment.authenticatedContext('unverified', { email_verified: false }).firestore();
+  await assertFails(createProfileBatch(claimsFalse, 'unverified', 'unverified-reader'));
+  // Verified token, but the account has been deleted (users/{uid} gone): the
+  // ID token stays valid for up to an hour and must not plant a page.
+  const ghost = verified('ghost');
+  await assertFails(createProfileBatch(ghost, 'ghost', 'ghost-reader'));
+  // Both: allowed.
+  await seedAccount('real');
+  await assertSucceeds(createProfileBatch(verified('real'), 'real', 'real-reader'));
+
+  // Updates and markers are gated the same way, including on a profile
+  // that already exists (seeded from before the gate).
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'legacy-reader'), profile('unverified'));
+    await setDoc(doc(context.firestore(), 'profileOwners', 'unverified'), { username: 'legacy-reader' });
+  });
+  await assertFails(setDoc(doc(unverified, 'profiles', 'legacy-reader'), profile('unverified', { familyName: 'Byron' })));
+  await assertFails(setDoc(doc(unverified, 'profileDiscovery', 'legacy-reader'), marker('unverified')));
+  await assertFails(setDoc(doc(ghost, 'profileDiscovery', 'real-reader'), marker('ghost')));
+  await assertSucceeds(setDoc(doc(verified('real'), 'profileDiscovery', 'real-reader'), marker('real')));
+  // The gate does not lock an unverified owner out of deleting what it has.
+  const legacyDelete = writeBatch(unverified);
+  legacyDelete.delete(doc(unverified, 'profiles', 'legacy-reader'));
+  legacyDelete.delete(doc(unverified, 'profileOwners', 'unverified'));
+  await assertSucceeds(legacyDelete.commit());
+});
+
+test('one profile per account: a second needs the first gone in the same batch', async () => {
+  await seedAccount('capped');
+  const db = verified('capped');
+  await assertSucceeds(createProfileBatch(db, 'capped', 'first-name'));
+  // A second profile, even with the ownership record moved, while the first
+  // still exists.
+  await assertFails(createProfileBatch(db, 'capped', 'second-name'));
+  // A second profile without touching the ownership record.
+  await assertFails(setDoc(doc(db, 'profiles', 'second-name'), profile('capped')));
+  // Rename: delete the first, create the second, move the record — allowed.
+  const rename = writeBatch(db);
+  rename.set(doc(db, 'profiles', 'second-name'), profile('capped'));
+  rename.delete(doc(db, 'profiles', 'first-name'));
+  rename.set(doc(db, 'profileOwners', 'capped'), { username: 'second-name' });
+  await assertSucceeds(rename.commit());
+  // (A get on a missing profile is denied by design — check with rules off.)
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    assert.equal((await getDoc(doc(context.firestore(), 'profiles', 'first-name'))).exists(), false);
+  });
+  assert.deepEqual((await getDoc(doc(db, 'profileOwners', 'capped'))).data(), { username: 'second-name' });
+  // A rename that forgets to delete the old profile.
+  const keepBoth = writeBatch(db);
+  keepBoth.set(doc(db, 'profiles', 'third-name'), profile('capped'));
+  keepBoth.set(doc(db, 'profileOwners', 'capped'), { username: 'third-name' });
+  await assertFails(keepBoth.commit());
+  // A rename whose record names the wrong profile.
+  const wrongRecord = writeBatch(db);
+  wrongRecord.set(doc(db, 'profiles', 'third-name'), profile('capped'));
+  wrongRecord.delete(doc(db, 'profiles', 'second-name'));
+  wrongRecord.set(doc(db, 'profileOwners', 'capped'), { username: 'fourth-name' });
+  await assertFails(wrongRecord.commit());
+});
+
+test('the profile ownership record only moves inside a profile batch', async () => {
+  await seedAccount('record-owner');
+  const db = verified('record-owner');
+  const record = doc(db, 'profileOwners', 'record-owner');
+  // Cannot name a profile that does not exist, or someone else's.
+  await assertFails(setDoc(record, { username: 'nothing-here' }));
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'theirs'), profile('someone-else'));
+  });
+  await assertFails(setDoc(record, { username: 'theirs' }));
+  await assertSucceeds(createProfileBatch(db, 'record-owner', 'mine'));
+  // Cannot be re-pointed while the named profile still exists, deleted while
+  // it exists, or given any other shape.
+  await assertFails(setDoc(record, { username: 'theirs' }));
+  await assertFails(setDoc(record, { username: 'nothing-here' }));
+  await assertFails(deleteDoc(record));
+  await assertFails(setDoc(record, { username: 'mine', extra: true }));
+  await assertFails(setDoc(record, { username: 'Bad Name' }));
+  // A rewrite that changes nothing is harmless and allowed.
+  await assertSucceeds(setDoc(record, { username: 'mine' }));
+  // Nobody else reads or writes it.
+  const stranger = verified('record-stranger');
+  await assertFails(getDoc(doc(stranger, 'profileOwners', 'record-owner')));
+  await assertFails(setDoc(doc(stranger, 'profileOwners', 'record-owner'), { username: 'mine' }));
+  await assertFails(deleteDoc(doc(stranger, 'profileOwners', 'record-owner')));
+  await assertSucceeds(getDoc(record));
+  // Released together with the profile.
+  const release = writeBatch(db);
+  release.delete(doc(db, 'profiles', 'mine'));
+  release.delete(record);
+  await assertSucceeds(release.commit());
+});
+
+test('names the site uses for itself cannot be claimed as usernames', async () => {
+  await seedAccount('squatter');
+  const db = verified('squatter');
+  for (const name of ['admin', 'api', 'profiles', 'sitemap', 'login', 'www', 'null', 'undefined', 'static']) {
+    await assertFails(createProfileBatch(db, 'squatter', name));
+  }
+  await assertSucceeds(createProfileBatch(db, 'squatter', 'admin-fan'));
+});
+
+test('profile updatedAt is server-pinned', async () => {
+  await seedAccount('clock-owner');
+  const db = verified('clock-owner');
+  await assertFails(createProfileBatch(db, 'clock-owner', 'clock', { updatedAt: Timestamp.now() }));
+  await assertFails(createProfileBatch(db, 'clock-owner', 'clock', { updatedAt: Timestamp.fromMillis(Date.UTC(9999, 0, 1)) }));
+  await assertFails(createProfileBatch(db, 'clock-owner', 'clock', { updatedAt: Timestamp.fromMillis(0) }));
+  await assertSucceeds(createProfileBatch(db, 'clock-owner', 'clock'));
+  await assertFails(setDoc(doc(db, 'profiles', 'clock'), profile('clock-owner', { updatedAt: Timestamp.fromMillis(Date.UTC(9999, 0, 1)) })));
+  await assertFails(updateDoc(doc(db, 'profiles', 'clock'), { familyName: 'Byron', updatedAt: Timestamp.now() }));
+  await assertSucceeds(setDoc(doc(db, 'profiles', 'clock'), profile('clock-owner', { familyName: 'Byron' })));
+});
+
+test('deleting a profile releases its record and takes its own marker with it', async () => {
+  await seedAccount('releaser');
+  const db = verified('releaser');
+  await assertSucceeds(createProfileBatch(db, 'releaser', 'released'));
+  await assertSucceeds(setDoc(doc(db, 'profileDiscovery', 'released'), marker('releaser')));
+  // Alone: the record still names it and the marker would be orphaned.
+  await assertFails(deleteDoc(doc(db, 'profiles', 'released')));
+  // Profile + marker, record kept.
+  const keepRecord = writeBatch(db);
+  keepRecord.delete(doc(db, 'profiles', 'released'));
+  keepRecord.delete(doc(db, 'profileDiscovery', 'released'));
+  await assertFails(keepRecord.commit());
+  // Profile + record, marker kept.
+  const keepMarker = writeBatch(db);
+  keepMarker.delete(doc(db, 'profiles', 'released'));
+  keepMarker.delete(doc(db, 'profileOwners', 'releaser'));
+  await assertFails(keepMarker.commit());
+  // All three.
+  const all = writeBatch(db);
+  all.delete(doc(db, 'profiles', 'released'));
+  all.delete(doc(db, 'profileDiscovery', 'released'));
+  all.delete(doc(db, 'profileOwners', 'releaser'));
+  await assertSucceeds(all.commit());
+  // The freed name is first-writer-wins again, with a clean marker slot.
+  await seedAccount('next-owner');
+  await assertSucceeds(createProfileBatch(verified('next-owner'), 'next-owner', 'released'));
+
+  // A marker under my name that belongs to another account (left by an
+  // orphan from before this rule) is not mine to carry: the delete goes
+  // through without touching it.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'squatted'), profile('releaser'));
+    await setDoc(doc(context.firestore(), 'profileOwners', 'releaser'), { username: 'squatted' });
+    await setDoc(doc(context.firestore(), 'profileDiscovery', 'squatted'), { uid: 'somebody-else', createdAt: Timestamp.now() });
+  });
+  const foreign = writeBatch(db);
+  foreign.delete(doc(db, 'profiles', 'squatted'));
+  foreign.delete(doc(db, 'profileOwners', 'releaser'));
+  await assertSucceeds(foreign.commit());
+
+  // A profile from before the ownership record existed deletes with its
+  // marker alone.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'legacy'), profile('releaser'));
+    await setDoc(doc(context.firestore(), 'profileDiscovery', 'legacy'), { uid: 'releaser', createdAt: Timestamp.now() });
+  });
+  const legacy = writeBatch(db);
+  legacy.delete(doc(db, 'profiles', 'legacy'));
+  legacy.delete(doc(db, 'profileDiscovery', 'legacy'));
+  await assertSucceeds(legacy.commit());
 });
 
 test('profile links support targeted, deduplicated arrayUnion writes up to the cap', async () => {
-  const db = environment.authenticatedContext('profile-link-owner').firestore();
+  await seedAccount('profile-link-owner');
+  const db = verified('profile-link-owner');
   const ref = doc(db, 'profiles', 'targeted-links');
   const link = { type: 'homepage', value: 'https://example.com' };
-  await assertSucceeds(setDoc(ref, profile('profile-link-owner')));
+  await assertSucceeds(createProfileBatch(db, 'profile-link-owner', 'targeted-links'));
   await assertSucceeds(updateDoc(ref, { links: arrayUnion(link), updatedAt: serverTimestamp() }));
   await assertSucceeds(updateDoc(ref, { links: arrayUnion(link), updatedAt: serverTimestamp() }));
   const saved = await getDoc(ref);
@@ -153,12 +350,14 @@ test('profile links support targeted, deduplicated arrayUnion writes up to the c
     link,
   ]);
 
-  const fullRef = doc(db, 'profiles', 'targeted-links-full');
+  await seedAccount('profile-link-full-owner');
+  const fullDb = verified('profile-link-full-owner');
+  const fullRef = doc(fullDb, 'profiles', 'targeted-links-full');
   const tenLinks = Array.from(
     { length: 10 },
     (_, index) => ({ type: 'other', value: `example.com/${index}` }),
   );
-  await assertSucceeds(setDoc(fullRef, profile('profile-link-owner', { links: tenLinks })));
+  await assertSucceeds(createProfileBatch(fullDb, 'profile-link-full-owner', 'targeted-links-full', { links: tenLinks }));
   await assertFails(updateDoc(fullRef, {
     links: arrayUnion({ type: 'other', value: 'example.com/overflow' }),
     updatedAt: serverTimestamp(),
@@ -185,10 +384,10 @@ test('profile documents are readable only by their owner, public or not', async 
 });
 
 test('owners can opt public profiles into search without making markers listable', async () => {
-  const owner = environment.authenticatedContext('discovery-owner').firestore();
-  const profileRef = doc(owner, 'profiles', 'searchable-reader');
+  await seedAccount('discovery-owner');
+  const owner = verified('discovery-owner');
   const discoveryRef = doc(owner, 'profileDiscovery', 'searchable-reader');
-  await assertSucceeds(setDoc(profileRef, profile('discovery-owner')));
+  await assertSucceeds(createProfileBatch(owner, 'discovery-owner', 'searchable-reader'));
   const missingDiscovery = await assertSucceeds(getDoc(discoveryRef));
   assert.equal(missingDiscovery.exists(), false);
   await assertSucceeds(setDoc(discoveryRef, {
@@ -211,50 +410,61 @@ test('owners can opt public profiles into search without making markers listable
 });
 
 test('profile discovery requires an owned public profile and an exact marker', async () => {
-  const owner = environment.authenticatedContext('private-discovery-owner').firestore();
-  await assertSucceeds(setDoc(
-    doc(owner, 'profiles', 'private-discovery'),
-    profile('private-discovery-owner', { public: false }),
-  ));
+  await seedAccount('private-discovery-owner');
+  const owner = verified('private-discovery-owner');
+  await assertSucceeds(createProfileBatch(owner, 'private-discovery-owner', 'private-discovery', { public: false }));
   await assertFails(setDoc(doc(owner, 'profileDiscovery', 'private-discovery'), {
     uid: 'private-discovery-owner',
     createdAt: serverTimestamp(),
   }));
 
   await assertSucceeds(setDoc(
-    doc(owner, 'profiles', 'public-discovery'),
+    doc(owner, 'profiles', 'private-discovery'),
     profile('private-discovery-owner'),
   ));
-  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'public-discovery'), {
+  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'private-discovery'), {
     uid: 'someone-else',
     createdAt: serverTimestamp(),
   }));
-  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'public-discovery'), {
+  await assertFails(setDoc(doc(owner, 'profileDiscovery', 'private-discovery'), {
     uid: 'private-discovery-owner',
     createdAt: serverTimestamp(),
     extra: true,
   }));
+  await assertSucceeds(setDoc(doc(owner, 'profileDiscovery', 'private-discovery'), {
+    uid: 'private-discovery-owner',
+    createdAt: serverTimestamp(),
+  }));
 });
 
 test('profile rename can move its discovery marker atomically', async () => {
-  const db = environment.authenticatedContext('rename-discovery-owner').firestore();
+  await seedAccount('rename-discovery-owner');
+  const db = verified('rename-discovery-owner');
   const oldProfile = doc(db, 'profiles', 'old-search-name');
   const oldDiscovery = doc(db, 'profileDiscovery', 'old-search-name');
-  await assertSucceeds(setDoc(oldProfile, profile('rename-discovery-owner')));
+  await assertSucceeds(createProfileBatch(db, 'rename-discovery-owner', 'old-search-name'));
   await assertSucceeds(setDoc(oldDiscovery, {
     uid: 'rename-discovery-owner',
     createdAt: serverTimestamp(),
   }));
 
+  // The client's rename batch: new profile, old profile gone, record moved,
+  // marker moved.
   const batch = writeBatch(db);
   batch.set(doc(db, 'profiles', 'new-search-name'), profile('rename-discovery-owner'));
   batch.delete(oldProfile);
+  batch.set(doc(db, 'profileOwners', 'rename-discovery-owner'), { username: 'new-search-name' });
   batch.set(doc(db, 'profileDiscovery', 'new-search-name'), {
     uid: 'rename-discovery-owner',
     createdAt: serverTimestamp(),
   });
   batch.delete(oldDiscovery);
   await assertSucceeds(batch.commit());
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    assert.equal((await getDoc(doc(context.firestore(), 'profileDiscovery', 'old-search-name'))).exists(), false);
+    assert.equal((await getDoc(doc(context.firestore(), 'profiles', 'old-search-name'))).exists(), false);
+  });
+  assert.equal((await getDoc(doc(db, 'profileDiscovery', 'new-search-name'))).exists(), true);
 });
 
 test('only the owner can write or list their profiles', async () => {
@@ -268,23 +478,239 @@ test('only the owner can write or list their profiles', async () => {
 });
 
 test('profile records cannot contain titles or arbitrary fields', async () => {
-  const db = environment.authenticatedContext('owner').firestore();
+  await seedAccount('owner');
+  const db = verified('owner');
   const withTitle = profile('owner');
   (withTitle.records.superlatives.longestSession as Record<string, unknown>).title = 'Private book';
-  await assertFails(setDoc(doc(db, 'profiles', 'leaky-record'), withTitle));
+  await assertFails(createProfileBatch(db, 'owner', 'leaky-record', withTitle));
 
   const extraStat = profile('owner');
   (extraStat.stats as Record<string, unknown>).favoriteBook = 1;
-  await assertFails(setDoc(doc(db, 'profiles', 'extra-stat'), extraStat));
+  await assertFails(createProfileBatch(db, 'owner', 'extra-stat', extraStat));
+  // Control for the harness: the plain shape goes through.
+  await assertSucceeds(createProfileBatch(db, 'owner', 'clean-record'));
 });
 
 test('profile field limits reject oversized and malformed data', async () => {
-  const db = environment.authenticatedContext('owner').firestore();
-  const tooManyLinks = profile('owner', {
+  await seedAccount('owner');
+  const db = verified('owner');
+  await assertFails(createProfileBatch(db, 'owner', 'too-many-links', {
     links: Array.from({ length: 11 }, (_, index) => ({ type: 'other', value: `example.com/${index}` })),
+  }));
+  await assertFails(createProfileBatch(db, 'owner', 'Bad Slug'));
+  await assertFails(createProfileBatch(db, 'owner', 'ab'));
+  await assertFails(createProfileBatch(db, 'owner', 'a'.repeat(31)));
+});
+
+// The full shape addBook writes, for allowlist tests.
+const fullBook = (db: ReturnType<RulesTestContext['firestore']>, uid: string, overrides: Record<string, unknown> = {}) => creatableBook({
+  authorIds: ['author-a', 'author-b'],
+  owner: doc(db, 'users', uid),
+  title: 'A full book',
+  isbn: '9780000000002',
+  coverUrl: 'https://covers.example/x-M.jpg',
+  publisher: 'Example House',
+  publishedDate: '2026',
+  subjects: ['Fiction', 'Norway'],
+  fiction: true,
+  createdAt: Timestamp.now(),
+  ...overrides,
+});
+
+test('book documents are allowlisted and byte-capped', async () => {
+  const uid = 'book-shape';
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'full'), fullBook(db, uid)));
+  const { authorIds: _ids, ...legacyAuthorBook } = fullBook(db, uid, { author: 'Ada Lovelace' }) as Record<string, unknown>;
+  await assertSucceeds(setDoc(doc(books, 'legacy-author'), legacyAuthorBook));
+  const junk = 'x'.repeat(120_000);
+  const rejected: Record<string, Record<string, unknown>> = {
+    unknownField: { notes: junk },
+    unknownFieldSmall: { rating: 5 },
+    coverUrl: { coverUrl: 'https://' + 'c'.repeat(2048) },
+    publisher: { publisher: 'p'.repeat(501) },
+    publishedDate: { publishedDate: 'd'.repeat(65) },
+    isbn: { isbn: '9'.repeat(33) },
+    title: { title: 't'.repeat(501) },
+    tooManySubjects: { subjects: Array.from({ length: 26 }, (_, i) => `s${i}`) },
+    fatSubjects: { subjects: ['a'.repeat(2501)] },
+    fatSubjectsSpread: { subjects: Array.from({ length: 25 }, () => 'a'.repeat(101)) },
+    nonStringSubject: { subjects: [{ name: 'x' }] },
+    tooManyAuthorIds: { authorIds: Array.from({ length: 51 }, (_, i) => `a${i}`) },
+    fatAuthorIds: { authorIds: ['a'.repeat(5001)] },
+    // (A number inside authorIds is stringified by join(), not rejected —
+    // the bytes stay bounded and the client decoder refuses it on read.)
+    fiction: { fiction: 'yes' },
+    foreignOwner: { owner: doc(db, 'users', 'someone-else') },
+    ownerString: { owner: `users/${uid}` },
+    createdAt: { createdAt: 'today' },
+    negativeTime: { timeRead: -1 },
+    fatSourceId: { currentPageUpdateId: null, pagesRead: 0 },
+  };
+  const admitted: string[] = [];
+  for (const [name, overrides] of Object.entries(rejected)) {
+    if (name === 'fatSourceId') continue;
+    try {
+      await setDoc(doc(books, name), fullBook(db, uid, overrides));
+      admitted.push(name);
+    } catch (error) {
+      if (!(error instanceof FirebaseError && error.code === 'permission-denied')) throw error;
+    }
+  }
+  assert.deepEqual(admitted, []);
+  // Every field is optional except what page state and the title require:
+  // the minimal shape the older client wrote still works.
+  await assertSucceeds(setDoc(doc(books, 'minimal'), creatableBook()));
+
+  // Progress and timer updates never run the shape check (they only touch
+  // fields the transition rules pin, and the timer batch is budget-bound),
+  // so a document with an unknown field from before this rule stays
+  // usable for reading — but an edit that touches anything else must shed
+  // the field.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid, 'books', 'pre-rule'), {
+      ...readingBook({ activeTimer: null }),
+      legacyNote: 'kept by an old client',
+    });
+    await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), idleLifecycle());
   });
-  await assertFails(setDoc(doc(db, 'profiles', 'too-many-links'), tooManyLinks));
-  await assertFails(setDoc(doc(db, 'profiles', 'Bad Slug'), profile('owner')));
+  const preRule = doc(books, 'pre-rule');
+  const start = { start: '2026-08-24T12:00:00.000Z', operationId: 'pre-rule-op' };
+  const timerBatch = writeBatch(db);
+  timerBatch.update(preRule, { activeTimer: start });
+  timerBatch.set(doc(db, 'users', uid, 'timerLifecycle', 'current'), localLifecycle('pre-rule', start.start, start.operationId));
+  await assertSucceeds(timerBatch.commit());
+  await assertFails(updateDoc(preRule, { title: 'Renamed', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(preRule, { title: 'Renamed', legacyNote: deleteField(), updatedAt: Timestamp.now() }));
+});
+
+test('author documents are allowlisted and capped', async () => {
+  const uid = 'author-shape';
+  const db = environment.authenticatedContext(uid).firestore();
+  const authors = collection(db, 'users', uid, 'authors');
+  const author = (overrides: Record<string, unknown> = {}) => ({
+    name: 'Ada Lovelace',
+    nameLower: 'ada lovelace',
+    kind: 'person',
+    givenName: 'Ada',
+    familyName: 'Lovelace',
+    updatedAt: Timestamp.now(),
+    ...overrides,
+  });
+  await assertSucceeds(setDoc(doc(authors, 'ada'), author()));
+  await assertSucceeds(setDoc(doc(authors, 'minimal'), { name: 'Anon' }));
+  await assertSucceeds(setDoc(doc(authors, 'entity'), { name: 'Penguin', nameLower: 'penguin', kind: 'entity' }));
+  const rejected: Record<string, unknown>[] = [
+    author({ bio: 'x'.repeat(120_000) }),
+    author({ rating: 5 }),
+    author({ name: 'n'.repeat(201) }),
+    author({ name: '' }),
+    author({ name: 42 }),
+    author({ nameLower: 'n'.repeat(201) }),
+    author({ kind: 'robot' }),
+    author({ givenName: 'g'.repeat(101) }),
+    author({ familyName: 'f'.repeat(101) }),
+    author({ updatedAt: 'now' }),
+    { nothing: true },
+    {},
+  ];
+  for (const [index, value] of rejected.entries()) {
+    await assertFails(setDoc(doc(authors, `bad-${index}`), value));
+  }
+  // Updates are shape-checked too: junk cannot be added later.
+  await assertFails(updateDoc(doc(authors, 'ada'), { bio: 'x'.repeat(1000) }));
+  await assertSucceeds(updateDoc(doc(authors, 'ada'), { givenName: 'Augusta Ada', name: 'Augusta Ada Lovelace', nameLower: 'augusta ada lovelace', updatedAt: Timestamp.now() }));
+});
+
+// Firestore evaluates at most 1000 expressions per request, and the
+// atomic offline-stop batch (book timer + lifecycle claim + queue row)
+// runs close to it. A ruleset that quietly crosses the line denies real
+// offline stops with an opaque error. This measures the headroom: it loads
+// copies of the rules with K trivial conjuncts injected into
+// validAtomicTimerStop (evaluated once per stop batch) and finds the
+// largest K under which the honest local and remote stop batches still
+// pass. The floor below is the budget a rules change may not spend
+// without first shrinking the timer path.
+const BUDGET_HEADROOM_FLOOR = 4;
+const BUDGET_HEADROOM_PROBE_MAX = 40;
+
+async function timerBatchesPassWith(rules: string, projectId: string): Promise<boolean> {
+  const budgetEnvironment = await initializeTestEnvironment({ projectId, firestore: { rules } });
+  try {
+    await budgetEnvironment.clearFirestore();
+    const uid = 'budget-owner';
+    await budgetEnvironment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      const seeded = context.firestore();
+      await setDoc(doc(seeded, 'users', uid), {
+        uid, email: `${uid}@example.test`,
+        toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+      });
+      await setDoc(doc(seeded, 'users', uid, 'books', 'local'), creatableBook());
+      await setDoc(doc(seeded, 'users', uid, 'books', 'remote'), {
+        ...creatableBook(), activeTimer: { entryId: 42, start: '2026-08-24T12:00:00.000Z' },
+      });
+      await setDoc(doc(seeded, 'users', uid, 'timerLifecycle', 'current'), idleLifecycle());
+    });
+    const db = budgetEnvironment.authenticatedContext(uid).firestore();
+    const lifecycleRef = doc(db, 'users', uid, 'timerLifecycle', 'current');
+    const localRef = doc(db, 'users', uid, 'books', 'local');
+    const remoteRef = doc(db, 'users', uid, 'books', 'remote');
+    const commits: Promise<unknown>[] = [];
+
+    const start = { start: '2026-08-24T13:00:00.000Z', operationId: 'budget-op' };
+    const claim = localLifecycle('local', start.start, start.operationId);
+    const startBatch = writeBatch(db);
+    startBatch.update(localRef, { activeTimer: start });
+    startBatch.set(lifecycleRef, claim);
+    await startBatch.commit();
+    const stopBatch = writeBatch(db);
+    stopBatch.update(localRef, { activeTimer: null });
+    stopBatch.set(lifecycleRef, idleLifecycle(claim));
+    stopBatch.set(doc(db, 'users', uid, 'togglQueue', togglQueueId('local', start.start)), queueItem({
+      bookId: 'local', bookTitle: 'Reading book', start: start.start, timerClaimVersion: 1,
+    }));
+    commits.push(stopBatch.commit());
+
+    const remoteStart = '2026-08-24T12:00:00.000Z';
+    const queueId = togglQueueId('remote', remoteStart);
+    const stopping = { state: 'stopping', entryId: 42, start: remoteStart, queueId };
+    const remoteBatch = writeBatch(db);
+    remoteBatch.update(remoteRef, { activeTimer: stopping });
+    remoteBatch.set(lifecycleRef, stoppingLifecycle('remote', remoteStart, 42, queueId));
+    remoteBatch.set(doc(db, 'users', uid, 'togglQueue', queueId), queueItem({
+      type: 'stop', bookId: 'remote', bookTitle: 'Reading book', entryId: 42,
+      start: remoteStart, timerClaimVersion: 1,
+    }));
+    try {
+      await commits[0];
+      await budgetEnvironment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+        await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), remoteLifecycle('remote', remoteStart, 42));
+      });
+      await remoteBatch.commit();
+      return true;
+    } catch (error) {
+      if (error instanceof FirebaseError && error.code === 'permission-denied') return false;
+      throw error;
+    }
+  } finally {
+    await budgetEnvironment.cleanup();
+  }
+}
+
+test('the timer batches keep headroom under the rules expression budget', async (t) => {
+  const source = await readFile('firestore.rules', 'utf8');
+  const anchor = "      return item.keys().hasAll(['bookId'])\n";
+  assert.equal(source.split(anchor).length, 2, 'validAtomicTimerStop anchor moved');
+  assert.equal(await timerBatchesPassWith(source, 'book-tracker-rules-budget-0'), true);
+  let headroom = 0;
+  for (let k = 1; k <= BUDGET_HEADROOM_PROBE_MAX; k += 1) {
+    const padded = source.replace(anchor, `      return item.keys().hasAll(['bookId'])${' && true'.repeat(k)}\n`);
+    if (!(await timerBatchesPassWith(padded, `book-tracker-rules-budget-${k}`))) break;
+    headroom = k;
+  }
+  t.diagnostic(`timer batches tolerate ${headroom} extra conjuncts in validAtomicTimerStop (floor ${BUDGET_HEADROOM_FLOOR})`);
+  assert.ok(headroom >= BUDGET_HEADROOM_FLOOR, `only ${headroom} conjuncts of headroom left on the timer batches`);
 });
 
 test('book creation requires complete, consistent, JS-safe page state', async () => {

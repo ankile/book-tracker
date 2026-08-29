@@ -1279,6 +1279,44 @@ test("the Functions emulator starts and stops using Firestore state only", async
   assert.equal(store.book.activeTimer, null);
 });
 
+const verifiedContext = {auth: {uid: "owner", token: {email_verified: true}}};
+
+// savetoken meters itself through users/owner/functionQuotas/togglToken
+// (consumeQuota's own transaction); the mock serves that document and
+// records what the quota transaction writes.
+function installTokenQuota(t, userRef, {quota} = {}) {
+  const quotaRef = {};
+  let quotaValue = quota;
+  const quotaWrites = [];
+  t.mock.method(db, "doc", (path) => {
+    if (path === "users/owner/functionQuotas/togglToken") return quotaRef;
+    assert.equal(path, "users/owner");
+    return userRef;
+  });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (ref) => {
+      assert.equal(ref, quotaRef);
+      return snapshot(quotaValue, quotaValue !== undefined);
+    },
+    set: (ref, value) => {
+      assert.equal(ref, quotaRef);
+      quotaValue = value;
+      quotaWrites.push({type: "set", value});
+    },
+    update: (ref, patch) => {
+      assert.equal(ref, quotaRef);
+      quotaValue = {...quotaValue, ...patch};
+      quotaWrites.push({type: "update", value: patch});
+    },
+  }));
+  return {
+    get quota() {
+      return quotaValue;
+    },
+    quotaWrites,
+  };
+}
+
 test("savetoken validates Toggl responses and stores the selected project", async (t) => {
   const writes = [];
   let exists = true;
@@ -1287,10 +1325,7 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     update: async (value) => writes.push({value}),
     set: async () => assert.fail("savetoken must not create a user document"),
   };
-  t.mock.method(db, "doc", (path) => {
-    assert.equal(path, "users/owner");
-    return userRef;
-  });
+  const quota = installTokenQuota(t, userRef);
   const requested = [];
   t.mock.method(global, "fetch", async (url) => {
     requested.push(url);
@@ -1303,7 +1338,7 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
   });
 
   assert.deepEqual(
-    await deployed.toggl.savetoken.run({token: "valid-token"}, authContext),
+    await deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
     {workspaceId: 6, projectId: 7},
   );
   assert.deepEqual(writes, [{
@@ -1312,14 +1347,69 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     },
   }]);
   assert.equal(requested.length, 2);
+  assert.equal(quota.quota.count, 1);
 
   // A deleted account's still-valid token cannot recreate its user document.
   exists = false;
   await assert.rejects(
-    deployed.toggl.savetoken.run({token: "valid-token"}, authContext),
+    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
     (error) => error.code === "failed-precondition",
   );
   assert.equal(writes.length, 1);
+});
+
+test("savetoken refuses unverified accounts before any Toggl call or quota spend", async (t) => {
+  const userRef = {
+    get: async () => assert.fail("must not read the user document"),
+    update: async () => assert.fail("must not write"),
+  };
+  const quota = installTokenQuota(t, userRef);
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+  for (const context of [
+    authContext,
+    {auth: {uid: "owner", token: {email_verified: false}}},
+    {auth: {uid: "owner", token: {email_verified: "true"}}},
+  ]) {
+    await assert.rejects(
+      deployed.toggl.savetoken.run({token: "valid-token"}, context),
+      (error) => error.code === "failed-precondition" && /Verify your email/.test(error.message),
+    );
+  }
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(quota.quotaWrites, []);
+});
+
+test("savetoken is metered per user and warns once per window", async (t) => {
+  const warnings = [];
+  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  const userRef = {
+    get: async () => ({exists: true}),
+    update: async () => {},
+  };
+  const quota = installTokenQuota(t, userRef, {
+    quota: {windowStartedAt: Timestamp.now(), count: 5},
+  });
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run past the quota");
+  });
+  // Sixth attempt in the window: refused, the credential never leaves.
+  await assert.rejects(
+    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
+    (error) => error.code === "resource-exhausted",
+  );
+  await assert.rejects(
+    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
+    (error) => error.code === "resource-exhausted",
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal(quota.quota.count, 6);
+  assert.deepEqual(warnings, [["toggl.token_quota_exceeded", {uid: "owner"}]]);
 });
 
 test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
@@ -1329,13 +1419,10 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
     get: async () => ({exists: true}),
     update: async (value) => writes.push({value}),
   };
-  t.mock.method(db, "doc", (path) => {
-    assert.equal(path, "users/owner");
-    return userRef;
-  });
+  installTokenQuota(t, userRef);
 
   assert.deepEqual(
-    await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, authContext),
+    await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, verifiedContext),
     {workspaceId: 900001, projectId: 900002},
   );
   assert.deepEqual(writes, [{

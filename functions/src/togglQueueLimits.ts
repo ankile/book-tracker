@@ -21,7 +21,10 @@
 // row can be deferred before it becomes terminal; a day over quota means
 // the rows were never going to drain, and without the cap each was one
 // delivery per window for its whole 90-day retention.
+// TOGGL_TOKEN_LIMIT meters savetoken, which makes two outbound Toggl calls
+// with a caller-supplied credential (SEC-024).
 export const TOGGL_QUEUE_LIMIT = 10;
+export const TOGGL_TOKEN_LIMIT = 5;
 export const TOGGL_QUEUE_MAX_DEFERRALS = 24;
 export const TOGGL_QUEUE_ROW_LIMIT = 60;
 export const TOGGL_QUEUE_WINDOW_MS = 60 * 60 * 1000;

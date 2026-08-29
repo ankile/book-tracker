@@ -8,13 +8,14 @@ import {setTimeout as delay} from "node:timers/promises";
 import {logger} from "firebase-functions";
 import {CALLABLE_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logIssue} from "./logging";
-import {applyQuota} from "./quota";
+import {applyQuota, consumeQuota} from "./quota";
 import {
   TOGGL_QUEUE_LIMIT,
   TOGGL_QUEUE_MAX_DEFERRALS,
   TOGGL_QUEUE_RETENTION_MS,
   TOGGL_QUEUE_ROW_LIMIT,
   TOGGL_QUEUE_WINDOW_MS,
+  TOGGL_TOKEN_LIMIT,
 } from "./togglQueueLimits";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
 import {
@@ -273,6 +274,32 @@ exports.savetoken = functions
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
 
+    // Two outbound Toggl calls with a caller-supplied credential: a
+    // validation oracle and a request amplifier from Google IPs unless
+    // metered (SEC-024). Verified accounts only — sign-up is open and
+    // unverified, and a stored token is a live credential for the user's
+    // whole Toggl account (SEC-033).
+    if (context.auth?.token.email_verified !== true) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Verify your email address before connecting Toggl.",
+      );
+    }
+    const decision = await consumeQuota(
+      db,
+      `users/${uid}/functionQuotas/togglToken`,
+      TOGGL_TOKEN_LIMIT,
+      TOGGL_QUEUE_WINDOW_MS,
+    );
+    if (!decision.granted) {
+      if (decision.firstRefusal) {
+        logger.warn("toggl.token_quota_exceeded", {uid});
+      }
+      throw new functions.https.HttpsError(
+        "resource-exhausted",
+        "Too many Toggl connection attempts. Try again later.",
+      );
+    }
     const meResp = await togglFetch(token, "GET", "/me");
     if (!meResp.ok) {
       throw new functions.https.HttpsError(

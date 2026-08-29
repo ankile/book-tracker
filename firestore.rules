@@ -4,18 +4,32 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if request.auth != null && userId == request.auth.uid;
     }
+    // Own-user private data, but a signed-up stranger's too: every field a
+    // client may write is allowlisted and byte-capped (SEC-039), so one
+    // document is a few KB rather than the 1 MiB Firestore allows —
+    // storage that PITR and 98 daily backups would multiply, and that a
+    // delete event would carry in full into Pub/Sub (SEC-071). Progress and
+    // timer updates only touch fields the transition rules already pin, so
+    // they skip the shape check: the timer batch runs close to the rules
+    // expression budget and must stay cheap.
     match /users/{userId}/books/{bookId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validInitialBookTimer()
                     && validBookPageState(request.resource.data)
-                    && request.resource.data.get('currentPageUpdateId', null) == null;
+                    && request.resource.data.get('currentPageUpdateId', null) == null
+                    && validBookShape();
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validBookTimerTransition(userId, bookId)
                     && validBookPageStateTransition()
-                    && validBookProgressSourceTransition(userId, bookId);
+                    && validBookProgressSourceTransition(userId, bookId)
+                    && (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                          'activeTimer', 'currentPage', 'currentPageUpdateId',
+                          'pagesRead', 'timeRead', 'finished', 'updatedAt'
+                        ])
+                        || validBookShape());
       // A local timer has no remote side effect. The UI explicitly warns
       // that its unsaved interval will be lost. Server-backed and uncertain
       // Toggl lifecycle states must be cleared through their stop/resolve path.
@@ -51,6 +65,51 @@ service cloud.firestore {
       allow update: if request.auth != null && userId == request.auth.uid
                     && lifecycleId == 'current'
                     && validClientTimerClaimTransition(userId);
+    }
+
+    // Field allowlist and byte caps for a book document (SEC-039). Lists
+    // cannot be iterated in rules, so string lists are bounded through
+    // join(): it throws on a non-string element, which is a denial. The
+    // legacy author/authors fields are accepted so the last pre-migration
+    // documents stay editable; the client deletes them on its next edit.
+    function validBookShape() {
+      let book = request.resource.data;
+      return book.keys().hasOnly([
+               'activeTimer', 'authorIds', 'author', 'authors', 'coverUrl', 'createdAt',
+               'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
+               'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
+               'publisher', 'subjects', 'title', 'updatedAt'
+             ])
+             && (!book.keys().hasAny(['authorIds'])
+                 || (book.authorIds is list && book.authorIds.size() <= 50
+                     && book.authorIds.join('').size() <= 5000))
+             && (!book.keys().hasAny(['author'])
+                 || (book.author is string && book.author.size() <= 500))
+             && (!book.keys().hasAny(['authors'])
+                 || (book.authors is list && book.authors.size() <= 50))
+             && (!book.keys().hasAny(['coverUrl'])
+                 || (book.coverUrl is string && book.coverUrl.size() <= 2048))
+             && (!book.keys().hasAny(['publisher'])
+                 || (book.publisher is string && book.publisher.size() <= 500))
+             && (!book.keys().hasAny(['publishedDate'])
+                 || (book.publishedDate is string && book.publishedDate.size() <= 64))
+             && (!book.keys().hasAny(['subjects'])
+                 || (book.subjects is list && book.subjects.size() <= 25
+                     && book.subjects.join('').size() <= 2500))
+             && (!book.keys().hasAny(['fiction'])
+                 || book.fiction == null || book.fiction is bool)
+             && (!book.keys().hasAny(['isbn'])
+                 || (book.isbn is string && book.isbn.size() <= 32))
+             && (!book.keys().hasAny(['owner'])
+                 || book.owner == /databases/$(database)/documents/users/$(request.auth.uid))
+             && (!book.keys().hasAny(['createdAt']) || book.createdAt is timestamp)
+             && (!book.keys().hasAny(['pagesRead'])
+                 || (book.pagesRead is number && book.pagesRead >= 0))
+             && (!book.keys().hasAny(['timeRead'])
+                 || (book.timeRead is number && book.timeRead >= 0))
+             && (book.get('currentPageUpdateId', null) == null
+                 || (book.currentPageUpdateId is string
+                     && book.currentPageUpdateId.size() <= 100));
     }
 
     function validBookUpdateIdentity(userId, bookId) {
@@ -398,8 +457,9 @@ service cloud.firestore {
              && timer.entryId > 0
              && validTimerStart(timer.start)
              && timer.queueId is string
-             && timer.queueId.size() > 0
-             && timer.queueId.size() <= 600;
+             // One document id: no slash, the server interpolates it into a
+             // path (SEC-040).
+             && timer.queueId.matches('[^/]{1,600}');
     }
 
     function validIdleTimerClaim(claim) {
@@ -495,8 +555,9 @@ service cloud.firestore {
              && claim.entryId > 0
              && validTimerStart(claim.start)
              && claim.queueId is string
-             && claim.queueId.size() > 0
-             && claim.queueId.size() <= 600;
+             // One document id: no slash, the server interpolates it into a
+             // path (SEC-040).
+             && claim.queueId.matches('[^/]{1,600}');
     }
 
     function validTimerStart(start) {
@@ -609,12 +670,36 @@ service cloud.firestore {
     // Author entities, written in the same client batch as the book that
     // references them. Own-user private data, so books-level strictness
     // applies (the validation-heavy style is for anonymous surfaces).
+    // Author entities: allowlisted and capped like books (SEC-039). No
+    // delete rule by design — a book written offline may still reference
+    // the id, so authors retire instead (validAuthorRetirementTransition).
     match /users/{userId}/authors/{authorId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
-                    && !request.resource.data.keys().hasAny(['retirement']);
+                    && !request.resource.data.keys().hasAny(['retirement'])
+                    && validAuthorShape();
       allow update: if request.auth != null && userId == request.auth.uid
-                    && validAuthorRetirementTransition(userId, authorId);
+                    && validAuthorRetirementTransition(userId, authorId)
+                    && validAuthorShape();
+    }
+
+    function validAuthorShape() {
+      let author = request.resource.data;
+      return author.keys().hasOnly([
+               'name', 'nameLower', 'kind', 'givenName', 'familyName', 'retirement', 'updatedAt'
+             ])
+             && author.name is string
+             && author.name.size() > 0
+             && author.name.size() <= 200
+             && (!author.keys().hasAny(['nameLower'])
+                 || (author.nameLower is string && author.nameLower.size() <= 200))
+             && (!author.keys().hasAny(['kind'])
+                 || author.kind in ['person', 'entity', 'placeholder'])
+             && (!author.keys().hasAny(['givenName'])
+                 || (author.givenName is string && author.givenName.size() <= 100))
+             && (!author.keys().hasAny(['familyName'])
+                 || (author.familyName is string && author.familyName.size() <= 100))
+             && (!author.keys().hasAny(['updatedAt']) || author.updatedAt is timestamp);
     }
 
     function validAuthorRetirementTransition(userId, authorId) {
@@ -718,10 +803,10 @@ service cloud.firestore {
                       && item.attempts > 0
                       && item.attempts < 5
                       && item.claimedAt is timestamp
-                      && (!item.keys().hasAny(['error'])
-                          || (item.error is string
-                              && (item.error.size() <= 1000
-                                  || item.error == resource.data.error)))));
+                      // The update rule pins affectedKeys to status and
+                      // retryRequestedAt, so error can never change here;
+                      // only its type is worth asserting.
+                      && (!item.keys().hasAny(['error']) || item.error is string)));
     }
 
     function validTogglQueuePayload(item) {
@@ -867,12 +952,24 @@ service cloud.firestore {
     // profile docs wholesale, but know nothing about this collection and
     // therefore cannot erase a newer search choice. Client list is forbidden;
     // the server-side sitemap enumerates markers with the Admin SDK.
+    // Publishing to the public web — a profile page, and its discovery
+    // marker that puts it in the shared sitemap — is for verified accounts
+    // whose users document still exists (SEC-033, SEC-062): sign-up is open
+    // and unverified, and an account deleted in Auth keeps a valid ID token
+    // for up to an hour, so without both checks anyone could plant an
+    // indexable page under a name nobody could later delete.
+    function verifiedAccount() {
+      return request.auth.token.get('email_verified', false) == true
+             && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
     match /profileDiscovery/{username} {
       allow get: if request.auth != null
                  && get(/databases/$(database)/documents/profiles/$(username)).data.uid
                     == request.auth.uid;
       allow list: if false;
       allow create: if request.auth != null
+                    && verifiedAccount()
                     && username.matches('[a-z0-9-]{3,30}')
                     && request.resource.data.keys().hasAll(['uid', 'createdAt'])
                     && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
@@ -915,16 +1012,93 @@ service cloud.firestore {
     // plus two deliberately short name parts (givenName/familyName, the
     // app-wide person-name convention) — nothing a profile link could be
     // used to host arbitrary content on.
+    //
+    // One profile per account (SEC-032): profileOwners/{uid} names the one
+    // username an account holds, and every profile create, rename and
+    // delete must move it in the same batch — a second profile would need
+    // the first one gone. That is also what makes a freed username's
+    // marker inert (SEC-036): a profile delete takes its own marker with
+    // it. Names the site uses for itself are reserved. updatedAt is
+    // server-pinned because the shared sitemap publishes it as <lastmod>
+    // (SEC-035).
     match /profiles/{username} {
       allow get: if request.auth != null && resource.data.uid == request.auth.uid;
       allow list: if request.auth != null && resource.data.uid == request.auth.uid;
       allow create: if request.auth != null
+                    && verifiedAccount()
                     && username.matches('[a-z0-9-]{3,30}')
-                    && validProfile();
+                    && !(username in [
+                         'admin', 'administrator', 'api', 'app', 'assets', 'auth', 'book',
+                         'books', 'help', 'isbns', 'login', 'logout', 'null', 'owner',
+                         'profile', 'profiles', 'register', 'root', 'sitemap', 'static',
+                         'support', 'system', 'undefined', 'www'
+                       ])
+                    && validProfile()
+                    && validProfileClaim(username);
       allow update: if request.auth != null
+                    && verifiedAccount()
                     && resource.data.uid == request.auth.uid
                     && validProfile();
-      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow delete: if request.auth != null
+                    && resource.data.uid == request.auth.uid
+                    && validProfileRelease(username);
+    }
+
+    // The batch that creates profiles/{username} must leave
+    // profileOwners/{uid} naming it, and if the account already held a
+    // username that profile must be gone in the same batch (rename).
+    // Ternaries, not ||: a get() inside a path is evaluated eagerly, and
+    // a missing record must not be a null-value error.
+    function validProfileClaim(username) {
+      let owner = /databases/$(database)/documents/profileOwners/$(request.auth.uid);
+      return existsAfter(owner)
+             && getAfter(owner).data.username == username
+             && (exists(owner)
+                 ? !existsAfter(/databases/$(database)/documents/profiles/$(get(owner).data.username))
+                 : true);
+    }
+
+    // Deleting a profile must release the ownership record (or move it to
+    // the renamed profile) and take the profile's own discovery marker
+    // with it; a marker left behind by another account is not ours to
+    // touch and is inert without a uid-matching profile.
+    function validProfileRelease(username) {
+      let owner = /databases/$(database)/documents/profileOwners/$(request.auth.uid);
+      let marker = /databases/$(database)/documents/profileDiscovery/$(username);
+      return (existsAfter(owner) ? getAfter(owner).data.username != username : true)
+             && (exists(marker)
+                 ? (!existsAfter(marker) || get(marker).data.uid != request.auth.uid)
+                 : true);
+    }
+
+    // Owner-only, and only ever moved inside a profile batch: it may name
+    // a username only while that profile exists after the batch and is
+    // ours, and it may stop naming one only once that profile is gone.
+    match /profileOwners/{ownerUid} {
+      allow read: if request.auth != null && ownerUid == request.auth.uid;
+      allow create: if request.auth != null && ownerUid == request.auth.uid
+                    && validProfileOwnerRecord()
+                    && ownsProfileAfter(request.resource.data.username);
+      allow update: if request.auth != null && ownerUid == request.auth.uid
+                    && validProfileOwnerRecord()
+                    && ownsProfileAfter(request.resource.data.username)
+                    && (resource.data.username == request.resource.data.username
+                        || !existsAfter(/databases/$(database)/documents/profiles/$(resource.data.username)));
+      allow delete: if request.auth != null && ownerUid == request.auth.uid
+                    && !existsAfter(/databases/$(database)/documents/profiles/$(resource.data.username));
+    }
+
+    function validProfileOwnerRecord() {
+      let record = request.resource.data;
+      return record.keys().hasAll(['username'])
+             && record.keys().hasOnly(['username'])
+             && record.username is string
+             && record.username.matches('[a-z0-9-]{3,30}');
+    }
+
+    function ownsProfileAfter(username) {
+      let path = /databases/$(database)/documents/profiles/$(username);
+      return existsAfter(path) && getAfter(path).data.uid == request.auth.uid;
     }
 
     function validProfile() {
@@ -966,7 +1140,7 @@ service cloud.firestore {
              // clamps to the newest 4000 (PROFILE_MAX_DAYS) to match.
              && profile.days is list
              && profile.days.size() <= 4000
-             && profile.updatedAt is timestamp;
+             && profile.updatedAt == request.time;
     }
 
     function validProfileRecords(records) {
