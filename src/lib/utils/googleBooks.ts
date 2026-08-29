@@ -1,6 +1,7 @@
-// Google Books volume parsing, the secondary metadata source. Open Library
-// stays primary (richer subject lists, stable cover URLs); Google Books
-// fills what it left empty — see mergeMetadata below.
+// Google Books volume parsing. Google supplies the preferred cover and
+// fiction classification during interactive ISBN lookup. Open Library keeps
+// precedence for detailed subjects and bibliographic fields. The historical
+// enrichment migrations still use mergeMetadata below for gap-only writes.
 //
 // Its value over Open Library is the fiction/non-fiction axis: categories
 // are BISAC top-level headings ("Business & Economics", "Science"), which

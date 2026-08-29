@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseOpenLibraryBook, deriveFiction, EMPTY_METADATA, METADATA_FIELDS } from "../src/lib/utils/bookMetadata.ts";
+import {
+  parseOpenLibraryBook,
+  deriveFiction,
+  EMPTY_METADATA,
+  METADATA_FIELDS,
+  selectLookupMetadata,
+} from "../src/lib/utils/bookMetadata.ts";
 
 test("METADATA_FIELDS mirrors EMPTY_METADATA", () => {
   assert.deepEqual(METADATA_FIELDS, Object.keys(EMPTY_METADATA));
@@ -72,17 +78,73 @@ test("Open Library rejects non-positive, fractional, and unsafe page counts", ()
   }
 });
 
-test("feed tags and duplicates are dropped from subjects", () => {
+test("feed tags, generic labels, and duplicates are dropped from subjects", () => {
   const parsed = parseOpenLibraryBook({
     subjects: [
       { name: "Fantasy" },
       { name: "nyt:combined-print-and-e-book-fiction=2018-04-29" },
       { name: "New York Times bestseller" },
+      { name: "Fiction, general" },
+      { name: "Nonfiction" },
       { name: "fantasy" },
       { name: "  " },
     ],
   });
   assert.deepEqual(parsed.subjects, ["Fantasy", "New York Times bestseller"]);
+});
+
+test("Google cover and classification win while Open Library subjects stay detailed", () => {
+  const openLibrary = parseOpenLibraryBook({
+    title: "The mind of the strategist",
+    cover: { medium: "https://covers.openlibrary.org/b/id/8666170-M.jpg" },
+    publishers: [{ name: "McGraw-Hill" }],
+    publish_date: "1982",
+    subjects: [
+      { name: "Industrial management" },
+      { name: "Strategy" },
+      { name: "Corporate planning" },
+      { name: "Fiction, general" },
+    ],
+  });
+  const google = {
+    ...EMPTY_METADATA,
+    coverUrl: "https://books.google.com/books/content?id=mXIiDxQAdbsC",
+    publisher: "McGraw-Hill Education",
+    subjects: ["Business & Economics"],
+    fiction: false,
+  };
+
+  assert.deepEqual(selectLookupMetadata(openLibrary, google, null), {
+    coverUrl: "https://books.google.com/books/content?id=mXIiDxQAdbsC",
+    publisher: "McGraw-Hill",
+    publishedDate: "1982",
+    subjects: ["Industrial management", "Strategy", "Corporate planning"],
+    fiction: false,
+  });
+});
+
+test("metadata selection falls back field by field when preferred sources have gaps", () => {
+  const openLibrary = {
+    ...EMPTY_METADATA,
+    coverUrl: "https://covers.openlibrary.org/cover.jpg",
+    subjects: ["Historical Fiction"],
+    fiction: true,
+  };
+  const google = { ...EMPTY_METADATA, publisher: "Google Publisher" };
+  const nationalLibrary = {
+    ...EMPTY_METADATA,
+    publishedDate: "2020",
+    subjects: ["Romaner"],
+    fiction: false,
+  };
+
+  assert.deepEqual(selectLookupMetadata(openLibrary, google, nationalLibrary), {
+    coverUrl: "https://covers.openlibrary.org/cover.jpg",
+    publisher: "Google Publisher",
+    publishedDate: "2020",
+    subjects: ["Historical Fiction"],
+    fiction: false,
+  });
 });
 
 test("fiction: a fiction subject classifies the book", () => {

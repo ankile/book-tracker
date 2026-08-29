@@ -6,8 +6,12 @@
   import { Database } from "../firebase/db.ts";
   import { editableBookAuthorChips, resolveChip, AUTHOR_KINDS } from "../utils/authors.ts";
   import { normalizeIsbn } from "../utils/isbn.ts";
-  import { EMPTY_METADATA, parseOpenLibraryBook } from "../utils/bookMetadata.ts";
-  import { parseGoogleVolume, mergeMetadata } from "../utils/googleBooks.ts";
+  import {
+    EMPTY_METADATA,
+    parseOpenLibraryBook,
+    selectLookupMetadata,
+  } from "../utils/bookMetadata.ts";
+  import { parseGoogleVolume } from "../utils/googleBooks.ts";
   import { nbSearchUrl, nbModsUrl, parseNbItem, extractModsGenres } from "../utils/nasjonalbiblioteket.ts";
   import { lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
@@ -178,11 +182,10 @@
     lookupError = "";
 
     try {
-      // Three sources, same order as the backfill migrations: Open Library
-      // is primary (richer subject lists, stable cover URLs), Google Books
-      // fills what it left empty — above all fiction/non-fiction, which
-      // its BISAC categories answer and OL's subjects often don't — and
-      // Nasjonalbiblioteket covers Norwegian editions neither one knows.
+      // The sources have field-specific precedence. Open Library supplies
+      // detailed subjects and bibliographic fields. Google Books supplies
+      // the preferred cover and fiction classification. Nasjonalbiblioteket
+      // fills gaps, especially for Norwegian editions.
       const openLibrary = await fetchOpenLibrary(normalized);
       const google = await fetchGoogleBooks(normalized);
       const nb = await fetchNasjonalbiblioteket(normalized);
@@ -209,18 +212,7 @@
         nb?.pageCount,
       ]);
 
-      // Each source in turn fills only what is still empty.
-      let merged = {
-        coverUrl: primary.coverUrl,
-        publisher: primary.publisher,
-        publishedDate: primary.publishedDate,
-        subjects: primary.subjects,
-        fiction: primary.fiction,
-      };
-      for (const source of [google, nb]) {
-        if (source !== null) merged = { ...merged, ...mergeMetadata(merged, source) };
-      }
-      metadata = merged;
+      metadata = selectLookupMetadata(openLibrary, google, nb);
 
     } catch (error) {
       lookupError = "Failed to look up ISBN. Please try again.";

@@ -22,6 +22,14 @@ export const METADATA_FIELDS = [
 ] as const satisfies readonly (keyof BookMetadata)[];
 
 const MAX_SUBJECTS = 25;
+const GENERIC_SUBJECTS = new Set([
+  'fiction',
+  'fiction, general',
+  'general fiction',
+  'nonfiction',
+  'non-fiction',
+  'non fiction',
+]);
 
 // Returns { title, authorNames, pageCount, ...metadata fields }. The first
 // three are lookup conveniences for the modal; the migration reads only the
@@ -91,10 +99,10 @@ export function parseOpenLibraryBook(value: unknown): BookLookupResult {
   };
 }
 
-// Open Library subjects mix genres with catalog noise. Feed tags like
+// Open Library subjects mix useful detail with catalog noise. Feed tags like
 // "nyt:combined-print-and-e-book-fiction=2018-04-29" carry ':' or '=' and
-// are dropped; the rest (including MARC composites like "Fiction, fantasy,
-// historical") are kept verbatim — curation is a display concern.
+// are dropped. Generic classification labels are also dropped because they
+// add no subject detail and are unreliable enough to misclassify nonfiction.
 function cleanSubjects(subjects: unknown): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -102,12 +110,65 @@ function cleanSubjects(subjects: unknown): string[] {
     const name = rawName.trim();
     if (name === "" || name.includes(":") || name.includes("=")) continue;
     const key = name.toLowerCase();
-    if (seen.has(key)) continue;
+    if (GENERIC_SUBJECTS.has(key) || seen.has(key)) continue;
     seen.add(key);
     out.push(name);
     if (out.length === MAX_SUBJECTS) break;
   }
   return out;
+}
+
+// Source quality differs by field. Google Books is the most consistent cover
+// and fiction classifier. Open Library has the richer subject vocabulary and
+// remains the first choice for publisher and publication date. The national
+// library fills any remaining gaps and has a stronger classification signal
+// than Open Library's free-form subjects.
+export function selectLookupMetadata(
+  openLibrary: BookMetadata | null,
+  google: BookMetadata | null,
+  nationalLibrary: BookMetadata | null,
+): BookMetadata {
+  return {
+    coverUrl: firstText([
+      google?.coverUrl,
+      openLibrary?.coverUrl,
+      nationalLibrary?.coverUrl,
+    ]),
+    publisher: firstText([
+      openLibrary?.publisher,
+      google?.publisher,
+      nationalLibrary?.publisher,
+    ]),
+    publishedDate: firstText([
+      openLibrary?.publishedDate,
+      google?.publishedDate,
+      nationalLibrary?.publishedDate,
+    ]),
+    subjects: firstItems([
+      openLibrary?.subjects,
+      google?.subjects,
+      nationalLibrary?.subjects,
+    ]),
+    fiction: firstClassification([
+      google?.fiction,
+      nationalLibrary?.fiction,
+      openLibrary?.fiction,
+    ]),
+  };
+}
+
+function firstText(values: readonly (string | undefined)[]): string {
+  return values.find((value) => value !== undefined && value.trim() !== '') ?? '';
+}
+
+function firstItems(values: readonly (string[] | undefined)[]): string[] {
+  return values.find((value) => value !== undefined && value.length > 0) ?? [];
+}
+
+function firstClassification(
+  values: readonly (boolean | null | undefined)[],
+): boolean | null {
+  return values.find((value) => value !== undefined && value !== null) ?? null;
 }
 
 // Heuristic: a subject saying nonfiction classifies that subject, a subject
