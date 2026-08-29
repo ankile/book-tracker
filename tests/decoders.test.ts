@@ -47,6 +47,57 @@ const bookData = (activeTimer: unknown = null) => ({
   fiction: null,
 });
 
+test('book decoder maps legacy catalog-link fields to explicit nulls', () => {
+  const book = decodeBook('legacy', bookData(), 'users/owner/books/legacy');
+  assert.deepEqual(
+    {
+      workId: book.workId,
+      editionId: book.editionId,
+      matchMethod: book.matchMethod,
+      linkedAt: book.linkedAt,
+    },
+    {workId: null, editionId: null, matchMethod: null, linkedAt: null},
+  );
+});
+
+test('book decoder validates correlated catalog links and provenance', () => {
+  const linked = decodeBook('linked', {
+    ...bookData(),
+    workId: 'work',
+    editionId: 'edition',
+    matchMethod: 'catalog-choice',
+    linkedAt: updatedAt,
+  }, 'users/owner/books/linked');
+  assert.equal(linked.workId, 'work');
+  assert.equal(linked.editionId, 'edition');
+  assert.equal(linked.matchMethod, 'catalog-choice');
+  assert.equal(linked.linkedAt, updatedAt);
+
+  assert.throws(
+    () => decodeBook('bad-method', {
+      ...bookData(),
+      workId: 'work',
+      matchMethod: 'title-guess',
+      linkedAt: updatedAt,
+    }, 'users/owner/books/bad-method'),
+    /matchMethod.*isbn, external-id, catalog-choice, migration, admin, or null/,
+  );
+  assert.throws(
+    () => decodeBook('missing-provenance', {
+      ...bookData(),
+      workId: 'work',
+    }, 'users/owner/books/missing-provenance'),
+    /matchMethod and linkedAt for a linked work/,
+  );
+  assert.throws(
+    () => decodeBook('edition-without-work', {
+      ...bookData(),
+      editionId: 'edition',
+    }, 'users/owner/books/edition-without-work'),
+    /editionId, matchMethod, and linkedAt to be null when workId is null/,
+  );
+});
+
 test('book decoder normalizes legacy progress-source state and validates new ids', () => {
   assert.equal(
     decodeBook('legacy', bookData(), 'users/owner/books/legacy').currentPageUpdateId,

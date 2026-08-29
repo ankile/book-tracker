@@ -13,7 +13,7 @@
   import ProfileLinks from '$lib/components/ProfileLinks.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
-  import { Database } from '$lib/firebase/db.ts';
+  import { Database, type BookSharingSettings } from '$lib/firebase/db.ts';
   import { togglClearToken, togglSaveToken } from '$lib/firebase/functions.ts';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.ts';
   import { countIsbnProblems } from '$lib/utils/metadataHealth.ts';
@@ -212,6 +212,20 @@
     }
   });
 
+  // This owner-scoped document is the per-book consent boundary. It stays
+  // outside profiles so the full-document profile sync below cannot erase a
+  // newer sharing choice made by another client.
+  let bookSharing = $state<BookSharingSettings | null | undefined>(undefined);
+  $effect(() => {
+    const userId = $user?.uid;
+    if (!userId) {
+      bookSharing = undefined;
+      return;
+    }
+    const sharingStore = Database.getBookSharingSettings(userId);
+    return sharingStore.subscribe((data) => (bookSharing = data));
+  });
+
   // Search discovery is a separate marker so old cached clients cannot
   // overwrite it during their full profile-stat sync. Only the owner reads
   // this document; public enumeration happens through the server sitemap.
@@ -289,10 +303,13 @@
           ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       } else {
+        if (bookSharing === undefined) {
+          throw new Error('Profile rename requires the book-sharing setting to finish loading.');
+        }
         await Database.renameProfile({
           userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
-          isDiscoverable: profileDiscoverable,
+          isDiscoverable: profileDiscoverable, bookSharing,
           ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
         });
       }
@@ -344,6 +361,7 @@
     isPublic?: boolean;
     links?: ProfileLink[];
     removeDiscovery?: boolean;
+    removeBookSharing?: boolean;
   }
 
   function persistProfile(overrides: ProfileOverrides = {}) {
@@ -384,6 +402,7 @@
     const saved = await persistProfileWithFeedback({
       isPublic: input.checked,
       removeDiscovery: !input.checked,
+      removeBookSharing: !input.checked,
     });
     if (!saved) input.checked = myProfile?.public ?? false;
   }
@@ -410,6 +429,42 @@
     } catch (error) {
       profileError = errorMessage(error);
       input.checked = profileDiscoverable;
+    }
+  }
+
+  let bookSharingPending = $state(false);
+
+  async function setBookSharing(input: HTMLInputElement) {
+    const currentUser = $user;
+    const profile = myProfile;
+    if (currentUser === null || currentUser === undefined || !profile) {
+      throw new Error('Book sharing requires an authenticated user and loaded profile.');
+    }
+    if (input.checked && !profile.public) {
+      input.checked = false;
+      profileError = 'Make the profile public before sharing book-level reading summaries.';
+      return;
+    }
+
+    bookSharingPending = true;
+    profileError = '';
+    try {
+      if (input.checked) {
+        const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (!timeZone) throw new Error('Your browser did not report a reading timezone.');
+        await Database.enableBookSharing({
+          userId: currentUser.uid,
+          profileUsername: profile.username,
+          timeZone,
+        });
+      } else {
+        await Database.disableBookSharing(currentUser.uid);
+      }
+    } catch (error) {
+      profileError = errorMessage(error);
+      input.checked = bookSharing !== null && bookSharing !== undefined;
+    } finally {
+      bookSharingPending = false;
     }
   }
 
@@ -1183,7 +1238,7 @@
                 autocomplete="off"
                 bind:value={profileSlug} />
             </div>
-            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined || (myProfile !== null && profileDiscovery === undefined)}>
+            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined || (myProfile !== null && (profileDiscovery === undefined || bookSharing === undefined))}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -1283,6 +1338,24 @@
                   <span class="visibility-copy">
                     <span class="visibility-title">Appear in search engines</span>
                     <span class="visibility-detail">List this profile in the public sitemap and allow indexing.</span>
+                  </span>
+                </label>
+                <label class="visibility-control">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={bookSharing !== null && bookSharing !== undefined}
+                    disabled={bookSharing === undefined || bookSharingPending || (!myProfile.public && bookSharing === null)}
+                    onchange={(event) => void setBookSharing(event.currentTarget)} />
+                  <span class="visibility-copy">
+                    <span class="visibility-title">Share books with other readers</span>
+                    <span class="visibility-detail">
+                      {myProfile.public
+                        ? 'Any signed-in account can then see which shared works you read, day-level first and finish dates, your page count, tracked time and session count, and derived reading speed beside your public profile name. Turn this off at any time to hide those rows.'
+                        : bookSharing
+                          ? 'Nothing is shared while your profile is private. Turn this off to clear the saved consent.'
+                          : 'Make your profile public first. This separate consent covers book titles, day-level dates, page count, tracked time, session count, and derived speed for signed-in viewers.'}
+                    </span>
                   </span>
                 </label>
               </div>

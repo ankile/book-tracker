@@ -4,7 +4,9 @@ const assert = require("node:assert/strict");
 const {readFileSync} = require("node:fs");
 const {join} = require("node:path");
 const test = require("node:test");
-const {getFirestore} = require("firebase-admin/firestore");
+const {getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {logger} = require("firebase-functions");
+const {sharedWorkOwnerId} = require("../lib/catalogProjection");
 
 const functions = require("../lib");
 const db = getFirestore();
@@ -13,15 +15,28 @@ test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
     "admin",
     "booksapi",
+    "catalog",
     "createUserDocument",
     "deleteUserDocument",
     "deletebookupdates",
     "publicweb",
+    "syncbooksharingprojection",
+    "syncsharingprofileprojection",
+    "syncsharingsettingprojection",
     "telemetry",
     "toggl",
   ]);
-  assert.deepEqual(Object.keys(functions.admin), ["overview"]);
+  assert.deepEqual(Object.keys(functions.admin).sort(), [
+    "catalogapply",
+    "catalogpreview",
+    "catalogscan",
+    "overview",
+  ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
+  assert.deepEqual(Object.keys(functions.catalog).sort(), [
+    "search",
+    "workreaders",
+  ]);
   assert.deepEqual(Object.keys(functions.telemetry), ["reportissue"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "clearstopping",
@@ -39,9 +54,14 @@ test("keeps every function in europe-west1 on its required generation", () => {
   // everything that predates that constraint stays gen1.
   const gen1Functions = [
     functions.admin.overview,
+    functions.admin.catalogapply,
+    functions.admin.catalogpreview,
+    functions.admin.catalogscan,
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
+    functions.catalog.search,
+    functions.catalog.workreaders,
     functions.telemetry.reportissue,
     functions.toggl.savetoken,
     functions.toggl.clearstopping,
@@ -55,6 +75,9 @@ test("keeps every function in europe-west1 on its required generation", () => {
 
   const gen2Functions = [
     functions.deletebookupdates,
+    functions.syncbooksharingprojection,
+    functions.syncsharingprofileprojection,
+    functions.syncsharingsettingprojection,
     functions.toggl.syncqueue,
   ];
   for (const deployedFunction of gen2Functions) {
@@ -108,6 +131,278 @@ test("preserves the Firestore and Authentication event contracts", () => {
       .eventFilterPathPatterns.document,
     "users/{userId}/books/{bookId}",
   );
+  for (const [deployedFunction, path] of [
+    [functions.syncbooksharingprojection, "users/{userId}/books/{bookId}"],
+    [functions.syncsharingsettingprojection, "users/{userId}/settings/bookSharing"],
+    [functions.syncsharingprofileprojection, "profiles/{username}"],
+  ]) {
+    assert.equal(
+      deployedFunction.__endpoint.eventTrigger.eventType,
+      "google.cloud.firestore.document.v1.written",
+    );
+    assert.equal(deployedFunction.__endpoint.eventTrigger.retry, true);
+    assert.equal(
+      deployedFunction.__endpoint.eventTrigger.eventFilterPathPatterns.document,
+      path,
+    );
+  }
+});
+
+test("a linked book write creates only the consent-eligible work-owner projection", async (t) => {
+  const writes = [];
+  const refs = new Map();
+  const ref = (path, kind = "doc") => {
+    if (!refs.has(path)) refs.set(path, {path, id: path.split("/").at(-1), kind});
+    return refs.get(path);
+  };
+  const query = {kind: "books-query"};
+  t.mock.method(db, "doc", (path) => ref(path));
+  t.mock.method(db, "collection", (name) => {
+    if (name === "sharedWorkOwners" || name === "users" || name === "profiles") {
+      return {doc: (id) => ref(`${name}/${id}`)};
+    }
+    if (name === "users/reader/books") {
+      return {where: (field, operator, value) => {
+        assert.deepEqual([field, operator, value], ["workId", "==", "work-one"]);
+        return {limit: (limit) => {
+          assert.equal(limit, 1);
+          return query;
+        }};
+      }};
+    }
+    assert.fail(`unexpected collection ${name}`);
+  });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (value) => {
+      if (value === query) return {empty: false};
+      if (value.path === "users/reader/settings/bookSharing") return {
+        exists: true,
+        data: () => ({profileUsername: "reader-name", timeZone: "UTC"}),
+        get: (field) => ({profileUsername: "reader-name", timeZone: "UTC"})[field],
+      };
+      if (value.path === "users/reader") return {
+        exists: true,
+        get: () => undefined,
+      };
+      if (value.path === "profiles/reader-name") return {
+        exists: true,
+        get: (field) => ({uid: "reader", public: true})[field],
+      };
+      assert.fail(`unexpected transaction read ${value.path}`);
+    },
+    set: (reference, data) => writes.push({type: "set", reference, data}),
+    delete: (reference) => writes.push({type: "delete", reference}),
+  }));
+  await functions.syncbooksharingprojection.run({
+    params: {userId: "reader", bookId: "book"},
+    data: {
+      before: {get: () => null},
+      after: {get: () => "work-one"},
+    },
+  });
+  const id = sharedWorkOwnerId("work-one", "reader");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].reference.path, `sharedWorkOwners/${id}`);
+  assert.equal(writes[0].data.workId, "work-one");
+  assert.equal(writes[0].data.uid, "reader");
+  assert.equal(writes[0].data.updatedAt instanceof Timestamp, true);
+});
+
+test("projection handlers converge across consent, profile, retry, and last-book changes", async (t) => {
+  const rows = new Map();
+  const refs = new Map();
+  const ref = (path) => {
+    if (!refs.has(path)) {
+      const reference = {path, id: path.split("/").at(-1)};
+      reference.get = async () => snap(reference);
+      refs.set(path, reference);
+    }
+    return refs.get(path);
+  };
+  const snap = (reference) => ({
+    exists: rows.has(reference.path),
+    ref: reference,
+    id: reference.id,
+    data: () => rows.get(reference.path),
+    get: (field) => rows.get(reference.path)?.[field],
+  });
+  const querySnapshot = (query) => {
+    const prefix = `${query.name}/`;
+    const docs = [...rows.keys()]
+      .filter((path) => path.startsWith(prefix) &&
+        !path.slice(prefix.length).includes("/"))
+      .sort()
+      .filter((path) => query.afterPath === null || path > query.afterPath)
+      .map(ref)
+      .filter((reference) => query.filters.every(([field, operator, value]) =>
+        operator === "==" ? rows.get(reference.path)?.[field] === value :
+          rows.get(reference.path)?.[field] !== value))
+      .slice(0, query.maximum)
+      .map(snap);
+    return {docs, size: docs.length, empty: docs.length === 0};
+  };
+  const query = (name) => {
+    const result = {
+      _query: true,
+      name,
+      filters: [],
+      maximum: Infinity,
+      afterPath: null,
+      where: (field, operator, value) => {
+        assert.ok(operator === "==" || operator === "!=");
+        result.filters.push([field, operator, value]);
+        return result;
+      },
+      limit: (maximum) => {
+        result.maximum = maximum;
+        return result;
+      },
+      orderBy: () => result,
+      startAfter: (snapshot) => {
+        result.afterPath = snapshot.ref.path;
+        return result;
+      },
+      get: async () => querySnapshot(result),
+      doc: (id) => ref(`${name}/${id}`),
+    };
+    return result;
+  };
+  t.mock.method(db, "doc", ref);
+  t.mock.method(db, "collection", query);
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (value) => value._query ? querySnapshot(value) : snap(value),
+    set: (reference, data) => rows.set(reference.path, data),
+    delete: (reference) => rows.delete(reference.path),
+  }));
+  const change = (before, after) => ({
+    before: {data: () => before, get: (field) => before?.[field]},
+    after: {data: () => after, get: (field) => after?.[field]},
+  });
+  const uid = "reader";
+  const workId = "work-one";
+  const projectionPath = `sharedWorkOwners/${sharedWorkOwnerId(workId, uid)}`;
+  const setting = {profileUsername: "reader-name", timeZone: "UTC"};
+  rows.set(`users/${uid}`, {uid});
+  rows.set("profiles/reader-name", {uid, public: true});
+  rows.set(`users/${uid}/settings/bookSharing`, setting);
+  rows.set(`works/${workId}`, {status: "active"});
+
+  // Consent may arrive before a book. The later book event and its retry
+  // both converge on the same deterministic row.
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(undefined, setting),
+  });
+  assert.equal(rows.has(projectionPath), false);
+  rows.set(`users/${uid}/books/book-one`, {workId});
+  const linkEvent = {
+    params: {userId: uid, bookId: "book-one"},
+    data: change({workId: null}, {workId}),
+  };
+  await functions.syncbooksharingprojection.run(linkEvent);
+  await functions.syncbooksharingprojection.run(linkEvent);
+  assert.deepEqual({
+    workId: rows.get(projectionPath).workId,
+    uid: rows.get(projectionPath).uid,
+  }, {workId, uid});
+
+  // A profile privacy change removes it; restoring the profile and renaming
+  // the selected public profile recreates it from the setting handler.
+  rows.set("profiles/reader-name", {uid, public: false});
+  await functions.syncsharingprofileprojection.run({
+    params: {username: "reader-name"},
+    data: change({uid, public: true}, {uid, public: false}),
+  });
+  assert.equal(rows.has(projectionPath), false);
+  const renamed = {profileUsername: "renamed-reader", timeZone: "UTC"};
+  rows.set("profiles/renamed-reader", {uid, public: true});
+  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(setting, renamed),
+  });
+  assert.equal(rows.has(projectionPath), true);
+
+  // Removing the final reread deletes membership, and disabling consent
+  // also deletes a recreated row even when the linked book still exists.
+  rows.delete(`users/${uid}/books/book-one`);
+  await functions.syncbooksharingprojection.run({
+    params: {userId: uid, bookId: "book-one"},
+    data: change({workId}, undefined),
+  });
+  assert.equal(rows.has(projectionPath), false);
+  rows.set(`users/${uid}/books/book-two`, {workId});
+  await functions.syncbooksharingprojection.run({
+    params: {userId: uid, bookId: "book-two"},
+    data: change(undefined, {workId}),
+  });
+  rows.delete(`users/${uid}/settings/bookSharing`);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(renamed, undefined),
+  });
+  assert.equal(rows.has(projectionPath), false);
+
+  // Owner-wide refreshes query only linked books and converge beyond the old
+  // 100-row boundary; unlinked attacker rows add no reads to this query.
+  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  for (let index = 0; index < 105; index += 1) {
+    rows.set(`works/bulk-work-${String(index).padStart(3, "0")}`, {status: "active"});
+    rows.set(`users/${uid}/books/bulk-${String(index).padStart(3, "0")}`, {
+      workId: `bulk-work-${String(index).padStart(3, "0")}`,
+    });
+  }
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(undefined, renamed),
+  });
+  assert.equal([...rows.keys()].filter((path) =>
+    path.startsWith("sharedWorkOwners/")).length, 106);
+  rows.delete(`users/${uid}/settings/bookSharing`);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(renamed, undefined),
+  });
+  assert.equal([...rows.keys()].some((path) => path.startsWith("sharedWorkOwners/")), false);
+
+  // Many rereads of the same works do not consume the distinct-work bound.
+  for (let index = 0; index < 300; index += 1) {
+    rows.set(`users/${uid}/books/reread-${String(index).padStart(3, "0")}`, {workId});
+  }
+  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(undefined, renamed),
+  });
+  assert.equal(rows.has(projectionPath), true);
+  rows.delete(`users/${uid}/settings/bookSharing`);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(renamed, undefined),
+  });
+  for (let index = 0; index < 300; index += 1) {
+    rows.delete(`users/${uid}/books/reread-${String(index).padStart(3, "0")}`);
+  }
+
+  // The explicit per-owner bound fails closed before any fan-out rather than
+  // silently maintaining only the first page.
+  const errors = [];
+  t.mock.method(logger, "error", (...args) => errors.push(args));
+  for (let index = 105; index < 201; index += 1) {
+    rows.set(`users/${uid}/books/bulk-${String(index).padStart(3, "0")}`, {
+      workId: `bulk-work-${String(index).padStart(3, "0")}`,
+    });
+  }
+  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(undefined, renamed),
+  });
+  assert.equal([...rows.keys()].some((path) => path.startsWith("sharedWorkOwners/")), false);
+  assert.deepEqual(errors[0], [
+    "catalog.shared_work_owner.catalog_bound_exceeded",
+    {uid, maximum: 200, source: "owner-works"},
+  ]);
 });
 
 test("user creation merges identity without erasing concurrent setup", async (t) => {
@@ -176,6 +471,11 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   const noDeleteUser = () => assert.fail("the user document and profiles must never be deleted");
   const sets = [];
   const deletes = [];
+  let sharingDeletes = 0;
+  const sharingRef = {
+    path: "users/owner/settings/bookSharing",
+    delete: async () => { sharingDeletes += 1; },
+  };
   let userValue = {email: "owner@example.test", uid: "owner", toggl: {apiToken: "t"}};
   const userRef = {path: "users/owner", delete: noDeleteUser};
   const queries = [];
@@ -212,6 +512,10 @@ test("user deletion tombstones the user document and its profiles, deletes only 
     if (path === "users") return {doc: (uid) => { assert.equal(uid, "owner"); return userRef; }};
     assert.equal(path, "profileDiscovery");
     return {doc: (name) => discoveryRef(name)};
+  });
+  t.mock.method(db, "doc", (path) => {
+    assert.equal(path, "users/owner/settings/bookSharing");
+    return sharingRef;
   });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (ref) => {
@@ -252,6 +556,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   pages.push(names.slice(100, 200).map((n, i) => profileDoc(n, i === 0 ? {seconds: 1} : undefined)));
   pages.push(names.slice(200).map((n) => profileDoc(n, undefined)));
   await functions.deleteUserDocument.run({uid: "owner"});
+  assert.equal(sharingDeletes, 1);
 
   // The user document keeps every field and gains the tombstone.
   assert.equal(sets[0][0], "users/owner");
@@ -283,6 +588,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   markerOwner = "squatter";
   pages.push([profileDoc("ada-lovelace", {seconds: 1})]);
   await functions.deleteUserDocument.run({uid: "owner"});
+  assert.equal(sharingDeletes, 2);
   assert.deepEqual(sets, []);
   assert.deepEqual(deletes, []);
   assert.equal(commits, 0);
@@ -292,6 +598,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   sets.length = 0; deletes.length = 0; commits = 0; markerOwner = "owner";
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.deepEqual(sets, []);
+  assert.equal(sharingDeletes, 3);
 
   // A uid whose document never existed still gets a tombstone, so the
   // admin overview can tell "deleted" from "orphaned".
@@ -299,6 +606,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.equal(sets.length, 1);
   assert.equal(sets[0][1].uid, "owner");
+  assert.equal(sharingDeletes, 4);
 
   // A delivery that fails is retried rather than dropped — for both Auth
   // triggers: nothing else can create users/{uid}.
@@ -355,10 +663,18 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
 
   const deployedFunctions = [
     functions.admin.overview,
+    functions.admin.catalogapply,
+    functions.admin.catalogpreview,
+    functions.admin.catalogscan,
     functions.booksapi.lookupisbn,
+    functions.catalog.search,
+    functions.catalog.workreaders,
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.deletebookupdates,
+    functions.syncbooksharingprojection,
+    functions.syncsharingprofileprojection,
+    functions.syncsharingsettingprojection,
     functions.publicweb,
     functions.telemetry.reportissue,
     ...Object.values(functions.toggl),
@@ -391,10 +707,18 @@ test("runs every function as its dedicated least-privilege identity", () => {
   assert.equal(functions.publicweb.__endpoint.serviceAccountEmail, publicwebRuntime);
   const authenticated = {
     deletebookupdates: functions.deletebookupdates,
+    syncbooksharingprojection: functions.syncbooksharingprojection,
+    syncsharingprofileprojection: functions.syncsharingprofileprojection,
+    syncsharingsettingprojection: functions.syncsharingsettingprojection,
     createUserDocument: functions.createUserDocument,
     deleteUserDocument: functions.deleteUserDocument,
     "admin.overview": functions.admin.overview,
+    "admin.catalogapply": functions.admin.catalogapply,
+    "admin.catalogpreview": functions.admin.catalogpreview,
+    "admin.catalogscan": functions.admin.catalogscan,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
+    "catalog.search": functions.catalog.search,
+    "catalog.workreaders": functions.catalog.workreaders,
     "telemetry.reportissue": functions.telemetry.reportissue,
     "toggl.savetoken": functions.toggl.savetoken,
     "toggl.start": functions.toggl.start,
@@ -446,7 +770,13 @@ test("runs every function as its dedicated least-privilege identity", () => {
   // gen2 services accept no public ingress. Everything else — callables,
   // the Hosting-rewritten publicweb, and gen1 Auth triggers, which Google
   // invokes over the public endpoint — keeps the default.
-  const internalOnly = new Set(["functions.deletebookupdates", "functions.toggl.syncqueue"]);
+  const internalOnly = new Set([
+    "functions.deletebookupdates",
+    "functions.syncbooksharingprojection",
+    "functions.syncsharingprofileprojection",
+    "functions.syncsharingsettingprojection",
+    "functions.toggl.syncqueue",
+  ]);
   for (const [name, deployedFunction] of exported) {
     const ingress = deployedFunction.__endpoint.ingressSettings;
     if (internalOnly.has(name)) assert.equal(ingress, "ALLOW_INTERNAL_ONLY", name);
@@ -463,7 +793,12 @@ test("runs every function as its dedicated least-privilege identity", () => {
   // billed before it rejects them: each carries an explicit instance cap.
   const caps = {
     "functions.admin.overview": 2,
+    "functions.admin.catalogapply": 2,
+    "functions.admin.catalogpreview": 2,
+    "functions.admin.catalogscan": 2,
     "functions.booksapi.lookupisbn": 10,
+    "functions.catalog.search": 10,
+    "functions.catalog.workreaders": 10,
     "functions.telemetry.reportissue": 10,
     "functions.toggl.savetoken": 10,
     "functions.toggl.start": 10,
@@ -474,6 +809,9 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.deleteUserDocument": 10,
     "functions.toggl.syncqueue": 5,
     "functions.deletebookupdates": 5,
+    "functions.syncbooksharingprojection": 5,
+    "functions.syncsharingprofileprojection": 5,
+    "functions.syncsharingsettingprojection": 5,
     "functions.publicweb": 2,
   };
   for (const [name, deployedFunction] of exported) {

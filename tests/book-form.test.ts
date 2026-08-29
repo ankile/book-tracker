@@ -50,7 +50,102 @@ test('book form caps the ISBN at the rules limit and trims it', () => {
     isbn: '  978-0-316-76948-8  ', metadata: EMPTY_METADATA,
   });
   assert.equal(ok.valid, true);
-  assert.equal(ok.valid ? ok.write.input.isbn : '', '978-0-316-76948-8');
+  assert.equal(ok.valid ? ok.write.input.isbn : '', '9780316769488');
+});
+
+test('book form normalizes valid ISBNs even without a lookup', () => {
+  const result = prepareBookWrite({
+    userId: 'user', book: null, authorChips: [], title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: '0-316-55634-3', metadata: EMPTY_METADATA,
+  });
+  assert.ok(result.valid);
+  assert.equal(result.write.input.isbn, '9780316556347');
+});
+
+test('catalog writes are explicit on add and patch-only on edit', () => {
+  const selection = {workId: 'work', editionId: 'edition', matchMethod: 'isbn'} as const;
+  const added = prepareBookWrite({
+    userId: 'user', book: null, authorChips: [], title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(added.valid && added.write.kind === 'add');
+  assert.deepEqual(added.write.input.catalogLink, selection);
+
+  const unchanged = prepareBookWrite({
+    userId: 'user', book: {...baseBook, workId: 'work', editionId: 'edition'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(unchanged.valid && unchanged.write.kind === 'update');
+  assert.equal('catalogLink' in unchanged.write.input, false);
+
+  const repairedAdminLink = prepareBookWrite({
+    userId: 'user',
+    book: {...baseBook, workId: 'work', editionId: 'edition', matchMethod: 'admin'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+    catalogSelectionTouched: true,
+  });
+  assert.ok(repairedAdminLink.valid && repairedAdminLink.write.kind === 'update');
+  assert.deepEqual(repairedAdminLink.write.input.catalogLink, selection);
+
+  const untouchedAdminLink = prepareBookWrite({
+    userId: 'user',
+    book: {...baseBook, workId: 'work', editionId: 'edition', matchMethod: 'admin'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(untouchedAdminLink.valid && untouchedAdminLink.write.kind === 'update');
+  assert.equal('catalogLink' in untouchedAdminLink.write.input, false);
+
+  const unlinked = prepareBookWrite({
+    userId: 'user', book: {...baseBook, workId: 'work', editionId: 'edition'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: null,
+  });
+  assert.ok(unlinked.valid && unlinked.write.kind === 'update');
+  assert.equal(unlinked.write.input.catalogLink, null);
+});
+
+test('editing ISBN-derived links clears stale provenance or keeps an exact reselection', () => {
+  const originalIsbn = '9780441478125';
+  const replacementIsbn = '9780316769488';
+  const linked = {
+    ...baseBook,
+    isbn: originalIsbn,
+    workId: 'work',
+    editionId: 'edition',
+    matchMethod: 'isbn',
+  } as Book;
+  const storedSelection = {
+    workId: 'work', editionId: 'edition', matchMethod: 'catalog-choice',
+  } as const;
+  const changed = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: replacementIsbn, metadata: EMPTY_METADATA,
+    catalogSelection: storedSelection, catalogSelectionIsbn13: originalIsbn,
+  });
+  assert.ok(changed.valid && changed.write.kind === 'update');
+  assert.equal(changed.write.input.catalogLink, null);
+
+  const cleared = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: '', metadata: EMPTY_METADATA,
+    catalogSelection: storedSelection, catalogSelectionIsbn13: originalIsbn,
+  });
+  assert.ok(cleared.valid && cleared.write.kind === 'update');
+  assert.equal(cleared.write.input.catalogLink, null);
+
+  const exactReplacement = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: replacementIsbn, metadata: EMPTY_METADATA,
+    catalogSelection: {workId: 'new-work', editionId: 'new-edition', matchMethod: 'isbn'},
+    catalogSelectionIsbn13: replacementIsbn,
+  });
+  assert.ok(exactReplacement.valid && exactReplacement.write.kind === 'update');
+  assert.deepEqual(exactReplacement.write.input.catalogLink, {
+    workId: 'new-work', editionId: 'new-edition', matchMethod: 'isbn',
+  });
 });
 
 test('book form blocks writes while an unresolved repair chip remains', () => {

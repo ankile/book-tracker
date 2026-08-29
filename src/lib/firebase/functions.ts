@@ -1,5 +1,26 @@
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
 import { app } from './index.ts';
+import type {
+  AdminCatalogApplyRequest,
+  AdminCatalogApplyResponse,
+  AdminCatalogPreviewRequest,
+  AdminCatalogPreviewResponse,
+  AdminCatalogScanResponse,
+  AdminCatalogScanRequest,
+  CatalogSearchRequest,
+  CatalogSearchResponse,
+  WorkReadersRequest,
+  WorkReadersResponse,
+} from '../interfaces/catalog.ts';
+import {
+  decodeAdminCatalogApplyResponse,
+  decodeAdminCatalogPreviewResponse,
+  decodeAdminCatalogScanResponse,
+} from '../utils/adminCatalog.ts';
+import {
+  decodeCatalogSearchResponse,
+  decodeWorkReadersResponse,
+} from '../utils/catalogClient.ts';
 import type { IssueReport } from '../utils/issueReport.ts';
 
 export interface TogglConfigResponse {
@@ -96,3 +117,33 @@ export const togglClearToken = httpsCallable<Record<string, never>, { cleared: t
 export const adminOverview = httpsCallable<Record<string, never>, AdminOverview>(fns, 'admin-overview');
 export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolumeInfo | null }>(fns, 'booksapi-lookupisbn');
 export const reportIssue = httpsCallable<IssueReport, { recorded: true }>(fns, 'telemetry-reportissue');
+
+const catalogSearchCallable = httpsCallable<CatalogSearchRequest, unknown>(fns, 'catalog-search');
+const workReadersCallable = httpsCallable<WorkReadersRequest, unknown>(fns, 'catalog-workreaders');
+const adminCatalogScanCallable = httpsCallable<AdminCatalogScanRequest, unknown>(fns, 'admin-catalogscan');
+const adminCatalogPreviewCallable = httpsCallable<AdminCatalogPreviewRequest, unknown>(fns, 'admin-catalogpreview');
+const adminCatalogApplyCallable = httpsCallable<AdminCatalogApplyRequest, unknown>(fns, 'admin-catalogapply');
+
+export async function catalogSearch(request: CatalogSearchRequest): Promise<CatalogSearchResponse> {
+  return decodeCatalogSearchResponse((await catalogSearchCallable(request)).data);
+}
+
+export async function workReaders(request: WorkReadersRequest): Promise<WorkReadersResponse> {
+  return decodeWorkReadersResponse((await workReadersCallable(request)).data);
+}
+
+export async function adminCatalogScan(bookCursor: string | null = null): Promise<AdminCatalogScanResponse> {
+  return decodeAdminCatalogScanResponse((await adminCatalogScanCallable({bookCursor})).data);
+}
+
+export async function adminCatalogPreview(
+  request: AdminCatalogPreviewRequest,
+): Promise<AdminCatalogPreviewResponse> {
+  return decodeAdminCatalogPreviewResponse((await adminCatalogPreviewCallable(request)).data);
+}
+
+export async function adminCatalogApply(
+  request: AdminCatalogApplyRequest,
+): Promise<AdminCatalogApplyResponse> {
+  return decodeAdminCatalogApplyResponse((await adminCatalogApplyCallable(request)).data);
+}

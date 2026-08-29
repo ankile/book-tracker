@@ -55,6 +55,7 @@ import {
 } from './readingSessionWrites.ts';
 import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
 import type { ActiveTimer, Book } from '../interfaces/book.ts';
+import type { CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
   Profile,
@@ -119,6 +120,7 @@ const allBooksStores = new Map<string, Readable<Book[] | undefined>>();
 const authorsStores = new Map<string, Readable<Author[] | undefined>>();
 const profileStores = new Map<string, Readable<Profile | null | undefined>>();
 const profileDiscoveryStores = new Map<string, Readable<ProfileDiscovery | null | undefined>>();
+const bookSharingStores = new Map<string, Readable<BookSharingSettings | null | undefined>>();
 const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
 
@@ -195,17 +197,59 @@ interface ProfileWrite extends ProfilePayload {
   links: ProfileLink[];
   isPublic: boolean;
   removeDiscovery?: boolean;
+  removeBookSharing?: boolean;
 }
 
 interface RenameProfileWrite extends Omit<ProfileWrite, 'username'> {
   oldUsername: string;
   newUsername: string;
   isDiscoverable: boolean;
+  bookSharing: BookSharingSettings | null;
+}
+
+export interface BookSharingSettings {
+  profileUsername: string;
+  timeZone: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+interface EnableBookSharingInput {
+  userId: string;
+  profileUsername: string;
+  timeZone: string;
 }
 
 interface ProfileDiscoveryWrite {
   userId: string;
   username: string;
+}
+
+function decodeBookSharingSettings(value: unknown, path: string): BookSharingSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected an object.`);
+  }
+  const data = value as Record<string, unknown>;
+  const keys = Object.keys(data).sort();
+  const expected = ['createdAt', 'profileUsername', 'timeZone', 'updatedAt'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError(`${path}: expected only ${expected.join(', ')}.`);
+  }
+  if (typeof data.profileUsername !== 'string' || !/^[a-z0-9-]{3,30}$/.test(data.profileUsername)) {
+    throw new TypeError(`${path}.profileUsername: expected a profile username.`);
+  }
+  if (typeof data.timeZone !== 'string' || data.timeZone.length === 0 || data.timeZone.length > 100) {
+    throw new TypeError(`${path}.timeZone: expected a non-empty string of at most 100 characters.`);
+  }
+  if (!(data.createdAt instanceof Timestamp) || !(data.updatedAt instanceof Timestamp)) {
+    throw new TypeError(`${path}: expected Firestore timestamps.`);
+  }
+  return {
+    profileUsername: data.profileUsername,
+    timeZone: data.timeZone,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+  };
 }
 
 interface AddProfileLinkInput {
@@ -227,7 +271,7 @@ interface AddReadingInput extends AddPageUpdateInput {
   timeRead: number;
 }
 
-interface AddBookInput {
+interface BookInputBase {
   userId: string;
   authorChips: AuthorChip[];
   title: string;
@@ -237,9 +281,21 @@ interface AddBookInput {
   metadata: BookMetadata;
 }
 
-interface UpdateBookInput extends AddBookInput {
+interface AddBookInput extends BookInputBase {
+  catalogLink: CatalogSelection | null;
+}
+
+interface UpdateBookInput extends BookInputBase {
   bookId: string;
   pageCountClampFrom: number | null;
+  catalogLink?: CatalogSelection | null;
+}
+
+function catalogLinkFields(catalogLink: CatalogSelection | null) {
+  if (catalogLink === null) {
+    return {workId: null, editionId: null, matchMethod: null, linkedAt: null};
+  }
+  return {...catalogLink, linkedAt: Timestamp.now()};
 }
 
 interface UpdateAuthorInput extends AuthorNameInput {
@@ -525,6 +581,35 @@ class Database {
     ));
   }
 
+  // Per-book sharing is separate from the profile document because cached
+  // clients replace profiles wholesale. The setting's existence is consent;
+  // the work-readers callable still checks that the named profile is public.
+  static getBookSharingSettings(userId: string): Readable<BookSharingSettings | null | undefined> {
+    return cachedStore(bookSharingStores, userId, undefined, (set) => (
+      onSnapshot(doc(db, 'users', userId, 'settings', 'bookSharing'), (snapshot) => {
+        set(snapshot.exists()
+          ? decodeStored(() => decodeBookSharingSettings(
+            snapshot.data({ serverTimestamps: 'estimate' }),
+            snapshot.ref.path,
+          ))
+          : null);
+      }, listenError('load your book-sharing setting'))
+    ));
+  }
+
+  static enableBookSharing({ userId, profileUsername, timeZone }: EnableBookSharingInput): Promise<void> {
+    return setDoc(doc(db, 'users', userId, 'settings', 'bookSharing'), {
+      profileUsername,
+      timeZone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  static disableBookSharing(userId: string): Promise<void> {
+    return deleteDoc(doc(db, 'users', userId, 'settings', 'bookSharing'));
+  }
+
   // setDoc, not addDoc: the username is the doc id. If the username is
   // already taken the rules evaluate this as an update of someone else's
   // doc and reject it, so the caller sees permission-denied and reports
@@ -555,7 +640,7 @@ class Database {
   // Full overwrite with the freshly computed payload (the Me page keeps the
   // published doc in step with live stats whenever it differs, and the
   // profile-edit form and visibility checkbox write through here too).
-  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, stats, records, years, days }: ProfileWrite): Promise<void> {
+  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, removeBookSharing = false, stats, records, years, days }: ProfileWrite): Promise<void> {
     const profileRef = doc(db, 'profiles', username);
     const profile = {
       uid: userId,
@@ -576,6 +661,9 @@ class Database {
     batch.set(profileRef, profile);
     batch.set(doc(db, 'profileOwners', userId), { username });
     if (removeDiscovery) batch.delete(doc(db, 'profileDiscovery', username));
+    if (removeBookSharing) {
+      batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
+    }
     await batch.commit();
   }
 
@@ -605,7 +693,10 @@ class Database {
   // profile is never gone or doubled — offline included. A taken new
   // username rejects the whole batch (see createProfile), which is why
   // this, like createProfile, stays out of writeLabels and reports inline.
-  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, stats, records, years, days }: RenameProfileWrite): Promise<void> {
+  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, bookSharing, stats, records, years, days }: RenameProfileWrite): Promise<void> {
+    if (bookSharing !== null && bookSharing.profileUsername !== oldUsername) {
+      throw new Error('Book-sharing settings do not match the profile being renamed.');
+    }
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newUsername), {
       uid: userId,
@@ -621,6 +712,14 @@ class Database {
     });
     batch.delete(doc(db, 'profiles', oldUsername));
     batch.set(doc(db, 'profileOwners', userId), { username: newUsername });
+    if (bookSharing !== null) {
+      batch.set(doc(db, 'users', userId, 'settings', 'bookSharing'), {
+        profileUsername: newUsername,
+        timeZone: bookSharing.timeZone,
+        createdAt: bookSharing.createdAt,
+        updatedAt: serverTimestamp(),
+      });
+    }
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
         uid: userId,
@@ -638,6 +737,7 @@ class Database {
     batch.delete(doc(db, 'profiles', username));
     batch.delete(doc(db, 'profileDiscovery', username));
     batch.delete(doc(db, 'profileOwners', userId));
+    batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
     await batch.commit();
   }
 
@@ -711,7 +811,7 @@ class Database {
   // legacy author/authors fields, so their presence on any doc proves an
   // old client wrote it last — the invariant the legacy-wins read rule
   // and the migration re-run policy both stand on.
-  static addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata }: AddBookInput): Promise<void> {
+  static addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata, catalogLink }: AddBookInput): Promise<void> {
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
@@ -727,6 +827,7 @@ class Database {
       timeRead: 0,
       title,
       isbn,
+      ...catalogLinkFields(catalogLink),
       // ISBN-derived metadata (utils/bookMetadata.ts shape), defaults when
       // the caller never looked the ISBN up.
       ...metadata,
@@ -737,7 +838,7 @@ class Database {
     return batch.commit();
   }
 
-  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, pageCountClampFrom, isbn, metadata }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, pageCountClampFrom, isbn, metadata, catalogLink }: UpdateBookInput): Promise<void> {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
     let correctionId: string | null = null;
@@ -772,6 +873,7 @@ class Database {
       }),
       finished: isFinished(currentPage, pageCount),
       isbn,
+      ...(catalogLink === undefined ? {} : catalogLinkFields(catalogLink)),
       ...metadata,
       updatedAt: Timestamp.now(),
     });

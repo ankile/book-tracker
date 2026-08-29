@@ -9,7 +9,7 @@ const decoders = require("../lib/decoders");
 const deployed = require("../lib");
 const db = getFirestore();
 
-const authContext = {auth: {uid: "owner", token: {}}};
+const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
 
 test("callable request decoders reject malformed and extra fields", () => {
   assert.deepEqual(decoders.decodeSaveTokenRequest({token: "abc"}), {
@@ -39,6 +39,175 @@ test("callable request decoders reject malformed and extra fields", () => {
     decoders.decodeIsbnLookupRequest({isbn: "9780000000002"}),
     {isbn: "9780000000002"},
   );
+});
+
+test("catalog request decoders are exact and bounded", () => {
+  assert.deepEqual(decoders.decodeCatalogSearchRequest({
+    externalId: {provider: "google-books", id: "volume-123"},
+  }), {
+    externalId: {provider: "google-books", id: "volume-123"},
+  });
+  for (const broken of [
+    {},
+    {title: "Book", authorNames: ["Author"], limit: 1000},
+    {title: "Bo", authorNames: ["Author"]},
+    {title: "b!!", authorNames: ["Author"]},
+    {title: "Book"},
+    {title: "Book", authorNames: ["!!!"]},
+    {externalId: {provider: "Google", id: "volume"}},
+    {externalId: {provider: "google-books", id: "volume", extra: true}},
+    {title: "Book", authorNames: Array(21).fill("Author")},
+  ]) {
+    assert.throws(() => decoders.decodeCatalogSearchRequest(broken));
+  }
+  const request = {
+    confirmSearchable: true,
+    promoteInternalCollision: false,
+    work: {
+      canonicalTitle: "The Book",
+      alternateTitles: [],
+      authorNames: ["Ada Lovelace"],
+      coverUrl: "https://example.test/work.jpg",
+      subjects: [],
+      fiction: null,
+    },
+    edition: {
+      isbn13: "9780000000002",
+      title: "The Book",
+      authorNames: ["Ada Lovelace"],
+      publisher: "Publisher",
+      publishedDate: "2026",
+      language: "en",
+      translatorNames: [],
+      format: "full",
+      suggestedPageCount: 320,
+      coverUrl: "https://example.test/edition.jpg",
+      externalIds: {"google-books": "volume-123"},
+    },
+  };
+  assert.deepEqual(decoders.decodeCatalogCreateRequest(request), request);
+  assert.throws(
+    () => decoders.decodeCatalogCreateRequest({
+      ...request,
+      work: {...request.work, coverUrl: "http://example.test/cover.jpg"},
+    }),
+    /HTTPS URL/,
+  );
+  assert.throws(
+    () => decoders.decodeCatalogCreateRequest({...request, confirmSearchable: false}),
+    /confirmSearchable/,
+  );
+  for (const broken of [
+    {...request, work: {...request.work, canonicalTitle: "!!!"}},
+    {...request, edition: {...request.edition, title: "!!!"}},
+    {...request, work: {...request.work, authorNames: []}},
+    {...request, edition: {...request.edition, authorNames: []}},
+    {...request, edition: {...request.edition, authorNames: ["Grace Hopper"]}},
+    {...request, promoteInternalCollision: true},
+    {...request, edition: {
+      ...request.edition,
+      externalIds: {untrusted: "opaque-id"},
+    }},
+  ]) {
+    assert.throws(() => decoders.decodeCatalogCreateRequest(broken));
+  }
+  assert.deepEqual(decoders.decodeCatalogCreateRequest({
+    ...request,
+    work: {...request.work, authorNames: ["Søren Kierkegaard", "Ada Lovelace"]},
+    edition: {...request.edition, authorNames: ["Ada Lovelace", "Soren Kierkegaard"]},
+  }).edition.authorNames, ["Ada Lovelace", "Soren Kierkegaard"]);
+  assert.throws(
+    () => decoders.decodeWorkReadersRequest({workId: "works/catalog"}),
+    /one Firestore document id/,
+  );
+});
+
+test("admin catalog decoders admit only the six bounded tagged operations", () => {
+  assert.deepEqual(decoders.decodeAdminCatalogScanRequest({}), {bookCursor: null});
+  assert.deepEqual(decoders.decodeAdminCatalogScanRequest({
+    bookCursor: "users/reader/books/book-one",
+  }), {bookCursor: "users/reader/books/book-one"});
+  assert.throws(() => decoders.decodeAdminCatalogScanRequest({
+    bookCursor: "works/not-a-book",
+  }));
+  assert.throws(() => decoders.decodeAdminCatalogScanRequest({extra: true}));
+  assert.throws(() => decoders.decodeAdminCatalogOperation({
+    type: "linkBooks",
+    books: [{uid: "reader", bookId: "book"}],
+    target: {workId: "w".repeat(101), editionId: null},
+  }));
+  const work = {
+    canonicalTitle: "Catalog Work",
+    alternateTitles: [],
+    authorNames: ["Ada Author"],
+    coverUrl: "",
+    subjects: [],
+    fiction: null,
+  };
+  const edition = {
+    isbn13: null,
+    title: "Catalog Work",
+    authorNames: ["Ada Author"],
+    publisher: "",
+    publishedDate: "",
+    language: "en",
+    translatorNames: [],
+    format: "full",
+    suggestedPageCount: 200,
+    coverUrl: "",
+    externalIds: {},
+  };
+  const operations = [
+    {
+      type: "createWork", workId: "new-work", visibility: "internal", work,
+      books: [{uid: "owner", bookId: "book"}],
+    },
+    {
+      type: "linkBooks", books: [{uid: "owner", bookId: "book"}],
+      target: {workId: "work", editionId: null},
+    },
+    {type: "mergeWorks", sourceWorkIds: ["source"], targetWorkId: "target"},
+    {type: "editWork", workId: "work", visibility: "searchable", work},
+    {type: "upsertEdition", editionId: "edition", workId: "work", edition},
+    {type: "repointIsbn", isbn13: "9780000000002", editionId: "edition"},
+  ];
+  for (const operation of operations) {
+    assert.deepEqual(
+      decoders.decodeAdminCatalogPreviewRequest({operation}),
+      {operation},
+    );
+  }
+  for (const operation of [
+    {...operations[0], path: "users/victim/books/private"},
+    {...operations[1], books: Array(101).fill({uid: "owner", bookId: "book"})},
+    {type: "mergeWorks", sourceWorkIds: ["same"], targetWorkId: "same"},
+    {type: "deleteWork", workId: "work"},
+  ]) {
+    assert.throws(() => decoders.decodeAdminCatalogPreviewRequest({operation}));
+  }
+  const operationId = "123e4567-e89b-12d3-a456-426614174000";
+  const expected = {
+    catalog: [{
+      kind: "external-id", id: "index", exists: true, updatedAt: 123,
+    }, {
+      kind: "title-index", id: "title-index", exists: false, updatedAt: null,
+    }],
+    books: [{
+      uid: "owner", bookId: "book", workId: null, editionId: null,
+      matchMethod: null, linkedAt: null, decisionIsbn13: null,
+    }],
+  };
+  assert.deepEqual(decoders.decodeAdminCatalogApplyRequest({
+    operationId,
+    operation: operations[1],
+    expected,
+  }), {operationId, operation: operations[1], expected});
+  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
+    operationId,
+    operation: operations[1],
+    expected,
+    arbitraryPatch: {activeTimer: null},
+  }));
 });
 
 test("public profile and discovery decoders pin their published shapes", () => {

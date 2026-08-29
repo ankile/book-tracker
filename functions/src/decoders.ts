@@ -165,6 +165,30 @@ export function decodeEmptyCallableRequest(
   exactKeys(decoded, [], "request data", fail);
 }
 
+export interface AdminCatalogScanRequest {
+  bookCursor: string | null;
+}
+
+export function decodeAdminCatalogScanRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): AdminCatalogScanRequest {
+  if (value === null || value === undefined) return {bookCursor: null};
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["bookCursor"], "request data", fail);
+  if (decoded.bookCursor === undefined || decoded.bookCursor === null) {
+    return {bookCursor: null};
+  }
+  const cursor = string(decoded.bookCursor, "bookCursor", fail, 3100);
+  const path = cursor.split("/");
+  if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
+    fail("bookCursor must identify a users/{uid}/books/{bookId} document.");
+  }
+  documentId(path[1], "bookCursor uid", fail);
+  documentId(path[3], "bookCursor book id", fail);
+  return {bookCursor: cursor};
+}
+
 export interface SaveTokenRequest {
   token: string;
 }
@@ -200,24 +224,704 @@ export interface IsbnLookupRequest {
   isbn: string;
 }
 
+function checksumValidIsbn13(value: unknown, label: string, fail: DecodeFailure): string {
+  if (typeof value !== "string" || !/^\d{13}$/.test(value)) {
+    fail(`${label} must be a checksum-valid ISBN-13 string.`);
+  }
+  let sum = 0;
+  for (let index = 0; index < 12; index += 1) {
+    sum += Number(value[index]) * (index % 2 === 0 ? 1 : 3);
+  }
+  const checkDigit = String((10 - (sum % 10)) % 10);
+  if (value[12] !== checkDigit) {
+    fail(`${label} must be a checksum-valid ISBN-13 string.`);
+  }
+  return value;
+}
+
 export function decodeIsbnLookupRequest(
   value: unknown,
   fail: DecodeFailure = throwDecodeError,
 ): IsbnLookupRequest {
   const decoded = record(value, "request data", fail);
   exactKeys(decoded, ["isbn"], "request data", fail);
-  if (typeof decoded.isbn !== "string" || !/^\d{13}$/.test(decoded.isbn)) {
-    fail("isbn must be a checksum-valid ISBN-13 string.");
+  return {isbn: checksumValidIsbn13(decoded.isbn, "isbn", fail)};
+}
+
+function documentId(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): string {
+  const decoded = string(value, label, fail, 1500);
+  if (decoded === "." || decoded === ".." || decoded.includes("/") ||
+      Buffer.byteLength(decoded, "utf8") > 1500) {
+    fail(`${label} must be one Firestore document id.`);
   }
-  let sum = 0;
-  for (let index = 0; index < 12; index += 1) {
-    sum += Number(decoded.isbn[index]) * (index % 2 === 0 ? 1 : 3);
+  return decoded;
+}
+
+function catalogDocumentId(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): string {
+  const decoded = documentId(value, label, fail);
+  if (Buffer.byteLength(decoded, "utf8") > 100) {
+    fail(`${label} must be at most 100 UTF-8 bytes.`);
   }
-  const checkDigit = String((10 - (sum % 10)) % 10);
-  if (decoded.isbn[12] !== checkDigit) {
-    fail("isbn must be a checksum-valid ISBN-13 string.");
+  return decoded;
+}
+
+function boundedStringArray(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+  maximumItems: number,
+  maximumItemLength: number,
+  maximumJoinedLength: number,
+): string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    fail(`${label} must be an array of at most ${maximumItems} strings.`);
   }
-  return {isbn: decoded.isbn};
+  const decoded = value.map((entry, index) =>
+    string(entry, `${label}[${index}]`, fail, maximumItemLength).trim(),
+  );
+  if (decoded.some((entry) => entry.length === 0)) {
+    fail(`${label} entries must not be blank.`);
+  }
+  if (decoded.join("").length > maximumJoinedLength) {
+    fail(`${label} is too large.`);
+  }
+  return decoded;
+}
+
+function optionalHttpsUrl(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): string {
+  const decoded = boundedPossiblyEmptyString(value, label, fail, 2048).trim();
+  if (decoded !== "" && !URL.canParse(decoded)) {
+    fail(`${label} must be empty or an HTTPS URL.`);
+  }
+  if (decoded !== "" && new URL(decoded).protocol !== "https:") {
+    fail(`${label} must be empty or an HTTPS URL.`);
+  }
+  return decoded;
+}
+
+export interface CatalogSearchRequest {
+  isbn13?: string;
+  externalId?: CatalogExternalId;
+  title?: string;
+  authorNames?: string[];
+}
+
+export interface CatalogExternalId {
+  provider: string;
+  id: string;
+}
+
+const TRUSTED_CATALOG_PROVIDERS = new Set(["google-books", "open-library"]);
+
+const CATALOG_CHARACTER_FOLDS: Readonly<Record<string, string>> = {
+  "æ": "ae",
+  "ð": "d",
+  "đ": "d",
+  "ł": "l",
+  "ø": "o",
+  "œ": "oe",
+  "ß": "ss",
+  "þ": "th",
+};
+
+function normalizeCatalogIdentity(value: string): string {
+  const folded = [...value.normalize("NFKD").toLowerCase()].map((character) =>
+    CATALOG_CHARACTER_FOLDS[character] ?? character,
+  ).join("");
+  return folded
+    .replace(/\p{Mark}+/gu, "")
+    .replace(/['\u2018\u2019\u02bc`\u00b4]/gu, "")
+    .replace(/&/gu, " and ")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
+
+function normalizedCatalogSearchLength(value: string): number {
+  return normalizeCatalogIdentity(value).length;
+}
+
+function decodeCatalogExternalId(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): CatalogExternalId {
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, ["provider", "id"], label, fail);
+  const provider = string(decoded.provider, `${label}.provider`, fail, 40);
+  if (!TRUSTED_CATALOG_PROVIDERS.has(provider)) {
+    fail(`${label}.provider is not a trusted catalog provider.`);
+  }
+  return {
+    provider,
+    id: string(decoded.id, `${label}.id`, fail, 200),
+  };
+}
+
+export function decodeCatalogSearchRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): CatalogSearchRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(
+    decoded,
+    ["isbn13", "externalId", "title", "authorNames"],
+    "request data",
+    fail,
+  );
+  const request: CatalogSearchRequest = {};
+  if (decoded.isbn13 !== undefined) {
+    request.isbn13 = checksumValidIsbn13(decoded.isbn13, "isbn13", fail);
+  }
+  if (decoded.externalId !== undefined) {
+    request.externalId = decodeCatalogExternalId(
+      decoded.externalId,
+      "externalId",
+      fail,
+    );
+  }
+  if (decoded.title !== undefined) {
+    request.title = string(decoded.title, "title", fail, 500).trim();
+    if (normalizedCatalogSearchLength(request.title) < 3) {
+      fail("title must contain at least 3 normalized characters.");
+    }
+  }
+  if (decoded.authorNames !== undefined) {
+    request.authorNames = boundedStringArray(
+      decoded.authorNames, "authorNames", fail, 20, 200, 2000,
+    );
+    if (request.authorNames.some((name) => normalizeCatalogIdentity(name) === "")) {
+      fail("authorNames entries must contain a letter or number.");
+    }
+  }
+  if (request.isbn13 === undefined && request.externalId === undefined &&
+      request.title === undefined) {
+    fail("request data must contain isbn13, externalId, or title.");
+  }
+  if (request.title !== undefined && (request.authorNames?.length ?? 0) === 0) {
+    fail("title search requires at least one author name.");
+  }
+  return request;
+}
+
+export interface CatalogWorkInput {
+  canonicalTitle: string;
+  alternateTitles: string[];
+  authorNames: string[];
+  coverUrl: string;
+  subjects: string[];
+  fiction: boolean | null;
+}
+
+export interface CatalogEditionInput {
+  isbn13: string | null;
+  title: string;
+  authorNames: string[];
+  publisher: string;
+  publishedDate: string;
+  language: string;
+  translatorNames: string[];
+  format: "full" | "abridged" | "revised" | "unknown";
+  suggestedPageCount: number | null;
+  coverUrl: string;
+  externalIds: Record<string, string>;
+}
+
+export interface CatalogCreateRequest {
+  confirmSearchable: true;
+  promoteInternalCollision: false;
+  work: CatalogWorkInput;
+  edition: CatalogEditionInput;
+}
+
+export function decodeCatalogWorkInput(
+  value: unknown,
+  fail: DecodeFailure,
+): CatalogWorkInput {
+  const decoded = record(value, "work", fail);
+  exactKeys(
+    decoded,
+    ["canonicalTitle", "alternateTitles", "authorNames", "coverUrl", "subjects", "fiction"],
+    "work",
+    fail,
+  );
+  const canonicalTitle = string(
+    decoded.canonicalTitle, "work.canonicalTitle", fail, 500,
+  ).trim();
+  if (normalizedCatalogSearchLength(canonicalTitle) === 0) {
+    fail("work.canonicalTitle must contain a letter or number.");
+  }
+  const fiction = decoded.fiction;
+  if (fiction !== null && typeof fiction !== "boolean") {
+    fail("work.fiction must be a boolean or null.");
+  }
+  const authorNames = boundedStringArray(
+    decoded.authorNames, "work.authorNames", fail, 20, 200, 2000,
+  );
+  if (authorNames.length === 0 ||
+      authorNames.some((name) => normalizeCatalogIdentity(name) === "")) {
+    fail("work.authorNames must contain at least one valid author name.");
+  }
+  return {
+    canonicalTitle,
+    alternateTitles: boundedStringArray(
+      decoded.alternateTitles, "work.alternateTitles", fail, 20, 500, 5000,
+    ),
+    authorNames,
+    coverUrl: optionalHttpsUrl(decoded.coverUrl, "work.coverUrl", fail),
+    subjects: boundedStringArray(
+      decoded.subjects, "work.subjects", fail, 25, 200, 2500,
+    ),
+    fiction,
+  };
+}
+
+function decodeExternalIds(
+  value: unknown,
+  fail: DecodeFailure,
+): Record<string, string> {
+  const decoded = record(value, "edition.externalIds", fail);
+  const entries = Object.entries(decoded);
+  if (entries.length > 10) fail("edition.externalIds may contain at most 10 entries.");
+  const result: Record<string, string> = {};
+  for (const [provider, rawId] of entries) {
+    if (!TRUSTED_CATALOG_PROVIDERS.has(provider)) {
+      fail("edition.externalIds contains an untrusted provider.");
+    }
+    result[provider] = string(
+      rawId, `edition.externalIds.${provider}`, fail, 200,
+    );
+  }
+  return result;
+}
+
+export function decodeCatalogEditionInput(
+  value: unknown,
+  fail: DecodeFailure,
+): CatalogEditionInput {
+  const decoded = record(value, "edition", fail);
+  exactKeys(
+    decoded,
+    [
+      "isbn13", "title", "authorNames", "publisher", "publishedDate",
+      "language", "translatorNames", "format", "suggestedPageCount",
+      "coverUrl", "externalIds",
+    ],
+    "edition",
+    fail,
+  );
+  const title = string(decoded.title, "edition.title", fail, 500).trim();
+  if (normalizedCatalogSearchLength(title) === 0) {
+    fail("edition.title must contain a letter or number.");
+  }
+  const format = decoded.format;
+  if (format !== "full" && format !== "abridged" &&
+      format !== "revised" && format !== "unknown") {
+    fail("edition.format is unsupported.");
+  }
+  const suggestedPageCount = decoded.suggestedPageCount;
+  if (suggestedPageCount !== null &&
+      (typeof suggestedPageCount !== "number" ||
+       !Number.isSafeInteger(suggestedPageCount) ||
+       suggestedPageCount <= 0 || suggestedPageCount > 100000)) {
+    fail("edition.suggestedPageCount must be null or a positive safe integer at most 100000.");
+  }
+  const authorNames = boundedStringArray(
+    decoded.authorNames, "edition.authorNames", fail, 20, 200, 2000,
+  );
+  if (authorNames.length === 0 ||
+      authorNames.some((name) => normalizeCatalogIdentity(name) === "")) {
+    fail("edition.authorNames must contain at least one valid author name.");
+  }
+  return {
+    isbn13: decoded.isbn13 === null ? null :
+      checksumValidIsbn13(decoded.isbn13, "edition.isbn13", fail),
+    title,
+    authorNames,
+    publisher: boundedPossiblyEmptyString(
+      decoded.publisher, "edition.publisher", fail, 500,
+    ).trim(),
+    publishedDate: boundedPossiblyEmptyString(
+      decoded.publishedDate, "edition.publishedDate", fail, 64,
+    ).trim(),
+    language: boundedPossiblyEmptyString(
+      decoded.language, "edition.language", fail, 35,
+    ).trim(),
+    translatorNames: boundedStringArray(
+      decoded.translatorNames, "edition.translatorNames", fail, 20, 200, 2000,
+    ),
+    format,
+    suggestedPageCount,
+    coverUrl: optionalHttpsUrl(decoded.coverUrl, "edition.coverUrl", fail),
+    externalIds: decodeExternalIds(decoded.externalIds, fail),
+  };
+}
+
+export function decodeCatalogCreateRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): CatalogCreateRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(
+    decoded,
+    ["confirmSearchable", "promoteInternalCollision", "work", "edition"],
+    "request data",
+    fail,
+  );
+  if (decoded.confirmSearchable !== true) {
+    fail("confirmSearchable must be true.");
+  }
+  const work = decodeCatalogWorkInput(decoded.work, fail);
+  const edition = decodeCatalogEditionInput(decoded.edition, fail);
+  const workAuthors = [...new Set(work.authorNames.map(normalizeCatalogIdentity))].sort();
+  const editionAuthors = [...new Set(
+    edition.authorNames.map(normalizeCatalogIdentity),
+  )].sort();
+  if (workAuthors.length !== editionAuthors.length ||
+      workAuthors.some((author, index) => author !== editionAuthors[index])) {
+    fail("work.authorNames and edition.authorNames must identify the same authors.");
+  }
+  if (boolean(
+    decoded.promoteInternalCollision,
+    "promoteInternalCollision",
+    fail,
+  )) {
+    fail("promoteInternalCollision must be false for ordinary catalog creation.");
+  }
+  return {
+    confirmSearchable: true,
+    promoteInternalCollision: false,
+    work,
+    edition,
+  };
+}
+
+export interface WorkReadersRequest {
+  workId: string;
+  cursor: string | null;
+}
+
+export function decodeWorkReadersRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): WorkReadersRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["workId", "cursor"], "request data", fail);
+  return {
+    workId: documentId(decoded.workId, "workId", fail),
+    cursor: decoded.cursor === undefined || decoded.cursor === null ? null :
+      documentId(decoded.cursor, "cursor", fail),
+  };
+}
+
+export interface AdminBookTarget {
+  uid: string;
+  bookId: string;
+}
+
+type AdminWorkVisibility = "internal" | "searchable";
+
+export type AdminCatalogOperation =
+  | {
+      type: "createWork";
+      workId: string;
+      visibility: AdminWorkVisibility;
+      work: CatalogWorkInput;
+      books: AdminBookTarget[];
+    }
+  | {
+      type: "linkBooks";
+      books: AdminBookTarget[];
+      target: {workId: string; editionId: string | null} | null;
+    }
+  | {
+      type: "mergeWorks";
+      sourceWorkIds: string[];
+      targetWorkId: string;
+    }
+  | {
+      type: "editWork";
+      workId: string;
+      visibility: AdminWorkVisibility;
+      work: CatalogWorkInput;
+    }
+  | {
+      type: "upsertEdition";
+      editionId: string;
+      workId: string;
+      edition: CatalogEditionInput;
+    }
+  | {
+      type: "repointIsbn";
+      isbn13: string;
+      editionId: string;
+    };
+
+export interface AdminCatalogExpected {
+  catalog: Array<{
+    kind: "work" | "edition" | "isbn" | "external-id" | "title-index";
+    id: string;
+    exists: boolean;
+    updatedAt: number | null;
+  }>;
+  books: Array<{
+    uid: string;
+    bookId: string;
+    workId: string | null;
+    editionId: string | null;
+    matchMethod: "isbn" | "external-id" | "catalog-choice" |
+      "migration" | "admin" | null;
+    linkedAt: number | null;
+    decisionIsbn13: string | null;
+  }>;
+}
+
+export interface AdminCatalogPreviewRequest {
+  operation: AdminCatalogOperation;
+}
+
+export interface AdminCatalogApplyRequest extends AdminCatalogPreviewRequest {
+  operationId: string;
+  expected: AdminCatalogExpected;
+}
+
+function decodeAdminBookTargets(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): AdminBookTarget[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    fail(`${label} must be an array of at most 100 book targets.`);
+  }
+  const targets = value.map((entry, index) => {
+    const target = record(entry, `${label}[${index}]`, fail);
+    exactKeys(target, ["uid", "bookId"], `${label}[${index}]`, fail);
+    return {
+      uid: documentId(target.uid, `${label}[${index}].uid`, fail),
+      bookId: documentId(target.bookId, `${label}[${index}].bookId`, fail),
+    };
+  });
+  const keys = targets.map(({uid, bookId}) => `${uid}\0${bookId}`);
+  if (new Set(keys).size !== keys.length) fail(`${label} contains duplicate books.`);
+  return targets;
+}
+
+function adminVisibility(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): AdminWorkVisibility {
+  if (value !== "internal" && value !== "searchable") {
+    fail(`${label} must be internal or searchable.`);
+  }
+  return value;
+}
+
+export function decodeAdminCatalogOperation(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): AdminCatalogOperation {
+  const decoded = record(value, "operation", fail);
+  const type = decoded.type;
+  if (type === "createWork") {
+    exactKeys(decoded, ["type", "workId", "visibility", "work", "books"], "operation", fail);
+    return {
+      type,
+      workId: catalogDocumentId(decoded.workId, "operation.workId", fail),
+      visibility: adminVisibility(decoded.visibility, "operation.visibility", fail),
+      work: decodeCatalogWorkInput(decoded.work, fail),
+      books: decodeAdminBookTargets(decoded.books, "operation.books", fail),
+    };
+  }
+  if (type === "linkBooks") {
+    exactKeys(decoded, ["type", "books", "target"], "operation", fail);
+    let target: {workId: string; editionId: string | null} | null = null;
+    if (decoded.target !== null) {
+      const rawTarget = record(decoded.target, "operation.target", fail);
+      exactKeys(rawTarget, ["workId", "editionId"], "operation.target", fail);
+      target = {
+        workId: catalogDocumentId(rawTarget.workId, "operation.target.workId", fail),
+        editionId: rawTarget.editionId === null ? null :
+          catalogDocumentId(rawTarget.editionId, "operation.target.editionId", fail),
+      };
+    }
+    return {
+      type,
+      books: decodeAdminBookTargets(decoded.books, "operation.books", fail),
+      target,
+    };
+  }
+  if (type === "mergeWorks") {
+    exactKeys(decoded, ["type", "sourceWorkIds", "targetWorkId"], "operation", fail);
+    const sourceWorkIds = boundedStringArray(
+      decoded.sourceWorkIds, "operation.sourceWorkIds", fail, 29, 100, 2900,
+    ).map((id, index) => catalogDocumentId(id, `operation.sourceWorkIds[${index}]`, fail));
+    const targetWorkId = catalogDocumentId(decoded.targetWorkId, "operation.targetWorkId", fail);
+    if (sourceWorkIds.length === 0 || new Set(sourceWorkIds).size !== sourceWorkIds.length ||
+        sourceWorkIds.includes(targetWorkId)) {
+      fail("operation.sourceWorkIds must be unique, non-empty, and exclude the target.");
+    }
+    return {type, sourceWorkIds, targetWorkId};
+  }
+  if (type === "editWork") {
+    exactKeys(decoded, ["type", "workId", "visibility", "work"], "operation", fail);
+    return {
+      type,
+      workId: catalogDocumentId(decoded.workId, "operation.workId", fail),
+      visibility: adminVisibility(decoded.visibility, "operation.visibility", fail),
+      work: decodeCatalogWorkInput(decoded.work, fail),
+    };
+  }
+  if (type === "upsertEdition") {
+    exactKeys(decoded, ["type", "editionId", "workId", "edition"], "operation", fail);
+    return {
+      type,
+      editionId: catalogDocumentId(decoded.editionId, "operation.editionId", fail),
+      workId: catalogDocumentId(decoded.workId, "operation.workId", fail),
+      edition: decodeCatalogEditionInput(decoded.edition, fail),
+    };
+  }
+  if (type === "repointIsbn") {
+    exactKeys(decoded, ["type", "isbn13", "editionId"], "operation", fail);
+    return {
+      type,
+      isbn13: checksumValidIsbn13(decoded.isbn13, "operation.isbn13", fail),
+      editionId: catalogDocumentId(decoded.editionId, "operation.editionId", fail),
+    };
+  }
+  fail("operation.type is unsupported.");
+}
+
+export function decodeAdminCatalogPreviewRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): AdminCatalogPreviewRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["operation"], "request data", fail);
+  return {operation: decodeAdminCatalogOperation(decoded.operation, fail)};
+}
+
+function nullableDocumentId(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): string | null {
+  return value === null ? null : documentId(value, label, fail);
+}
+
+function nullableMillis(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure,
+): number | null {
+  if (value === null) return null;
+  const decoded = finiteNumber(value, label, fail);
+  if (!Number.isSafeInteger(decoded) || decoded < 0) {
+    fail(`${label} must be null or non-negative epoch milliseconds.`);
+  }
+  return decoded;
+}
+
+function decodeAdminCatalogExpected(
+  value: unknown,
+  fail: DecodeFailure,
+): AdminCatalogExpected {
+  const decoded = record(value, "expected", fail);
+  exactKeys(decoded, ["catalog", "books"], "expected", fail);
+  if (!Array.isArray(decoded.catalog) || decoded.catalog.length > 200) {
+    fail("expected.catalog must contain at most 200 versions.");
+  }
+  const catalog = decoded.catalog.map((entry, index) => {
+    const version = record(entry, `expected.catalog[${index}]`, fail);
+    exactKeys(
+      version,
+      ["kind", "id", "exists", "updatedAt"],
+      `expected.catalog[${index}]`,
+      fail,
+    );
+    if (version.kind !== "work" && version.kind !== "edition" &&
+        version.kind !== "isbn" && version.kind !== "external-id" &&
+        version.kind !== "title-index") {
+      fail(`expected.catalog[${index}].kind is unsupported.`);
+    }
+    const kind = version.kind === "work" ? "work" as const :
+      version.kind === "edition" ? "edition" as const :
+        version.kind === "isbn" ? "isbn" as const :
+          version.kind === "external-id" ? "external-id" as const :
+            "title-index" as const;
+    return {
+      kind,
+      id: documentId(version.id, `expected.catalog[${index}].id`, fail),
+      exists: boolean(version.exists, `expected.catalog[${index}].exists`, fail),
+      updatedAt: nullableMillis(
+        version.updatedAt, `expected.catalog[${index}].updatedAt`, fail,
+      ),
+    };
+  });
+  if (!Array.isArray(decoded.books) || decoded.books.length > 100) {
+    fail("expected.books must contain at most 100 link versions.");
+  }
+  const methods = ["isbn", "external-id", "catalog-choice", "migration", "admin"];
+  const books = decoded.books.map((entry, index) => {
+    const book = record(entry, `expected.books[${index}]`, fail);
+    exactKeys(
+      book,
+      ["uid", "bookId", "workId", "editionId", "matchMethod", "linkedAt", "decisionIsbn13"],
+      `expected.books[${index}]`,
+      fail,
+    );
+    const matchMethod = book.matchMethod;
+    if (matchMethod !== null &&
+        (typeof matchMethod !== "string" || !methods.includes(matchMethod))) {
+      fail(`expected.books[${index}].matchMethod is unsupported.`);
+    }
+    return {
+      uid: documentId(book.uid, `expected.books[${index}].uid`, fail),
+      bookId: documentId(book.bookId, `expected.books[${index}].bookId`, fail),
+      workId: nullableDocumentId(book.workId, `expected.books[${index}].workId`, fail),
+      editionId: nullableDocumentId(
+        book.editionId, `expected.books[${index}].editionId`, fail,
+      ),
+      matchMethod: matchMethod as "isbn" | "external-id" | "catalog-choice" |
+        "migration" | "admin" | null,
+      linkedAt: nullableMillis(book.linkedAt, `expected.books[${index}].linkedAt`, fail),
+      decisionIsbn13: book.decisionIsbn13 === null ? null : checksumValidIsbn13(
+        book.decisionIsbn13,
+        `expected.books[${index}].decisionIsbn13`,
+        fail,
+      ),
+    };
+  });
+  return {catalog, books};
+}
+
+export function decodeAdminCatalogApplyRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): AdminCatalogApplyRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["operationId", "operation", "expected"], "request data", fail);
+  const operationId = string(decoded.operationId, "operationId", fail, 100);
+  if (!/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(operationId)) {
+    fail("operationId must be a UUID.");
+  }
+  return {
+    operationId,
+    operation: decodeAdminCatalogOperation(decoded.operation, fail),
+    expected: decodeAdminCatalogExpected(decoded.expected, fail),
+  };
 }
 
 // Client-reported issue (telemetry-reportissue). The event allowlist is the

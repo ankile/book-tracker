@@ -16,6 +16,7 @@ import type {
   LegacyEmbeddedAuthorsBook,
   LegacyStringAuthorBook,
 } from '../interfaces/book.ts';
+import type { CatalogLink, CatalogMatchMethod } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import {
   PROFILE_LINK_TYPES,
@@ -189,6 +190,46 @@ function strings(value: unknown, context: string): string[] {
   return value.map((entry, index) => string(entry, `${context}[${index}]`));
 }
 
+function nullableNonEmptyString(value: unknown, context: string): string | null {
+  return value === undefined || value === null ? null : nonEmptyString(value, context);
+}
+
+function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod | null {
+  if (value === undefined || value === null) return null;
+  const decoded = string(value, context);
+  if (
+    decoded !== 'isbn' &&
+    decoded !== 'external-id' &&
+    decoded !== 'catalog-choice' &&
+    decoded !== 'migration' &&
+    decoded !== 'admin'
+  ) {
+    return fail(context, 'isbn, external-id, catalog-choice, migration, admin, or null');
+  }
+  return decoded;
+}
+
+function catalogLink(data: Data, context: string): CatalogLink {
+  const link: CatalogLink = {
+    workId: nullableNonEmptyString(data.workId, `${context}.workId`),
+    editionId: nullableNonEmptyString(data.editionId, `${context}.editionId`),
+    matchMethod: catalogMatchMethod(data.matchMethod, `${context}.matchMethod`),
+    linkedAt: data.linkedAt === undefined || data.linkedAt === null
+      ? null
+      : timestamp(data.linkedAt, `${context}.linkedAt`),
+  };
+  if (link.workId === null) {
+    if (link.editionId !== null || link.matchMethod !== null || link.linkedAt !== null) {
+      return fail(context, 'editionId, matchMethod, and linkedAt to be null when workId is null');
+    }
+    return link;
+  }
+  if (link.matchMethod === null || link.linkedAt === null) {
+    return fail(context, 'matchMethod and linkedAt for a linked work');
+  }
+  return link;
+}
+
 function exactKeys(value: Data, allowed: readonly string[], context: string): void {
   const extras = Object.keys(value).filter((key) => !allowed.includes(key));
   if (extras.length > 0) fail(context, `only keys ${allowed.join(', ')}`);
@@ -283,6 +324,7 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
     createdAt: timestamp(data.createdAt, `${path}.createdAt`),
     updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
     activeTimer: activeTimer(data.activeTimer, `${path}.activeTimer`),
+    ...catalogLink(data, path),
     ...metadata(data, path),
   };
 

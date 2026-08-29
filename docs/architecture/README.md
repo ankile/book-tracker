@@ -2,7 +2,7 @@
 
 Book Tracker is a private, offline-capable reading tracker with opt-in public profiles and optional Toggl synchronization. This guide explains how requests move through the app, where security is enforced, which code owns each responsibility, and what to update when the system changes.
 
-Last audited: 2026-08-28 against app commit `f678cec`. Run `node docs/architecture/verify.mjs` to check the current route and function inventory.
+Last audited: 2026-08-29 against the cross-user works implementation branch. Run `node docs/architecture/verify.mjs` to check the current route and function inventory.
 
 ## Quick facts
 
@@ -18,11 +18,12 @@ Last audited: 2026-08-28 against app commit `f678cec`. Run `node docs/architectu
 | Local Firebase stack | `npm --prefix functions run serve`, then `VITE_EMULATOR=1 npm run dev` |
 | Emulator ports | Auth `9099`, Firestore `8080`, Functions `5001`, Emulator UI `4000` |
 
-Five facts explain most of the design:
+Six facts explain most of the design:
 
 - Private library data lives below `users/{uid}`. The browser can read or change only its owner's data, and Firestore Rules validate correlated book, page, session, and timer updates.
 - The service worker caches the app shell. Firestore persists data in IndexedDB, so normal writes can be accepted offline and sent later.
 - Public sharing is separate from search discovery. `profiles/{username}` holds the profile, while `profileDiscovery/{username}` is the explicit search opt-in.
+- Shared works are server-owned bibliography. A personal book keeps its own title, page count, progress, and sessions, and may hold a nullable link to one work and edition. Reader comparisons require a separate `users/{uid}/settings/bookSharing` consent document and an owned public profile.
 - Browser Firestore access goes through Security Rules. Functions use the Admin SDK and bypass those rules, so IAM service accounts are the relevant boundary there.
 - Hosting and `publicweb` share a generated Svelte shell. They must be built and deployed together because Hosting pins a specific Cloud Run revision.
 
@@ -68,7 +69,7 @@ Each diagram answers one question and stays small enough to read at normal scree
 
 ![Book Tracker route access matrix](site-access.svg)
 
-## Three request paths worth knowing
+## Request paths worth knowing
 
 ### Signed-in or offline book write
 
@@ -86,6 +87,15 @@ Deleting a book is different from editing one. The client deletes the book docum
 3. A public profile returns cached HTML or a UID-free JSON projection. A private or missing profile returns the same 404 response.
 4. The SPA hydrates the returned shell. If the signed-in viewer owns a private profile, the browser can then read the raw document through Firestore Rules and render it client-side. The public JSON endpoint itself never serves private profiles.
 
+### Shared catalog and reader summaries
+
+1. The add/edit dialog makes bounded, signed-in calls to `catalog-search`. Exact ISBN or trusted external-ID matches may be preselected; title matches remain explicit choices.
+2. The browser writes only the nullable link fields on its own personal book. Rules require an active searchable work and a matching edition, while ordinary progress/timer writes avoid those catalog reads. If no suggestion is chosen, saving remains offline-capable and the book stays unlinked.
+3. Ordinary accounts cannot create globally shared catalog rows. `/admin/catalog` creates and curates works, editions, and indexes after reviewing unmatched books and exact or likely candidates.
+4. Three Gen 2 triggers maintain `sharedWorkOwners`, a server-only work-ID/UID candidate projection. The migration also backfills it. Owner-wide refreshes query at most 501 linked books, deduplicate rereads, and refuse fan-out above 500 linked books or 200 distinct works; they never scan an attacker's unlinked books or the global catalog. Profile privacy and deletion Rules require the selected sharing setting to be removed or atomically repointed.
+5. `/books/[workId]` calls `catalog-workreaders`. The function resolves one-hop aliases, pages projection candidates stably in groups of ten, then rechecks the live book, consent setting, account, and owned public profile before reading updates. The page size is deliberately aligned with the five-reread and 201-update ceilings so every owner in a page is handled within the total read budget. It returns date-only summaries and omits UID, email, ISBN, raw updates, and unqualified speed values. A bounded partial result is marked `incomplete` with an omission count; later candidate pages remain reachable with a cursor. The global breaker allows 100 valid-work pages per hour, preserving the prior worst-case read envelope while invalid work IDs are excluded from it.
+6. `/admin/catalog` uses paginated, bounded admin callables. Mutations require recent authentication, preview before apply, a strict six-operation union, stale-state checks, and one transaction that includes the recovery audit row. Creation and edition upserts transactionally refuse to cross the scan capacities (200 works and 500 each of editions, ISBN indexes, and external-ID indexes), while repair edits, merges, repoints, and unlinking remain available at capacity.
+
 Profile HTML, instance caches, the Hosting CDN, and browser caching mean a privacy change is not instant. The detailed cache ceilings and sitemap behavior live in [the root README](../../README.md#public-profile-search-indexing).
 
 ### Toggl timers and offline recovery
@@ -101,7 +111,8 @@ When an offline stop cannot reach Toggl, the client atomically clears or changes
 | Private page navigation | Root Svelte layout and route code | This is user experience, not the data-security boundary. |
 | Browser to Firestore | Firebase ID token plus `firestore.rules` | Rules enforce owner scope and multi-document invariants. Offline acceptance is provisional until the server evaluates the write. |
 | Browser to callable | Publicly invokable endpoint; handler checks the ID token and request shape | An unauthenticated request can incur an invocation before rejection. Instance caps bound cost and fan-out. |
-| `/admin` | Client layout hides the page; `admin-overview` checks one UID and a verified email | The server check is authoritative. A successful call writes `adminAudit`; denials look like not-found. |
+| `/admin` and `/admin/catalog` | Client layout hides the pages; every admin callable checks one UID and a verified email | The server check is authoritative. Catalog mutations also require `auth_time` within 15 minutes, preview/apply validation, and a transactional audit; denials look like not-found. |
+| Shared-work reader rows | `catalog-workreaders`, a server-only candidate projection, and live consent/profile checks | Authentication alone does not expose a library. A stale projection cannot authorize disclosure: every row requires the live UID-keyed setting, its selected owned public profile, and a currently linked book. Responses contain no UID, ISBN, or raw session rows. |
 | Public HTTP | Hosting rewrite plus `publicweb` visibility checks | Private and missing usernames are deliberately indistinguishable. |
 | `publicweb` to Firestore | `publicweb-runtime` with `roles/datastore.viewer` | It cannot write, access Auth, or read secrets. Firestore IAM cannot restrict it by collection, so it can technically read the entire database, including stored Toggl tokens. |
 | Other functions to Firebase | `functions-runtime` with Firestore write, Auth viewer, Eventarc, Run invoker, and one secret binding | Admin SDK access bypasses Firestore Rules. IAM and handler checks must be reviewed with every new function. |
@@ -119,12 +130,18 @@ When an offline stop cannot reach Toggl, the client atomically clears or changes
 | `users/{uid}/timerLifecycle/current` | Cross-book timer claim | Owner read and narrowly validated transitions | Toggl callables own remote claim transitions. |
 | `users/{uid}/togglQueue/{queueId}` | Offline create/stop work | Owner read, create, and bounded retry requests | `toggl-syncqueue` claims and writes status. Successful rows are deleted; eligible terminal rows have a 90-day TTL. |
 | `users/{uid}/functionQuotas/{name}` | Callable and queue rate windows | No client access | Functions own all reads and writes. |
+| `users/{uid}/settings/bookSharing` | Per-account consent, chosen public profile, and IANA timezone | Owner get/create/update/delete only; exact Rules shape | Catalog reader summaries read it. Projection triggers refresh the owner's candidates; profile rename moves it atomically; profile/account deletion removes it. |
+| `works/{workId}` | Canonical works, aliases, visibility, and one-hop merge redirects | Signed-in direct get only when active and searchable; never list or write | Catalog/admin callables create and curate. Migration may create internal works. |
+| `editions/{editionId}` | Edition metadata and its owning work | Signed-in direct get only when its work is active and searchable; never list or write | Catalog/admin callables create, move, and edit. Page count is advisory only. |
+| `isbnIndex/{isbn13}`, `externalIdIndex/{id}`, `workTitleIndex/{id}` | Server-owned matching indexes | No browser access | Catalog search and admin/migration transactions maintain them. Title rows carry work visibility so internal records cannot crowd public suggestions. |
+| `sharedWorkOwners/{hash}` | Work-scoped UID candidates for reader lookup | No browser access | Three Firestore triggers and the migration maintain it. `catalog-workreaders` treats it only as a candidate and rechecks all live authorization state. |
+| `functionGlobalQuotas/{name}` | Emergency global callable circuit breaker | No browser access | Functions own all reads and writes; per-user quota remains the primary abuse boundary. Reader calls consume the global breaker only after resolving a real searchable work, so invalid-ID traffic cannot exhaust it. |
 | `profiles/{username}` | Public or private profile document | Owner raw read and CRUD only | `publicweb` reads it and emits a bounded public projection without the Firebase UID. Auth deletion removes matching profiles. |
 | `profileDiscovery/{username}` | Explicit search-engine opt-in | Owner can get, create, or delete its marker; clients cannot list | `publicweb` lists markers for the sitemap. Auth deletion removes matching markers. |
 | `logEvents/{id}` | Allowlisted client and function issues | No client access | Telemetry writes; admin reads. TTL owns retention. |
-| `adminAudit/{id}` | Successful and denied admin access records | No client access | Admin function writes. TTL owns retention. |
+| `adminAudit/{id}` | Successful admin views and bounded catalog mutation recovery records | No client access | Admin function writes. Mutation audit commits with the mutation; TTL owns 365-day retention. |
 
-Firestore does not cascade when `users/{uid}` is deleted. `deleteUserDocument` removes the root account document, owned profiles, and discovery markers. Books, updates, authors, `timerLifecycle`, and `togglQueue` subcollections remain until an operator removes them with the Admin SDK. Follow the account-disable and session-revocation sequence in [Abusive or compromised accounts](../../README.md#abusive-or-compromised-accounts) before deleting an Auth user.
+Firestore does not cascade when `users/{uid}` is deleted. `deleteUserDocument` removes the sharing setting first, then the root account document, owned profiles, and discovery markers. Books, updates, authors, `timerLifecycle`, and `togglQueue` subcollections remain until an operator removes them with the Admin SDK. Follow the account-disable and session-revocation sequence in [Abusive or compromised accounts](../../README.md#abusive-or-compromised-accounts) before deleting an Auth user.
 
 ## Deployed function inventory
 
@@ -134,8 +151,13 @@ All function regions are `europe-west1`.
 |---|---|---|---|
 | `publicweb` | Gen 2 public HTTP | Public visibility rules in handler | Profiles, discovery markers, generated profile shell, Hosting cache |
 | `booksapi-lookupisbn` | Gen 1 callable | Signed-in handler, 60 lookups per user per hour | Secret Manager, Google Books, function quota |
+| `catalog-search` | Gen 1 callable | Signed-in handler, strict bounded request, per-user quota | Works, editions, server-owned matching indexes |
+| `catalog-workreaders` | Gen 1 callable | Verified signed-in handler, searchable-work and live consent checks, per-user quota | Catalog aliases, server-only owner projection, private books/updates, sharing settings, public profiles |
 | `telemetry-reportissue` | Gen 1 callable | Signed-in handler, allowlisted payload, 20 reports per user per hour | Issue quota, `logEvents` |
 | `admin-overview` | Gen 1 callable | Fixed UID and verified email | Auth Admin API, library aggregates, `logEvents`, `adminAudit` |
+| `admin-catalogscan` | Gen 1 callable | Fixed UID and verified email | Bounded bibliographic/catalog projection, view audit |
+| `admin-catalogpreview` | Gen 1 callable | Fixed UID and verified email | Strict operation decoding and current-state validation |
+| `admin-catalogapply` | Gen 1 callable | Fixed UID, verified email, and recent authentication | One catalog transaction, indexes, personal links, mutation audit |
 | `toggl-savetoken` | Gen 1 callable | Signed-in handler | Toggl user/project lookup, `users/{uid}` |
 | `toggl-cleartoken` | Gen 1 callable | Signed-in handler; timer must be idle | `users/{uid}`, timer lifecycle |
 | `toggl-start` | Gen 1 callable | Signed-in handler | Book and timer claim transaction, Toggl create |
@@ -144,6 +166,9 @@ All function regions are `europe-west1`.
 | `createUserDocument` | Gen 1 Auth `onCreate` | Firebase Auth event | Account root and idle timer lifecycle |
 | `deleteUserDocument` | Gen 1 Auth `onDelete` | Firebase Auth event | Account root, profile documents, discovery markers |
 | `deletebookupdates` | Gen 2 Firestore `onDelete` | Internal event ingress | Recursive deletion of one book's update subcollection |
+| `syncbooksharingprojection` | Gen 2 Firestore `onWrite` | Internal event ingress | Personal-book work links and `sharedWorkOwners` |
+| `syncsharingsettingprojection` | Gen 2 Firestore `onWrite` | Internal event ingress | Sharing consent, owned public profile, catalog works, and `sharedWorkOwners` |
+| `syncsharingprofileprojection` | Gen 2 Firestore `onWrite` | Internal event ingress | Public-profile state, catalog works, and `sharedWorkOwners` |
 | `toggl-syncqueue` | Gen 2 Firestore `onWrite` | Internal event ingress | Queue claim and quota, Toggl create/patch, recovery status and TTL |
 
 ## Route catalog
@@ -156,7 +181,9 @@ All function regions are `europe-west1`.
 | `/authors` | Rename, classify, merge, and soft-delete authors | Owner read/write |
 | `/isbns` | Find missing, invalid, unresolved, or coverless ISBN metadata and open the edit dialog | Owner read/write |
 | `/profiles/[username]` | Public reading statistics, heatmap, records, yearly data, and links | Anyone when published; owner can render their private profile through authenticated Firestore; no writes on the page |
-| `/admin` | Account activity, aggregate library totals, anomalies, and recent issue feed | Fixed verified operator; no controls; server writes an audit row |
+| `/books/[workId]` | Canonical work, editions, and grouped opted-in reading attempts | Signed-in users; read-only redacted callable response |
+| `/admin` | Account activity, aggregate library totals, anomalies, and recent issue feed | Fixed verified operator; server writes a view audit row |
+| `/admin/catalog` | Works, unmatched books, findings, work detail, and preview/apply curation | Fixed verified operator; mutations require recent authentication and write a transactional audit |
 
 ## Where to make common changes
 
@@ -164,6 +191,8 @@ All function regions are `europe-west1`.
 |---|---|---|
 | Add or rename a route | `src/routes/`, `src/lib/components/Navbar.svelte` | Root auth gate, `site-functionality.mmd`, `site-access.mmd` |
 | Add a book or session field | `src/lib/interfaces/`, `src/lib/firebase/db.ts`, decoders | `firestore.rules`, migration scripts, public profile projection, tests |
+| Change shared-work matching | `src/lib/utils/catalog.ts`, `functions/src/catalog.ts`, `cross-user-work-migration.ts` | Shared normalization fixtures, server-owned indexes, Rules, privacy and race tests |
+| Change admin curation | `functions/src/admin.ts`, admin catalog client/route | Recent-auth ordering, preview/apply stale checks, transactional audit, emulator contention tests |
 | Change a correlated write invariant | `src/lib/firebase/readingSessionWrites.ts`, `firestore.rules` | Emulator tests and offline failure handling |
 | Add a callable | New or existing `functions/src/*.ts`, then export from `functions/src/index.ts` | Client binding, auth and quota, service account, max instances, function table |
 | Change public profile output | `functions/src/publicWeb.ts`, `publicProfileRenderer.ts` | `sync-profile-shell.ts`, cache/privacy tests, coupled Hosting deployment |
@@ -179,6 +208,7 @@ All function regions are `europe-west1`.
 - There is no safe Hosting-only or preview-channel release path. Test locally or with the emulators.
 - Roll forward with a new deploy. The operational runbook removes stale Cloud Run tags and revisions, so console rollback can point Hosting or Eventarc at a retired revision.
 - New functions must choose one of the dedicated runtime identities, set an instance cap, and document whether the endpoint is public, handler-authenticated, or internal-event-only.
+- Deploy the additive `books.workId` and `books.editionId` collection-group indexes, searchable-title and stable work-reader pagination composite indexes, and three sharing-projection triggers before catalog callables or a linking client. Rehearse the catalog/projection migration in emulators, then run production dry-run, snapshot, apply, second zero-write run, and `db-audit.ts` before exposing admin curation and shared-work pages.
 
 The complete release, monitoring, spend, and recovery procedures remain in [README.md](../../README.md#deployment) and [MIGRATIONS.md](../../MIGRATIONS.md). This guide summarizes architecture rather than duplicating those runbooks.
 

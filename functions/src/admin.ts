@@ -3,7 +3,21 @@ import {logger} from "firebase-functions";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
 import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
-import {decodeEmptyCallableRequest} from "./decoders";
+import {
+  AdminCatalogApplyRequest,
+  AdminCatalogPreviewRequest,
+  AdminCatalogScanRequest,
+  DecodeFailure,
+  decodeAdminCatalogApplyRequest,
+  decodeAdminCatalogPreviewRequest,
+  decodeAdminCatalogScanRequest,
+  decodeEmptyCallableRequest,
+} from "./decoders";
+import {
+  applyAdminCatalogOperation,
+  previewAdminCatalogOperation,
+  scanAdminCatalog,
+} from "./adminCatalog";
 import {
   ANONYMOUS_ISSUE_LIMIT,
   assembleIssueFeed,
@@ -85,10 +99,11 @@ async function audit(
   });
 }
 
-// Decides on context.auth only, which the callables runtime populates from
-// a server-verified ID token; requires the operator UID plus a verified
-// email as defense in depth; and runs before any privileged read, so no
-// cross-user data is touched for a non-admin.
+// Starts from context.auth, which the callables runtime populates from a
+// server-verified ID token, then requires the operator's Firestore account
+// marker to still be live. Firebase ID tokens can outlive Auth deletion, so
+// this second check closes the deletion-to-token-expiry window before any
+// cross-user data is read.
 //
 // Unauthenticated callers are rejected without logging anything. They carry
 // no uid and no email, so a denial record would hold no forensic signal.
@@ -101,15 +116,15 @@ async function audit(
 // never does. Treat this as an authorization boundary, not a secret one.
 async function requireAdmin(
   context: functions.https.CallableContext,
-): Promise<void> {
+): Promise<{uid: string; email: string | null}> {
   const caller = context.auth;
   if (!caller) {
     throw new functions.https.HttpsError("not-found", "Not found.");
   }
   const identity = {uid: caller.uid, email: caller.token.email ?? null};
   if (caller.uid === ADMIN_UID && caller.token.email_verified === true) {
-    await audit("view", identity);
-    return;
+    const account = await db.collection("users").doc(ADMIN_UID).get();
+    if (account.exists && account.get("deletedAt") === undefined) return identity;
   }
   await audit("denied", identity);
   throw new functions.https.HttpsError("not-found", "Not found.");
@@ -120,16 +135,35 @@ async function requireAdmin(
 // would compile and deploy perfectly well while being wide open — the
 // wrapper is what makes forgetting the check impossible rather than
 // merely unlikely.
-function adminCallable(
-  handler: () => Promise<unknown>,
+function adminCallable<Request>(
+  decode: (_value: unknown, _fail: DecodeFailure) => Request,
+  handler: (
+    _request: Request,
+    _context: functions.https.CallableContext,
+  ) => Promise<unknown>,
+  options: {recentAuth?: boolean; auditView?: boolean} = {},
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
     .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: ADMIN_MAX_INSTANCES})
     .https.onCall(async (data: unknown, context) => {
-      await requireAdmin(context);
-      decodeEmptyCallableRequest(data, invalidArgument);
-      return handler();
+      const identity = await requireAdmin(context);
+      if (options.recentAuth === true) {
+        const authTime = context.auth?.token.auth_time;
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        if (typeof authTime !== "number" || !Number.isSafeInteger(authTime) ||
+            authTime < nowSeconds - 900 || authTime > nowSeconds + 60) {
+          throw new functions.https.HttpsError(
+            "failed-precondition",
+            "Recent authentication required.",
+            {reason: "recent-auth-required", maxAgeSeconds: 900},
+          );
+        }
+      }
+      const request = decode(data, invalidArgument);
+      const result = await handler(request, context);
+      if (options.auditView === true) await audit("view", identity);
+      return result;
     });
 }
 
@@ -214,7 +248,7 @@ async function readIssuesFor(
   };
 }
 
-exports.overview = adminCallable(async () => {
+exports.overview = adminCallable(decodeEmptyCallableRequest, async () => {
   // listUsers returns one capped page; stopping there would silently
   // truncate the table and undercount every total, so follow pageToken
   // until the API stops handing one back.
@@ -325,4 +359,26 @@ exports.overview = adminCallable(async () => {
       anonymousUnread,
     },
   };
-});
+}, {auditView: true});
+
+exports.catalogscan = adminCallable(
+  decodeAdminCatalogScanRequest,
+  async ({bookCursor}: AdminCatalogScanRequest) => scanAdminCatalog(db, bookCursor),
+  {auditView: true},
+);
+
+exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
+  decodeAdminCatalogPreviewRequest,
+  async ({operation}) => previewAdminCatalogOperation(db, operation),
+  {auditView: true},
+);
+
+exports.catalogapply = adminCallable<AdminCatalogApplyRequest>(
+  decodeAdminCatalogApplyRequest,
+  async (request, context) => applyAdminCatalogOperation(
+    db,
+    context.auth?.uid ?? "",
+    request,
+  ),
+  {recentAuth: true},
+);

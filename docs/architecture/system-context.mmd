@@ -3,7 +3,7 @@ title: Book Tracker system context
 ---
 flowchart LR
   accTitle: Book Tracker system context
-  accDescr: Readers, public profile visitors, the operator, and search crawlers use Book Tracker. Book Tracker reads book metadata from Open Library, Google Books, and Nasjonalbiblioteket, and optionally synchronizes reading timers with Toggl Track.
+  accDescr: Readers track personal books, connect them to a shared work catalog, and may opt into reader comparisons. The operator curates shared works and editions. Book Tracker also reads external metadata, serves public profiles, and optionally synchronizes timers with Toggl Track.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef system fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:3px;
@@ -12,13 +12,13 @@ flowchart LR
 
   subgraph people[People]
     direction TB
-    reader["<b>Reader</b><br/>Tracks books, progress, sessions,<br/>authors, and reading statistics"]:::person
+    reader["<b>Reader</b><br/>Tracks books, links shared works,<br/>and optionally shares reading summaries"]:::person
     visitor["<b>Profile visitor</b><br/>Reads a shared public profile"]:::person
-    operator["<b>Operator</b><br/>Reviews account activity and issues"]:::person
+    operator["<b>Operator</b><br/>Reviews operations and curates<br/>shared works and editions"]:::person
     crawler["<b>Search crawler</b><br/>Indexes opted-in public profiles"]:::person
   end
 
-  app["<b>Book Tracker</b><br/>Private, offline-capable reading tracker<br/>with opt-in public profiles and optional Toggl sync"]:::system
+  app["<b>Book Tracker</b><br/>Private, offline-capable reading tracker<br/>with shared works, opt-in comparisons,<br/>public profiles, and optional Toggl sync"]:::system
 
   subgraph providers[External systems]
     direction TB
@@ -28,7 +28,7 @@ flowchart LR
 
   reader -->|"uses"| app
   visitor -->|"opens shared profile"| app
-  operator -->|"opens restricted overview"| app
+  operator -->|"opens restricted overview and catalog"| app
   crawler -->|"reads sitemap and profile HTML"| app
   app -->|"looks up ISBN metadata"| catalogs
   app -->|"creates and stops timers"| toggl

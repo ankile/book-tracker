@@ -3,7 +3,7 @@ title: Pages, navigation, and page-local actions
 ---
 flowchart LR
   accTitle: Book Tracker pages, navigation, and page-local actions
-  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Shared links and search results can enter the public profile directly. The admin overview is reachable only by direct URL. Dotted links open write dialogs or page-local actions rather than new routes.
+  accDescr: Signed-in readers use the primary navigation for their library and settings. Linked books open authenticated shared-work pages with opted-in reader summaries. My site controls book-sharing consent. The restricted admin overview links to catalog curation. Dotted links open write dialogs or page-local actions rather than new routes.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
@@ -18,7 +18,7 @@ flowchart LR
     signedout["<b>Signed-out visitor</b><br/>Private URL or app home"]:::person
     owner["<b>Signed-in reader</b><br/>Restored browser session"]:::person
     publicentry["<b>Public visitor</b><br/>Shared link · search result<br/>or direct profile URL"]:::person
-    operator["<b>Verified operator</b><br/>Direct <code>/admin</code> URL"]:::person
+    operator["<b>Verified operator</b><br/>Direct <code>/admin</code> URL<br/>recent authentication for catalog writes"]:::person
   end
 
   subgraph routes[Application routes]
@@ -33,16 +33,19 @@ flowchart LR
     authors["<b>Authors</b><br/><code>/authors</code><br/>Rename · classify · merge · delete"]:::page
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
+    work["<b>Shared work</b><br/><code>/books/[workId]</code><br/>Editions · opted-in readers · rereads"]:::public
     admin["<b>Admin overview</b><br/><code>/admin</code><br/>Account activity · recent issues"]:::admin
+    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Works · unmatched books · findings"]:::admin
   end
 
   subgraph actions[Dialogs and page-local writes]
     direction TB
-    bookaction["<b>Add or edit book</b><br/>Metadata lookup · authors · delete"]:::action
+    bookaction["<b>Add or edit book</b><br/>Metadata lookup · catalog suggestions<br/>link, unlink, reread · delete"]:::action
     sessionaction["<b>Progress and sessions</b><br/>Set page · log, edit, or delete session"]:::action
     timeraction["<b>Reading timers</b><br/>Local or Toggl start/stop<br/>offline queue and stalled recovery"]:::action
     authoraction["<b>Author editor</b><br/>Rename · kind · merge · soft delete"]:::action
-    profileaction["<b>Profile settings</b><br/>Create · rename · publish · discovery<br/>links · delete"]:::action
+    profileaction["<b>Profile settings</b><br/>Create · rename · publish · discovery<br/>book sharing · links · delete"]:::action
+    catalogaction["<b>Curate catalog</b><br/>Preview then apply create · link · merge<br/>work, edition, and ISBN corrections"]:::action
     togglaction["<b>Toggl settings</b><br/>Connect · replace · disconnect token"]:::action
   end
 
@@ -57,7 +60,10 @@ flowchart LR
   me -->|"Authors card"| authors
   me -->|"Needs an ISBN card"| isbns
   me -->|"Profile link"| profile
+  current -->|"Linked work"| work
+  finished -->|"Linked work"| work
   profile -->|"Go to app"| auth
+  admin -->|"Catalog"| admincatalog
 
   current -.-> bookaction
   finished -.-> bookaction
@@ -69,6 +75,7 @@ flowchart LR
   authors -.-> authoraction
   me -.-> profileaction
   me -.-> togglaction
+  admincatalog -.-> catalogaction
 
   legend["<b>Legend</b><br/>Solid = route navigation · Dotted = dialog or local action<br/>Teal = signed-in page · Blue = profile · Red = privileged route"]:::legend
-  togglaction ~~~ legend
+  catalogaction ~~~ legend

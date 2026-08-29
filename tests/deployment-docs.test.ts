@@ -5,6 +5,7 @@ import test from 'node:test';
 const readmeUrl = new URL('../README.md', import.meta.url);
 const migrationsUrl = new URL('../MIGRATIONS.md', import.meta.url);
 const progressMigrationUrl = new URL('../migrate-reading-progress-sources.ts', import.meta.url);
+const firestoreIndexesUrl = new URL('../firestore.indexes.json', import.meta.url);
 
 function section(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -94,6 +95,41 @@ test('the general migration order links to the timer-claim exception', async () 
     migrations,
     /Session edit\/delete rewind is deliberately disabled on un-backfilled books[\s\S]*window artifact/i,
   );
+});
+
+test('catalog admin queries have both required collection-group indexes', async () => {
+  const indexes = JSON.parse(await readFile(firestoreIndexesUrl, 'utf8')) as {
+    fieldOverrides: Array<{
+      collectionGroup: string;
+      fieldPath: string;
+      indexes: Array<{order?: string; queryScope?: string}>;
+    }>;
+  };
+  for (const fieldPath of ['workId', 'editionId']) {
+    const override = indexes.fieldOverrides.find((entry) =>
+      entry.collectionGroup === 'books' && entry.fieldPath === fieldPath);
+    assert.ok(override, `missing books.${fieldPath} field override`);
+    assert.equal(override.indexes.some((entry) =>
+      entry.order === 'ASCENDING' && entry.queryScope === 'COLLECTION_GROUP'), true);
+  }
+
+  const compositeIndexes = (JSON.parse(await readFile(firestoreIndexesUrl, 'utf8')) as {
+    indexes: Array<{
+      collectionGroup: string;
+      queryScope: string;
+      fields: Array<{fieldPath: string; order: string}>;
+    }>;
+  }).indexes;
+  assert.equal(compositeIndexes.some((index) =>
+    index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&
+    index.fields[0]?.fieldPath === 'visibility' && index.fields[0]?.order === 'ASCENDING' &&
+    index.fields[1]?.fieldPath === 'titleKey' && index.fields[1]?.order === 'ASCENDING'), true,
+  'missing searchable title-prefix composite index');
+  assert.equal(compositeIndexes.some((index) =>
+    index.collectionGroup === 'sharedWorkOwners' && index.queryScope === 'COLLECTION' &&
+    index.fields[0]?.fieldPath === 'workId' && index.fields[0]?.order === 'ASCENDING' &&
+    index.fields[1]?.fieldPath === '__name__' && index.fields[1]?.order === 'ASCENDING'), true,
+  'missing stable work-reader pagination composite index');
 });
 
 test('the strict-TypeScript rollback runbook preserves compatible release stages', async () => {

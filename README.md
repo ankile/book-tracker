@@ -38,6 +38,10 @@ This responsive single-page app allows one to keep track of what one's reading, 
 ### Book Metadata
 - **ISBN Lookup**: One button fills title, author, page count, cover, genres and
   a fiction/non-fiction flag from the book's ISBN
+- **Shared Works**: Existing works and editions are suggested while adding a
+  book; each reader still chooses the title and page count for their own copy
+- **Reader Comparisons**: Authenticated work pages group opted-in rereads and
+  show date, duration, and qualified pace context without exposing raw sessions
 - **Book Covers**: Shown on the reading and finished lists, hot-linked from the
   source catalogue (no image storage)
 - **Metadata Repair**: `/isbns` lists books whose ISBN is missing or mistyped —
@@ -158,6 +162,44 @@ authoritative commercial source for Norwegian titles.
 A book with no ISBN, or a mistyped one, has nothing to look up. Those are listed
 at `/isbns`, grouped by problem, and repaired through the normal edit modal. The
 Me-page "Needs an ISBN" card links there and shows the count.
+
+## Shared works and editions
+
+The shared catalog connects personal books without replacing them. An ISBN
+identifies an edition; several editions may point to one work. Personal books
+retain their own title, authors, ISBN text, page count, progress, and sessions,
+and may be unlinked or relinked at any time. Exact ISBN and trusted external-ID
+matches can be preselected. Title and author matches are suggestions that need
+an explicit choice. Ordinary accounts cannot create shared catalog entries; an
+unmatched book remains unlinked and fully usable until an operator curates it.
+Catalog failures never block the existing offline save path.
+
+Reader rows on `/books/[workId]` are separately opt-in. The account must choose
+an owned public profile and an IANA timezone in `/me`. The callable returns a
+redacted summary without UID, email, or raw updates; different page counts are
+reported as context, not treated as catalog conflicts.
+
+The consent/profile triggers intentionally trade bounded work for prompt
+privacy convergence: one meaningful change can refresh at most 500 linked
+books and 200 distinct works, with five trigger instances and ten refreshes at
+a time. Repeated consent toggles can therefore amplify Firestore reads and
+writes even though they cannot disclose data. The work-reader callable also
+has a deliberate shared 100-page/hour breaker after its per-account quota; a
+small group of verified accounts can exhaust it and temporarily hide reader
+summaries. Treat both as accepted availability/spend controls for the initial
+release. Before deployment, add alerts for
+`catalog.shared_work_owner.catalog_bound_exceeded`, sustained projection
+writes, and work-reader quota exhaustion; if real usage approaches the bounds,
+move consent changes behind a rate-limited callable or adopt generation-based
+projection invalidation and partitioned reader budgets.
+
+The fixed verified operator curates works, editions, aliases, links, ISBN
+mappings, and exact or likely unmatched-book candidates at `/admin/catalog`.
+Every mutation is previewed, requires a password
+reauthentication no more than 15 minutes old, rechecks stale state, and commits
+with one bounded recovery audit. Browser Rules continue to deny direct catalog
+mutation and cross-user library reads. The initial rollout and migration gates
+are in [MIGRATIONS.md](MIGRATIONS.md#cross-user-work-catalog-rollout).
 
 ## Version 2.0 - Major Upgrade 🎉
 

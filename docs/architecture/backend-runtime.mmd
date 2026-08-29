@@ -3,7 +3,7 @@ title: Backend request and event paths
 ---
 flowchart TB
   accTitle: Book Tracker backend request and event paths
-  accDescr: Seven independent rows show public profile delivery, Google Books lookup, telemetry and administration, online Toggl calls, offline Toggl queue synchronization, authentication lifecycle cleanup, and book session cleanup. Every deployed function appears by its deployed name.
+  accDescr: Independent rows show public delivery, metadata lookup, shared-catalog search and reader summaries, operator curation, telemetry, Toggl synchronization, and lifecycle cleanup. Every deployed function appears by its deployed name with its authorization boundary and main data dependencies.
 
   classDef source fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef mediation fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
@@ -37,18 +37,42 @@ flowchart TB
     secret -. "API key" .-> booksapi
   end
 
+  subgraph catalogpath[Shared work catalog]
+    direction LR
+    catalogbrowser["<b>Signed-in reader</b><br/>Add/edit dialog or work page"]:::source
+    catalogfunctions["<b>Catalog callables · Gen 1</b><br/>catalog-search · catalog-workreaders<br/>verified users · bounded quotas"]:::function
+    catalogdata[("<b>Shared catalog</b><br/><code>works</code> · <code>editions</code><br/>ISBN, external-ID, and title indexes")]:::data
+    ownerprojection[("<b>Server-only owner projection</b><br/><code>sharedWorkOwners</code><br/>work ID + UID only")]:::data
+    privatebooks[("<b>Live private reader data</b><br/>Personal books and updates<br/>sharing setting + owned public profile")]:::data
+    catalogresponse["<b>Redacted response</b><br/>Searchable bibliography or<br/>opted-in summary rows without UID"]:::security
+    catalogbrowser --> catalogfunctions
+    catalogfunctions -->|"search"| catalogdata
+    catalogfunctions -->|"bounded candidate lookup"| ownerprojection
+    catalogfunctions -->|"recheck consent and aggregate"| privatebooks
+    catalogfunctions --> catalogresponse
+  end
+
+  subgraph sharingprojection[Sharing projection lifecycle]
+    direction LR
+    sharingwrites["<b>Owner writes</b><br/>book link · sharing setting<br/>or public profile"]:::source
+    sharingevent["<b>Eventarc delivery</b><br/>Gen 2 · internal-only ingress"]:::mediation
+    sharingtriggers["<b>Projection triggers · Gen 2</b><br/>syncbooksharingprojection<br/>syncsharingsettingprojection<br/>syncsharingprofileprojection"]:::function
+    projectiondata[("<b>Candidate-owner projection</b><br/><code>sharedWorkOwners</code><br/>default-denied to clients")]:::data
+    sharingwrites --> sharingevent --> sharingtriggers --> projectiondata
+  end
+
   subgraph operationspath[Client issue reports and operator overview]
     direction LR
     clientissue["<b>Signed-in browser</b><br/>Allowlisted warn/error event"]:::source
     telemetry["<b>telemetry-reportissue · Gen 1</b><br/>20 reports per user per hour"]:::function
     opsdata[("<b>Operations data</b><br/><code>logEvents</code> · issue quota<br/>server-owned TTL fields")]:::data
     adminrequest["<b>Fixed verified operator</b>"]:::source
-    admin["<b>admin-overview · Gen 1</b><br/>UID + verified-email gate<br/>max 2 instances"]:::function
+    admin["<b>Admin callables · Gen 1</b><br/>admin-overview · admin-catalogscan<br/>admin-catalogpreview · admin-catalogapply"]:::function
     adminsources[("<b>Admin sources</b><br/>Auth users · private libraries<br/><code>logEvents</code>")]:::data
     audit[("<b>Audit output</b><br/><code>adminAudit</code> · TTL")]:::data
     clientissue --> telemetry --> opsdata
     adminrequest --> admin --> adminsources
-    admin -->|"successful view"| audit
+    admin -->|"views and transactional mutation audits"| audit
   end
 
   subgraph togglonline[Online Toggl configuration and timers]
@@ -84,7 +108,7 @@ flowchart TB
     createuser["<b>createUserDocument · Gen 1</b><br/>Auth onCreate · retry enabled"]:::function
     deleteuser["<b>deleteUserDocument · Gen 1</b><br/>Auth onDelete · retry enabled"]:::function
     userroot[("<b>Account root</b><br/><code>users/{uid}</code><br/>idle timer lifecycle on create")]:::data
-    deletedprofiles[("<b>Profiles and discovery markers</b><br/>Deleted page by page"]:::data
+    deletedprofiles[("<b>Profiles, discovery, and consent</b><br/>Sharing removed first<br/>profiles deleted page by page")]:::data
     remains["<b>Manual cleanup still required</b><br/>Books · updates · authors · timer lifecycle<br/>and Toggl queue subcollections remain"]:::security
     authevent -->|"create"| createuser --> userroot
     authevent -->|"delete"| deleteuser

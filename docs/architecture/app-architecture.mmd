@@ -3,7 +3,7 @@ title: Book Tracker container and trust boundaries
 ---
 flowchart LR
   accTitle: Book Tracker container and trust boundaries
-  accDescr: The browser and Firebase Hosting form the delivery edge. Browser Firestore access is checked by Security Rules. Cloud Functions use Admin SDK access governed by two IAM service accounts. Direct catalog requests stay in the browser, while Google Books and Toggl requests run through Cloud Functions.
+  accDescr: The browser and Firebase Hosting form the delivery edge. Browser Firestore access is checked by Security Rules. Shared-catalog search, reader summaries, and administration use authorized Cloud Functions with Admin SDK access. External metadata and Toggl requests use their existing direct or mediated paths.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef client fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:2px;
@@ -32,9 +32,9 @@ flowchart LR
       hosting["<b>Hosting + CDN</b><br/>Static SPA and immutable assets<br/>Pinned rewrite for public web"]:::edge
       auth["<b>Firebase Authentication</b><br/>Email/password sessions<br/>Auth lifecycle events"]:::firebase
       rules["<b>Firestore Security Rules</b><br/>Owner checks and write invariants"]:::security
-      firestore[("<b>Cloud Firestore · eur3</b><br/>Private libraries · profiles<br/>queues · quotas · operations")]:::data
+      firestore[("<b>Cloud Firestore · eur3</b><br/>Private libraries · shared catalog<br/>consent · profiles · quotas · operations")]:::data
       publicweb["<b>publicweb · Gen 2</b><br/>Pinned Cloud Run revision<br/><code>publicweb-runtime</code> · read-only IAM"]:::edge
-      callables["<b>Callable functions · Gen 1</b><br/>Public endpoints, handlers authorize<br/><code>functions-runtime</code> · max instances"]:::firebase
+      callables["<b>Callable functions · Gen 1</b><br/>Metadata · catalog · admin · Toggl<br/>handlers authorize · bounded instances"]:::firebase
       eventarc["<b>Event delivery</b><br/>Auth events + Eventarc<br/>Firestore ingress is internal-only"]:::neutral
       background["<b>Background functions</b><br/>Gen 1 Auth + Gen 2 Firestore triggers<br/><code>functions-runtime</code>"]:::firebase
       secrets["<b>Secret Manager</b><br/><code>FUNCTIONS_CONFIG_EXPORT</code>"]:::security
@@ -67,7 +67,7 @@ flowchart LR
   callables -->|"token and timer requests"| toggl
 
   auth -->|"create or delete event"| eventarc
-  firestore -->|"book delete or queue write"| eventarc
+  firestore -->|"book, sharing, profile, or queue write"| eventarc
   eventarc --> background
   background -->|"Admin SDK + IAM"| firestore
   background -->|"queued time entry"| toggl

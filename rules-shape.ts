@@ -16,6 +16,7 @@
 export const BOOK_FIELDS = [
   'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
   'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
+  'workId', 'editionId', 'matchMethod', 'linkedAt',
   'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
   'publisher', 'subjects', 'title', 'updatedAt',
 ] as const;
@@ -97,7 +98,27 @@ export function bookShapeViolations(book: Record<string, unknown>, ownerPath: st
   if ('subjects' in book) v.push(...stringListViolations('subjects', book.subjects, 25, 2500));
   if ('fiction' in book && book.fiction !== null && typeof book.fiction !== 'boolean') v.push('fiction.not-bool');
   if ('isbn' in book) v.push(...cappedString('isbn', book.isbn, 32));
-  if ('owner' in book && !(isDocumentReference(book.owner) && book.owner.path === ownerPath)) v.push('owner.not-self');
+  if ('workId' in book && book.workId !== null) {
+    v.push(...cappedString('workId', book.workId, 100));
+    if (typeof book.workId === 'string' && (book.workId.length === 0 || book.workId.includes('/'))) {
+      v.push('workId.not-document-id');
+    }
+  }
+  if ('editionId' in book && book.editionId !== null) {
+    v.push(...cappedString('editionId', book.editionId, 100));
+    if (typeof book.editionId === 'string' && (book.editionId.length === 0 || book.editionId.includes('/'))) {
+      v.push('editionId.not-document-id');
+    }
+  }
+  if ('matchMethod' in book && book.matchMethod !== null
+      && !['isbn', 'external-id', 'catalog-choice', 'migration', 'admin'].includes(book.matchMethod as string)) {
+    v.push('matchMethod.unknown');
+  }
+  if ('linkedAt' in book && book.linkedAt !== null && !isTimestamp(book.linkedAt)) {
+    v.push('linkedAt.not-timestamp');
+  }
+  if (!('owner' in book) && book.workId !== undefined && book.workId !== null) v.push('owner.missing-for-link');
+  else if ('owner' in book && !(isDocumentReference(book.owner) && book.owner.path === ownerPath)) v.push('owner.not-self');
   if ('createdAt' in book && !isTimestamp(book.createdAt)) v.push('createdAt.not-timestamp');
   if ('pagesRead' in book && !(typeof book.pagesRead === 'number' && book.pagesRead >= 0)) v.push('pagesRead.not-nonnegative-number');
   if ('timeRead' in book && !(typeof book.timeRead === 'number' && book.timeRead >= 0)) v.push('timeRead.not-nonnegative-number');

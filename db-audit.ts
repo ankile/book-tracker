@@ -9,11 +9,19 @@
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
 import { parseFlags, connect } from './migrate-lib.ts';
+import { createHash } from 'node:crypto';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
 import { Timestamp } from 'firebase-admin/firestore';
+import { deterministicTitleIndexId } from './cross-user-work-migration.ts';
+import {
+  catalogTitleKeys,
+  normalizeCatalogAuthorName,
+  normalizeCatalogTitle,
+} from './src/lib/utils/catalog.ts';
+import { normalizeIsbn } from './src/lib/utils/isbn.ts';
 import {
   authorShapeViolations,
   bookShapeViolations,
@@ -40,7 +48,301 @@ const users = await db.collection('users').listDocuments();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
 const profileOwners = await db.collection('profileOwners').get();
+const works = await db.collection('works').get();
+const editions = await db.collection('editions').get();
+const isbnIndexes = await db.collection('isbnIndex').get();
+const externalIdIndexes = await db.collection('externalIdIndex').get();
+const workTitleIndexes = await db.collection('workTitleIndex').get();
+const sharedWorkOwners = await db.collection('sharedWorkOwners').get();
 const existingUsers = new Set(userProfiles.docs.map((d) => d.id));
+const userProfilesById = new Map(userProfiles.docs.map((d) => [d.id, d.data()]));
+
+const worksById = new Map(works.docs.map((doc) => [doc.id, doc.data()]));
+const editionsById = new Map(editions.docs.map((doc) => [doc.id, doc.data()]));
+const isbnIndexesById = new Map(isbnIndexes.docs.map((doc) => [doc.id, doc.data()]));
+const externalIdIndexesById = new Map(externalIdIndexes.docs.map((doc) => [doc.id, doc.data()]));
+const titleIndexesById = new Map(workTitleIndexes.docs.map((doc) => [doc.id, doc.data()]));
+
+const externalIndexId = (provider: string, externalId: string): string =>
+  createHash('sha256').update(`${provider}\0${externalId}`).digest('hex');
+const sharedWorkOwnerId = (workId: string, uid: string): string =>
+  createHash('sha256').update(`${workId}\0${uid}`).digest('hex');
+const trustedExternalProviders = new Set(['google-books', 'open-library']);
+const validCatalogCover = (value: unknown): boolean =>
+  value === '' || (typeof value === 'string' && /^https:\/\/[^\s]+$/u.test(value));
+const validTimeZone = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', {timeZone: value}).format();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const resolveCatalogWork = (id: string): {id: string | null; hops: number; cycle: boolean} => {
+  const visited = new Set<string>();
+  let current = id;
+  let hops = 0;
+  while (true) {
+    if (visited.has(current)) return {id: null, hops, cycle: true};
+    visited.add(current);
+    const work = worksById.get(current);
+    if (work === undefined) return {id: null, hops, cycle: false};
+    if (work.status !== 'merged') return {id: current, hops, cycle: false};
+    if (typeof work.mergedInto !== 'string') return {id: null, hops, cycle: false};
+    current = work.mergedInto;
+    hops += 1;
+  }
+};
+
+for (const workDoc of works.docs) {
+  const work = workDoc.data();
+  const path = workDoc.ref.path;
+  const required = [
+    'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorNames', 'authorNamesLower',
+    'coverUrl', 'subjects', 'fiction', 'visibility', 'status', 'createdAt', 'updatedAt',
+  ];
+  for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
+  const allowedWorkFields = new Set([...required, 'mergedInto', 'mergedFrom']);
+  for (const field of Object.keys(work)) {
+    if (!allowedWorkFields.has(field)) found('catalog.work.unexpected-field', path, field);
+  }
+  if (!['active', 'merged'].includes(work.status)) found('catalog.work.bad-status', path, String(work.status));
+  if (!['internal', 'searchable'].includes(work.visibility)) found('catalog.work.bad-visibility', path, String(work.visibility));
+  if (typeof work.canonicalTitle !== 'string' || work.canonicalTitle.trim() === '') {
+    found('catalog.work.bad-title', path, JSON.stringify(work.canonicalTitle));
+  }
+  if (!validCatalogCover(work.coverUrl)) {
+    found('catalog.work.bad-cover-url', path, JSON.stringify(work.coverUrl));
+  }
+  if (!Array.isArray(work.alternateTitles) || work.alternateTitles.some((title) => typeof title !== 'string')) {
+    found('catalog.work.bad-alternate-titles', path, JSON.stringify(work.alternateTitles));
+  }
+  if (!Array.isArray(work.authorNames) || work.authorNames.some((name) => typeof name !== 'string')) {
+    found('catalog.work.bad-authors', path, JSON.stringify(work.authorNames));
+  } else if (JSON.stringify(work.authorNamesLower) !== JSON.stringify(work.authorNames.map(normalizeCatalogAuthorName))) {
+    found('catalog.work.author-index-mismatch', path, JSON.stringify(work.authorNamesLower));
+  }
+  if (!Array.isArray(work.subjects) || work.subjects.length > 25 ||
+      work.subjects.some((subject) => typeof subject !== 'string')) {
+    found('catalog.work.bad-subjects', path, JSON.stringify(work.subjects));
+  }
+  if (work.fiction !== null && typeof work.fiction !== 'boolean') {
+    found('catalog.work.bad-fiction', path, JSON.stringify(work.fiction));
+  }
+  if (!(work.createdAt instanceof Timestamp) || !(work.updatedAt instanceof Timestamp)) {
+    found('catalog.work.bad-timestamps', path);
+  }
+  if (typeof work.canonicalTitle === 'string' && Array.isArray(work.alternateTitles) && work.alternateTitles.every((title) => typeof title === 'string')) {
+    const expectedTitleKeys = catalogTitleKeys(work.canonicalTitle, work.alternateTitles);
+    if (JSON.stringify(work.titleKeys) !== JSON.stringify(expectedTitleKeys)) {
+      found('catalog.work.title-keys-mismatch', path, `${JSON.stringify(work.titleKeys)} != ${JSON.stringify(expectedTitleKeys)}`);
+    }
+  }
+  const resolution = resolveCatalogWork(workDoc.id);
+  if (resolution.cycle) found('catalog.work.merge-cycle', path);
+  if (work.status === 'merged') {
+    if (typeof work.mergedInto !== 'string' || !worksById.has(work.mergedInto)) {
+      found('catalog.work.merge-target-missing', path, String(work.mergedInto));
+    } else if (worksById.get(work.mergedInto)?.status !== 'active') {
+      found('catalog.work.merge-not-one-hop', path, work.mergedInto);
+    }
+  } else if (work.mergedInto !== undefined) {
+    found('catalog.work.active-has-merged-into', path, String(work.mergedInto));
+  }
+  if (work.status === 'active') {
+    if (!Array.isArray(work.mergedFrom) || work.mergedFrom.length > 29 || new Set(work.mergedFrom).size !== work.mergedFrom.length) {
+      found('catalog.work.bad-merged-from', path, JSON.stringify(work.mergedFrom));
+    } else {
+      for (const sourceId of work.mergedFrom) {
+        const source = typeof sourceId === 'string' ? worksById.get(sourceId) : undefined;
+        if (source?.status !== 'merged' || source.mergedInto !== workDoc.id) {
+          found('catalog.work.merged-from-mismatch', path, String(sourceId));
+        }
+      }
+    }
+  }
+}
+
+for (const editionDoc of editions.docs) {
+  const edition = editionDoc.data();
+  const path = editionDoc.ref.path;
+  const allowedEditionFields = new Set([
+    'workId', 'isbn13', 'title', 'authorNames', 'publisher', 'publishedDate',
+    'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
+    'externalIds', 'createdAt', 'updatedAt',
+  ]);
+  for (const field of allowedEditionFields) {
+    if (edition[field] === undefined) found(`catalog.edition.missing.${field}`, path);
+  }
+  for (const field of Object.keys(edition)) {
+    if (!allowedEditionFields.has(field)) found('catalog.edition.unexpected-field', path, field);
+  }
+  if (!validCatalogCover(edition.coverUrl)) {
+    found('catalog.edition.bad-cover-url', path, JSON.stringify(edition.coverUrl));
+  }
+  if (typeof edition.title !== 'string' || edition.title.trim() === '') {
+    found('catalog.edition.bad-title', path, JSON.stringify(edition.title));
+  }
+  if (!Array.isArray(edition.authorNames) || edition.authorNames.length === 0 ||
+      edition.authorNames.some((name) => typeof name !== 'string')) {
+    found('catalog.edition.bad-authors', path, JSON.stringify(edition.authorNames));
+  }
+  for (const field of ['publisher', 'publishedDate', 'language']) {
+    if (typeof edition[field] !== 'string') {
+      found(`catalog.edition.bad-${field}`, path, JSON.stringify(edition[field]));
+    }
+  }
+  if (!Array.isArray(edition.translatorNames) ||
+      edition.translatorNames.some((name) => typeof name !== 'string')) {
+    found('catalog.edition.bad-translators', path, JSON.stringify(edition.translatorNames));
+  }
+  if (!['full', 'abridged', 'revised', 'unknown'].includes(edition.format)) {
+    found('catalog.edition.bad-format', path, String(edition.format));
+  }
+  if (edition.suggestedPageCount !== null &&
+      (!Number.isSafeInteger(edition.suggestedPageCount) || edition.suggestedPageCount <= 0)) {
+    found('catalog.edition.bad-page-count', path, String(edition.suggestedPageCount));
+  }
+  if (!(edition.createdAt instanceof Timestamp) || !(edition.updatedAt instanceof Timestamp)) {
+    found('catalog.edition.bad-timestamps', path);
+  }
+  if (typeof edition.workId !== 'string') {
+    found('catalog.edition.bad-work-id', path, String(edition.workId));
+  } else {
+    const resolution = resolveCatalogWork(edition.workId);
+    if (resolution.id === null) found('catalog.edition.work-unresolved', path, edition.workId);
+    if (resolution.hops > 1) found('catalog.edition.work-not-one-hop', path, edition.workId);
+  }
+  if (edition.isbn13 !== null && (typeof edition.isbn13 !== 'string' || normalizeIsbn(edition.isbn13) !== edition.isbn13)) {
+    found('catalog.edition.bad-isbn', path, String(edition.isbn13));
+  }
+  if (typeof edition.isbn13 === 'string') {
+    const index = isbnIndexesById.get(edition.isbn13);
+    if (index?.editionId !== editionDoc.id || index.workId !== edition.workId) {
+      found('catalog.edition.isbn-index-mismatch', path, edition.isbn13);
+    }
+  }
+  if (
+    typeof edition.externalIds !== 'object' ||
+    edition.externalIds === null ||
+    Array.isArray(edition.externalIds)
+  ) {
+    found('catalog.edition.bad-external-ids', path, JSON.stringify(edition.externalIds));
+  } else {
+    for (const [provider, externalId] of Object.entries(edition.externalIds)) {
+      if (!trustedExternalProviders.has(provider) || typeof externalId !== 'string' || externalId === '') {
+        found('catalog.edition.bad-external-id', path, `${provider}:${String(externalId)}`);
+        continue;
+      }
+      const index = externalIdIndexesById.get(externalIndexId(provider, externalId));
+      if (
+        index?.editionId !== editionDoc.id ||
+        index.workId !== edition.workId ||
+        index.provider !== provider ||
+        index.externalId !== externalId
+      ) {
+        found('catalog.edition.external-index-mismatch', path, `${provider}:${externalId}`);
+      }
+    }
+  }
+}
+
+for (const indexDoc of isbnIndexes.docs) {
+  const index = indexDoc.data();
+  const path = indexDoc.ref.path;
+  if (Object.keys(index).sort().join(',') !== 'editionId,workId') {
+    found('catalog.isbn-index.bad-shape', path, JSON.stringify(index));
+  }
+  if (normalizeIsbn(indexDoc.id) !== indexDoc.id) found('catalog.isbn-index.bad-id', path);
+  if (typeof index.workId !== 'string' || typeof index.editionId !== 'string') {
+    found('catalog.isbn-index.bad-shape', path, JSON.stringify(index));
+    continue;
+  }
+  const edition = editionsById.get(index.editionId);
+  if (edition === undefined) {
+    found('catalog.isbn-index.edition-missing', path, index.editionId);
+    continue;
+  }
+  if (edition.isbn13 !== indexDoc.id) found('catalog.isbn-index.edition-isbn-mismatch', path, String(edition.isbn13));
+  const indexedWork = resolveCatalogWork(index.workId);
+  const editionWork = typeof edition.workId === 'string' ? resolveCatalogWork(edition.workId) : {id: null, hops: 0, cycle: false};
+  if (indexedWork.id === null || indexedWork.id !== editionWork.id) {
+    found('catalog.isbn-index.work-mismatch', path, `${index.workId} != ${String(edition.workId)}`);
+  }
+}
+
+for (const indexDoc of externalIdIndexes.docs) {
+  const index = indexDoc.data();
+  const path = indexDoc.ref.path;
+  if (Object.keys(index).sort().join(',') !== 'editionId,externalId,provider,workId') {
+    found('catalog.external-index.bad-shape', path, JSON.stringify(index));
+  }
+  if (
+    typeof index.workId !== 'string' ||
+    typeof index.editionId !== 'string' ||
+    typeof index.provider !== 'string' ||
+    !trustedExternalProviders.has(index.provider) ||
+    typeof index.externalId !== 'string' ||
+    index.externalId === ''
+  ) {
+    found('catalog.external-index.bad-fields', path, JSON.stringify(index));
+    continue;
+  }
+  if (externalIndexId(index.provider, index.externalId) !== indexDoc.id) {
+    found('catalog.external-index.bad-id', path, `${index.provider}:${index.externalId}`);
+  }
+  const edition = editionsById.get(index.editionId);
+  if (edition === undefined) {
+    found('catalog.external-index.edition-missing', path, index.editionId);
+    continue;
+  }
+  if (edition.externalIds?.[index.provider] !== index.externalId) {
+    found('catalog.external-index.edition-id-mismatch', path, String(edition.externalIds?.[index.provider]));
+  }
+  const indexedWork = resolveCatalogWork(index.workId);
+  const editionWork = typeof edition.workId === 'string'
+    ? resolveCatalogWork(edition.workId)
+    : {id: null, hops: 0, cycle: false};
+  if (indexedWork.id === null || indexedWork.id !== editionWork.id) {
+    found('catalog.external-index.work-mismatch', path, `${index.workId} != ${String(edition.workId)}`);
+  }
+}
+
+const titleRowsByPair = new Map<string, string[]>();
+for (const indexDoc of workTitleIndexes.docs) {
+  const index = indexDoc.data();
+  const path = indexDoc.ref.path;
+  if (Object.keys(index).sort().join(',') !== 'title,titleKey,visibility,workId') {
+    found('catalog.title-index.bad-shape', path, JSON.stringify(index));
+  }
+  if (typeof index.workId !== 'string' || typeof index.title !== 'string' ||
+      typeof index.titleKey !== 'string' ||
+      (index.visibility !== 'internal' && index.visibility !== 'searchable')) {
+    found('catalog.title-index.bad-shape', path, JSON.stringify(index));
+    continue;
+  }
+  if (index.titleKey !== normalizeCatalogTitle(index.title)) found('catalog.title-index.bad-key', path, index.titleKey);
+  if (indexDoc.id !== deterministicTitleIndexId(index.workId, index.titleKey)) found('catalog.title-index.bad-id', path);
+  const work = worksById.get(index.workId);
+  if (work === undefined) found('catalog.title-index.work-missing', path, index.workId);
+  else if (work.status !== 'active' || !Array.isArray(work.titleKeys) || !work.titleKeys.includes(index.titleKey)) {
+    found('catalog.title-index.work-mismatch', path, index.workId);
+  } else if (index.visibility !== work.visibility) {
+    found('catalog.title-index.visibility-mismatch', path, `${index.visibility} != ${String(work.visibility)}`);
+  }
+  const pair = `${index.workId}\0${index.titleKey}`;
+  titleRowsByPair.set(pair, [...(titleRowsByPair.get(pair) ?? []), indexDoc.id]);
+}
+for (const [workId, work] of worksById) {
+  if (work.status !== 'active' || !Array.isArray(work.titleKeys)) continue;
+  for (const titleKey of work.titleKeys) {
+    if (typeof titleKey !== 'string') continue;
+    const rows = titleRowsByPair.get(`${workId}\0${titleKey}`) ?? [];
+    if (rows.length !== 1) found('catalog.work.title-index-count', `works/${workId}`, `${titleKey}: ${rows.length}`);
+  }
+}
 
 const publicProfilesByUsername = new Map(
   publicProfiles.docs.map((profile) => [profile.id, profile.data()]),
@@ -134,10 +436,41 @@ for (const record of profileOwners.docs) {
 // autocomplete — but the counts make drift visible in audit diffs.
 let authorDocCount = 0;
 let authorOrphanCount = 0;
+let catalogLinkedBookCount = 0;
+let bookSharingSettingCount = 0;
+const eligibleSharingUsers = new Set<string>();
+const linkedOwnerWorkPairs = new Set<string>();
 
 for (const user of users) {
   const books = await user.collection('books').get();
   const lifecycle = await user.collection('timerLifecycle').doc('current').get();
+  const bookSharing = await user.collection('settings').doc('bookSharing').get();
+  if (bookSharing.exists) {
+    bookSharingSettingCount += 1;
+    const setting = bookSharing.data() ?? {};
+    const settingKeys = Object.keys(setting).sort().join(',');
+    if (
+      settingKeys !== 'createdAt,profileUsername,timeZone,updatedAt' ||
+      typeof setting.profileUsername !== 'string' ||
+      !validTimeZone(setting.timeZone) ||
+      !(setting.createdAt instanceof Timestamp) ||
+      !(setting.updatedAt instanceof Timestamp)
+    ) {
+      found('book-sharing.bad-shape', bookSharing.ref.path, JSON.stringify(setting));
+    }
+    if (!existingUsers.has(user.id)) found('book-sharing.user-missing', bookSharing.ref.path, user.id);
+    const profile = typeof setting.profileUsername === 'string' ? publicProfilesByUsername.get(setting.profileUsername) : undefined;
+    if (profile === undefined) found('book-sharing.profile-missing', bookSharing.ref.path, String(setting.profileUsername));
+    else if (profile.uid !== user.id || profile.public !== true) {
+      found('book-sharing.profile-not-public-owner', bookSharing.ref.path, String(setting.profileUsername));
+    } else if (
+      existingUsers.has(user.id) && userProfilesById.get(user.id)?.deletedAt === undefined &&
+      profile.deletedAt === undefined && validTimeZone(setting.timeZone) &&
+      settingKeys === 'createdAt,profileUsername,timeZone,updatedAt'
+    ) {
+      eligibleSharingUsers.add(user.id);
+    }
+  }
   for (const finding of auditTimerClaimState(
     books.docs.map((book) => ({id: book.id, data: book.data()})),
     {exists: lifecycle.exists, data: lifecycle.data()},
@@ -239,8 +572,43 @@ for (const user of users) {
     const p = book.ref.path;
     for (const violation of bookShapeViolations(b, user.path)) found('book.rules-shape', p, violation);
 
-    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction']) {
+    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction', 'workId', 'editionId', 'matchMethod', 'linkedAt']) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
+    }
+    if (b.workId === null) {
+      if (b.editionId !== null || b.matchMethod !== null || b.linkedAt !== null) {
+        found('catalog.book.null-link-mismatch', p, `${String(b.editionId)}/${String(b.matchMethod)}/${String(b.linkedAt)}`);
+      }
+    } else if (typeof b.workId === 'string') {
+      catalogLinkedBookCount += 1;
+      linkedOwnerWorkPairs.add(`${user.id}\0${b.workId}`);
+      const resolvedWork = resolveCatalogWork(b.workId);
+      if (resolvedWork.id === null) found('catalog.book.work-unresolved', p, b.workId);
+      if (resolvedWork.hops > 1) found('catalog.book.work-not-one-hop', p, b.workId);
+      if (!(b.linkedAt instanceof Timestamp) || !['isbn', 'external-id', 'catalog-choice', 'migration', 'admin'].includes(b.matchMethod)) {
+        found('catalog.book.bad-provenance', p, `${String(b.matchMethod)}/${String(b.linkedAt)}`);
+      }
+      if (b.editionId !== null) {
+        const edition = typeof b.editionId === 'string' ? editionsById.get(b.editionId) : undefined;
+        if (edition === undefined) {
+          found('catalog.book.edition-missing', p, String(b.editionId));
+        } else {
+          const editionWork = typeof edition.workId === 'string' ? resolveCatalogWork(edition.workId) : {id: null, hops: 0, cycle: false};
+          if (resolvedWork.id === null || resolvedWork.id !== editionWork.id) {
+            found('catalog.book.edition-work-mismatch', p, `${b.workId}/${String(edition.workId)}`);
+          }
+        }
+      }
+      if (b.matchMethod === 'isbn') {
+        const normalizedBookIsbn = normalizeIsbn(typeof b.isbn === 'string' ? b.isbn : '');
+        const index = normalizedBookIsbn ? isbnIndexesById.get(normalizedBookIsbn) : undefined;
+        const indexedWork = typeof index?.workId === 'string' ? resolveCatalogWork(index.workId) : {id: null, hops: 0, cycle: false};
+        if (!normalizedBookIsbn || index === undefined || index.editionId !== b.editionId || indexedWork.id !== resolvedWork.id) {
+          found('catalog.book.isbn-provenance-mismatch', p, normalizedBookIsbn ?? String(b.isbn));
+        }
+      }
+    } else if (b.workId !== undefined) {
+      found('catalog.book.bad-work-id', p, String(b.workId));
     }
     // ISBN-derived metadata shapes (see utils/bookMetadata.ts); the string
     // fields ride the missing check above, these two have structure.
@@ -312,8 +680,10 @@ for (const user of users) {
       const up = update.ref.path;
       if (!['reading', 'update'].includes(u.type)) found('update.bad-type', up, String(u.type));
       if (u.owner === undefined) found('update.missing.owner', up);
+      else if (u.owner?.path !== user.path) found('update.owner-mismatch', up, String(u.owner?.path));
       if (u.createdAt === undefined) found('update.missing.createdAt', up);
       if (u.book === undefined) found('update.missing.book', up);
+      else if (u.book?.path !== p) found('update.book-mismatch', up, String(u.book?.path));
       if (Number.isFinite(u.fromPage) && Number.isFinite(u.toPage) && u.pagesRead !== u.toPage - u.fromPage) {
         found('update.pages-arithmetic', up, `${u.fromPage}->${u.toPage} pagesRead=${u.pagesRead}`);
       }
@@ -322,6 +692,38 @@ for (const user of users) {
 
   for (const authorDoc of authorDocs.docs) {
     if (!referencedAuthorIds.has(authorDoc.id)) authorOrphanCount += 1;
+  }
+}
+
+const projectedPairs = new Set<string>();
+for (const projection of sharedWorkOwners.docs) {
+  const data = projection.data();
+  const path = projection.ref.path;
+  if (
+    Object.keys(data).sort().join(',') !== 'uid,updatedAt,workId' ||
+    typeof data.uid !== 'string' || data.uid === '' || data.uid.includes('/') ||
+    typeof data.workId !== 'string' || data.workId === '' || data.workId.includes('/') ||
+    !(data.updatedAt instanceof Timestamp)
+  ) {
+    found('book-sharing.projection-bad-shape', path, JSON.stringify(data));
+    continue;
+  }
+  const pair = `${data.uid}\0${data.workId}`;
+  projectedPairs.add(pair);
+  if (projection.id !== sharedWorkOwnerId(data.workId, data.uid)) {
+    found('book-sharing.projection-bad-id', path, pair);
+  }
+  if (!existingUsers.has(data.uid)) found('book-sharing.projection-user-missing', path, data.uid);
+  if (!worksById.has(data.workId)) found('book-sharing.projection-work-missing', path, data.workId);
+  if (!eligibleSharingUsers.has(data.uid)) found('book-sharing.projection-without-consent', path, data.uid);
+  if (!linkedOwnerWorkPairs.has(pair)) found('book-sharing.projection-without-book', path, pair);
+}
+for (const pair of linkedOwnerWorkPairs) {
+  const separator = pair.indexOf('\0');
+  const uid = pair.slice(0, separator);
+  const workId = pair.slice(separator + 1);
+  if (eligibleSharingUsers.has(uid) && !projectedPairs.has(pair)) {
+    found('book-sharing.projection-missing', `sharedWorkOwners/${sharedWorkOwnerId(workId, uid)}`, pair);
   }
 }
 
@@ -355,4 +757,12 @@ console.log(`public-profiles: ${publicProfiles.size}`);
 console.log(`profile-discoveries: ${profileDiscoveries.size}`);
 console.log(`profile-owners: ${profileOwners.size}`);
 console.log(`deleted-accounts: ${tombstonedUsers.size}`);
+console.log(`catalog-works: ${works.size}`);
+console.log(`catalog-editions: ${editions.size}`);
+console.log(`catalog-isbn-indexes: ${isbnIndexes.size}`);
+console.log(`catalog-external-id-indexes: ${externalIdIndexes.size}`);
+console.log(`catalog-title-indexes: ${workTitleIndexes.size}`);
+console.log(`shared-work-owners: ${sharedWorkOwners.size}`);
+console.log(`catalog-linked-books: ${catalogLinkedBookCount}`);
+console.log(`book-sharing-settings: ${bookSharingSettingCount}`);
 console.log(`findings: ${findings.length}`);

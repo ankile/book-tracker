@@ -4,6 +4,11 @@ import {initializeApp} from "firebase-admin/app";
 import {FieldPath, FieldValue, getFirestore} from "firebase-admin/firestore";
 import type {QueryDocumentSnapshot} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
+import {
+  syncbooksharingprojection,
+  syncsharingprofileprojection,
+  syncsharingsettingprojection,
+} from "./catalogProjection";
 import {AUTH_TRIGGER_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 initializeApp();
@@ -156,13 +161,26 @@ exports.deleteUserDocument = functions
   })
   .auth.user()
   .onDelete(async (user) => {
+    // A sharing-setting delete lets the projection trigger remove discovery
+    // rows promptly. Live account checks still make any stale row inert while
+    // the retryable Auth trigger converges.
+    await db.doc(`users/${user.uid}/settings/bookSharing`).delete();
     await tombstoneUser(user.uid);
     await tombstoneProfiles(user.uid);
     return null;
   });
 
+exports.syncbooksharingprojection = syncbooksharingprojection;
+exports.syncsharingsettingprojection = syncsharingsettingprojection;
+exports.syncsharingprofileprojection = syncsharingprofileprojection;
+
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
+const catalog = require("./catalog");
+exports.catalog = {
+  search: catalog.search,
+  workreaders: catalog.workreaders,
+};
 exports.telemetry = require("./telemetry");
 exports.toggl = require("./toggl");
 exports.publicweb = publicweb;

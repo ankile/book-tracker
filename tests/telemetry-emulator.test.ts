@@ -76,6 +76,9 @@ const report = {
 };
 const createdAuthUsers: string[] = [];
 const createdIssueIds: string[] = [];
+const adminAccountRef = db.doc(`users/${ADMIN_UID}`);
+const adminAccountBefore = await adminAccountRef.get();
+await adminAccountRef.set({uid: ADMIN_UID});
 // Every successful overview call appends an adminAudit row; remember what
 // was there before so the run's rows can be removed afterwards.
 const auditBefore = new Set((await db.collection('adminAudit').listDocuments()).map((ref) => ref.id));
@@ -112,6 +115,8 @@ after(async () => {
   }
   const mine = await db.collection('logEvents').where('message', '>=', run).where('message', '<', run + '\uf8ff').get();
   for (const d of mine.docs) await d.ref.delete();
+  if (adminAccountBefore.exists) await adminAccountRef.set(adminAccountBefore.data()!);
+  else await adminAccountRef.delete();
 });
 
 test('the callable stores exactly twenty rows an hour, pins the uid, and warns once', async (t) => {

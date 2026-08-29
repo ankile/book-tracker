@@ -19,7 +19,8 @@ service cloud.firestore {
                     && validInitialBookTimer()
                     && validBookPageState(request.resource.data)
                     && request.resource.data.get('currentPageUpdateId', null) == null
-                    && validBookShape();
+                    && validBookShape()
+                    && validBookCatalogLink();
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validBookTimerTransition(userId, bookId)
@@ -30,7 +31,8 @@ service cloud.firestore {
                            'pagesRead', 'timeRead', 'finished', 'updatedAt'
                          ])
                          && validBookProgressFields())
-                        || validBookShape());
+                        || (validBookShape()
+                            && validBookCatalogLinkTransition()));
       // A local timer has no remote side effect. The UI explicitly warns
       // that its unsaved interval will be lost. Server-backed and uncertain
       // Toggl lifecycle states must be cleared through their stop/resolve path.
@@ -58,6 +60,65 @@ service cloud.firestore {
                       && resource.data.type == 'reading'
                       && validDeletedBookUpdate(userId, bookId, updateId);
       }
+    }
+
+    // Consent for title-level reader summaries lives outside the cached
+    // profile document. Older clients replace profile documents wholesale,
+    // so storing this switch there would let an unrelated stats sync erase
+    // or recreate consent. Only the owner can read the setting.
+    match /users/{userId}/settings/{settingId} {
+      allow get: if request.auth != null
+                 && userId == request.auth.uid
+                 && settingId == 'bookSharing';
+      allow create: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing'
+                    && validBookSharingSetting(userId);
+      allow update: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing'
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && validBookSharingSetting(userId);
+      allow delete: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing';
+    }
+
+    function validBookSharingSetting(userId) {
+      let setting = request.resource.data;
+      let username = setting.get('profileUsername', '');
+      let profile = getAfter(/databases/$(database)/documents/profiles/$(username)).data;
+      return setting.keys().hasAll([
+               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
+             ])
+             && setting.keys().hasOnly([
+               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
+             ])
+             && username is string
+             && username.matches('[a-z0-9-]{3,30}')
+             && setting.timeZone is string
+             && setting.timeZone.matches('[A-Za-z0-9_+./-]{1,100}')
+             && setting.createdAt is timestamp
+             && setting.updatedAt is timestamp
+             && profile.uid == userId
+             && profile.public == true;
+    }
+
+    // Catalog documents are server-owned. A signed-in client can fetch a
+    // known active work or edition, but cannot list the catalog or inspect
+    // internal curation rows. Search, merged-ID resolution, and work-page
+    // detail use bounded callables.
+    match /works/{workId} {
+      allow get: if request.auth != null
+                 && resource.data.status == 'active'
+                 && resource.data.visibility == 'searchable';
+    }
+
+    match /editions/{editionId} {
+      allow get: if request.auth != null
+                 && resource.data.workId is string
+                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.status == 'active'
+                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.visibility == 'searchable';
     }
 
     match /users/{userId}/timerLifecycle/{lifecycleId} {
@@ -96,6 +157,7 @@ service cloud.firestore {
       return book.keys().hasOnly([
                'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
                'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
+               'workId', 'editionId', 'matchMethod', 'linkedAt',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
@@ -117,8 +179,23 @@ service cloud.firestore {
                  || book.fiction == null || book.fiction is bool)
              && (!book.keys().hasAny(['isbn'])
                  || (book.isbn is string && book.isbn.size() <= 32))
+             && (!book.keys().hasAny(['workId'])
+                 || book.workId == null
+                 || (book.workId is string && book.workId.matches('[^/]{1,100}')))
+             && (!book.keys().hasAny(['editionId'])
+                 || book.editionId == null
+                 || (book.editionId is string && book.editionId.matches('[^/]{1,100}')))
+             && (!book.keys().hasAny(['matchMethod'])
+                 || book.matchMethod == null
+                 || book.matchMethod in ['isbn', 'external-id', 'catalog-choice', 'migration', 'admin'])
+             && (!book.keys().hasAny(['linkedAt'])
+                 || book.linkedAt == null || book.linkedAt is timestamp)
+             // Cross-user summaries derive identity from this reference.
+             // Old unlinked books may omit it, but every linked row must pin
+             // it so one malformed record cannot make a work page fail.
              && (!book.keys().hasAny(['owner'])
-                 || book.owner == /databases/$(database)/documents/users/$(request.auth.uid))
+                 ? book.get('workId', null) == null
+                 : book.owner == /databases/$(database)/documents/users/$(request.auth.uid))
              && (!book.keys().hasAny(['createdAt']) || book.createdAt is timestamp)
              && (!book.keys().hasAny(['pagesRead'])
                  || (book.pagesRead is number && book.pagesRead >= 0))
@@ -127,6 +204,39 @@ service cloud.firestore {
              && (book.get('currentPageUpdateId', null) == null
                  || (book.currentPageUpdateId is string
                      && book.currentPageUpdateId.size() <= 100));
+    }
+
+    // A link changed by the browser may target only a public, active work.
+    // Admin and migration links can point to internal works because Admin
+    // SDK writes bypass Rules. Later metadata edits skip these reads while
+    // the four link fields remain unchanged, which keeps timer and ordinary
+    // book edits inside the Rules expression and document-access budgets.
+    function validBookCatalogLinkTransition() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+               'workId', 'editionId', 'matchMethod', 'linkedAt'
+             ]) || validBookCatalogLink();
+    }
+
+    function validBookCatalogLink() {
+      let book = request.resource.data;
+      let workId = book.get('workId', null);
+      let editionId = book.get('editionId', null);
+      let method = book.get('matchMethod', null);
+      let linkedAt = book.get('linkedAt', null);
+      return (workId == null
+              && editionId == null
+              && method == null
+              && linkedAt == null)
+             || (workId is string
+                 && workId.matches('[^/]{1,100}')
+                 && method in ['isbn', 'external-id', 'catalog-choice']
+                 && linkedAt is timestamp
+                 && get(/databases/$(database)/documents/works/$(workId)).data.status == 'active'
+                 && get(/databases/$(database)/documents/works/$(workId)).data.visibility == 'searchable'
+                 && (editionId == null
+                     || (editionId is string
+                         && editionId.matches('[^/]{1,100}')
+                         && get(/databases/$(database)/documents/editions/$(editionId)).data.workId == workId)));
     }
 
     function validBookUpdateIdentity(userId, bookId) {
@@ -314,7 +424,8 @@ service cloud.firestore {
                'authorIds', 'author', 'authors', 'title', 'pageCount',
                'currentPage', 'currentPageUpdateId', 'finished', 'isbn',
                'coverUrl', 'publisher', 'publishedDate', 'subjects',
-               'fiction', 'updatedAt'
+               'fiction', 'workId', 'editionId', 'matchMethod', 'linkedAt',
+               'updatedAt'
              ])
              && after.pageCount is int
              && after.pageCount > 0
@@ -1080,7 +1191,10 @@ service cloud.firestore {
       allow update: if request.auth != null
                     && verifiedAccount()
                     && resource.data.uid == request.auth.uid
-                    && validProfile();
+                    && validProfile()
+                    && (resource.data.public == true && request.resource.data.public == false
+                        ? validBookSharingRelease(username)
+                        : true);
       // A tombstoned profile is the record of a deleted account; only an
       // operator purge removes it. accountLive() closes the window in
       // which deleteUserDocument has tombstoned users/{uid} but not yet
@@ -1092,7 +1206,8 @@ service cloud.firestore {
                     && resource.data.uid == request.auth.uid
                     && resource.data.get('deletedAt', null) == null
                     && accountLive()
-                    && validProfileRelease(username);
+                    && validProfileRelease(username)
+                    && validBookSharingRelease(username);
     }
 
     // The batch that creates profiles/{username} must leave
@@ -1120,6 +1235,18 @@ service cloud.firestore {
              && (exists(marker)
                  ? (!existsAfter(marker) || get(marker).data.uid != request.auth.uid)
                  : true);
+    }
+
+    // A cached client may predate book-sharing UI. It must not be able to
+    // leave dormant consent behind when the selected profile becomes private
+    // or is deleted, because recreating that public profile would silently
+    // reactivate title-level sharing. A rename may atomically repoint the
+    // setting to the new owned public profile instead of deleting it.
+    function validBookSharingRelease(username) {
+      let setting = /databases/$(database)/documents/users/$(request.auth.uid)/settings/bookSharing;
+      return exists(setting) && get(setting).data.profileUsername == username
+             ? (!existsAfter(setting) || getAfter(setting).data.profileUsername != username)
+             : true;
     }
 
     // Owner-only, and only ever moved inside a profile batch: it may name

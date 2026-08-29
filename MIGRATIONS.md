@@ -15,6 +15,7 @@ backfills — and still went through the whole loop; that run is the template.)
 | `db-snapshot.ts` | full-database dump to `snapshots/<ISO>-<target>.json` | no |
 | `db-restore.ts` | load a dump into the emulator (or prod, disaster only) | yes |
 | `db-audit.ts` | read-only drift report, diff-friendly output | no |
+| `migrate-cross-user-works.ts` | create the shared work/edition catalog and backfill personal-book links | yes |
 | `migrate-*.ts` | one script per migration, kept forever as history | yes |
 | `migrate-purge-deleted-accounts.ts` | physical purge of ONE tombstoned account (SEC-006); the only removal path, never scheduled | yes |
 
@@ -213,6 +214,129 @@ its provenance.
 Keep the migration cheap and idempotent, re-run it with the follow-up audit for
 stragglers, and do not remove it from the repository.
 
+#### Cross-user work catalog rollout
+
+The catalog migration is additive. Personal `pageCount` stays authoritative;
+an edition's `suggestedPageCount` is only a hint, so acknowledgements/front
+matter choices never force users onto one total. Every personal book receives
+all four catalog-link fields. Unmatched or ambiguous books get explicit nulls;
+linked books get a work, optional edition, provenance, and link timestamp. The
+migration never changes the personal book's `updatedAt` and never rewrites its
+title, authors, ISBN, or page count.
+
+Automatic catalog creation is deliberately narrower than linking. The
+operator's books and books whose owner has a valid
+`users/<uid>/settings/bookSharing` opt-in may seed searchable works. Private
+books and books below deleted or missing user documents may match an existing
+work but cannot create one. Placeholder/deleted authors are excluded and merged
+personal-author records resolve to their live target before matching.
+
+Matching is conservative: normalized ISBN-13 first, then exact normalized title
+plus the complete resolved non-placeholder author set. Title-only and fuzzy
+matches are review findings, not writes. Known translations or spelling
+corrections use an optional reviewed JSON manifest:
+
+```json
+{
+  "groups": [{
+    "id": "stable-review-key",
+    "bookPaths": ["users/<uid>/books/<bookId>"],
+    "canonicalTitle": "Canonical title",
+    "alternateTitles": ["Reviewed translation"],
+    "authorNames": ["Canonical Author"]
+  }]
+}
+```
+
+The exact paths make review decisions reproducible; the migration does not
+turn them into general fuzzy rules. Keep the reviewed file with the rollout
+record and checksum it. A missing path, duplicate assignment, ISBN/title-author
+disagreement, conflicting existing link, or catalog collision remains a
+`REVIEW` line. Do not treat the migration as complete until every such line is
+explicitly resolved or recorded as an accepted unlinked case.
+
+Deploy and run in this order:
+
+1. Deploy the additive catalog rules; the `books.workId` and `books.editionId`
+   collection-group indexes; and the searchable `workTitleIndex.visibility +
+   titleKey` and stable `sharedWorkOwners.workId + __name__` composite indexes.
+   Wait for every index to report ready. Do not
+   expose the catalog UI yet.
+2. Build and test Functions, then deploy the three sharing-projection triggers
+   and the catalog callables. They must understand both absent legacy links and
+   explicit null links. Wait for the triggers to become healthy before clients
+   can opt in; the migration also creates the current eligible projection rows.
+3. Take a fresh snapshot and baseline audit. Rehearse the commands below on
+   that snapshot with the Firestore and Functions emulators. Confirm the second
+   apply reports zero shared catalog/projection documents and zero personal books, and diff the
+   audit. `catalog.*` and `book-sharing.*` findings are release blockers unless
+   individually understood.
+4. Repeat the dry-run against production, review every create/link/null and
+   `REVIEW` line, take the immediate pre-write snapshot, apply, audit, and apply
+   once more for the required zero-write pass.
+5. Only after the audit is clean, deploy Hosting with the work pages, catalog
+   suggestion flow, sharing control, and admin catalog curation UI.
+
+```sh
+# Emulator rehearsal. Omit reviewed.json when there are no approved exceptions.
+node migrate-cross-user-works.ts reviewed.json
+node migrate-cross-user-works.ts reviewed.json --expect-overlap-groups=18
+node migrate-cross-user-works.ts reviewed.json --apply
+node migrate-cross-user-works.ts reviewed.json --apply
+node db-audit.ts > audit-catalog-emulator-post.txt
+
+# Production remains dry-run unless --apply is explicit; production apply asks
+# for the project id before opening a write-capable connection.
+node migrate-cross-user-works.ts reviewed.json --prod
+node migrate-cross-user-works.ts reviewed.json --prod --apply
+node db-audit.ts --prod > audit-catalog-post.txt
+node migrate-cross-user-works.ts reviewed.json --prod --apply
+```
+
+Work, edition, and title-index IDs are deterministic. ISBN index rows are
+create-only: an existing row must already name the same work and edition or the
+run stops/reports review; no migration may redirect it implicitly. Catalog
+documents for one proposed work are read and created in one transaction. Every
+new catalog document carries an eligible source book; the same transaction
+rechecks that source book, its live account, and—outside the operator
+library—its exact sharing setting and owned public profile, so a concurrent
+deletion or consent revocation prevents publication. Each personal book is
+re-read in its own link transaction so a concurrent
+owner/admin relink wins instead of being overwritten. The audit independently
+checks work redirect cycles and the one-hop limit, edition/work agreement, both
+directions of ISBN indexing, exact title-index coverage, merge provenance, link
+provenance, ISBN-backed personal links, and both directions of the
+`sharedWorkOwners` consent projection. A projection backfill is also create-only
+and transactionally rechecks the user's current opt-in plus at least one source
+book still linked to that exact work. Revoking consent, deleting the last copy,
+or relinking it during the migration therefore prevents a stale projection from
+being recreated.
+
+This section documents the procedure only. Do not add a production rollout-log
+entry until the production dry-run, snapshot, apply, zero-write rerun, and
+post-audit have actually happened.
+
+Development acceptance record (not a production run), 2026-08-29:
+
+- The synthetic Firestore-emulator test exercised dry-run, apply, idempotence,
+  exact ISBN linking across an opted-in and a private user, private-only null
+  backfill, preservation of every personal `updatedAt`, and refusal to replace
+  a conflicting pre-existing ISBN index.
+- Snapshot `2026-08-29T20-52-54.729Z-prod.json` was restored only into a
+  loopback Firestore emulator. Running
+  `node migrate-cross-user-works.ts --expect-overlap-groups=18` accepted exactly
+  18 cross-user groups without committing their titles or paths. The apply
+  created 684 catalog documents and backfilled 221 books with the final
+  searchable-title and sharing-projection implementation. The current snapshot
+  had no valid sharing opt-ins, so it correctly created 0 projection rows. The
+  second apply reported 0 catalog documents and 0 personal books. The
+  post-apply audit reported 0 `catalog.*` and 0 `book-sharing.*` findings; its
+  10 findings were unchanged legacy `book.progress-source-null-baseline`
+  records outside this migration. One
+  `unresolved-book` review item remained because it had no resolved
+  non-placeholder author; it was intentionally left with explicit null link
+  fields for operator review. No production apply was run.
+
 #### Strict-TypeScript release record and rollback boundary
 
 Merging this change does not deploy it: this repository has no GitHub Actions
@@ -313,15 +437,18 @@ re-run, and why the follow-up audit exists.
   `db-snapshot.ts` also deliberately uses
   `listCollections()`/`listDocuments()` because a backup must capture every
   orphan; don't "fix" it.
-- **Batching**: always through `batcher()` — 500-op rollover, dry-run
+- **Batching**: normally through `batcher()` — 500-op rollover, dry-run
   counting, and it **crashes if an `update()` payload touches `updatedAt`**
   (on books it drives the reading-list order; no migration may touch it).
   `batcher.set()` allows `updatedAt` — it is for documents the script owns
   outright (restores, new-entity upserts). The timer-claim and reading-progress
-  migrations are documented exceptions. Timer claims must commit each legacy
+  and catalog migrations are documented exceptions. Timer claims must commit each legacy
   book patch and lifecycle claim atomically. Reading-progress migration must
   re-read each book and its updates in one transaction so the logged and stored
   source reflects concurrent progress rather than a stale dry-run candidate.
+  Catalog creation uses one create-only transaction per proposed work, and
+  catalog-link backfill uses one transaction per book; neither path writes a
+  personal book's `updatedAt`.
 - **Snapshot codec**: Timestamp/ref/GeoPoint/bytes round-trip via `__type`
   markers; the encoder crashes on unknown types and on documents using the
   reserved `__type` key. Crash-don't-corrupt.

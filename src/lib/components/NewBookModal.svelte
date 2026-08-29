@@ -2,6 +2,7 @@
   import ModalCard from "$lib/components/ModalCard.svelte";
   import Input from "$lib/components/Input.svelte";
   import AuthorInput from "$lib/components/AuthorInput.svelte";
+  import CatalogMatchPanel from "$lib/components/CatalogMatchPanel.svelte";
 
   import { Database } from "../firebase/db.ts";
   import { editableBookAuthorChips, resolveChip, AUTHOR_KINDS } from "../utils/authors.ts";
@@ -19,10 +20,14 @@
     extractModsGenres,
     extractModsCoverUrl,
   } from "../utils/nasjonalbiblioteket.ts";
-  import { lookupIsbn } from "../firebase/functions.ts";
+  import { catalogSearch, lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
+  import type {
+    CatalogSearchResult,
+    CatalogSelection,
+  } from "../interfaces/catalog.ts";
   import {
     bookDeletionPolicy,
     executeBookWrite,
@@ -32,6 +37,14 @@
     prepareBookWrite,
   } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
+  import {
+    automaticIsbnSelectionStillApplies,
+    buildCatalogSearchRequest,
+    createLatestRequestGate,
+    exactEditionPreselection,
+    linkedBooksForWork,
+    selectionForResult,
+  } from "../utils/catalogClient.ts";
 
   let {
     open, userId, book = null, onclose,
@@ -64,6 +77,35 @@
   // ISBN-derived metadata (bookMetadata.ts shape). Seeded from the book in
   // edit mode so saving without a fresh lookup preserves what's stored.
   let metadata = $state<BookMetadata>({ ...EMPTY_METADATA });
+  let allBooks = $state<Book[]>([]);
+  let catalogResults = $state<CatalogSearchResult[]>([]);
+  let catalogSelection = $state<CatalogSelection | null>(null);
+  let selectedCatalogResult = $state<CatalogSearchResult | null>(null);
+  let catalogLoading = $state(false);
+  let catalogMessage = $state("");
+  let catalogChoiceTouched = $state(false);
+  let automaticSelectionIsbn13 = $state<string | null>(null);
+  let online = $state(true);
+  const catalogRequestGate = createLatestRequestGate();
+
+  $effect(() => {
+    if (!open || !userId) return;
+    const store = Database.getAllBooks(userId);
+    return store.subscribe((books) => {
+      if (books !== undefined) allBooks = books;
+    });
+  });
+
+  $effect(() => {
+    const updateOnline = () => (online = navigator.onLine);
+    updateOnline();
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+    return () => {
+      window.removeEventListener('online', updateOnline);
+      window.removeEventListener('offline', updateOnline);
+    };
+  });
 
   let isEditMode = $derived(!!book);
   let deletionPolicy = $derived(book === null ? null : bookDeletionPolicy(book.activeTimer));
@@ -74,7 +116,18 @@
     (chip) => chip.id !== null && 'unresolved' in chip,
   ).length);
 
+  // Seed every modal session, including a fresh add after the component was
+  // closed without being unmounted on /me. A plain sentinel avoids tracking
+  // bookkeeping while still letting a different edited book reseed in place.
+  let seededFormBookId: string | null | undefined;
   $effect(() => {
+    if (!open) {
+      seededFormBookId = undefined;
+      return;
+    }
+    const bookId = book?.id ?? null;
+    if (seededFormBookId === bookId) return;
+    seededFormBookId = bookId;
     title = book?.title ?? "";
     pageCount = book?.pageCount;
     currentPage = book?.currentPage ?? 1;
@@ -86,6 +139,23 @@
       subjects: book?.subjects ?? [],
       fiction: book?.fiction ?? null,
     };
+    catalogSelection = book?.workId
+      ? {
+        workId: book.workId,
+        editionId: book.editionId,
+        // Existing migration/admin links retain their stored provenance
+        // because prepareBookWrite omits an unchanged link patch.
+        matchMethod: 'catalog-choice',
+      }
+      : null;
+    selectedCatalogResult = null;
+    catalogChoiceTouched = false;
+    automaticSelectionIsbn13 = book?.matchMethod === 'isbn'
+      ? normalizeIsbn(book.isbn)
+      : null;
+    catalogResults = [];
+    catalogMessage = "";
+    lookupError = "";
   });
 
   // Chips seed separately from the plain fields: resolving authorIds
@@ -99,6 +169,9 @@
       seededBookId = undefined;
       authorChips = [];
       lookupError = "";
+      catalogRequestGate.invalidate();
+      catalogResults = [];
+      catalogMessage = "";
       return;
     }
     if (!authorsLoaded) return;
@@ -116,6 +189,104 @@
     }
   });
 
+  const catalogAuthorNames = $derived(authorChips.map((chip) => chip.name).filter(Boolean));
+  const duplicateBooks = $derived(
+    selectedCatalogResult === null
+      ? []
+      : linkedBooksForWork(allBooks, selectedCatalogResult.work, book?.id ?? null),
+  );
+
+  $effect(() => {
+    if (!open || !authorsLoaded) return;
+    const request = buildCatalogSearchRequest({isbn, title, authorNames: catalogAuthorNames});
+    if (request === null) {
+      catalogRequestGate.invalidate();
+      catalogResults = [];
+      catalogLoading = false;
+      if (automaticSelectionIsbn13 !== null) {
+        catalogSelection = null;
+        selectedCatalogResult = null;
+        automaticSelectionIsbn13 = null;
+      }
+      return;
+    }
+    if (!automaticIsbnSelectionStillApplies(automaticSelectionIsbn13, request)) {
+      catalogSelection = null;
+      selectedCatalogResult = null;
+      automaticSelectionIsbn13 = null;
+    }
+    if (!online) {
+      catalogRequestGate.invalidate();
+      catalogLoading = false;
+      catalogMessage = catalogSelection === null
+        ? 'Catalog lookup is unavailable offline. Saving will keep this book unlinked.'
+        : 'Catalog lookup is unavailable offline. Your current shared-work choice remains selected.';
+      return;
+    }
+
+    // Input changes make any already-running request stale immediately, not
+    // only after the replacement request starts at the end of the debounce.
+    catalogRequestGate.invalidate();
+    catalogResults = [];
+    const timeout = window.setTimeout(() => void searchCatalog(request), 350);
+    return () => window.clearTimeout(timeout);
+  });
+
+  async function searchCatalog(request: NonNullable<ReturnType<typeof buildCatalogSearchRequest>>) {
+    const requestId = catalogRequestGate.begin();
+    catalogLoading = true;
+    catalogMessage = '';
+    try {
+      const response = await catalogSearch(request);
+      if (!catalogRequestGate.isCurrent(requestId)) return;
+      catalogResults = response.results;
+      if (catalogSelection !== null) {
+        selectedCatalogResult = response.results.find((result) =>
+          result.workId === catalogSelection?.workId ||
+          result.work.mergedFrom.includes(catalogSelection?.workId ?? '')) ?? selectedCatalogResult;
+      }
+      const exact = exactEditionPreselection(response.results);
+      if (!catalogChoiceTouched && catalogSelection === null && exact !== null) {
+        selectCatalogResult(exact, false);
+      }
+    } catch (error) {
+      if (!catalogRequestGate.isCurrent(requestId)) return;
+      console.error('Catalog search failed', error);
+      catalogResults = [];
+      catalogMessage = 'Catalog suggestions are unavailable. You can still save this book unlinked.';
+    } finally {
+      if (catalogRequestGate.isCurrent(requestId)) catalogLoading = false;
+    }
+  }
+
+  function selectCatalogResult(result: CatalogSearchResult, touched = true) {
+    catalogSelection = selectionForResult(result);
+    selectedCatalogResult = result;
+    catalogChoiceTouched = touched;
+    automaticSelectionIsbn13 = touched ? null : normalizeIsbn(isbn);
+    title = fillMissingText(title, result.work.canonicalTitle);
+    authorChips = fillMissingItems(
+      authorChips,
+      result.work.authorNames.map((name) => resolveChip(name, authorList)),
+    );
+    pageCount = fillMissingPageCount(pageCount, [result.edition?.suggestedPageCount ?? undefined]);
+    metadata = {
+      coverUrl: fillMissingText(metadata.coverUrl, result.edition?.coverUrl || result.work.coverUrl),
+      publisher: fillMissingText(metadata.publisher, result.edition?.publisher ?? ''),
+      publishedDate: fillMissingText(metadata.publishedDate, result.edition?.publishedDate ?? ''),
+      subjects: fillMissingItems(metadata.subjects, []),
+      fiction: metadata.fiction,
+    };
+  }
+
+  function removeCatalogLink() {
+    catalogSelection = null;
+    selectedCatalogResult = null;
+    catalogChoiceTouched = true;
+    automaticSelectionIsbn13 = null;
+    catalogMessage = 'This personal book will be saved without a shared-work link.';
+  }
+
   function handleSubmit() {
     lookupError = "";
     if (!authorsLoaded) {
@@ -131,6 +302,9 @@
       currentPage,
       isbn,
       metadata: $state.snapshot(metadata),
+      catalogSelection: $state.snapshot(catalogSelection),
+      catalogSelectionTouched: catalogChoiceTouched,
+      catalogSelectionIsbn13: automaticSelectionIsbn13,
     });
     if (!prepared.valid) {
       lookupError = prepared.message;
@@ -489,7 +663,7 @@
 
   <div class="space"></div>
 
-  <Input label="Number of pages" inputId="pageCount">
+  <Input label="Your edition's page count" inputId="pageCount">
     <input
       id="pageCount"
       class="form-control"
@@ -550,6 +724,17 @@
       </div>
     </div>
   {/if}
+
+  <CatalogMatchPanel
+    suggestions={catalogResults}
+    selected={catalogSelection}
+    selectedResult={selectedCatalogResult}
+    duplicates={duplicateBooks}
+    loading={catalogLoading}
+    {online}
+    message={catalogMessage}
+    onselect={selectCatalogResult}
+    onremove={removeCatalogLink} />
 
   {#if isEditMode}
     <button
