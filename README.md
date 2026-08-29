@@ -323,11 +323,14 @@ production tokens are never sent to Toggl, and start, stop, token, and queue
 flows still exercise their real Firestore state transitions. The metered Google
 Books proxy also returns a local miss instead of consuming its production key.
 Book and author documents are field-allowlisted and byte-capped by the
-rules (a document is a few KB, not the 1 MiB Firestore allows — storage
-that PITR and 98 daily backups multiply, and that a delete event carries in
-full into Pub/Sub; SEC-039/071). Progress and timer updates skip the shape
-check, so a document with an unknown field from before the rule stays
-readable; the next edit sheds the field. Connecting Toggl (`savetoken`)
+rules (a document is tens of KB at most — `size()` counts UTF-16 units,
+so a cap is up to 3× that in bytes for CJK text — not the 1 MiB Firestore
+allows: storage that PITR and 98 daily backups multiply, and that a delete
+event carries in full into Pub/Sub; SEC-039/071). Progress and timer
+updates skip the field allowlist but still type the fields they may
+touch, so a document with an unknown field from before the rule stays
+readable; the next edit sheds the field. The pre-migration `author`/
+`authors` fields are not admitted (no live document has them). Connecting Toggl (`savetoken`)
 requires a verified account and is metered at five attempts per user per
 hour (`functionQuotas/togglToken`, SEC-024).
 Queued Toggl work is claimed under a server-owned ten-per-hour user quota;

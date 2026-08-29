@@ -571,11 +571,18 @@ test('book documents are allowlisted and byte-capped', async () => {
   const db = environment.authenticatedContext(uid).firestore();
   const books = collection(db, 'users', uid, 'books');
   await assertSucceeds(setDoc(doc(books, 'full'), fullBook(db, uid)));
-  const { authorIds: _ids, ...legacyAuthorBook } = fullBook(db, uid, { author: 'Ada Lovelace' }) as Record<string, unknown>;
-  await assertSucceeds(setDoc(doc(books, 'legacy-author'), legacyAuthorBook));
   const junk = 'x'.repeat(120_000);
   const rejected: Record<string, Record<string, unknown>> = {
     unknownField: { notes: junk },
+    // The pre-migration fields are not admitted at all: an uncapped list
+    // of maps was a 1 MiB channel (review, books face).
+    legacyAuthor: { author: 'Ada Lovelace' },
+    legacyAuthors: { authors: [{ name: 'x'.repeat(20_000) }] },
+    legacyAuthorsMany: { authors: Array.from({ length: 50 }, () => ({ name: 'x'.repeat(20_000) })) },
+    updatedAtString: { updatedAt: 'x'.repeat(500_000) },
+    updatedAtMap: { updatedAt: { blob: junk } },
+    pagesReadString: { pagesRead: junk },
+    timeReadList: { timeRead: [junk] },
     unknownFieldSmall: { rating: 5 },
     coverUrl: { coverUrl: 'https://' + 'c'.repeat(2048) },
     publisher: { publisher: 'p'.repeat(501) },
@@ -632,6 +639,25 @@ test('book documents are allowlisted and byte-capped', async () => {
   await assertSucceeds(timerBatch.commit());
   await assertFails(updateDoc(preRule, { title: 'Renamed', updatedAt: Timestamp.now() }));
   await assertSucceeds(updateDoc(preRule, { title: 'Renamed', legacyNote: deleteField(), updatedAt: Timestamp.now() }));
+
+  // The exempt fields are typed even on the exempt path: a progress-only
+  // update cannot smuggle bytes through pagesRead, timeRead or updatedAt
+  // (each was a 500 KB channel before the review), nor by set-merge.
+  const progressJunk: Record<string, unknown>[] = [
+    { pagesRead: junk, updatedAt: Timestamp.now() },
+    { timeRead: { blob: junk }, updatedAt: Timestamp.now() },
+    // (A negative number is typed but not sign-checked on this path — it
+    // is not a storage vector, and the check must stay cheap: this runs in
+    // every timer batch, the tightest of which has ~15 conjuncts spare.)
+    { updatedAt: junk },
+    { updatedAt: { blob: junk } },
+    { pagesRead: 'x'.repeat(520_000), timeRead: 'x'.repeat(520_000), updatedAt: Timestamp.now() },
+  ];
+  for (const patch of progressJunk) {
+    await assertFails(updateDoc(preRule, patch));
+    await assertFails(setDoc(preRule, patch, { merge: true }));
+  }
+  await assertSucceeds(updateDoc(preRule, { pagesRead: 30, timeRead: 90.5, updatedAt: Timestamp.now() }));
 });
 
 test('author documents are allowlisted and capped', async () => {
@@ -667,24 +693,35 @@ test('author documents are allowlisted and capped', async () => {
   for (const [index, value] of rejected.entries()) {
     await assertFails(setDoc(doc(authors, `bad-${index}`), value));
   }
-  // Updates are shape-checked too: junk cannot be added later.
+  // Updates are shape-checked too: junk cannot be added later, including
+  // inside the retirement map on any path.
   await assertFails(updateDoc(doc(authors, 'ada'), { bio: 'x'.repeat(1000) }));
+  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'deleted', blob: 'x'.repeat(500_000) } }));
+  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'merged', targetId: 'x'.repeat(101) } }));
+  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'retired' } }));
+  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: 'x'.repeat(500_000) }));
   await assertSucceeds(updateDoc(doc(authors, 'ada'), { givenName: 'Augusta Ada', name: 'Augusta Ada Lovelace', nameLower: 'augusta ada lovelace', updatedAt: Timestamp.now() }));
 });
 
-// Firestore evaluates at most 1000 expressions per request, and the
-// atomic offline-stop batch (book timer + lifecycle claim + queue row)
-// runs close to it. A ruleset that quietly crosses the line denies real
-// offline stops with an opaque error. This measures the headroom: it loads
-// copies of the rules with K trivial conjuncts injected into
-// validAtomicTimerStop (evaluated once per stop batch) and finds the
-// largest K under which the honest local and remote stop batches still
-// pass. The floor below is the budget a rules change may not spend
-// without first shrinking the timer path.
+// Firestore evaluates at most 1000 expressions per request, and the timer
+// batches (a book update plus the lifecycle claim, plus a queue row for
+// the offline stops) run close to it. A ruleset that quietly crosses the
+// line denies real timer operations with an opaque error. This measures
+// the headroom: it loads copies of the rules with K trivial conjuncts
+// injected into the books update rule — the one rule every timer batch
+// evaluates exactly once — and finds the largest K under which each
+// honest batch still passes: the local offline stop, the remote offline
+// stop, and the outcome-unknown clear (the review's books face found the
+// last one tightest, at 25 while the offline stops sat at 37, when the
+// probe still measured only validAtomicTimerStop). The floor below is the
+// budget a rules change may not spend without first shrinking the timer
+// path.
 const BUDGET_HEADROOM_FLOOR = 4;
 const BUDGET_HEADROOM_PROBE_MAX = 40;
 
-async function timerBatchesPassWith(rules: string, projectId: string): Promise<boolean> {
+type TimerBatches = { localStop: boolean; remoteStop: boolean; unknownClear: boolean };
+
+async function timerBatchesPassWith(rules: string, projectId: string): Promise<TimerBatches> {
   const budgetEnvironment = await initializeTestEnvironment({ projectId, firestore: { rules } });
   try {
     await budgetEnvironment.clearFirestore();
@@ -705,7 +742,15 @@ async function timerBatchesPassWith(rules: string, projectId: string): Promise<b
     const lifecycleRef = doc(db, 'users', uid, 'timerLifecycle', 'current');
     const localRef = doc(db, 'users', uid, 'books', 'local');
     const remoteRef = doc(db, 'users', uid, 'books', 'remote');
-    const commits: Promise<unknown>[] = [];
+    const passes = async (commit: Promise<unknown>): Promise<boolean> => {
+      try {
+        await commit;
+        return true;
+      } catch (error) {
+        if (error instanceof FirebaseError && error.code === 'permission-denied') return false;
+        throw error;
+      }
+    };
 
     const start = { start: '2026-08-24T13:00:00.000Z', operationId: 'budget-op' };
     const claim = localLifecycle('local', start.start, start.operationId);
@@ -719,9 +764,12 @@ async function timerBatchesPassWith(rules: string, projectId: string): Promise<b
     stopBatch.set(doc(db, 'users', uid, 'togglQueue', togglQueueId('local', start.start)), queueItem({
       bookId: 'local', bookTitle: 'Reading book', start: start.start, timerClaimVersion: 1,
     }));
-    commits.push(stopBatch.commit());
+    const localStop = await passes(stopBatch.commit());
 
     const remoteStart = '2026-08-24T12:00:00.000Z';
+    await budgetEnvironment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), remoteLifecycle('remote', remoteStart, 42));
+    });
     const queueId = togglQueueId('remote', remoteStart);
     const stopping = { state: 'stopping', entryId: 42, start: remoteStart, queueId };
     const remoteBatch = writeBatch(db);
@@ -731,17 +779,24 @@ async function timerBatchesPassWith(rules: string, projectId: string): Promise<b
       type: 'stop', bookId: 'remote', bookTitle: 'Reading book', entryId: 42,
       start: remoteStart, timerClaimVersion: 1,
     }));
-    try {
-      await commits[0];
-      await budgetEnvironment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
-        await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), remoteLifecycle('remote', remoteStart, 42));
-      });
-      await remoteBatch.commit();
-      return true;
-    } catch (error) {
-      if (error instanceof FirebaseError && error.code === 'permission-denied') return false;
-      throw error;
-    }
+    const remoteStop = await passes(remoteBatch.commit());
+
+    // The outcome-unknown clear: server-owned timer state released by the
+    // owner in one batch with the lifecycle claim.
+    const unknownTimer = {
+      state: 'outcome-unknown', operationId: 'server-operation', start: '2026-08-24T14:00:00.000Z',
+      claimedAt: Timestamp.now(), error: 'Check Toggl first.',
+    };
+    const unknownClaim = { version: 1, bookId: 'unknown', ...unknownTimer };
+    await budgetEnvironment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      await setDoc(doc(context.firestore(), 'users', uid, 'books', 'unknown'), { ...creatableBook(), activeTimer: unknownTimer });
+      await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), unknownClaim);
+    });
+    const clear = writeBatch(db);
+    clear.update(doc(db, 'users', uid, 'books', 'unknown'), { activeTimer: null });
+    clear.set(lifecycleRef, idleLifecycle(unknownClaim));
+    const unknownClear = await passes(clear.commit());
+    return { localStop, remoteStop, unknownClear };
   } finally {
     await budgetEnvironment.cleanup();
   }
@@ -749,17 +804,23 @@ async function timerBatchesPassWith(rules: string, projectId: string): Promise<b
 
 test('the timer batches keep headroom under the rules expression budget', async (t) => {
   const source = await readFile('firestore.rules', 'utf8');
-  const anchor = "      return item.keys().hasAll(['bookId'])\n";
-  assert.equal(source.split(anchor).length, 2, 'validAtomicTimerStop anchor moved');
-  assert.equal(await timerBatchesPassWith(source, 'book-tracker-rules-budget-0'), true);
-  let headroom = 0;
+  const anchor = "                    && validBookTitle()\n                    && validBookTimerTransition(userId, bookId)\n";
+  assert.equal(source.split(anchor).length, 2, 'books update rule anchor moved');
+  const baseline = await timerBatchesPassWith(source, 'book-tracker-rules-budget-0');
+  assert.deepEqual(baseline, { localStop: true, remoteStop: true, unknownClear: true });
+  const headroom: Record<keyof TimerBatches, number> = { localStop: 0, remoteStop: 0, unknownClear: 0 };
   for (let k = 1; k <= BUDGET_HEADROOM_PROBE_MAX; k += 1) {
-    const padded = source.replace(anchor, `      return item.keys().hasAll(['bookId'])${' && true'.repeat(k)}\n`);
-    if (!(await timerBatchesPassWith(padded, `book-tracker-rules-budget-${k}`))) break;
-    headroom = k;
+    const padded = source.replace(anchor, `                    && validBookTitle()${' && true'.repeat(k)}\n                    && validBookTimerTransition(userId, bookId)\n`);
+    const result = await timerBatchesPassWith(padded, `book-tracker-rules-budget-${k}`);
+    for (const batch of ['localStop', 'remoteStop', 'unknownClear'] as const) {
+      if (result[batch] && headroom[batch] === k - 1) headroom[batch] = k;
+    }
+    if (!result.localStop && !result.remoteStop && !result.unknownClear) break;
   }
-  t.diagnostic(`timer batches tolerate ${headroom} extra conjuncts in validAtomicTimerStop (floor ${BUDGET_HEADROOM_FLOOR})`);
-  assert.ok(headroom >= BUDGET_HEADROOM_FLOOR, `only ${headroom} conjuncts of headroom left on the timer batches`);
+  t.diagnostic(`book-update conjuncts tolerated — local stop ${headroom.localStop}, remote stop ${headroom.remoteStop}, unknown clear ${headroom.unknownClear} (floor ${BUDGET_HEADROOM_FLOOR})`);
+  for (const [batch, value] of Object.entries(headroom)) {
+    assert.ok(value >= BUDGET_HEADROOM_FLOOR, `only ${value} conjuncts of headroom left on the ${batch} batch`);
+  }
 });
 
 test('book creation requires complete, consistent, JS-safe page state', async () => {

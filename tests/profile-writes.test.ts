@@ -104,6 +104,22 @@ test('client caps mirror the rules literals for books', async () => {
   const rules = await readFile(new URL('../firestore.rules', import.meta.url), 'utf8');
   const shape = rules.slice(rules.indexOf('function validBookShape('));
   const body = shape.slice(0, shape.indexOf('\n    }'));
+  // The exempt set of a progress update is exactly the fields the
+  // transition rules and validBookProgressFields type — adding one here is
+  // opening an uncapped channel (review, books face: a mutation that
+  // appended a field admitted a 900 KB publisher).
+  const update = rules.slice(rules.indexOf("match /users/{userId}/books/{bookId}"));
+  const exempt = update.match(/affectedKeys\(\)\.hasOnly\(\[\s*([^\]]+)\]\)\s*&& validBookProgressFields\(\)/);
+  assert.ok(exempt, 'the progress exemption is guarded by validBookProgressFields()');
+  assert.deepEqual(
+    exempt![1].split(',').map((field) => field.trim().replace(/'/g, '')).filter(Boolean).sort(),
+    ['activeTimer', 'currentPage', 'currentPageUpdateId', 'finished', 'pagesRead', 'timeRead', 'updatedAt'],
+  );
+  // The pre-migration author fields stay out of the allowlist.
+  assert.equal(/'author'|'authors'/.test(body), false);
+  // The stopping timer's queue id may not carry a path separator (SEC-040),
+  // in the timer and in the claim.
+  assert.equal((rules.match(/queueId\.matches\('\[\^\/\]\{1,600\}'\)/g) ?? []).length, 2);
   const metadata = await readFile(new URL('../src/lib/utils/bookMetadata.ts', import.meta.url), 'utf8');
   const maxSubjects = Number(metadata.match(/const MAX_SUBJECTS = (\d+);/)![1]);
   assert.match(body, new RegExp(`book\\.subjects\\.size\\(\\) <= ${maxSubjects}\\b`));

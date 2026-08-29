@@ -25,10 +25,11 @@ service cloud.firestore {
                     && validBookTimerTransition(userId, bookId)
                     && validBookPageStateTransition()
                     && validBookProgressSourceTransition(userId, bookId)
-                    && (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                          'activeTimer', 'currentPage', 'currentPageUpdateId',
-                          'pagesRead', 'timeRead', 'finished', 'updatedAt'
-                        ])
+                    && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                           'activeTimer', 'currentPage', 'currentPageUpdateId',
+                           'pagesRead', 'timeRead', 'finished', 'updatedAt'
+                         ])
+                         && validBookProgressFields())
                         || validBookShape());
       // A local timer has no remote side effect. The UI explicitly warns
       // that its unsaved interval will be lost. Server-backed and uncertain
@@ -67,26 +68,42 @@ service cloud.firestore {
                     && validClientTimerClaimTransition(userId);
     }
 
+    // The fields a progress or timer update may touch without the full
+    // shape check are typed here, cheaply (get() with a default rather than
+    // hasAny branches: this runs inside every timer batch, and the tightest
+    // of them — the outcome-unknown clear — sits nearest the expression
+    // budget). Page state types currentPage/pageCount/finished, the timer
+    // transition types activeTimer, and the progress-source transition pins
+    // currentPageUpdateId to an existing document id.
+    function validBookProgressFields() {
+      let book = request.resource.data;
+      return book.get('updatedAt', request.time) is timestamp
+             && book.get('pagesRead', 0) is number
+             && book.get('timeRead', 0) is number;
+    }
+
     // Field allowlist and byte caps for a book document (SEC-039). Lists
     // cannot be iterated in rules, so string lists are bounded through
-    // join(): it throws on a non-string element, which is a denial. The
-    // legacy author/authors fields are accepted so the last pre-migration
-    // documents stay editable; the client deletes them on its next edit.
+    // join(): it throws on a non-string element, which is a denial.
+    // size() counts UTF-16 code units, so a cap is up to three times as
+    // many bytes for CJK text — still tens of KB per document, not the
+    // 1 MiB Firestore allows. The pre-migration author/authors fields are
+    // not admitted: no live document carries them (inventoried 2026-08-29)
+    // and the client only ever deletes them, so an update that still holds
+    // one must shed it — an uncapped list of maps was a 1 MiB channel.
     function validBookShape() {
       let book = request.resource.data;
       return book.keys().hasOnly([
-               'activeTimer', 'authorIds', 'author', 'authors', 'coverUrl', 'createdAt',
+               'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
                'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
+             // Absent on the oldest documents; typed when present.
+             && book.get('updatedAt', request.time) is timestamp
              && (!book.keys().hasAny(['authorIds'])
                  || (book.authorIds is list && book.authorIds.size() <= 50
                      && book.authorIds.join('').size() <= 5000))
-             && (!book.keys().hasAny(['author'])
-                 || (book.author is string && book.author.size() <= 500))
-             && (!book.keys().hasAny(['authors'])
-                 || (book.authors is list && book.authors.size() <= 50))
              && (!book.keys().hasAny(['coverUrl'])
                  || (book.coverUrl is string && book.coverUrl.size() <= 2048))
              && (!book.keys().hasAny(['publisher'])
@@ -699,7 +716,15 @@ service cloud.firestore {
                  || (author.givenName is string && author.givenName.size() <= 100))
              && (!author.keys().hasAny(['familyName'])
                  || (author.familyName is string && author.familyName.size() <= 100))
-             && (!author.keys().hasAny(['updatedAt']) || author.updatedAt is timestamp);
+             && (!author.keys().hasAny(['updatedAt']) || author.updatedAt is timestamp)
+             // The retirement transition pins the map's shape on each legal
+             // transition; this bounds it on every write regardless.
+             && (!author.keys().hasAny(['retirement'])
+                 || (author.retirement is map
+                     && author.retirement.keys().hasOnly(['reason', 'targetId'])
+                     && author.retirement.reason in ['deleted', 'merged']
+                     && author.retirement.get('targetId', '') is string
+                     && author.retirement.get('targetId', '').size() <= 100));
     }
 
     function validAuthorRetirementTransition(userId, authorId) {
