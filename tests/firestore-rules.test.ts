@@ -325,7 +325,8 @@ test('deleting a profile releases its record and takes its own marker with it', 
   await assertSucceeds(foreign.commit());
 
   // A profile from before the ownership record existed deletes with its
-  // marker alone.
+  // marker alone — and, what the client actually sends, with the record
+  // delete included even though no record exists.
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await setDoc(doc(context.firestore(), 'profiles', 'legacy'), profile('releaser'));
     await setDoc(doc(context.firestore(), 'profileDiscovery', 'legacy'), { uid: 'releaser', createdAt: Timestamp.now() });
@@ -333,7 +334,55 @@ test('deleting a profile releases its record and takes its own marker with it', 
   const legacy = writeBatch(db);
   legacy.delete(doc(db, 'profiles', 'legacy'));
   legacy.delete(doc(db, 'profileDiscovery', 'legacy'));
+  legacy.delete(doc(db, 'profileOwners', 'releaser'));
   await assertSucceeds(legacy.commit());
+});
+
+test('a profile from before the ownership record can be updated, renamed and deleted by the client batches', async () => {
+  // The owner's production profile predates profileOwners. Every batch
+  // db.ts sends must work against it: update (which now creates the
+  // record), rename, and delete with the unconditional record delete.
+  const uid = 'legacy-owner';
+  await seedAccount(uid);
+  const db = verified(uid);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'legacy-name'), profile(uid));
+    await setDoc(doc(context.firestore(), 'profileDiscovery', 'legacy-name'), { uid, createdAt: Timestamp.now() });
+  });
+  // Delete with no record in place (the client always includes the delete).
+  const del = writeBatch(db);
+  del.delete(doc(db, 'profiles', 'legacy-name'));
+  del.delete(doc(db, 'profileDiscovery', 'legacy-name'));
+  del.delete(doc(db, 'profileOwners', uid));
+  await assertSucceeds(del.commit());
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'profiles', 'legacy-name'), profile(uid));
+  });
+  // Update (the Me page's stats sync): creates the record.
+  const upd = writeBatch(db);
+  upd.set(doc(db, 'profiles', 'legacy-name'), profile(uid, { familyName: 'Byron' }));
+  upd.set(doc(db, 'profileOwners', uid), { username: 'legacy-name' });
+  await assertSucceeds(upd.commit());
+  assert.deepEqual((await getDoc(doc(db, 'profileOwners', uid))).data(), { username: 'legacy-name' });
+  // Rename now that the record exists.
+  const ren = writeBatch(db);
+  ren.set(doc(db, 'profiles', 'renamed-name'), profile(uid));
+  ren.delete(doc(db, 'profiles', 'legacy-name'));
+  ren.set(doc(db, 'profileOwners', uid), { username: 'renamed-name' });
+  ren.delete(doc(db, 'profileDiscovery', 'legacy-name'));
+  await assertSucceeds(ren.commit());
+  // And a rename straight from the legacy state (no record) also works.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await deleteDoc(doc(context.firestore(), 'profileOwners', uid));
+    await deleteDoc(doc(context.firestore(), 'profiles', 'renamed-name'));
+    await setDoc(doc(context.firestore(), 'profiles', 'legacy-name'), profile(uid));
+  });
+  const ren2 = writeBatch(db);
+  ren2.set(doc(db, 'profiles', 'renamed-name'), profile(uid));
+  ren2.delete(doc(db, 'profiles', 'legacy-name'));
+  ren2.set(doc(db, 'profileOwners', uid), { username: 'renamed-name' });
+  ren2.delete(doc(db, 'profileDiscovery', 'legacy-name'));
+  await assertSucceeds(ren2.commit());
 });
 
 test('profile links support targeted, deduplicated arrayUnion writes up to the cap', async () => {

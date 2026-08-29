@@ -90,6 +90,11 @@ export function bookDeletionPolicy(activeTimer: Book['activeTimer']): BookDeleti
   };
 }
 
+// Mirrors the rules cap on `isbn` (validBookShape); the modal closes
+// optimistically, so a rules denial here would discard the whole edit
+// behind a generic banner instead of a field message.
+const MAX_ISBN_LENGTH = 32;
+
 export function prepareBookWrite({
   userId,
   book,
@@ -118,6 +123,13 @@ export function prepareBookWrite({
 
   const titleResult = validateBookTitle(title);
   if (!titleResult.valid) return titleResult;
+  const trimmedIsbn = isbn.trim();
+  if (trimmedIsbn.length > MAX_ISBN_LENGTH) {
+    return {
+      valid: false,
+      message: `ISBN must be at most ${MAX_ISBN_LENGTH} characters — enter just the number.`,
+    };
+  }
   const pageCountResult = book === null
     ? null
     : validateBookPages({ pageCount, currentPage: 0 });
@@ -141,7 +153,7 @@ export function prepareBookWrite({
     title: titleResult.title,
     pageCount: pages.pageCount,
     currentPage: pages.currentPage,
-    isbn,
+    isbn: trimmedIsbn,
     metadata,
   };
   return book === null

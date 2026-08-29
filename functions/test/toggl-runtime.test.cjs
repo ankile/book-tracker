@@ -1376,7 +1376,7 @@ test("savetoken refuses unverified accounts before any Toggl call or quota spend
   ]) {
     await assert.rejects(
       deployed.toggl.savetoken.run({token: "valid-token"}, context),
-      (error) => error.code === "failed-precondition" && /Verify your email/.test(error.message),
+      (error) => error.code === "failed-precondition" && /verified email address/.test(error.message),
     );
   }
   assert.equal(fetchCalls, 0);

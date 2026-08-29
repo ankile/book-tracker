@@ -978,14 +978,21 @@ service cloud.firestore {
                     // createdAt, oldest first, so a client-chosen (backdated)
                     // value could sort a seeded marker ahead of real profiles.
                     && request.resource.data.createdAt == request.time
-                    && getAfter(/databases/$(database)/documents/profiles/$(username)).data.uid == request.auth.uid
-                    && getAfter(/databases/$(database)/documents/profiles/$(username)).data.public == true;
+                    && ownsPublicProfileAfter(username);
       allow update: if false;
+      // Own marker first: a batched write may make at most 20 document
+      // accesses, and the discoverable rename batch touches six documents
+      // through these rules, so the honest path must stay cheap.
       allow delete: if request.auth != null
-                    && ((exists(/databases/$(database)/documents/profiles/$(username))
+                    && (resource.data.uid == request.auth.uid
+                        || (exists(/databases/$(database)/documents/profiles/$(username))
                             && get(/databases/$(database)/documents/profiles/$(username)).data.uid
-                               == request.auth.uid)
-                        || resource.data.uid == request.auth.uid);
+                               == request.auth.uid));
+    }
+
+    function ownsPublicProfileAfter(username) {
+      let profile = getAfter(/databases/$(database)/documents/profiles/$(username)).data;
+      return profile.uid == request.auth.uid && profile.public == true;
     }
 
     // Opt-in public profile pages: /profiles/<username> renders this doc.
@@ -1084,8 +1091,13 @@ service cloud.firestore {
                     && ownsProfileAfter(request.resource.data.username)
                     && (resource.data.username == request.resource.data.username
                         || !existsAfter(/databases/$(database)/documents/profiles/$(resource.data.username)));
+      // A profile from before this record existed has none; the client's
+      // delete batch removes the record unconditionally, and a delete of a
+      // missing document must not be a null-value error (resource is null).
       allow delete: if request.auth != null && ownerUid == request.auth.uid
-                    && !existsAfter(/databases/$(database)/documents/profiles/$(resource.data.username));
+                    && (resource == null
+                        ? true
+                        : !existsAfter(/databases/$(database)/documents/profiles/$(resource.data.username)));
     }
 
     function validProfileOwnerRecord() {

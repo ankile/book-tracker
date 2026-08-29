@@ -37,6 +37,22 @@ function prepare(authorChips: AuthorChip[]) {
   });
 }
 
+test('book form caps the ISBN at the rules limit and trims it', () => {
+  const chips: AuthorChip[] = [];
+  const long = prepareBookWrite({
+    userId: 'user', book: null, authorChips: chips, title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: 'ISBN 978-0-316-76948-8 (hardcover)', metadata: EMPTY_METADATA,
+  });
+  assert.equal(long.valid, false);
+  assert.match(long.valid ? '' : long.message, /at most 32 characters/);
+  const ok = prepareBookWrite({
+    userId: 'user', book: null, authorChips: chips, title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: '  978-0-316-76948-8  ', metadata: EMPTY_METADATA,
+  });
+  assert.equal(ok.valid, true);
+  assert.equal(ok.valid ? ok.write.input.isbn : '', '978-0-316-76948-8');
+});
+
 test('book form blocks writes while an unresolved repair chip remains', () => {
   const result = prepare([{
     id: 'missing',

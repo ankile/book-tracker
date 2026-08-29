@@ -569,13 +569,13 @@ class Database {
       days,
       updatedAt: serverTimestamp(),
     };
-    if (!removeDiscovery) {
-      await setDoc(profileRef, profile);
-      return;
-    }
+    // The ownership record rides along on every update too, so a profile
+    // from before the record existed converges on the next stats sync
+    // instead of waiting for a rename.
     const batch = writeBatch(db);
     batch.set(profileRef, profile);
-    batch.delete(doc(db, 'profileDiscovery', username));
+    batch.set(doc(db, 'profileOwners', userId), { username });
+    if (removeDiscovery) batch.delete(doc(db, 'profileDiscovery', username));
     await batch.commit();
   }
 

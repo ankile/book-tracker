@@ -282,7 +282,7 @@ exports.savetoken = functions
     if (context.auth?.token.email_verified !== true) {
       throw new functions.https.HttpsError(
         "failed-precondition",
-        "Verify your email address before connecting Toggl.",
+        "Connecting Toggl needs a verified email address. The app cannot verify it yet — ask the administrator.",
       );
     }
     const decision = await consumeQuota(
