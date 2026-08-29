@@ -7,8 +7,9 @@ import type { BookLookupResult } from '../interfaces/metadata.ts';
 // It answers the fiction/non-fiction question for Norwegian books that
 // Open Library and Google Books draw a blank on: catalogue records carry
 // MODS genres like "Romaner" (novels) and the explicit marker "notfiction".
-// Covers are weaker — the scanned cover of an in-copyright book is
-// restricted, so a candidate URL must be verified before it is stored.
+// The catalogue's MODS record sometimes includes a public cover supplied by
+// Bokbasen. Restricted Nasjonalbiblioteket scans remain separate and must be
+// verified before a migration stores them.
 export const NB_SEARCH_URL = 'https://api.nb.no/catalog/v1/items';
 
 // Cataloguing tokens that describe the record rather than the work, and
@@ -34,7 +35,6 @@ export function nbCoverCandidate(urn: string): string {
 }
 
 // MODS genres come from a separate request; pass [] when not fetched.
-// coverUrl is deliberately left empty here — see nbCoverCandidate.
 export interface NbItem {
   metadata?: {
     title?: string;
@@ -82,7 +82,11 @@ function strings(value: unknown): string[] {
     : [];
 }
 
-export function parseNbItem(item: unknown, genres: unknown = []): NbBookLookupResult {
+export function parseNbItem(
+  item: unknown,
+  genres: unknown = [],
+  publicCoverUrl: string = '',
+): NbBookLookupResult {
   const data = requireRecord(item);
   const md = optionalRecord(data.metadata) ?? {};
   const originInfo = optionalRecord(md.originInfo);
@@ -95,7 +99,7 @@ export function parseNbItem(item: unknown, genres: unknown = []): NbBookLookupRe
     title: optionalString(md.title) ?? '',
     authorNames: strings(md.creators).map(flipCatalogueName),
     pageCount: optionalPageCount(md.pageCount),
-    coverUrl: '',
+    coverUrl: publicCoverUrl,
     publisher: optionalString(originInfo?.publisher) ?? '',
     publishedDate: optionalString(originInfo?.issued) ?? '',
     subjects,
@@ -132,4 +136,29 @@ export function extractModsGenres(modsXml: string): string[] {
       .map((match) => match[1].trim())
       .filter((genre) => genre !== '')
   )];
+}
+
+const PUBLIC_COVER_HOSTS = new Set([
+  'media.aja.bs.no',
+  'contents.bibs.aws.unit.no',
+]);
+
+// MODS also contains full-text links, thumbnails, and restricted NB scans.
+// Accept only an explicit cover label from the catalog's public image hosts.
+export function extractModsCoverUrl(modsXml: string): string {
+  const urlElements = modsXml.matchAll(
+    /<(?:[a-zA-Z]+:)?url\b([^>]*)>([^<]*)<\/(?:[a-zA-Z]+:)?url>/g,
+  );
+  for (const match of urlElements) {
+    const attributes = match[1];
+    if (!/\bdisplayLabel\s*=\s*(["'])Omslagsbilde\1/i.test(attributes)) continue;
+
+    const value = match[2].trim().replaceAll('&amp;', '&');
+    if (!URL.canParse(value)) continue;
+    const url = new URL(value);
+    if (url.protocol === 'https:' && PUBLIC_COVER_HOSTS.has(url.hostname)) {
+      return url.href;
+    }
+  }
+  return '';
 }

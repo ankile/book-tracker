@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  parseNbItem, deriveFictionFromNbGenres, extractModsGenres, flipCatalogueName, nbCoverCandidate,
+  parseNbItem, deriveFictionFromNbGenres, extractModsCoverUrl, extractModsGenres,
+  flipCatalogueName, nbCoverCandidate,
 } from "../src/lib/utils/nasjonalbiblioteket.ts";
 
 const item = {
@@ -61,9 +62,15 @@ test("Nasjonalbiblioteket rejects non-positive, fractional, and unsafe page coun
   }
 });
 
-test("the cover is never taken on trust — parsing leaves it empty", () => {
-  // In-copyright scans 403; migrate-enrich-nb.ts verifies the candidate.
+test("a sanitized public cover can accompany the catalogue item", () => {
   assert.equal(parseNbItem(item, []).coverUrl, "");
+  assert.equal(
+    parseNbItem(item, [], "https://media.aja.bs.no/cover/original.jpg").coverUrl,
+    "https://media.aja.bs.no/cover/original.jpg",
+  );
+
+  // In-copyright NB scans can return 403; the migration verifies this
+  // separate candidate before storing it.
   assert.equal(
     nbCoverCandidate("URN:NBN:no-nb_digibok_2016011906027"),
     "https://www.nb.no/services/image/resolver/URN:NBN:no-nb_digibok_2016011906027_C1/full/0,400/0/native.jpg",
@@ -105,4 +112,37 @@ test("MODS genres are extracted and de-duplicated", () => {
     <mods:genre></mods:genre></mods:mods>`;
   assert.deepEqual(extractModsGenres(xml), ["novel", "Romaner"]);
   assert.deepEqual(extractModsGenres("<genre>drama</genre>"), ["drama"]);
+});
+
+test("Kongeriket Norges grunnlov gets its explicit public MODS cover", () => {
+  const xml = `<mods xmlns="http://www.loc.gov/mods/v3">
+    <location><url displayLabel="Fulltekst Nettbiblioteket">https://www.nb.no/book</url></location>
+    <location><url displayLabel="Omslagsbilde">https://media.aja.bs.no/6983b330-7c13-4505-86ac-7ece3ac0155f/original.jpg</url></location>
+    <relatedItem><location><url displayLabel="Omslagsbilde">https://contents.bibs.aws.unit.no/files/images/large/1/7/9788245089271.jpg</url></location></relatedItem>
+  </mods>`;
+  const coverUrl = extractModsCoverUrl(xml);
+  assert.equal(
+    coverUrl,
+    "https://media.aja.bs.no/6983b330-7c13-4505-86ac-7ece3ac0155f/original.jpg",
+  );
+  assert.equal(parseNbItem(item, ["notfiction", "Lover"], coverUrl).coverUrl, coverUrl);
+});
+
+test("MODS cover extraction rejects restricted, unlabelled, and foreign URLs", () => {
+  assert.equal(
+    extractModsCoverUrl('<url displayLabel="Omslagsbilde">https://www.nb.no/restricted.jpg</url>'),
+    "",
+  );
+  assert.equal(
+    extractModsCoverUrl('<url>https://media.aja.bs.no/unlabelled.jpg</url>'),
+    "",
+  );
+  assert.equal(
+    extractModsCoverUrl('<url displayLabel="Omslagsbilde">https://example.com/wrong.jpg</url>'),
+    "",
+  );
+  assert.equal(
+    extractModsCoverUrl('<mods:url displayLabel="Omslagsbilde">http://media.aja.bs.no/insecure.jpg</mods:url>'),
+    "",
+  );
 });

@@ -12,7 +12,13 @@
     selectLookupMetadata,
   } from "../utils/bookMetadata.ts";
   import { parseGoogleVolume } from "../utils/googleBooks.ts";
-  import { nbSearchUrl, nbModsUrl, parseNbItem, extractModsGenres } from "../utils/nasjonalbiblioteket.ts";
+  import {
+    nbSearchUrl,
+    nbModsUrl,
+    parseNbItem,
+    extractModsGenres,
+    extractModsCoverUrl,
+  } from "../utils/nasjonalbiblioteket.ts";
   import { lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
@@ -238,9 +244,8 @@
 
   // Nasjonalbiblioteket is called straight from the browser (open, no key,
   // and it reflects CORS origins). Genres — the fiction/non-fiction signal
-  // for Norwegian books — live in the separate MODS record. Cover scans
-  // are skipped here: they are restricted for in-copyright books, and the
-  // modal has no way to verify one before showing it.
+  // for Norwegian books — live in the separate MODS record. That record can
+  // also contain an explicit public cover supplied by the Norwegian catalog.
   async function fetchNasjonalbiblioteket(isbn13: string): Promise<BookLookupResult | null> {
     try {
       const response = await fetch(nbSearchUrl(isbn13));
@@ -255,7 +260,12 @@
       if (typeof itemData.id !== 'string') throw new Error('Nasjonalbiblioteket item id must be a string.');
       const mods = await fetch(nbModsUrl(itemData.id));
       if (!mods.ok) throw new Error(`Nasjonalbiblioteket MODS ${mods.status}`);
-      const parsed = parseNbItem(item, extractModsGenres(await mods.text()));
+      const modsXml = await mods.text();
+      const parsed = parseNbItem(
+        item,
+        extractModsGenres(modsXml),
+        extractModsCoverUrl(modsXml),
+      );
       return {
         title: parsed.title,
         authorNames: parsed.authorNames,
