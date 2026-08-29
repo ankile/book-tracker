@@ -76,6 +76,9 @@ const report = {
 };
 const createdAuthUsers: string[] = [];
 const createdIssueIds: string[] = [];
+// Every successful overview call appends an adminAudit row; remember what
+// was there before so the run's rows can be removed afterwards.
+const auditBefore = new Set((await db.collection('adminAudit').listDocuments()).map((ref) => ref.id));
 
 async function rowsFor(uid: string | null) {
   return (await db.collection('logEvents').where('uid', '==', uid).get()).docs.filter((d) =>
@@ -104,12 +107,16 @@ after(async () => {
     await batch.commit();
   }
   for (const uid of createdAuthUsers) await db.recursiveDelete(db.doc(`users/${uid}`));
-  const mine = await db.collection('logEvents').where('message', '>=', run).where('message', '<', `${run}`).get();
+  for (const ref of await db.collection('adminAudit').listDocuments()) {
+    if (!auditBefore.has(ref.id)) await ref.delete();
+  }
+  const mine = await db.collection('logEvents').where('message', '>=', run).where('message', '<', run + '\uf8ff').get();
   for (const d of mine.docs) await d.ref.delete();
 });
 
 test('the callable stores exactly twenty rows an hour, pins the uid, and warns once', async (t) => {
   const uid = `${run}-seq`;
+  createdAuthUsers.push(uid);
   const warnings = captureWarnings(t);
   for (let index = 0; index < 20; index += 1) {
     assert.deepEqual(await deployed.telemetry.reportissue.run({ ...report, message: `${run} ${index}` }, asUser(uid)), {
@@ -135,11 +142,11 @@ test('the callable stores exactly twenty rows an hour, pins the uid, and warns o
   }
   assert.equal((await quota(uid))?.count, 21);
   assert.deepEqual(warnings, [['telemetry.quota_exceeded', { uid, event: 'firestore.listener_failed' }]]);
-  createdAuthUsers.push(uid);
 });
 
 test('concurrent reports contend on the real transaction and never exceed the quota', async (t) => {
   const uid = `${run}-race`;
+  createdAuthUsers.push(uid);
   const warnings = captureWarnings(t);
   const outcomes = await Promise.all(
     Array.from({ length: 30 }, (_, index) =>
@@ -169,7 +176,11 @@ test('concurrent reports contend on the real transaction and never exceed the qu
   assert.equal(warnings.length, refused > 0 ? 1 : 0);
   // Retry exhaustion is the only other outcome, and it fails closed.
   for (const code of other) assert.equal(code, 'grpc-10', `unexpected outcome ${code}`);
-  createdAuthUsers.push(uid);
+  // A burst in which contention killed most calls before the limit was
+  // reached proves nothing about the limit; say so in the TAP output
+  // rather than passing silently.
+  t.diagnostic(`race: granted ${granted}, refused ${refused}, aborted ${other.length}`);
+  assert.ok(granted === 20 || other.length > 0, 'contention degenerated without reaching the limit');
 });
 
 test('a refused, malformed or anonymous report touches neither the counter nor the collection', async () => {
@@ -197,6 +208,7 @@ test('a refused, malformed or anonymous report touches neither the counter nor t
 
 test('an expired window restarts at one and a stale first-refusal marker does not warn again', async (t) => {
   const uid = `${run}-window`;
+  createdAuthUsers.push(uid);
   const warnings = captureWarnings(t);
   await db.doc(`users/${uid}/functionQuotas/issueReports`).set({
     windowStartedAt: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000),
@@ -213,7 +225,6 @@ test('an expired window restarts at one and a stale first-refusal marker does no
   assert.deepEqual(warnings, []);
   const rows = await db.collection('logEvents').where('uid', '==', uid).get();
   createdIssueIds.push(...rows.docs.map((d) => d.id));
-  createdAuthUsers.push(uid);
 });
 
 test('the overview reads every account separately and a flood cannot hide an honest account', async (t) => {
@@ -274,7 +285,12 @@ test('the overview reads every account separately and a flood cannot hide an hon
 
   // Honest rows survive the flood, newest first; the malformed row took one
   // of the account's ten slots (it is newest) and renders as malformed.
-  assert.ok(honestRows.length >= 5, `honest rows shown: ${honestRows.length}`);
+  // The bound is what round-robin guarantees — floor(FEED_LIMIT / groups)
+  // rows per group — minus the malformed slot, derived from the wire rather
+  // than a constant, so extra groups left by other tests cannot flip it.
+  const guaranteed = Math.floor(FEED_LIMIT / overview.issueCaps.groupsWithRows) - 1;
+  assert.ok(guaranteed >= 1, `too many groups for the scenario: ${overview.issueCaps.groupsWithRows}`);
+  assert.ok(honestRows.length >= guaranteed, `honest rows shown: ${honestRows.length}, guaranteed ${guaranteed}`);
   assert.ok(honestRows.length <= ISSUES_PER_UID - 1);
   assert.equal(honestRows[0].message, `${run} honest 0`);
   const malformed = overview.issues.filter((issue) => issue.malformed);
@@ -311,6 +327,143 @@ test('the overview reads every account separately and a flood cannot hide an hon
   for (let index = 1; index < overview.issues.length; index += 1) assert.ok(overview.issues[index - 1].at >= overview.issues[index].at);
   assert.ok(overview.users.some((user) => user.uid === quiet));
   assert.equal(honestRows[0].email, `${honest}@example.test`);
+});
+
+// The only Firestore call the overview makes that can fail per account is
+// the logEvents query readIssuesFor builds. Only the query whose uid
+// `fails` names is made to reject; everything else is the real emulator and
+// the real compiled callable — the way a missing composite index or an IAM
+// change fails in production.
+function failLogEventsReadsFor(
+  t: { mock: { method: (o: object, m: string, f: (...a: never[]) => unknown) => void } },
+  fails: (uid: string | null | undefined) => boolean,
+) {
+  const original = db.collection.bind(db);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wrap = (target: any, uid: string | null | undefined): any =>
+    new Proxy(target, {
+      get(_t, prop) {
+        if (prop === 'where') {
+          return (field: string, op: string, value: unknown) =>
+            wrap(target.where(field, op, value), field === 'uid' ? (value as string | null) : uid);
+        }
+        if (prop === 'orderBy') return (...a: unknown[]) => wrap(target.orderBy(...a), uid);
+        if (prop === 'limit') return (...a: unknown[]) => wrap(target.limit(...a), uid);
+        if (prop === 'get') {
+          return async () => {
+            if (fails(uid)) throw new Error(`simulated read failure for ${String(uid)}`);
+            return target.get();
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  t.mock.method(db, 'collection', ((path: string) => {
+    const real = original(path);
+    return path === 'logEvents' ? wrap(real, undefined) : real;
+  }) as never);
+}
+
+const issueRow = (uid: string | null, at: number, message: string) => ({
+  level: 'error',
+  event: 'firestore.listener_failed',
+  message: `${run} ${message}`,
+  code: null,
+  uid,
+  detail: null,
+  createdAt: Timestamp.fromMillis(at),
+  expiresAt: Timestamp.fromMillis(at + 90 * 24 * 3600 * 1000),
+});
+
+async function seedTwoAccounts(tag: string) {
+  const good = `${run}-${tag}-good`;
+  const broken = `${run}-${tag}-broken`;
+  for (const uid of [good, broken]) {
+    await auth.createUser({ uid, email: `${uid}@example.test`, emailVerified: true });
+    createdAuthUsers.push(uid);
+  }
+  const now = Date.now();
+  for (const uid of [good, broken]) {
+    for (let index = 0; index < 3; index += 1) {
+      const id = `${uid}-${index}`;
+      createdIssueIds.push(id);
+      await db.doc(`logEvents/${id}`).set(issueRow(uid, now - index * 1000, `${uid} ${index}`));
+    }
+  }
+  const anonId = `${run}-${tag}-anon`;
+  createdIssueIds.push(anonId);
+  await db.doc(`logEvents/${anonId}`).set(issueRow(null, now - 10_000, 'anon'));
+  return { good, broken };
+}
+
+test('one unreadable account is dropped, counted and logged, and never fails the page', async (t) => {
+  const { good, broken } = await seedTwoAccounts('drop');
+  const errors: unknown[][] = [];
+  t.mock.method(logger, 'error', (...args: unknown[]) => {
+    errors.push(args);
+  });
+  failLogEventsReadsFor(t, (uid) => uid === broken);
+
+  const overview = await deployed.admin.overview.run({}, { auth: { uid: ADMIN_UID, token: { email_verified: true } } });
+
+  assert.equal(overview.issues.filter((i) => i.uid === good).length, 3);
+  assert.equal(overview.issues.filter((i) => i.uid === broken).length, 0);
+  assert.equal(overview.issueCaps.unreadAccounts, 1);
+  assert.equal(overview.issueCaps.anonymousUnread, false);
+  assert.ok(overview.issues.some((i) => i.uid === null && !i.malformed && i.message.includes(`${run} anon`)));
+  const mine = errors.filter((e) => (e[1] as { uid?: string })?.uid === broken);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0][0], 'admin.issues.read_failed');
+});
+
+test('a failed uid-null read sets anonymousUnread and no account count', async (t) => {
+  const { good } = await seedTwoAccounts('anon');
+  const errors: unknown[][] = [];
+  t.mock.method(logger, 'error', (...args: unknown[]) => {
+    errors.push(args);
+  });
+  failLogEventsReadsFor(t, (uid) => uid === null);
+
+  const overview = await deployed.admin.overview.run({}, { auth: { uid: ADMIN_UID, token: { email_verified: true } } });
+
+  assert.equal(overview.issueCaps.anonymousUnread, true);
+  assert.equal(overview.issueCaps.unreadAccounts, 0);
+  assert.equal(overview.issues.filter((i) => i.uid === null && !i.malformed).length, 0);
+  assert.equal(overview.issues.filter((i) => i.uid === good).length, 3);
+  const mine = errors.filter((e) => (e[1] as { uid?: string | null })?.uid === null);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0][0], 'admin.issues.read_failed');
+});
+
+test('the cut is rank-fair: no account is more than one row ahead of another', async () => {
+  const flooders = Array.from({ length: 30 }, (_, i) => `${run}-f${String(i).padStart(2, '0')}`);
+  const honest = `${run}-zhonest`;
+  for (const uid of [...flooders, honest]) {
+    await auth.createUser({ uid, email: `${uid}@example.test`, emailVerified: true });
+    createdAuthUsers.push(uid);
+  }
+  const now = Date.now();
+  const write = async (id: string, uid: string, at: number, message: string) => {
+    createdIssueIds.push(id);
+    await db.doc(`logEvents/${id}`).set(issueRow(uid, at, message));
+  };
+  // Every flooder row is newer than every honest row, and each account has
+  // exactly the per-account cap, so nothing reports them as capped — the
+  // round-3 blinding scenario with the cap-detection signal switched off.
+  for (const f of flooders) for (let i = 0; i < 10; i += 1) await write(`${f}-${i}`, f, now - i * 1000, `${f} ${i}`);
+  for (let i = 0; i < 10; i += 1) await write(`${honest}-${i}`, honest, now - 3_600_000 - i * 1000, `honest ${i}`);
+
+  const overview = await deployed.admin.overview.run({}, { auth: { uid: ADMIN_UID, token: { email_verified: true } } });
+  const shares = new Map<string, number>();
+  for (const issue of overview.issues) {
+    if (typeof issue.uid === 'string' && issue.uid.startsWith(run)) shares.set(issue.uid, (shares.get(issue.uid) ?? 0) + 1);
+  }
+  const honestShare = shares.get(honest) ?? 0;
+  const floodShares = flooders.map((f) => shares.get(f) ?? 0);
+  assert.ok(honestShare > 0, `the honest account was erased: ${honestShare}`);
+  assert.ok(Math.max(...floodShares) - honestShare <= 1, `unfair cut: flooders ${Math.max(...floodShares)} vs honest ${honestShare}`);
+  assert.equal(overview.issueCaps.groupsShown, overview.issueCaps.groupsWithRows);
 });
 
 test('the overview refuses everyone but the operator without reading anything', async () => {

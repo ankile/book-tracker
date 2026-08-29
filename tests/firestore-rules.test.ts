@@ -1719,6 +1719,82 @@ test('the users document cannot be created, rewritten or nudged one field by any
   await assertFails(setDoc(doc(absent, 'users', 'users-doc-absent'), body));
 });
 
+const auditRow = (uid: string) => ({
+  type: 'view',
+  uid,
+  email: `${uid}@example.test`,
+  at: serverTimestamp(),
+  expiresAt: Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000),
+});
+
+test('adminAudit has no client path at all, whatever the actor, id or shape', async () => {
+  const operator = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'adminAudit', 'seeded'), auditRow(operator));
+    await setDoc(doc(db, 'adminAudit', 'other-row'), auditRow('audit-victim'));
+    await setDoc(doc(db, 'users', 'audit-owner'), { uid: 'audit-owner' });
+    await setDoc(doc(db, 'users', 'audit-owner', 'books', 'b1'), { title: 'The Book' });
+  });
+  for (const db of [
+    // The operator's own browser is a client too, and it is the one actor
+    // a well-meaning "let the admin page read its audit trail" grant names.
+    environment.authenticatedContext(operator, { email_verified: true }).firestore(),
+    environment.authenticatedContext('audit-owner').firestore(),
+    environment.authenticatedContext('audit-victim').firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    for (const id of ['seeded', 'other-row', 'no-such-row']) {
+      await assertFails(getDoc(doc(db, 'adminAudit', id)));
+    }
+    await assertFails(setDoc(doc(db, 'adminAudit', 'forged'), auditRow('audit-owner')));
+    await assertFails(updateDoc(doc(db, 'adminAudit', 'seeded'), { type: 'scrubbed' }));
+    await assertFails(deleteDoc(doc(db, 'adminAudit', 'seeded')));
+    await assertFails(getDocs(collection(db, 'adminAudit')));
+    await assertFails(getDocs(query(collection(db, 'adminAudit'), limit(1))));
+    await assertFails(getDocs(query(collection(db, 'adminAudit'), where('uid', '==', 'audit-owner'), limit(1))));
+    await assertFails(getDocs(query(collection(db, 'adminAudit'), orderBy('at', 'desc'), limit(1))));
+    await assertFails(getDocs(query(collectionGroup(db, 'adminAudit'), limit(1))));
+    await assertFails(setDoc(doc(db, 'users', 'audit-owner', 'adminAudit', 'planted'), auditRow('audit-owner')));
+    await assertFails(setDoc(doc(db, 'users', 'audit-owner', 'books', 'b1', 'adminAudit', 'planted'), auditRow('audit-owner')));
+  }
+});
+
+test('no token claim opens logEvents or the quota document', async () => {
+  const uid = 'claims-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'logEvents', 'seeded'), issue(uid, 'firestore.decode_failed'));
+    await setDoc(doc(db, 'logEvents', 'other-row'), issue('claims-victim', 'firestore.decode_failed'));
+    await setDoc(doc(db, 'users', uid, 'functionQuotas', 'issueReports'), {
+      windowStartedAt: Timestamp.now(),
+      count: 20,
+    });
+  });
+  // authenticatedContext(uid) mints a token with no email, no
+  // email_verified and no provider, so every other probe in this file runs
+  // as an actor that cannot satisfy a claim-conditioned grant.
+  const claimSets: Record<string, unknown>[] = [
+    { email_verified: true, email: `${uid}@example.test` },
+    { email_verified: false, email: `${uid}@example.test` },
+    { email: `${uid}@example.test`, firebase: { sign_in_provider: 'password' } },
+    { admin: true },
+    { email_verified: true, admin: true, email: `${uid}@example.test` },
+  ];
+  for (const claims of claimSets) {
+    const db = environment.authenticatedContext(uid, claims).firestore();
+    for (const id of ['seeded', 'other-row']) await assertFails(getDoc(doc(db, 'logEvents', id)));
+    await assertFails(setDoc(doc(db, 'logEvents', 'claims-create'), issue(uid, 'firestore.decode_failed')));
+    await assertFails(getDocs(query(collection(db, 'logEvents'), limit(1))));
+    await assertFails(getDocs(query(collectionGroup(db, 'logEvents'), limit(1))));
+    const quotaRef = doc(db, 'users', uid, 'functionQuotas', 'issueReports');
+    await assertFails(getDoc(quotaRef));
+    await assertFails(setDoc(quotaRef, { windowStartedAt: serverTimestamp(), count: 0 }));
+    await assertFails(updateDoc(quotaRef, { count: 0 }));
+    await assertFails(getDocs(query(collection(db, 'users', uid, 'functionQuotas'), limit(1))));
+  }
+});
+
 test('owners can create and read only exact pending Toggl queue payloads', async () => {
   await seedToggl('queue-owner');
   const owner = environment.authenticatedContext('queue-owner').firestore();
