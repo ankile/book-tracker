@@ -225,6 +225,24 @@ test('publishing needs a verified account whose users document still exists', as
   await assertFails(deleteDoc(doc(tomb, 'profiles', 'tomb-reader')));
   // Nor start over under another name with the same identity.
   await assertFails(createProfileBatch(verified('tomb-fresh'), 'tomb-fresh', 'tomb-fresh-reader'));
+
+  // The window deleteUserDocument opens (users/{uid} tombstoned first, the
+  // profiles tombstoned after): a profile that is NOT yet tombstoned must
+  // still be undeletable by the residual identity, because its account is
+  // tombstoned. The delete rule gates on the account, not just the
+  // profile's own deletedAt.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const admin = context.firestore();
+    await setDoc(doc(admin, 'users', 'tombwin'), { uid: 'tombwin', email: 'w@example.test', deletedAt: Timestamp.now() });
+    await setDoc(doc(admin, 'profiles', 'tombwin-reader'), profile('tombwin'));
+    await setDoc(doc(admin, 'profileOwners', 'tombwin'), { username: 'tombwin-reader' });
+  });
+  const tombwin = verified('tombwin');
+  const windowDelete = writeBatch(tombwin);
+  windowDelete.delete(doc(tombwin, 'profiles', 'tombwin-reader'));
+  windowDelete.delete(doc(tombwin, 'profileOwners', 'tombwin'));
+  await assertFails(windowDelete.commit());
+  await assertFails(deleteDoc(doc(tombwin, 'profiles', 'tombwin-reader')));
 });
 
 test('one profile per account: a second needs the first gone in the same batch', async () => {

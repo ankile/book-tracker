@@ -118,12 +118,20 @@ test('deleting an account tombstones its document and profile and removes nothin
   const before = await dumpAccount(db, uid, username);
   const bystanderBefore = await dumpAccount(db, bystander, bystander);
   assert.equal(before.size, 10);
+  assert.ok(before.has(`profileDiscovery/${username}`));
 
   await deployed.deleteUserDocument.run({ uid });
 
   const afterFirst = await dumpAccount(db, uid, username);
-  assert.deepEqual([...afterFirst.keys()].sort(), [...before.keys()].sort());
+  // The discovery marker — a search-index pointer, not content — is the
+  // one thing deletion removes; everything else survives, with a tombstone
+  // on the user document and the profile.
+  const markerPath = `profileDiscovery/${username}`;
+  assert.ok(before.has(markerPath));
+  assert.ok(!afterFirst.has(markerPath), 'the discovery marker must be deleted');
+  assert.deepEqual([...afterFirst.keys()].sort(), [...before.keys()].filter((p) => p !== markerPath).sort());
   for (const [path, json] of before) {
+    if (path === markerPath) continue;
     const stored = afterFirst.get(path);
     assert.ok(stored !== undefined);
     if (path === `users/${uid}` || path === `profiles/${username}`) {
@@ -183,11 +191,13 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
     env: { ...process.env, FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST },
   });
 
-  // Live account: refused, even with --apply.
+  // Live account: refused, even with --apply, and it changed nothing.
+  const goneBefore = await dumpAccount(target, gone, gone);
+  assert.ok(goneBefore.size > 0);
   const refused = purge(gone, '--apply');
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /not tombstoned/);
-  assert.deepEqual(await dumpAccount(target, gone, gone), await dumpAccount(target, gone, gone));
+  assert.deepEqual(await dumpAccount(target, gone, gone), goneBefore);
 
   await target.doc(`users/${gone}`).set({ deletedAt: FieldValue.serverTimestamp() }, { merge: true });
   await target.doc(`profiles/${gone}`).set({ deletedAt: FieldValue.serverTimestamp() }, { merge: true });
@@ -209,4 +219,12 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   assert.equal((await dumpAccount(target, gone, gone)).size, 0);
   assert.deepEqual(await target.collection('users').doc(gone).listCollections(), []);
   assert.deepEqual(await dumpAccount(target, kept, kept), keptBefore);
+
+  // Re-running a completed purge (or one interrupted after the root doc
+  // went) does not throw and writes nothing: the root is absent, so the
+  // account is treated as already gone.
+  const again = purge(gone, '--apply');
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /is absent/);
+  assert.match(again.stdout, /0 public documents and a 0-document tree deleted/);
 });

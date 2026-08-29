@@ -172,19 +172,18 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
   ]);
 });
 
-test("user deletion tombstones the user document and its profiles, pages by id, and deletes nothing", async (t) => {
-  // Nothing in this store can delete: a trigger that reached for delete()
-  // on any ref, batch or transaction would throw here (SEC-006 is a soft
-  // delete by owner decision).
-  const noDelete = () => assert.fail("account deletion must not delete a document");
+test("user deletion tombstones the user document and its profiles, deletes only uid-matched markers, and pages by id", async (t) => {
+  const noDeleteUser = () => assert.fail("the user document and profiles must never be deleted");
   const sets = [];
+  const deletes = [];
   let userValue = {email: "owner@example.test", uid: "owner", toggl: {apiToken: "t"}};
-  const userRef = {path: "users/owner", delete: noDelete};
+  const userRef = {path: "users/owner", delete: noDeleteUser};
   const queries = [];
   const pages = [];
+  let markerOwner = "owner";
   const profileDoc = (name, deletedAt) => ({
     id: name,
-    ref: {path: `profiles/${name}`, delete: noDelete},
+    ref: {path: `profiles/${name}`, delete: noDeleteUser},
     get: (field) => {
       assert.equal(field, "deletedAt");
       return deletedAt;
@@ -196,18 +195,9 @@ test("user deletion tombstones the user document and its profiles, pages by id, 
       const call = {orderBy: null, limit: null, startAfter: null};
       queries.push(call);
       const query = {
-        orderBy: (path) => {
-          call.orderBy = path;
-          return query;
-        },
-        limit: (size) => {
-          call.limit = size;
-          return query;
-        },
-        startAfter: (cursor) => {
-          call.startAfter = cursor.id;
-          return query;
-        },
+        orderBy: (path) => { call.orderBy = path; return query; },
+        limit: (size) => { call.limit = size; return query; },
+        startAfter: (cursor) => { call.startAfter = cursor.id; return query; },
         get: async () => {
           const docs = pages.shift() ?? [];
           return {empty: docs.length === 0, size: docs.length, docs};
@@ -216,13 +206,12 @@ test("user deletion tombstones the user document and its profiles, pages by id, 
       return query;
     },
   };
+  const discoveryRef = (name) => ({path: `profileDiscovery/${name}`});
   t.mock.method(db, "collection", (path) => {
     if (path === "profiles") return profiles;
-    if (path === "users") return {doc: (uid) => {
-      assert.equal(uid, "owner");
-      return userRef;
-    }};
-    assert.fail(`unexpected collection ${path}`);
+    if (path === "users") return {doc: (uid) => { assert.equal(uid, "owner"); return userRef; }};
+    assert.equal(path, "profileDiscovery");
+    return {doc: (name) => discoveryRef(name)};
   });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (ref) => {
@@ -234,22 +223,30 @@ test("user deletion tombstones the user document and its profiles, pages by id, 
       sets.push([ref.path, value, options]);
       userValue = {...userValue, ...value};
     },
-    update: noDelete,
-    delete: noDelete,
+    update: noDeleteUser,
+    delete: noDeleteUser,
   }));
-  t.mock.method(db, "getAll", noDelete);
+  let getAllCount = 0;
+  t.mock.method(db, "getAll", async (...refs) => {
+    getAllCount += 1;
+    // Every marker exists; its uid is markerOwner (a freed-and-reclaimed
+    // name would report a different owner and must be left alone).
+    return refs.map((ref) => ({exists: true, ref, get: (field) => {
+      assert.equal(field, "uid");
+      return markerOwner;
+    }}));
+  });
   let commits = 0;
   t.mock.method(db, "batch", () => ({
     set: (ref, value, options) => sets.push([ref.path, value, options]),
-    delete: noDelete,
-    update: noDelete,
-    commit: async () => {
-      commits += 1;
-    },
+    delete: (ref) => deletes.push(ref.path),
+    update: noDeleteUser,
+    commit: async () => { commits += 1; },
   }));
 
-  // Two full pages and a partial one; the second page's first profile is
-  // already tombstoned (a retried delivery) and must not be stamped again.
+  // Two full pages and a partial one; page 2's first profile is already
+  // tombstoned (a retried delivery) and must not be stamped again, but its
+  // marker is still deleted.
   const names = Array.from({length: 250}, (_, i) => `user-${String(i).padStart(3, "0")}`);
   pages.push(names.slice(0, 100).map((n) => profileDoc(n, undefined)));
   pages.push(names.slice(100, 200).map((n, i) => profileDoc(n, i === 0 ? {seconds: 1} : undefined)));
@@ -261,14 +258,18 @@ test("user deletion tombstones the user document and its profiles, pages by id, 
   assert.deepEqual(Object.keys(sets[0][1]).sort(), ["deletedAt", "uid"]);
   assert.deepEqual(sets[0][2], {merge: true});
   assert.equal(userValue.toggl.apiToken, "t");
-  // Profiles: 249 stamped (one already was), three batches, cursor paging
-  // by document id — the tombstone does not change the query, so a
-  // limit-only loop could never advance.
+  // Profiles: 249 tombstoned (one already was); three batches; cursor
+  // paging by document id.
   const profileSets = sets.slice(1);
   assert.equal(profileSets.length, 249);
-  assert.ok(profileSets.every(([, value, options]) =>
-    Object.keys(value).join() === "deletedAt" && options.merge === true));
+  assert.ok(profileSets.every(([path, value, options]) =>
+    path.startsWith("profiles/") && Object.keys(value).join() === "deletedAt" && options.merge === true));
   assert.ok(!profileSets.some(([path]) => path === "profiles/user-100"));
+  // Markers: all 250 deleted (the already-tombstoned profile's marker too),
+  // one getAll per page.
+  assert.equal(deletes.length, 250);
+  assert.ok(deletes.includes("profileDiscovery/user-100") && deletes.includes("profileDiscovery/user-249"));
+  assert.equal(getAllCount, 3);
   assert.equal(commits, 3);
   assert.deepEqual(queries.map((q) => [q.orderBy.constructor.name, q.limit, q.startAfter]), [
     ["FieldPath", 100, null],
@@ -276,14 +277,21 @@ test("user deletion tombstones the user document and its profiles, pages by id, 
     ["FieldPath", 100, "user-199"],
   ]);
 
-  // Redelivery: the user document is already tombstoned, so nothing is
-  // written for it; a page of tombstoned profiles commits no batch.
-  sets.length = 0;
-  commits = 0;
+  // A marker under a freed username that another account now owns is left
+  // alone; if its profile is already tombstoned the page commits nothing.
+  sets.length = 0; deletes.length = 0; commits = 0;
+  markerOwner = "squatter";
   pages.push([profileDoc("ada-lovelace", {seconds: 1})]);
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.deepEqual(sets, []);
+  assert.deepEqual(deletes, []);
   assert.equal(commits, 0);
+
+  // Redelivery: the user document is already tombstoned, so nothing is
+  // written for it.
+  sets.length = 0; deletes.length = 0; commits = 0; markerOwner = "owner";
+  await functions.deleteUserDocument.run({uid: "owner"});
+  assert.deepEqual(sets, []);
 
   // A uid whose document never existed still gets a tombstone, so the
   // admin overview can tell "deleted" from "orphaned".

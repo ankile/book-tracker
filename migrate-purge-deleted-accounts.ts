@@ -31,10 +31,21 @@ const tag = flags.apply ? 'DELETE' : 'DRY';
 
 const userRef = db.collection('users').doc(uid);
 const user = await userRef.get();
-if (!user.exists) throw new Error(`${userRef.path} does not exist`);
-const deletedAt = user.get('deletedAt');
-if (deletedAt === undefined) throw new Error(`${userRef.path} is not tombstoned (no deletedAt); refusing to purge a live account`);
-console.log(`${userRef.path} tombstoned at ${deletedAt.toDate().toISOString()}`);
+// The live-account guard runs only when the document is present: a
+// missing root means the account never existed OR a prior partial purge
+// already removed it. Either way there is nothing live to protect, and a
+// re-run must be able to finish an interrupted purge (clean the public
+// docs and any orphaned subcollections) rather than throw. A present
+// document with no deletedAt is a live account — refuse.
+if (user.exists) {
+  const deletedAt = user.get('deletedAt');
+  if (deletedAt === undefined) {
+    throw new Error(`${userRef.path} is not tombstoned (no deletedAt); refusing to purge a live account`);
+  }
+  console.log(`${userRef.path} tombstoned at ${deletedAt.toDate().toISOString()}`);
+} else {
+  console.log(`${userRef.path} is absent — cleaning any orphaned data from an earlier partial purge`);
+}
 
 const profiles = await db.collection('profiles').where('uid', '==', uid).get();
 for (const profile of profiles.docs) {
@@ -53,10 +64,14 @@ if (owner.exists) {
 }
 await writes.flush();
 
-// The tree: counted by listing (so orphans under missing parents count
-// too), removed by recursiveDelete, which handles depth and batching.
+// The tree: counted by listing (so orphans under a missing root count
+// too), removed subcollection by subcollection with recursiveDelete, and
+// the root document deleted LAST. Root-last is what makes a re-run of an
+// interrupted purge safe: while the root is still present the guard above
+// re-verifies the tombstone, and once it is gone a re-run treats the
+// account as absent and cleans whatever orphans remain, ending at 0 writes.
 async function countTree(ref: DocumentReference): Promise<number> {
-  let count = 1;
+  let count = (await ref.get()).exists ? 1 : 0;
   for (const collection of await ref.listCollections()) {
     for (const child of await collection.listDocuments()) count += await countTree(child);
   }
@@ -64,7 +79,12 @@ async function countTree(ref: DocumentReference): Promise<number> {
 }
 const treeSize = await countTree(userRef);
 console.log(`${tag} ${userRef.path} tree: ${treeSize} documents`);
-if (flags.apply) await db.recursiveDelete(userRef);
+if (flags.apply) {
+  for (const collection of await userRef.listCollections()) {
+    await db.recursiveDelete(collection);
+  }
+  await userRef.delete();
+}
 
 console.log(
   `${writes.count()} public documents and a ${treeSize}-document tree ${flags.apply ? 'deleted' : '(dry run, nothing written)'}`,

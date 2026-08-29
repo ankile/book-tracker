@@ -86,9 +86,13 @@ exports.createUserDocument = functions
 // (publicWeb.ts), the Toggl callables and queue worker (toggl.ts), the
 // admin overview, and the rules, which refuse the identity's profile
 // writes for the hour its ID token outlives the account (verifiedAccount).
-// Reading data, authors, queue rows, quotas, the ownership record and the
-// discovery marker stay exactly as they were; a username stays reserved
-// by its tombstoned profile. A physical purge is an operator-run
+// Reading data, authors, queue rows, quotas and the ownership record stay
+// exactly as they were; a username stays reserved by its tombstoned
+// profile. The one thing deletion prunes is the profileDiscovery marker —
+// a search-index opt-in pointer, not retained content: a deleted account
+// leaves the search index, so its uid-matched markers are removed (the
+// profile itself, the actual content, is kept and tombstoned). This is a
+// deliberate, narrow exception to the soft-delete default. A physical purge is an operator-run
 // migration (migrate-purge-deleted-accounts.ts), never this trigger.
 //
 // failurePolicy makes a failed delivery retry, and every step is
@@ -117,13 +121,26 @@ async function tombstoneProfiles(uid: string): Promise<void> {
       .limit(PROFILE_TOMBSTONE_PAGE);
     if (after !== undefined) query = query.startAfter(after);
     const page = await query.get();
-    const live = page.docs.filter((profile) => profile.get("deletedAt") === undefined);
-    if (live.length > 0) {
+    if (!page.empty) {
+      // A freed username's marker may now belong to another account, so a
+      // marker is removed only while it still names this uid.
+      const markers = await db.getAll(
+        ...page.docs.map((profile) => db.collection("profileDiscovery").doc(profile.id)),
+      );
       const batch = db.batch();
-      for (const profile of live) {
-        batch.set(profile.ref, {deletedAt: FieldValue.serverTimestamp()}, {merge: true});
-      }
-      await batch.commit();
+      let ops = 0;
+      page.docs.forEach((profile, index) => {
+        if (profile.get("deletedAt") === undefined) {
+          batch.set(profile.ref, {deletedAt: FieldValue.serverTimestamp()}, {merge: true});
+          ops += 1;
+        }
+        const marker = markers[index];
+        if (marker.exists && marker.get("uid") === uid) {
+          batch.delete(marker.ref);
+          ops += 1;
+        }
+      });
+      if (ops > 0) await batch.commit();
     }
     if (page.size < PROFILE_TOMBSTONE_PAGE) break;
     after = page.docs[page.size - 1];

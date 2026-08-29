@@ -987,9 +987,15 @@ service cloud.firestore {
     // document stays with deletedAt set, and for the hour its ID token
     // outlives it the identity must not publish. A missing document is a
     // null-value error here, which denies — the same outcome exists() gave.
+    // The account is not tombstoned (SEC-006). A missing users document is
+    // a null-value error here, which denies — a live account always has
+    // one (the sign-up trigger creates it and soft-delete keeps it).
+    function accountLive() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deletedAt', null) == null;
+    }
     function verifiedAccount() {
       return request.auth.token.get('email_verified', false) == true
-             && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deletedAt', null) == null;
+             && accountLive();
     }
 
     match /profileDiscovery/{username} {
@@ -1076,10 +1082,16 @@ service cloud.firestore {
                     && resource.data.uid == request.auth.uid
                     && validProfile();
       // A tombstoned profile is the record of a deleted account; only an
-      // operator purge removes it.
+      // operator purge removes it. accountLive() closes the window in
+      // which deleteUserDocument has tombstoned users/{uid} but not yet
+      // reached this profile: the residual identity (its ID token lives an
+      // hour past deletion) must not delete its own not-yet-tombstoned
+      // profile and free the reserved name. Not verifiedAccount(): an
+      // unverified live owner may still delete what it has.
       allow delete: if request.auth != null
                     && resource.data.uid == request.auth.uid
                     && resource.data.get('deletedAt', null) == null
+                    && accountLive()
                     && validProfileRelease(username);
     }
 
