@@ -13,7 +13,14 @@
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
-  import { bookDeletionPolicy, executeBookWrite, fillMissingPageCount, prepareBookWrite } from "../utils/bookForm.ts";
+  import {
+    bookDeletionPolicy,
+    executeBookWrite,
+    fillMissingItems,
+    fillMissingPageCount,
+    fillMissingText,
+    prepareBookWrite,
+  } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
 
   let {
@@ -185,18 +192,16 @@
         return;
       }
 
-      // Auto-fill fields (always overwrite when looking up). Whichever
-      // source answered wins for the plain fields, in source order.
+      // Fill empty form fields from the first source that answered. Keep
+      // anything the user entered or that was already stored on the book.
       const primary = openLibrary ?? google ?? nb;
       if (primary === null) throw new Error('Metadata source selection failed.');
 
-      if (primary.title) {
-        title = primary.title;
-      }
-
-      if (primary.authorNames.length > 0) {
-        authorChips = primary.authorNames.map((name) => resolveChip(name, authorList));
-      }
+      title = fillMissingText(title, primary.title);
+      authorChips = fillMissingItems(
+        authorChips,
+        primary.authorNames.map((name) => resolveChip(name, authorList)),
+      );
 
       pageCount = fillMissingPageCount(pageCount, [
         primary.pageCount,

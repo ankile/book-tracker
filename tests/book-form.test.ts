@@ -4,7 +4,9 @@ import { Timestamp } from 'firebase/firestore';
 import {
   bookDeletionPolicy,
   executeBookWrite,
+  fillMissingItems,
   fillMissingPageCount,
+  fillMissingText,
   prepareBookWrite,
   type BookWriter,
 } from '../src/lib/utils/bookForm.ts';
@@ -112,7 +114,11 @@ function preparePageCountEdit(book: Book, pageCount: number | null | undefined) 
   });
 }
 
-test('ISBN lookup fills a missing page count without overwriting an existing one', () => {
+test('ISBN lookup fills missing book fields without overwriting existing ones', () => {
+  assert.equal(fillMissingText('Entered title', 'Lookup title'), 'Entered title');
+  assert.equal(fillMissingText('   ', 'Lookup title'), 'Lookup title');
+  assert.deepEqual(fillMissingItems(['Entered author'], ['Lookup author']), ['Entered author']);
+  assert.deepEqual(fillMissingItems([], ['Lookup author']), ['Lookup author']);
   assert.equal(fillMissingPageCount(320, [393, 400]), 320);
   assert.equal(fillMissingPageCount(undefined, [undefined, 393, 400]), 393);
   assert.equal(fillMissingPageCount(null, [undefined, undefined]), null);

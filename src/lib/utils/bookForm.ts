@@ -35,6 +35,14 @@ export type BookDeletionPolicy =
   | { allowed: true; confirmationWarning: string | null }
   | { allowed: false; guidance: string };
 
+export function fillMissingText(currentText: string, lookupText: string): string {
+  return currentText.trim() === '' ? lookupText : currentText;
+}
+
+export function fillMissingItems<T>(currentItems: T[], lookupItems: T[]): T[] {
+  return currentItems.length === 0 ? lookupItems : currentItems;
+}
+
 export function fillMissingPageCount(
   currentPageCount: number | null | undefined,
   lookupPageCounts: readonly (number | undefined)[],
