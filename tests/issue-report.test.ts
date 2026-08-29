@@ -81,52 +81,77 @@ test('the client event allowlist is the server allowlist', async () => {
 
 test('logIssue reports once, on the live session, and swallows its own failure', async () => {
   const source = await readFile(new URL('../src/lib/firebase/db.ts', import.meta.url), 'utf8');
-  const declarations = find(parse(source), (n) => ts.isFunctionDeclaration(n) && n.name?.text === 'logIssue');
+  const file = parse(source);
+  const declarations = find(file, (n) => ts.isFunctionDeclaration(n) && n.name?.text === 'logIssue');
   assert.equal(declarations.length, 1);
   const calls = find(declarations[0], ts.isCallExpression) as ts.CallExpression[];
 
-  // The live session, not a constant, decides whether to report.
-  assert.deepEqual(
-    calls
-      .filter((call) => call.expression.getText() === 'issueReportPayload')
-      .map((call) => call.arguments[0].getText()),
-    ['auth.currentUser !== null'],
+  // The live session, not a constant, decides whether to report. Compared
+  // structurally: `auth.currentUser !== null`, `null != auth.currentUser`
+  // and friends are the same predicate.
+  const checks = calls.filter((call) => call.expression.getText() === 'issueReportPayload').map((call) => call.arguments[0]);
+  assert.equal(checks.length, 1);
+  const [check] = checks;
+  assert.ok(ts.isBinaryExpression(check), 'the session check is not a comparison');
+  assert.deepEqual([check.left.getText(), check.right.getText()].sort(), ['auth.currentUser', 'null']);
+  assert.ok(
+    [ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(check.operatorToken.kind),
+    'the session check must be a not-equal against null',
+  );
+  assert.ok(
+    find(declarations[0], (n) => ts.isIfStatement(n) && /payload === null|null === payload/.test(n.expression.getText())).length === 1,
+    'a null payload must return before anything is sent',
   );
 
-  // Exactly one send, and its rejection goes nowhere but the console: an
-  // addError here would put the callable's rejection text in the user's
-  // banner on every backend hiccup, and a missing catch is an unhandled
-  // rejection (src/ has no no-floating-promises lint).
+  // Exactly one send in the whole module, and its rejection goes nowhere
+  // but the console: an addError here would put the callable's rejection
+  // text in the user's banner on every backend hiccup, and a missing catch
+  // is an unhandled rejection (src/ has no no-floating-promises lint).
+  const sendsInFile = (find(file, ts.isCallExpression) as ts.CallExpression[]).filter((c) => c.expression.getText() === 'reportIssue');
+  assert.equal(sendsInFile.length, 1, 'reportIssue may only be called from logIssue, once');
   const sends = calls.filter((call) => call.expression.getText() === 'reportIssue');
-  assert.equal(sends.length, 1, 'logIssue must make exactly one reportIssue call');
-  const access = sends[0].parent;
+  assert.equal(sends.length, 1);
+  // Walk the chain to the .catch, whatever is chained before it.
+  let node: ts.Node = sends[0];
+  while (ts.isPropertyAccessExpression(node.parent) && ts.isCallExpression(node.parent.parent) && node.parent.name.text !== 'catch') {
+    node = node.parent.parent;
+  }
+  const access = node.parent;
   assert.ok(ts.isPropertyAccessExpression(access) && access.name.text === 'catch', 'the reportIssue call is not caught');
-  const handler = (access.parent as ts.CallExpression).arguments[0];
+  const catchCall = access.parent as ts.CallExpression;
+  const handler = catchCall.arguments[0];
   assert.ok(ts.isArrowFunction(handler), 'the catch handler must be an arrow function');
   const body =
     ts.isBlock(handler.body) && handler.body.statements.length === 1 && ts.isExpressionStatement(handler.body.statements[0])
       ? handler.body.statements[0].expression
       : handler.body;
-  assert.ok(
-    ts.isCallExpression(body) && body.expression.getText() === 'console.error',
-    'the catch handler must do nothing but console.error',
-  );
+  assert.ok(ts.isCallExpression(body) && body.expression.getText() === 'console.error', 'the catch handler must do nothing but console.error');
+  // Nothing may be chained after the catch: a .then/.finally there can
+  // produce a fresh unhandled rejection.
+  assert.ok(ts.isExpressionStatement(catchCall.parent) || ts.isVoidExpression(catchCall.parent), 'nothing may be chained after the .catch');
   assert.doesNotMatch(declarations[0].getText(), /addError/);
 });
 
-test('the admin page reads issueCaps only through the guarded derived and names every cap', async () => {
+test('the admin page reads issueCaps only through the guarded derived and gates all clear on it', async () => {
   const page = await readFile(new URL('../src/routes/admin/+page.svelte', import.meta.url), 'utf8');
-  assert.match(page, /const caps = \$derived\(overview\?\.issueCaps \?\? null\)/);
-  // Exactly one mention of issueCaps: the derived itself. A bare
-  // overview.issueCaps.x crashes the page against a server that predates it.
-  assert.equal(page.split('issueCaps').length - 1, 1);
-  for (const field of ['cappedAccounts', 'anonymousCapped', 'shown', 'unreadAccounts', 'anonymousUnread']) {
-    assert.ok(page.includes(`caps.${field}`), `no feed note reads caps.${field}`);
-  }
+  const code = page.replace(/^\s*\/\/.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '');
+  assert.match(code, /const caps = \$derived\(overview\?\.issueCaps \?\? null\)/);
+  // Exactly one mention of issueCaps outside comments: the derived itself.
+  // A bare overview.issueCaps.x crashes the page against a server that
+  // predates it.
+  assert.equal(code.split('issueCaps').length - 1, 1, 'issueCaps must be read exactly once, through the guarded derived');
+  // The notes and the failure predicate come from the tested module, not
+  // from inline logic.
+  assert.match(code, /const feedNotes = \$derived\(feedNotesFor\(caps\)\)/);
+  assert.match(code, /const readFailed = \$derived\(readFailedFor\(caps\)\)/);
+  assert.match(code, /import \{ feedNotes as feedNotesFor, readFailed as readFailedFor \} from '\$lib\/utils\/adminFeed\.ts'/);
   // An empty feed after a failed read must not render as all clear.
-  const allClear = page.indexOf('No warnings or errors — all clear.');
+  const allClear = code.indexOf('No warnings or errors — all clear.');
   assert.notEqual(allClear, -1);
-  const guard = page.lastIndexOf('{#if overview.issues.length === 0 && readFailed}', allClear);
+  const guard = code.lastIndexOf('{#if overview.issues.length === 0 && readFailed}', allClear);
   assert.notEqual(guard, -1, 'the all-clear line is not preceded by the read-failure guard');
-  assert.match(page.slice(guard, allClear), /{:else if overview\.issues\.length === 0}/);
+  assert.match(code.slice(guard, allClear), /{:else if overview\.issues\.length === 0}/);
+  assert.match(code.slice(guard, allClear), /Nothing could be shown for this window/);
+  // Every note is rendered as its own list item.
+  assert.match(code, /{#each feedNotes as note}\s*<li>{note}\.<\/li>/);
 });

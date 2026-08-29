@@ -43,6 +43,8 @@ interface Overview {
     anonymousCapped: boolean;
     shown: number;
     total: number;
+    groupsWithRows: number;
+    groupsShown: number;
     unreadAccounts: number;
     anonymousUnread: boolean;
   };
@@ -294,6 +296,9 @@ test('the overview reads every account separately and a flood cannot hide an hon
   assert.equal(overview.issues.length, overview.issueCaps.shown);
   assert.equal(overview.issueCaps.unreadAccounts, 0);
   assert.equal(overview.issueCaps.anonymousUnread, false);
+  // Well under two hundred groups: every account with rows is shown.
+  assert.ok(overview.issueCaps.groupsWithRows >= 27);
+  assert.equal(overview.issueCaps.groupsShown, overview.issueCaps.groupsWithRows);
   assert.deepEqual(errors, []);
   // Anonymous rows are read under their own cap and the legacy shape decodes.
   const anonymous = overview.issues.filter((issue) => issue.uid === null && !issue.malformed);

@@ -52,6 +52,12 @@ export interface IssueFeed {
   rows: AdminIssueRow[];
   // Rows that passed the per-group caps, before the feed limit.
   total: number;
+  // Groups that had at least one row in the window, and how many of
+  // those the cut left with at least one row shown. Different only above
+  // feedLimit groups; the page names the difference so no account can
+  // vanish from the feed silently.
+  groupsWithRows: number;
+  groupsShown: number;
   // Accounts whose rows in the window exceeded the per-account cap.
   cappedAccounts: number;
   // Whether the uid-null group exceeded its own cap.
@@ -138,10 +144,14 @@ function mapIssueDocument(
 // accounts writing exactly the cap each (so nothing reported them as
 // capped) pushed an honest account's rows below the cut entirely (round-3
 // red-team). Round-robin guarantees every group at least
-// floor(feedLimit / groups) of its rows; at twenty groups or fewer nothing
-// is cut at all, and at two hundred every account still shows its newest
-// row. `total` is how many rows passed the per-group caps, so the page can
-// say how many the cut hid.
+// floor(feedLimit / groups) of its rows: nothing is cut while the capped
+// groups fit (seventeen accounts plus a full 25-row anonymous group, or
+// twenty accounts without one), at two hundred groups every group still
+// shows its newest row, and above two hundred that guarantee is zero —
+// groups past the budget in array order show nothing, and the feed says
+// so through groupsShown < groupsWithRows rather than hiding it. `total`
+// is how many rows passed the per-group caps, so the page can say how
+// many the cut hid.
 export function assembleIssueFeed(
   groups: readonly IssueGroup[],
   perAccountLimit: number,
@@ -162,14 +172,21 @@ export function assembleIssueFeed(
       .sort((a, b) => b.at - a.at);
   });
   const total = perGroup.reduce((sum, groupRows) => sum + groupRows.length, 0);
-  const deepest = Math.max(0, ...perGroup.map((groupRows) => groupRows.length));
+  // reduce, not Math.max(...spread): one argument per group overflows the
+  // call stack somewhere above a hundred thousand groups.
+  const deepest = perGroup.reduce((max, groupRows) => Math.max(max, groupRows.length), 0);
+  const groupsWithRows = perGroup.filter((groupRows) => groupRows.length > 0).length;
   const rows: AdminIssueRow[] = [];
+  let groupsShown = 0;
   for (let rank = 0; rank < deepest && rows.length < feedLimit; rank += 1) {
     for (const groupRows of perGroup) {
       if (rows.length >= feedLimit) break;
-      if (rank < groupRows.length) rows.push(groupRows[rank]);
+      if (rank < groupRows.length) {
+        rows.push(groupRows[rank]);
+        if (rank === 0) groupsShown += 1;
+      }
     }
   }
   rows.sort((a, b) => b.at - a.at);
-  return {rows, total, cappedAccounts, anonymousCapped};
+  return {rows, total, groupsWithRows, groupsShown, cappedAccounts, anonymousCapped};
 }

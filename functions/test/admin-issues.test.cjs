@@ -76,6 +76,7 @@ test("every malformed field shape becomes the same fixed placeholder", () => {
   const malformedValues = [
     validIssue({level: "debug"}),
     validIssue({event: {secret: "event-secret"}}),
+    validIssue({event: "event-secret".repeat(10)}),
     validIssue({message: {secret: "message-secret"}}),
     validIssue({message: "message-secret".repeat(100)}),
     validIssue({code: {secret: "code-secret"}}),
@@ -252,8 +253,35 @@ test("the round-robin cut keeps every account's newest rows and reports the tota
     const account = uid.replace("account-", "");
     assert.deepEqual(messages, Array.from({length: shown}, (_, index) => `${account}/${index}`));
   }
+  assert.equal(feed.groupsWithRows, 30);
+  assert.equal(feed.groupsShown, 30);
   // Below the limit nothing is cut.
   const small = assembleIssueFeed(groups.slice(0, 5), 10, 25, 200, identities);
   assert.equal(small.rows.length, 50);
   assert.equal(small.total, 50);
+});
+
+test("above feedLimit groups the tail is dropped and the feed says how many accounts vanished", () => {
+  const groups = Array.from({length: 230}, (_, account) =>
+    group(`account-${account}`, account % 2 === 0 ? [] : [
+      document(`row-${account}`, validIssue({uid: `account-${account}`, createdAt: Timestamp.fromMillis(1_000 + account)})),
+      document(`row-${account}-b`, validIssue({uid: `account-${account}`, createdAt: Timestamp.fromMillis(account)})),
+    ]));
+  // Empty groups consume no slot.
+  const feed = assembleIssueFeed(groups, 10, 25, 100, identities);
+  assert.equal(feed.groupsWithRows, 115);
+  assert.equal(feed.groupsShown, 100);
+  assert.equal(feed.rows.length, 100);
+  assert.equal(feed.total, 230);
+  // Each shown group shows exactly its newest row.
+  assert.ok(feed.rows.every((row) => row.at >= 1_000));
+  // With room for everyone, every group with rows is shown.
+  const roomy = assembleIssueFeed(groups, 10, 25, 200, identities);
+  assert.equal(roomy.groupsShown, 115);
+  assert.equal(roomy.groupsWithRows, 115);
+  assert.equal(roomy.rows.length, 200);
+  // Degenerate inputs neither throw nor claim anything.
+  const empty = assembleIssueFeed([], 10, 25, 200, identities);
+  assert.deepEqual(empty, {rows: [], total: 0, groupsWithRows: 0, groupsShown: 0, cappedAccounts: 0, anonymousCapped: false});
+  assert.equal(assembleIssueFeed(groups, 10, 25, 0, identities).rows.length, 0);
 });

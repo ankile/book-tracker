@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { feedNotes as feedNotesFor, readFailed as readFailedFor } from '$lib/utils/adminFeed.ts';
   import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
   import { addError } from '$lib/stores/errors.ts';
 
@@ -16,42 +17,12 @@
 
   // The caps block is read through one guarded derived value so a server
   // that predates it (a rollback of admin-overview while Hosting stays
-  // current) degrades to no note instead of a render error.
+  // current) degrades to no note instead of a render error. What the
+  // notes say, and when an empty feed is a failure rather than a calm,
+  // live in $lib/utils/adminFeed.ts where they are tested.
   const caps = $derived(overview?.issueCaps ?? null);
-
-  // A capped feed that looks complete is worse than one that admits it is
-  // incomplete, so everything that hid a row is named with its real number.
-  const feedNotes = $derived.by(() => {
-    if (!caps) return [];
-    const notes: string[] = [];
-    if (caps.cappedAccounts > 0) {
-      notes.push(
-        `${caps.cappedAccounts} ${caps.cappedAccounts === 1 ? 'account has' : 'accounts have'} more than ${caps.perAccount} rows in this window — only the newest ${caps.perAccount} of each are listed`
-      );
-    }
-    if (caps.anonymousCapped) {
-      notes.push(`only the newest ${caps.anonymous} anonymous sign-in failures are listed`);
-    }
-    if (caps.shown < caps.total) {
-      notes.push(`showing ${caps.shown} of ${caps.total} rows, shared evenly between accounts`);
-    }
-    if (caps.unreadAccounts > 0) {
-      notes.push(
-        `${caps.unreadAccounts} ${caps.unreadAccounts === 1 ? 'account' : 'accounts'} could not be read — ${caps.unreadAccounts === 1 ? 'its' : 'their'} rows are missing`
-      );
-    }
-    if (caps.anonymousUnread) {
-      notes.push('the anonymous sign-in failures could not be read');
-    }
-    return notes;
-  });
-
-  // An empty feed means "nothing happened" only when every read succeeded;
-  // after a total read failure (a missing index, an IAM change) it would
-  // otherwise render as a green all-clear.
-  const readFailed = $derived(
-    caps !== null && (caps.unreadAccounts > 0 || caps.anonymousUnread)
-  );
+  const feedNotes = $derived(feedNotesFor(caps));
+  const readFailed = $derived(readFailedFor(caps));
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
@@ -282,9 +253,9 @@
         Warnings and errors from the last {overview.issueWindowDays} days,
         newest first.{#if caps}
           Each account is read separately and shows at most
-          {caps.perAccount} rows, and the {caps.shown < caps.total ? caps.shown : 'feed'}
-          cut is shared evenly between accounts, so one account's volume
-          never hides another's.{/if} Anonymous rows are no longer written;
+          {caps.perAccount} rows, and the feed cut is shared evenly between
+          accounts, so one account's volume never hides another's while
+          the accounts with rows fit the feed.{/if} Anonymous rows are no longer written;
         the ones still listed predate that change and drop out of this
         window as it moves (the rows themselves expire with the 90-day
         retention).
@@ -300,7 +271,7 @@
         </div>
       {/if}
       {#if overview.issues.length === 0 && readFailed}
-        <p class="unreadable">No rows could be read for this window.</p>
+        <p class="unreadable">Nothing could be shown for this window — see above.</p>
       {:else if overview.issues.length === 0}
         <p class="empty">No warnings or errors — all clear.</p>
       {:else}

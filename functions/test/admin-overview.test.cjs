@@ -134,6 +134,8 @@ test("the issue feed reads one uid-pinned, cap+1 query per account", async (t) =
     anonymousCapped: false,
     shown: 0,
     total: 0,
+    groupsWithRows: 0,
+    groupsShown: 0,
     unreadAccounts: 0,
     anonymousUnread: false,
   });
@@ -157,6 +159,8 @@ test("the callable applies the shipped caps and the shipped feed limit to the wi
   assert.equal(result.issueCaps.total, uids.length * ISSUES_PER_UID);
   assert.equal(result.issueCaps.cappedAccounts, uids.length);
   assert.equal(result.issueCaps.anonymousCapped, false);
+  assert.equal(result.issueCaps.groupsWithRows, uids.length);
+  assert.equal(result.issueCaps.groupsShown, uids.length);
   const perUid = new Map();
   for (const row of result.issues) perUid.set(row.uid, (perUid.get(row.uid) ?? 0) + 1);
   // Round-robin: every account is present and none exceeds its cap.

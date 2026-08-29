@@ -39,7 +39,10 @@ const AUDIT_RETENTION_DAYS = 365;
 // (SEC-038 red-team, 2026-08-28). With a query per account, the most any
 // account can contribute is its cap, and no account's volume affects what
 // is read for another; FEED_LIMIT then bounds the response as a whole,
-// shared round-robin between accounts so the cut cannot re-couple them.
+// shared round-robin between accounts so the cut cannot re-couple them
+// while at most two hundred accounts have rows in the window — above
+// that every account is reduced to its newest row and the tail of the
+// account list is dropped, which the wire reports (groupsShown).
 // What this feed does not see: rows of a uid that exists in neither Auth
 // nor users/ (a fully purged account — today deleted accounts survive in
 // the union through their orphaned subcollections; if account deletion
@@ -312,6 +315,8 @@ exports.overview = adminCallable(async () => {
       anonymousCapped: feed.anonymousCapped,
       shown: feed.rows.length,
       total: feed.total,
+      groupsWithRows: feed.groupsWithRows,
+      groupsShown: feed.groupsShown,
       unreadAccounts,
       anonymousUnread,
     },

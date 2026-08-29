@@ -71,6 +71,10 @@ export interface AdminOverview {
     // Rows shown of the rows that passed the per-account caps.
     shown: number;
     total: number;
+    // Accounts (plus the anonymous group) with rows in the window, and how
+    // many of them the 200-row cut left with at least one row shown.
+    groupsWithRows: number;
+    groupsShown: number;
     // Accounts whose read failed; their rows are missing from this feed.
     unreadAccounts: number;
     // Whether the read for rows without a uid failed.
