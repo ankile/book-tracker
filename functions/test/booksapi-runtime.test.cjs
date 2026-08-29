@@ -72,6 +72,81 @@ test("lookupisbn returns sanitized partial metadata", async (t) => {
   assert.equal(quota.quota().count, 1);
 });
 
+test("lookupisbn retries transient Google Books failures without charging quota again", async (t) => {
+  const quota = installQuotaStore(t);
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    if (fetchCalls < 3) {
+      return new Response("temporarily unavailable", {status: 503});
+    }
+    return new Response(JSON.stringify({
+      totalItems: 1,
+      items: [{
+        volumeInfo: {
+          title: "Life",
+          authors: ["Keith Richards", "James Fox"],
+          pageCount: 576,
+          imageLinks: {thumbnail: "http://books.example/life.jpg"},
+        },
+      }],
+    }), {status: 200});
+  });
+
+  assert.deepEqual(
+    await deployed.booksapi.lookupisbn.run(
+      {isbn: "9780316034418"},
+      authContext,
+    ),
+    {volume: {
+      title: "Life",
+      authors: ["Keith Richards", "James Fox"],
+      pageCount: 576,
+      imageLinks: {thumbnail: "http://books.example/life.jpg"},
+    }},
+  );
+  assert.equal(fetchCalls, 3);
+  assert.equal(quota.quota().count, 1);
+});
+
+test("lookupisbn does not retry a non-transient Google Books rejection", async (t) => {
+  const quota = installQuotaStore(t);
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    return new Response("forbidden", {status: 403});
+  });
+
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run(
+      {isbn: "9780316034418"},
+      authContext,
+    ),
+    (error) => error.code === "internal",
+  );
+  assert.equal(fetchCalls, 1);
+  assert.equal(quota.quota().count, 1);
+});
+
+test("lookupisbn stops after four transient Google Books failures", async (t) => {
+  const quota = installQuotaStore(t);
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    return new Response("temporarily unavailable", {status: 503});
+  });
+
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run(
+      {isbn: "9780316034418"},
+      authContext,
+    ),
+    (error) => error.code === "unavailable",
+  );
+  assert.equal(fetchCalls, 4);
+  assert.equal(quota.quota().count, 1);
+});
+
 test("the Functions emulator returns a local miss without outbound fetch", async (t) => {
   const previous = process.env.FUNCTIONS_EMULATOR;
   process.env.FUNCTIONS_EMULATOR = "true";

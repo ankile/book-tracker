@@ -2,6 +2,7 @@ import * as functions from "firebase-functions/v1";
 import {getFirestore} from "firebase-admin/firestore";
 import {defineJsonSecret} from "firebase-functions/params";
 import {env} from "node:process";
+import {setTimeout as delay} from "node:timers/promises";
 import {
   decodeBooksApiVolume,
   decodeIsbnLookupRequest,
@@ -23,6 +24,8 @@ const db = getFirestore();
 
 const LOOKUPS_PER_WINDOW = 60;
 const LOOKUP_WINDOW_MS = 60 * 60 * 1000;
+const GOOGLE_BOOKS_MAX_ATTEMPTS = 4;
+const GOOGLE_BOOKS_RETRY_BASE_MS = 250;
 
 const invalidArgument = (message: string): never => {
   throw new functions.https.HttpsError("invalid-argument", message);
@@ -41,6 +44,22 @@ async function consumeLookupQuota(uid: string): Promise<void> {
       "Google Books lookup limit reached. Try again later.",
     );
   }
+}
+
+function retryableGoogleBooksStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+async function fetchGoogleBooks(url: string): Promise<Response> {
+  let response = await fetch(url);
+  for (let attempt = 1;
+    attempt < GOOGLE_BOOKS_MAX_ATTEMPTS &&
+    retryableGoogleBooksStatus(response.status);
+    attempt += 1) {
+    await delay(GOOGLE_BOOKS_RETRY_BASE_MS * 2 ** (attempt - 1));
+    response = await fetch(url);
+  }
+  return response;
 }
 
 // Callable, not onRequest: this proxies a metered API key, so it must not
@@ -79,13 +98,16 @@ exports.lookupisbn = functions
     }
 
     const {url, key} = runtimeConfig.value().booksapi;
-    const response = await fetch(`${url}?key=${key}&q=isbn:${isbn}&country=NO`);
+    const response = await fetchGoogleBooks(
+      `${url}?key=${key}&q=isbn:${isbn}&country=NO`,
+    );
 
     if (!response.ok) {
-      // Google emits transient 503s; surface it as retryable rather than
-      // as an internal error so the client can say "try again".
+      // The short retry budget has been exhausted. Keep transient upstream
+      // failures retryable for a later button press.
       throw new functions.https.HttpsError(
-        response.status >= 500 ? "unavailable" : "internal",
+        retryableGoogleBooksStatus(response.status) ?
+          "unavailable" : "internal",
         `Google Books request failed with status ${response.status}.`,
       );
     }
