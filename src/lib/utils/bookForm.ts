@@ -35,6 +35,14 @@ export type BookDeletionPolicy =
   | { allowed: true; confirmationWarning: string | null }
   | { allowed: false; guidance: string };
 
+export function fillMissingPageCount(
+  currentPageCount: number | null | undefined,
+  lookupPageCounts: readonly (number | undefined)[],
+): number | null | undefined {
+  if (currentPageCount !== null && currentPageCount !== undefined) return currentPageCount;
+  return lookupPageCounts.find((pageCount) => pageCount !== undefined) ?? currentPageCount;
+}
+
 export function bookDeletionPolicy(activeTimer: Book['activeTimer']): BookDeletionPolicy {
   if (activeTimer === null) {
     return { allowed: true, confirmationWarning: null };

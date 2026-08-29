@@ -13,7 +13,7 @@
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
-  import { bookDeletionPolicy, executeBookWrite, prepareBookWrite } from "../utils/bookForm.ts";
+  import { bookDeletionPolicy, executeBookWrite, fillMissingPageCount, prepareBookWrite } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
 
   let {
@@ -198,7 +198,11 @@
         authorChips = primary.authorNames.map((name) => resolveChip(name, authorList));
       }
 
-      pageCount = primary.pageCount || google?.pageCount || nb?.pageCount || pageCount;
+      pageCount = fillMissingPageCount(pageCount, [
+        primary.pageCount,
+        google?.pageCount,
+        nb?.pageCount,
+      ]);
 
       // Each source in turn fills only what is still empty.
       let merged = {

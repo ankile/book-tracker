@@ -4,6 +4,7 @@ import { Timestamp } from 'firebase/firestore';
 import {
   bookDeletionPolicy,
   executeBookWrite,
+  fillMissingPageCount,
   prepareBookWrite,
   type BookWriter,
 } from '../src/lib/utils/bookForm.ts';
@@ -110,6 +111,12 @@ function preparePageCountEdit(book: Book, pageCount: number | null | undefined) 
     metadata: EMPTY_METADATA,
   });
 }
+
+test('ISBN lookup fills a missing page count without overwriting an existing one', () => {
+  assert.equal(fillMissingPageCount(320, [393, 400]), 320);
+  assert.equal(fillMissingPageCount(undefined, [undefined, 393, 400]), 393);
+  assert.equal(fillMissingPageCount(null, [undefined, undefined]), null);
+});
 
 test('shrinking below an inflated current page prepares an atomic page correction', () => {
   const book = {
