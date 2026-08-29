@@ -30,6 +30,12 @@ import {
 import { FirebaseError } from 'firebase/app';
 import { togglQueueId } from '../src/lib/utils/toggl.ts';
 import {
+  authorShapeViolations,
+  bookShapeViolations,
+  profileOwnerRecordViolations,
+  profileShapeViolations,
+} from '../rules-shape.ts';
+import {
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from '../src/lib/firebase/readingSessionWrites.ts';
@@ -81,10 +87,11 @@ const createProfileBatch = (
   uid: string,
   username: string,
   overrides: Record<string, unknown> = {},
+  record: Record<string, unknown> = { username },
 ) => {
   const batch = writeBatch(db);
   batch.set(doc(db, 'profiles', username), profile(uid, overrides));
-  batch.set(doc(db, 'profileOwners', uid), { username });
+  batch.set(doc(db, 'profileOwners', uid), record);
   return batch.commit();
 };
 const marker = (uid: string) => ({ uid, createdAt: serverTimestamp() });
@@ -566,13 +573,14 @@ const fullBook = (db: ReturnType<RulesTestContext['firestore']>, uid: string, ov
   ...overrides,
 });
 
-test('book documents are allowlisted and byte-capped', async () => {
-  const uid = 'book-shape';
-  const db = environment.authenticatedContext(uid).firestore();
-  const books = collection(db, 'users', uid, 'books');
-  await assertSucceeds(setDoc(doc(books, 'full'), fullBook(db, uid)));
+// Field overrides the book shape rule denies, by name; the audit's mirror
+// (rules-shape.ts) must deny every one of them too.
+const bookShapeRejections = (
+  db: ReturnType<RulesTestContext['firestore']>,
+  uid: string,
+): Record<string, Record<string, unknown>> => {
   const junk = 'x'.repeat(120_000);
-  const rejected: Record<string, Record<string, unknown>> = {
+  return {
     unknownField: { notes: junk },
     // The pre-migration fields are not admitted at all: an uncapped list
     // of maps was a 1 MiB channel (review, books face).
@@ -604,6 +612,15 @@ test('book documents are allowlisted and byte-capped', async () => {
     negativeTime: { timeRead: -1 },
     fatSourceId: { currentPageUpdateId: null, pagesRead: 0 },
   };
+};
+
+test('book documents are allowlisted and byte-capped', async () => {
+  const uid = 'book-shape';
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'full'), fullBook(db, uid)));
+  const junk = 'x'.repeat(120_000);
+  const rejected = bookShapeRejections(db, uid);
   const admitted: string[] = [];
   for (const [name, overrides] of Object.entries(rejected)) {
     if (name === 'fatSourceId') continue;
@@ -660,36 +677,43 @@ test('book documents are allowlisted and byte-capped', async () => {
   await assertSucceeds(updateDoc(preRule, { pagesRead: 30, timeRead: 90.5, updatedAt: Timestamp.now() }));
 });
 
+const author = (overrides: Record<string, unknown> = {}) => ({
+  name: 'Ada Lovelace',
+  nameLower: 'ada lovelace',
+  kind: 'person',
+  givenName: 'Ada',
+  familyName: 'Lovelace',
+  updatedAt: Timestamp.now(),
+  ...overrides,
+});
+const admittedAuthors = (): Record<string, unknown>[] => [
+  author(),
+  { name: 'Anon' },
+  { name: 'Penguin', nameLower: 'penguin', kind: 'entity' },
+];
+const authorShapeRejections = (): Record<string, unknown>[] => [
+    author({ bio: 'x'.repeat(120_000) }),
+  author({ rating: 5 }),
+  author({ name: 'n'.repeat(201) }),
+  author({ name: '' }),
+  author({ name: 42 }),
+  author({ nameLower: 'n'.repeat(201) }),
+  author({ kind: 'robot' }),
+  author({ givenName: 'g'.repeat(101) }),
+  author({ familyName: 'f'.repeat(101) }),
+  author({ updatedAt: 'now' }),
+  { nothing: true },
+  {},
+];
+
 test('author documents are allowlisted and capped', async () => {
   const uid = 'author-shape';
   const db = environment.authenticatedContext(uid).firestore();
   const authors = collection(db, 'users', uid, 'authors');
-  const author = (overrides: Record<string, unknown> = {}) => ({
-    name: 'Ada Lovelace',
-    nameLower: 'ada lovelace',
-    kind: 'person',
-    givenName: 'Ada',
-    familyName: 'Lovelace',
-    updatedAt: Timestamp.now(),
-    ...overrides,
-  });
   await assertSucceeds(setDoc(doc(authors, 'ada'), author()));
   await assertSucceeds(setDoc(doc(authors, 'minimal'), { name: 'Anon' }));
   await assertSucceeds(setDoc(doc(authors, 'entity'), { name: 'Penguin', nameLower: 'penguin', kind: 'entity' }));
-  const rejected: Record<string, unknown>[] = [
-    author({ bio: 'x'.repeat(120_000) }),
-    author({ rating: 5 }),
-    author({ name: 'n'.repeat(201) }),
-    author({ name: '' }),
-    author({ name: 42 }),
-    author({ nameLower: 'n'.repeat(201) }),
-    author({ kind: 'robot' }),
-    author({ givenName: 'g'.repeat(101) }),
-    author({ familyName: 'f'.repeat(101) }),
-    author({ updatedAt: 'now' }),
-    { nothing: true },
-    {},
-  ];
+  const rejected = authorShapeRejections();
   for (const [index, value] of rejected.entries()) {
     await assertFails(setDoc(doc(authors, `bad-${index}`), value));
   }
@@ -701,6 +725,100 @@ test('author documents are allowlisted and capped', async () => {
   await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'retired' } }));
   await assertFails(updateDoc(doc(authors, 'ada'), { retirement: 'x'.repeat(500_000) }));
   await assertSucceeds(updateDoc(doc(authors, 'ada'), { givenName: 'Augusta Ada', name: 'Augusta Ada Lovelace', nameLower: 'augusta ada lovelace', updatedAt: Timestamp.now() }));
+});
+
+// The read-only audit (db-audit.ts) reports stored documents the rules
+// would reject on their next client edit, through the mirror in
+// rules-shape.ts. The mirror is only worth anything if it agrees with the
+// rules, so every fixture above is judged by both and the verdicts must
+// match in both directions; a cap moved in one place and not the other
+// fails here.
+const denied = async (write: Promise<unknown>): Promise<boolean> => {
+  try {
+    await write;
+    return false;
+  } catch (error) {
+    if (error instanceof FirebaseError && error.code === 'permission-denied') return true;
+    throw error;
+  }
+};
+
+test('the audit shape mirror agrees with the rules', async () => {
+  const uid = 'shape-mirror';
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  const disagreements: string[] = [];
+
+  const bookCases: Record<string, Record<string, unknown>> = {
+    full: fullBook(db, uid),
+    minimal: creatableBook(),
+    // join('') stringifies numbers: admitted by both, bytes stay bounded.
+    numericAuthorIds: fullBook(db, uid, { authorIds: [1, 2] }),
+    emptyTitle: fullBook(db, uid, { title: '' }),
+    nullSourceId: fullBook(db, uid, { currentPageUpdateId: null }),
+  };
+  for (const [name, overrides] of Object.entries(bookShapeRejections(db, uid))) {
+    if (name === 'fatSourceId') continue;
+    bookCases[`rejected:${name}`] = fullBook(db, uid, overrides);
+  }
+  for (const [name, book] of Object.entries(bookCases)) {
+    const mirror = bookShapeViolations(book, `users/${uid}`);
+    const rules = await denied(setDoc(doc(books, name), book));
+    if (rules !== (mirror.length > 0)) disagreements.push(`book ${name}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
+  }
+
+  const authors = collection(db, 'users', uid, 'authors');
+  const authorCases = [...admittedAuthors(), ...authorShapeRejections()];
+  for (const [index, value] of authorCases.entries()) {
+    const mirror = authorShapeViolations(value);
+    const rules = await denied(setDoc(doc(authors, `case-${index}`), value));
+    if (rules !== (mirror.length > 0)) disagreements.push(`author ${index}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
+  }
+
+  const profileCases: Record<string, Record<string, unknown>> = {
+    valid: {},
+    longGivenName: { givenName: 'g'.repeat(51) },
+    manyLinks: { links: Array.from({ length: 11 }, () => ({ type: 'github', value: 'x' })) },
+    extraField: { bio: 'x' },
+    missingField: { days: undefined },
+    extraStat: { stats: { ...profile(uid).stats as Record<string, unknown>, extra: 1 } },
+    stringStat: { stats: { ...profile(uid).stats as Record<string, unknown>, totalBooks: '12' } },
+    manyYears: { years: Array.from({ length: 201 }, (_, i) => ({ year: 1800 + i, count: 1, hours: 1, pages: 1 })) },
+    manyDays: { days: Array.from({ length: 4001 }, (_, i) => ({ day: `d${i}`, pagesRead: 1, timeRead: 1, sessions: 1 })) },
+    foreignUid: { uid: 'someone-else' },
+  };
+  for (const [name, overrides] of Object.entries(profileCases)) {
+    const owner = `mirror-${name.toLowerCase()}`;
+    await seedAccount(owner);
+    const data = Object.fromEntries(
+      Object.entries(profile(owner, overrides)).filter(([, value]) => value !== undefined),
+    );
+    // The stored document carries a real timestamp; the write sends the
+    // sentinel the rules pin to request.time.
+    const mirror = profileShapeViolations({ ...data, updatedAt: Timestamp.now() }, owner);
+    const ownerDb = verified(owner);
+    const batch = writeBatch(ownerDb);
+    batch.set(doc(ownerDb, 'profiles', owner), data);
+    batch.set(doc(ownerDb, 'profileOwners', owner), { username: owner });
+    const rules = await denied(batch.commit());
+    if (rules !== (mirror.length > 0)) disagreements.push(`profile ${name}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
+  }
+
+  const recordCases: Record<string, Record<string, unknown>> = {
+    valid: { username: 'record-valid' },
+    extraField: { username: 'record-extrafield', note: 'x' },
+    badUsername: { username: 'record-BAD' },
+    numeric: { username: 42 },
+  };
+  for (const [name, record] of Object.entries(recordCases)) {
+    const owner = `record-${name.toLowerCase()}`;
+    await seedAccount(owner);
+    const mirror = profileOwnerRecordViolations(record);
+    const rules = await denied(createProfileBatch(verified(owner), owner, owner, {}, record));
+    if (rules !== (mirror.length > 0)) disagreements.push(`record ${name}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
+  }
+
+  assert.deepEqual(disagreements, []);
 });
 
 // Firestore evaluates at most 1000 expressions per request, and the timer

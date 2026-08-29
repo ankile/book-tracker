@@ -14,6 +14,12 @@ import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
 import { Timestamp } from 'firebase-admin/firestore';
+import {
+  authorShapeViolations,
+  bookShapeViolations,
+  profileOwnerRecordViolations,
+  profileShapeViolations,
+} from './rules-shape.ts';
 
 const flags = parseFlags(process.argv.slice(2));
 const { db } = await connect(flags);
@@ -33,6 +39,8 @@ const userProfiles = await db.collection('users').get();
 const users = await db.collection('users').listDocuments();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
+const profileOwners = await db.collection('profileOwners').get();
+const existingUsers = new Set(userProfiles.docs.map((d) => d.id));
 
 const publicProfilesByUsername = new Map(
   publicProfiles.docs.map((profile) => [profile.id, profile.data()]),
@@ -64,6 +72,39 @@ for (const discovery of profileDiscoveries.docs) {
   }
 }
 
+// Rules-sitting invariants (2026-08-29): a profile belongs to a verified,
+// existing account and is named by exactly one profileOwners/{uid} record,
+// which the client moves in every profile batch. A profile without its
+// record is the legacy shape (migrate-profile-owners.ts backfills it); a
+// record without its profile, or naming a profile that is not the
+// account's, is drift the rules should have made impossible.
+const ownerRecordsByUid = new Map(profileOwners.docs.map((record) => [record.id, record.data()]));
+for (const profile of publicProfiles.docs) {
+  const data = profile.data();
+  const path = profile.ref.path;
+  for (const violation of profileShapeViolations(data, String(data.uid))) {
+    found('profile.rules-shape', path, violation);
+  }
+  if (typeof data.uid !== 'string') continue;
+  if (!existingUsers.has(data.uid)) found('profile.account-missing', path, data.uid);
+  const record = ownerRecordsByUid.get(data.uid);
+  if (record === undefined) found('profile.owner-record-missing', path, `profileOwners/${data.uid}`);
+  else if (record.username !== profile.id) {
+    found('profile.owner-record-mismatch', path, `profileOwners/${data.uid} names ${String(record.username)}`);
+  }
+}
+for (const record of profileOwners.docs) {
+  const data = record.data();
+  const path = record.ref.path;
+  for (const violation of profileOwnerRecordViolations(data)) found('profile-owner.bad-shape', path, violation);
+  if (typeof data.username !== 'string') continue;
+  const profile = publicProfilesByUsername.get(data.username);
+  if (profile === undefined) found('profile-owner.profile-missing', path, data.username);
+  else if (profile.uid !== record.id) {
+    found('profile-owner.uid-mismatch', path, `${data.username} belongs to ${String(profile.uid)}`);
+  }
+}
+
 // Info-level author bookkeeping (summary lines, not findings): orphaned
 // author docs are a legitimate steady state — deleting or editing a book
 // never garbage-collects its authors, and an orphan is still useful for
@@ -91,6 +132,7 @@ for (const user of users) {
   for (const authorDoc of authorDocs.docs) {
     const a = authorDoc.data();
     const ap = authorDoc.ref.path;
+    for (const violation of authorShapeViolations(a)) found('authordoc.rules-shape', ap, violation);
     if (typeof a.name !== 'string' || a.name.trim() === '') {
       found('authordoc.bad-name', ap, JSON.stringify(a.name));
     } else if (a.nameLower !== a.name.toLowerCase()) {
@@ -172,6 +214,7 @@ for (const user of users) {
   for (const book of books.docs) {
     const b = book.data();
     const p = book.ref.path;
+    for (const violation of bookShapeViolations(b, user.path)) found('book.rules-shape', p, violation);
 
     for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction']) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
@@ -261,7 +304,6 @@ for (const user of users) {
 
 // Orphans: parents that are listable but do not exist as documents, with
 // children underneath. Report-only, never repaired (see migrate-add-owner).
-const existingUsers = new Set(userProfiles.docs.map((d) => d.id));
 for (const ref of users) {
   if (!existingUsers.has(ref.id)) found('orphan.user', ref.path);
 }
@@ -288,4 +330,5 @@ console.log(`author-docs: ${authorDocCount}`);
 console.log(`author-orphans: ${authorOrphanCount}`);
 console.log(`public-profiles: ${publicProfiles.size}`);
 console.log(`profile-discoveries: ${profileDiscoveries.size}`);
+console.log(`profile-owners: ${profileOwners.size}`);
 console.log(`findings: ${findings.length}`);
