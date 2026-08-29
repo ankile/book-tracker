@@ -309,9 +309,17 @@ use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
 production tokens are never sent to Toggl, and start, stop, token, and queue
 flows still exercise their real Firestore state transitions. The metered Google
 Books proxy also returns a local miss instead of consuming its production key.
-Queued Toggl work is claimed under a server-owned ten-per-hour user quota.
-Successful queue rows are deleted, while terminal rows receive a 90-day TTL;
-malformed events consume quota before they are rejected.
+Queued Toggl work is claimed under a server-owned ten-per-hour user quota;
+an over-quota row is stamped with the end of the window (`deferredUntil`)
+and left pending — the trigger never throws for overflow, so Eventarc does
+not redeliver it, and the client sweep may re-arm it only once the window
+has ended. The only queue row a client can create is the atomic offline-stop
+row coupled to a real timer clear, and the trigger counts each row once
+against a second server-owned counter (sixty rows per user per hour,
+`functionQuotas/togglQueueRows`) that closes that create rule when full
+(SEC-002). Successful queue rows are deleted, while terminal and deferred
+rows receive a 90-day TTL; malformed events consume quota before they are
+rejected.
 Before Firebase starts, `serve` stages the checked-in dummy
 `functions/.secret.emulator` as the ignored `.secret.local`; Firebase resolves
 bound secrets before handler guards run, so this prevents an emulator startup

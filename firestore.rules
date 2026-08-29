@@ -637,29 +637,40 @@ service cloud.firestore {
                          && get(/databases/$(database)/documents/users/$(userId)/authors/$(after.targetId)).data.get('retirement', null) == null)));
     }
 
-    // Offline Toggl sync queue: an owner can enqueue one exact, bounded
-    // payload and read its lifecycle. The Admin SDK alone writes processing,
-    // error and synced states. A client retry can only set pending plus a new
-    // server timestamp, only after the same stale windows the client sweep
-    // uses, and never after the fifth claim. The timestamp makes a retry of
-    // an unchanged pending status emit a production Firestore event. The
-    // server-owned per-user quota bounds all claim attempts to ten per hour;
-    // terminal rows expire through the server-owned TTL field. Atomic timer
-    // stops deliberately bypass the rules-side quota so an offline client
-    // can always release its local timer claim. Retry writes do too: the
-    // server claim transaction remains the authoritative quota gate and
-    // leaves over-quota rows pending for a later Eventarc delivery. This
-    // quota bounds remote calls, not the one client write and Eventarc
-    // delivery needed to request a retry; the outstanding marker limits a
-    // stuck row to one fresh delivery request per ten-minute window.
+    // Offline Toggl sync queue: the only row a client can create is the
+    // atomic offline-stop row — the deterministic `bookId_start` row written
+    // in the same batch that clears that exact timer (SEC-002: ordinary
+    // creates, which the client stopped writing on 2026-08-24, are gone, so
+    // no client can mint a queue row that is not coupled to a real timer
+    // clear). An owner can read its lifecycle; the Admin SDK alone writes
+    // processing, error and synced states. A client retry can only set
+    // pending plus a new server timestamp, only after the same stale
+    // windows the client sweep uses, never before a server-pinned deferral
+    // has ended, and never after the fifth claim. The timestamp makes a
+    // retry of an unchanged pending status emit a production Firestore
+    // event.
+    //
+    // Two server-owned counters bound the queue. functionQuotas/togglQueue
+    // meters remote Toggl calls (ten per hour); an over-quota row is
+    // deferred, not refused, so an offline stop never rolls its timer back
+    // and its interval is never lost. functionQuotas/togglQueueRows counts
+    // rows themselves (sixty per hour, moved by the trigger the first time
+    // it touches a row) and closes this create rule once full: a client can
+    // start and stop timers as fast as it likes, so without it one account
+    // yields unlimited rows and Eventarc deliveries. The count lags the
+    // writes by one delivery, so a burst overshoots but cannot sustain; a
+    // refused stop leaves the timer running. Retry writes bypass both: the
+    // server claim transaction remains the authoritative gate, and the
+    // marker plus the deferral limit a stuck row to one delivery request
+    // per ten-minute window and one per quota window respectively.
     match /users/{userId}/togglQueue/{queueId} {
       allow read: if request.auth != null && userId == request.auth.uid;
       allow create: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
                     && validInitialTogglQueueItem()
-                    && (request.resource.data.get('timerClaimVersion', 0) == 1
-                        ? validAtomicTimerStop(userId, queueId)
-                        : togglQueueQuotaAvailable(userId));
+                    && request.resource.data.get('timerClaimVersion', 0) == 1
+                    && validAtomicTimerStop(userId, queueId)
+                    && togglQueueRowsAvailable(userId);
       allow update: if request.auth != null && userId == request.auth.uid
                     && togglConfigured(userId)
                     && request.resource.data.diff(resource.data).affectedKeys()
@@ -694,7 +705,7 @@ service cloud.firestore {
              && item.keys().hasOnly([
                   'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
                   'timerClaimVersion', 'status', 'createdAt', 'attempts', 'claimedAt', 'error',
-                  'expiresAt', 'retryRequestedAt'
+                  'expiresAt', 'retryRequestedAt', 'deferredUntil'
                 ])
              && ((!item.keys().hasAny(['attempts', 'claimedAt', 'error']))
                   || (item.attempts is int
@@ -737,10 +748,10 @@ service cloud.firestore {
                      && item.entryId > 0));
     }
 
-    // A full claim quota must not make an offline stop roll its book timer
-    // back. The narrow exception below only accepts the deterministic queue
-    // row written in the same batch that clears that exact timer. Ordinary
-    // creates, including legacy clients without bookId, remain quota-gated.
+    // The one client-creatable queue row: the deterministic row written in
+    // the same batch that clears that exact timer. A full claim quota must
+    // not make an offline stop roll its book timer back, so the remote-call
+    // quota is not consulted here; the row counter is (see the match).
     function validAtomicTimerStop(userId, queueId) {
       let item = request.resource.data;
       let bookId = item.get('bookId', '');
@@ -778,12 +789,18 @@ service cloud.firestore {
                      && afterClaim.queueId == after.activeTimer.queueId));
     }
 
+    // A pending row the server deferred (quota window full) carries the
+    // server-pinned end of that window; no retry marker before it, so a
+    // deferred row costs one delivery per window instead of six.
     function togglRetryWindowOpen() {
       return resource.data.status == 'error'
              || (resource.data.status == 'pending'
                  && resource.data.createdAt is timestamp
                  && resource.data.createdAt
-                    < request.time - duration.value(600, 's'))
+                    < request.time - duration.value(600, 's')
+                 && (!resource.data.keys().hasAny(['deferredUntil'])
+                     || (resource.data.deferredUntil is timestamp
+                         && resource.data.deferredUntil <= request.time)))
              || (resource.data.status == 'processing'
                  && resource.data.claimedAt is timestamp
                  && resource.data.claimedAt
@@ -816,8 +833,12 @@ service cloud.firestore {
              && toggl.projectId > 0;
     }
 
-    function togglQueueQuotaAvailable(userId) {
-      let path = /databases/$(database)/documents/users/$(userId)/functionQuotas/togglQueue;
+    // Mirrors functions/src/togglQueueLimits.ts (TOGGL_QUEUE_ROW_LIMIT,
+    // TOGGL_QUEUE_WINDOW_MS) and the shape applyQuota writes. Only the Admin
+    // SDK can write the counter, so a malformed document is a server bug and
+    // fails closed here; a missing or expired one is an open window.
+    function togglQueueRowsAvailable(userId) {
+      let path = /databases/$(database)/documents/users/$(userId)/functionQuotas/togglQueueRows;
       return !exists(path)
              || (get(path).data.keys().hasAll(['windowStartedAt', 'count'])
                  && get(path).data.keys().hasOnly(['windowStartedAt', 'count'])
@@ -826,7 +847,7 @@ service cloud.firestore {
                  && get(path).data.count >= 0
                  && (get(path).data.windowStartedAt
                        <= request.time - duration.value(3600, 's')
-                     || get(path).data.count < 10));
+                     || get(path).data.count < 60));
     }
 
     // A separate marker opts an already-public profile into search. Keeping

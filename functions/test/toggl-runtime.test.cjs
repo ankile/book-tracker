@@ -3,6 +3,13 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {logger} = require("firebase-functions");
+const {
+  TOGGL_QUEUE_LIMIT,
+  TOGGL_QUEUE_RETENTION_MS,
+  TOGGL_QUEUE_ROW_LIMIT,
+  TOGGL_QUEUE_WINDOW_MS,
+} = require("../lib/togglQueueLimits");
 
 const deployed = require("../lib");
 const db = getFirestore();
@@ -40,14 +47,17 @@ function queueItem(overrides = {}) {
   };
 }
 
-function installQueueStore(t, item, {quota} = {}) {
+function installQueueStore(t, item, {quota, rows} = {}) {
   const queueUpdates = [];
   const transactionUpdates = [];
   const quotaWrites = [];
+  const rowsWrites = [];
   const issues = [];
   let queueDeleted = false;
   let configReads = 0;
   let quotaValue = quota;
+  let rowsValue = rows;
+  let rowsReads = 0;
   const queueRef = {
     update: async (patch) => {
       queueUpdates.push(patch);
@@ -65,20 +75,29 @@ function installQueueStore(t, item, {quota} = {}) {
     },
   };
   const quotaRef = {};
+  const rowsRef = {};
   t.mock.method(db, "doc", (path) => {
     if (path === "users/owner") return userRef;
+    if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (ref) => {
       if (ref === queueRef) return snapshot(item);
+      if (ref === rowsRef) {
+        rowsReads += 1;
+        return snapshot(rowsValue, rowsValue !== undefined);
+      }
       assert.equal(ref, quotaRef);
       return snapshot(quotaValue, quotaValue !== undefined);
     },
     update: (ref, patch) => {
       if (ref === queueRef) {
         transactionUpdates.push(patch);
+      } else if (ref === rowsRef) {
+        rowsValue = {...rowsValue, ...patch};
+        rowsWrites.push({type: "update", value: patch});
       } else {
         assert.equal(ref, quotaRef);
         quotaValue = {...quotaValue, ...patch};
@@ -86,6 +105,11 @@ function installQueueStore(t, item, {quota} = {}) {
       }
     },
     set: (ref, value) => {
+      if (ref === rowsRef) {
+        rowsValue = value;
+        rowsWrites.push({type: "set", value});
+        return;
+      }
       assert.equal(ref, quotaRef);
       quotaValue = value;
       quotaWrites.push({type: "set", value});
@@ -117,7 +141,14 @@ function installQueueStore(t, item, {quota} = {}) {
     get quota() {
       return quotaValue;
     },
+    get rows() {
+      return rowsValue;
+    },
+    get rowsReads() {
+      return rowsReads;
+    },
     quotaWrites,
+    rowsWrites,
     queueUpdates,
     transactionUpdates,
   };
@@ -146,6 +177,7 @@ function installCorrelatedStopStore(t, mode) {
   const bookRef = {};
   const claimRef = {};
   const quotaRef = {};
+  const rowsRef = {};
   const userRef = {
     get: async () => snapshot({
       toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
@@ -156,6 +188,7 @@ function installCorrelatedStopStore(t, mode) {
   t.mock.method(db, "doc", (path) => {
     if (path === "users/owner") return userRef;
     if (path === "users/owner/functionQuotas/togglQueue") return quotaRef;
+    if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     if (path === "users/owner/books/book") return bookRef;
     if (path === "users/owner/timerLifecycle/current") return claimRef;
     throw new Error(`Unexpected document path ${path}`);
@@ -170,6 +203,7 @@ function installCorrelatedStopStore(t, mode) {
       return handler({
         get: async (ref) => {
           if (ref === queueRef) return snapshot(item);
+          if (ref === rowsRef) return snapshot(undefined, false);
           assert.equal(ref, quotaRef);
           return snapshot(undefined, false);
         },
@@ -582,6 +616,66 @@ test("queue quota increments, resets, and blocks remote work", async (t) => {
   await deployed.toggl.syncqueue.run(active.event);
   assert.equal(active.quota.count, 10);
   assert.equal(active.quotaWrites[0].type, "update");
+  // The fresh row is counted against the row bound in the same transaction
+  // as its claim, and the claim clears any deferral stamp.
+  assert.equal(active.rowsReads, 1);
+  assert.deepEqual(active.rowsWrites.map((write) => write.type), ["set"]);
+  assert.equal(active.rows.count, 1);
+  assert.deepEqual(active.transactionUpdates[0].deferredUntil, FieldValue.delete());
+});
+
+test("a redelivered event for an already-touched row is not counted again", async (t) => {
+  const store = installQueueStore(t, queueItem({
+    attempts: 1,
+    claimedAt: Timestamp.fromMillis(Date.now() - 20 * 60 * 1000),
+    retryRequestedAt: Timestamp.now(),
+  }), {rows: {windowStartedAt: Timestamp.now(), count: 3}});
+  t.mock.method(global, "fetch", async () =>
+    new Response(JSON.stringify({id: 84}), {status: 200}),
+  );
+  await deployed.toggl.syncqueue.run(store.event);
+  assert.equal(store.rowsReads, 0);
+  assert.deepEqual(store.rowsWrites, []);
+  assert.equal(store.rows.count, 3);
+  assert.equal(store.queueDeleted, true);
+});
+
+test("the row bound refuses past the limit, warns once, and never blocks the row", async (t) => {
+  const warnings = [];
+  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  t.mock.method(global, "fetch", async () =>
+    new Response(JSON.stringify({id: 85}), {status: 200}),
+  );
+  const atLimit = installQueueStore(t, queueItem(), {
+    rows: {windowStartedAt: Timestamp.now(), count: TOGGL_QUEUE_ROW_LIMIT},
+  });
+  await deployed.toggl.syncqueue.run(atLimit.event);
+  // The row itself is processed: the bound closes the rules for later
+  // creates, it does not discard a row the rules already admitted.
+  assert.equal(atLimit.queueDeleted, true);
+  assert.deepEqual(atLimit.rowsWrites, [
+    {type: "update", value: {count: TOGGL_QUEUE_ROW_LIMIT + 1}},
+  ]);
+  assert.deepEqual(warnings, [["toggl.queue_rows_exceeded", {uid: "owner"}]]);
+
+  const pastLimit = installQueueStore(t, queueItem(), {
+    rows: {windowStartedAt: Timestamp.now(), count: TOGGL_QUEUE_ROW_LIMIT + 1},
+  });
+  await deployed.toggl.syncqueue.run(pastLimit.event);
+  assert.equal(pastLimit.queueDeleted, true);
+  assert.deepEqual(pastLimit.rowsWrites, []);
+  assert.equal(warnings.length, 1);
+
+  const expired = installQueueStore(t, queueItem(), {
+    rows: {
+      windowStartedAt: Timestamp.fromMillis(Date.now() - TOGGL_QUEUE_WINDOW_MS - 1),
+      count: TOGGL_QUEUE_ROW_LIMIT + 1,
+    },
+  });
+  await deployed.toggl.syncqueue.run(expired.event);
+  assert.deepEqual(expired.rowsWrites.map((write) => write.type), ["set"]);
+  assert.equal(expired.rows.count, 1);
+  assert.equal(warnings.length, 1);
 });
 
 test("an expired queue quota resets before remote work", async (t) => {
@@ -599,9 +693,11 @@ test("an expired queue quota resets before remote work", async (t) => {
   assert.equal(expired.quotaWrites[0].type, "set");
 });
 
-test("an exhausted queue quota defers without consuming an attempt", async (t) => {
-  const store = installQueueStore(t, queueItem(), {
-    quota: {windowStartedAt: Timestamp.now(), count: 10},
+test("an exhausted queue quota defers once per window and never throws", async (t) => {
+  const windowStartedAt = Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
+  const createdAt = Timestamp.fromMillis(Date.now() - 60 * 1000);
+  const store = installQueueStore(t, queueItem({createdAt}), {
+    quota: {windowStartedAt, count: TOGGL_QUEUE_LIMIT},
   });
   let fetchCalls = 0;
   t.mock.method(global, "fetch", async () => {
@@ -609,19 +705,76 @@ test("an exhausted queue quota defers without consuming an attempt", async (t) =
     throw new Error("fetch must not run");
   });
 
-  await assert.rejects(
-    deployed.toggl.syncqueue.run(store.event),
-    /Eventarc will retry/,
-  );
+  // Resolves: a throw here used to make Eventarc redeliver every over-quota
+  // row with backoff for a day (SEC-002).
+  await deployed.toggl.syncqueue.run(store.event);
   assert.equal(fetchCalls, 0);
   assert.equal(store.configReads, 0);
-  assert.deepEqual(store.transactionUpdates, []);
   assert.deepEqual(store.quotaWrites, []);
   assert.equal(store.queueUpdates.length, 0);
+  // The stamp is the server-pinned end of the quota window, and a deferred
+  // create row gets a finite expiry measured from its creation.
+  assert.deepEqual(store.transactionUpdates, [{
+    deferredUntil: Timestamp.fromMillis(windowStartedAt.toMillis() + TOGGL_QUEUE_WINDOW_MS),
+    expiresAt: Timestamp.fromMillis(createdAt.toMillis() + TOGGL_QUEUE_RETENTION_MS),
+  }]);
+  // A deferred row is still a row: it is counted against the row bound.
+  assert.deepEqual(store.rowsWrites.map((write) => write.type), ["set"]);
+  assert.equal(store.rows.count, 1);
+});
+
+test("a row already stamped for this window is left untouched", async (t) => {
+  const windowStartedAt = Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
+  const deferredUntil = Timestamp.fromMillis(windowStartedAt.toMillis() + TOGGL_QUEUE_WINDOW_MS);
+  const store = installQueueStore(t, queueItem({
+    deferredUntil,
+    expiresAt: Timestamp.fromMillis(Date.now() + TOGGL_QUEUE_RETENTION_MS),
+  }), {
+    quota: {windowStartedAt, count: TOGGL_QUEUE_LIMIT},
+    rows: {windowStartedAt, count: 7},
+  });
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("fetch must not run");
+  });
+
+  // The stamp write fires this trigger once more; writing it again would
+  // loop. Nothing is written and the row is not counted a second time.
+  await deployed.toggl.syncqueue.run(store.event);
+  assert.deepEqual(store.transactionUpdates, []);
+  assert.deepEqual(store.quotaWrites, []);
+  assert.deepEqual(store.rowsWrites, []);
+  assert.equal(store.rowsReads, 0);
+  assert.equal(store.rows.count, 7);
+});
+
+test("a new quota window re-stamps a still-deferred row without re-counting it", async (t) => {
+  const previousWindow = Timestamp.fromMillis(Date.now() - 90 * 60 * 1000);
+  const windowStartedAt = Timestamp.fromMillis(Date.now() - 10 * 60 * 1000);
+  const expiresAt = Timestamp.fromMillis(Date.now() + TOGGL_QUEUE_RETENTION_MS);
+  const store = installQueueStore(t, queueItem({
+    deferredUntil: Timestamp.fromMillis(previousWindow.toMillis() + TOGGL_QUEUE_WINDOW_MS),
+    expiresAt,
+  }), {
+    quota: {windowStartedAt, count: TOGGL_QUEUE_LIMIT},
+    rows: {windowStartedAt, count: 7},
+  });
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("fetch must not run");
+  });
+
+  await deployed.toggl.syncqueue.run(store.event);
+  // Only the stamp moves: the expiry set at the first deferral is kept, so
+  // a row deferred window after window still ends 90 days after creation.
+  assert.deepEqual(store.transactionUpdates, [{
+    deferredUntil: Timestamp.fromMillis(windowStartedAt.toMillis() + TOGGL_QUEUE_WINDOW_MS),
+  }]);
+  assert.equal(store.rowsReads, 0);
+  assert.deepEqual(store.rowsWrites, []);
 });
 
 test("quota deferral preserves a pending item's existing retry budget", async (t) => {
   const claimedAt = Timestamp.now();
+  const windowStartedAt = Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
   const item = queueItem({
     attempts: 4,
     claimedAt,
@@ -629,7 +782,7 @@ test("quota deferral preserves a pending item's existing retry budget", async (t
     error: "previous failure",
   });
   const store = installQueueStore(t, item, {
-    quota: {windowStartedAt: Timestamp.now(), count: 10},
+    quota: {windowStartedAt, count: TOGGL_QUEUE_LIMIT},
   });
   let fetchCalls = 0;
   t.mock.method(global, "fetch", async () => {
@@ -637,15 +790,36 @@ test("quota deferral preserves a pending item's existing retry budget", async (t
     throw new Error("fetch must not run");
   });
 
-  await assert.rejects(
-    deployed.toggl.syncqueue.run(store.event),
-    /Eventarc will retry/,
-  );
-  assert.deepEqual(store.transactionUpdates, []);
+  await deployed.toggl.syncqueue.run(store.event);
+  assert.equal(store.transactionUpdates.length, 1);
+  assert.deepEqual(Object.keys(store.transactionUpdates[0]).sort(), ["deferredUntil", "expiresAt"]);
   assert.deepEqual(store.quotaWrites, []);
+  // A retried row was counted when first touched; not again.
+  assert.equal(store.rowsReads, 0);
+  assert.deepEqual(store.rowsWrites, []);
   assert.equal(fetchCalls, 0);
   assert.equal(item.attempts, 4);
   assert.equal(item.claimedAt, claimedAt);
+  assert.equal(item.retryRequestedAt instanceof Timestamp, true);
+});
+
+test("a deferred correlated stop keeps its recovery row TTL-immune", async (t) => {
+  const windowStartedAt = Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
+  const start = "2026-08-24T12:00:00Z";
+  const store = installQueueStore(t, queueItem({
+    type: "stop", bookId: "book", timerClaimVersion: 1, entryId: 52, start,
+  }), {
+    quota: {windowStartedAt, count: TOGGL_QUEUE_LIMIT},
+  });
+  t.mock.method(global, "fetch", async () => {
+    throw new Error("fetch must not run");
+  });
+
+  await deployed.toggl.syncqueue.run(store.event);
+  assert.deepEqual(store.transactionUpdates, [{
+    deferredUntil: Timestamp.fromMillis(windowStartedAt.toMillis() + TOGGL_QUEUE_WINDOW_MS),
+  }]);
+  assert.equal(store.rows.count, 1);
 });
 
 test("a malformed queue quota fails closed without fetch", async (t) => {

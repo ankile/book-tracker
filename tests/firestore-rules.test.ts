@@ -1795,48 +1795,101 @@ test('no token claim opens logEvents or the quota document', async () => {
   }
 });
 
-test('owners can create and read only exact pending Toggl queue payloads', async () => {
-  await seedToggl('queue-owner');
-  const owner = environment.authenticatedContext('queue-owner').firestore();
-  const createRef = doc(owner, 'users', 'queue-owner', 'togglQueue', 'create');
-  const stopRef = doc(owner, 'users', 'queue-owner', 'togglQueue', 'stop');
-  await assertSucceeds(setDoc(createRef, queueItem()));
-  await assertSucceeds(setDoc(stopRef, queueItem({type: 'stop', entryId: 42})));
-  await assertSucceeds(getDoc(createRef));
+// Seeds a running local timer and returns the one batch a client may use to
+// enqueue: clear that exact timer and write the deterministic queue row in
+// the same commit. `overrides` shape the queue row; the batch is built by an
+// arbitrary caller so forged rows from a stranger can be tried too.
+const localStopBatch = async (
+  uid: string,
+  sequence: number,
+  overrides: Record<string, unknown> = {},
+  writer: ReturnType<RulesTestContext['firestore']> = environment.authenticatedContext(uid).firestore(),
+) => {
+  const start = `2026-08-24T14:${String(sequence % 60).padStart(2, '0')}:${String(Math.floor(sequence / 60)).padStart(2, '0')}.000Z`;
+  const operationId = `op-${sequence}`;
+  const claim = localLifecycle('book', start, operationId);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+      title: 'Book', activeTimer: {start, operationId},
+    });
+    await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), claim);
+  });
+  const batch = writeBatch(writer);
+  batch.update(doc(writer, 'users', uid, 'books', 'book'), {activeTimer: null});
+  batch.set(doc(writer, 'users', uid, 'timerLifecycle', 'current'), idleLifecycle(claim));
+  batch.set(doc(writer, 'users', uid, 'togglQueue', togglQueueId('book', start)), queueItem({
+    bookId: 'book', bookTitle: 'Book', start, timerClaimVersion: 1, ...overrides,
+  }));
+  return {commit: () => batch.commit(), queueId: togglQueueId('book', start)};
+};
+
+test('owners can create only the atomic offline-stop row and read their own queue', async () => {
+  const uid = 'queue-owner';
+  await seedToggl(uid);
+  const owner = environment.authenticatedContext(uid).firestore();
+  const valid = await localStopBatch(uid, 1);
+  await assertSucceeds(valid.commit());
+  await assertSucceeds(getDoc(doc(owner, 'users', uid, 'togglQueue', valid.queueId)));
+  // Uncoupled rows are gone (SEC-002): the bare create and stop payloads the
+  // old client wrote are refused even from a configured owner.
+  await assertFails(setDoc(doc(owner, 'users', uid, 'togglQueue', 'create'), queueItem()));
+  await assertFails(setDoc(doc(owner, 'users', uid, 'togglQueue', 'stop'), queueItem({type: 'stop', entryId: 42})));
 
   const stranger = environment.authenticatedContext('queue-stranger').firestore();
-  await assertFails(getDoc(doc(stranger, 'users', 'queue-owner', 'togglQueue', 'create')));
+  await assertFails(getDoc(doc(stranger, 'users', uid, 'togglQueue', valid.queueId)));
   await assertFails(setDoc(
-    doc(stranger, 'users', 'queue-owner', 'togglQueue', 'forged'),
-    queueItem(),
+    doc(stranger, 'users', uid, 'togglQueue', 'forged'),
+    queueItem({bookId: 'book', timerClaimVersion: 1}),
   ));
+  const forgedBatch = await localStopBatch(uid, 2, {}, stranger);
+  await assertFails(forgedBatch.commit());
 });
 
-test('Toggl queue creates reject malformed payloads and lifecycle fields', async () => {
-  await seedToggl('queue-shape');
-  const db = environment.authenticatedContext('queue-shape').firestore();
-  const queue = collection(db, 'users', 'queue-shape', 'togglQueue');
-  const cases = [
-    queueItem({type: 'other'}),
-    queueItem({bookId: 'books/123'}),
-    queueItem({bookId: '.'}),
-    queueItem({bookTitle: ''}),
-    queueItem({start: 'August 24, 2026'}),
-    queueItem({stop: '2026-08-24'}),
-    queueItem({type: 'create', entryId: 42}),
-    queueItem({type: 'stop'}),
-    queueItem({type: 'stop', entryId: '42'}),
-    queueItem({status: 'processing'}),
-    queueItem({attempts: 0}),
-    queueItem({claimedAt: serverTimestamp()}),
-    queueItem({retryRequestedAt: serverTimestamp()}),
-    queueItem({expiresAt: serverTimestamp()}),
-    queueItem({unexpected: true}),
-    queueItem({createdAt: 'today'}),
+test('atomic queue rows reject malformed payloads and lifecycle fields', async () => {
+  const uid = 'queue-shape';
+  await seedToggl(uid);
+  const cases: Record<string, unknown>[] = [
+    {type: 'other'},
+    {bookId: 'books/123'},
+    {bookId: '.'},
+    {bookId: 'other'},
+    {bookTitle: ''},
+    {start: 'August 24, 2026'},
+    {stop: '2026-08-24'},
+    {type: 'create', entryId: 42},
+    {type: 'stop'},
+    {type: 'stop', entryId: '42'},
+    {status: 'processing'},
+    {attempts: 0},
+    {claimedAt: serverTimestamp()},
+    {retryRequestedAt: serverTimestamp()},
+    {expiresAt: serverTimestamp()},
+    {deferredUntil: serverTimestamp()},
+    {deferredUntil: Timestamp.fromMillis(Date.now() - 1000)},
+    {unexpected: true},
+    {createdAt: 'today'},
+    {timerClaimVersion: 2},
   ];
-  for (const [index, item] of cases.entries()) {
-    await assertFails(setDoc(doc(queue, String(index)), item));
+  for (const [index, overrides] of cases.entries()) {
+    await assertFails((await localStopBatch(uid, index + 1, overrides)).commit());
   }
+  // The legacy shape — the coupled row without its version marker — is
+  // refused too: the marker is what selects the atomic path.
+  const legacy = await localStopBatch(uid, 400);
+  const db = environment.authenticatedContext(uid).firestore();
+  const legacyStart = legacy.queueId.slice('book_'.length);
+  const legacyBatch = writeBatch(db);
+  legacyBatch.update(doc(db, 'users', uid, 'books', 'book'), {activeTimer: null});
+  legacyBatch.set(
+    doc(db, 'users', uid, 'timerLifecycle', 'current'),
+    idleLifecycle(localLifecycle('book', legacyStart, 'op-400')),
+  );
+  legacyBatch.set(doc(db, 'users', uid, 'togglQueue', legacy.queueId), queueItem({
+    bookId: 'book', bookTitle: 'Book', start: legacyStart,
+  }));
+  await assertFails(legacyBatch.commit());
+  // Control: the same harness admits the well-formed row.
+  await assertSucceeds((await localStopBatch(uid, 500)).commit());
 });
 
 test('owners can retry only stale or failed queue states below the cap', async () => {
@@ -2049,7 +2102,10 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
   assert.ok(legacyPending?.retryRequestedAt instanceof Timestamp);
 });
 
-test('ordinary Toggl queue creates require configuration and an available server quota', async () => {
+test('no ordinary Toggl queue create exists any more, whatever the quotas say', async () => {
+  // SEC-002: a queue row that is not the atomic offline-stop row coupled to
+  // a real timer clear can no longer be minted, even by a configured owner
+  // with open quotas. Legacy clients without bookId lose the path too.
   const uid = 'queue-quota';
   const db = environment.authenticatedContext(uid).firestore();
   const queue = collection(db, 'users', uid, 'togglQueue');
@@ -2061,17 +2117,115 @@ test('ordinary Toggl queue creates require configuration and an available server
   });
   await assertFails(setDoc(doc(queue, 'unconfigured'), queueItem()));
 
-  await seedToggl(uid, { windowStartedAt: Timestamp.now(), count: 10 });
-  await assertFails(setDoc(doc(queue, 'exhausted'), queueItem()));
+  await seedToggl(uid);
+  await assertFails(setDoc(doc(queue, 'plain'), queueItem()));
   await assertFails(setDoc(doc(queue, 'book_2026-08-24T12:00:00.000Z'), queueItem({
     bookId: 'book',
+  })));
+  await assertFails(setDoc(doc(queue, 'stop'), queueItem({type: 'stop', entryId: 42})));
+  await assertFails(setDoc(doc(queue, 'claims-v1'), queueItem({
+    bookId: 'book', timerClaimVersion: 1,
   })));
 
   await seedToggl(uid, {
     windowStartedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000),
-    count: 10,
+    count: 0,
   });
-  await assertSucceeds(setDoc(doc(queue, 'expired-window'), queueItem()));
+  await assertFails(setDoc(doc(queue, 'expired-window'), queueItem()));
+  await assertFails(setDoc(doc(queue, 'expired-window-v1'), queueItem({
+    bookId: 'book', timerClaimVersion: 1,
+  })));
+});
+
+test('the row bound closes the atomic offline stop once the server counter is full', async () => {
+  // SEC-002: the trigger counts each row in functionQuotas/togglQueueRows;
+  // once the window holds sixty, no further atomic stop row can be created
+  // until the window ends. The timer stays running (the batch is refused as
+  // a whole), so no interval is lost. A malformed counter fails closed: only
+  // the Admin SDK can write it, so that is a server bug, not a lockout path.
+  const uid = 'atomic-row-bound';
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', 'book');
+  const lifecycleRef = doc(db, 'users', uid, 'timerLifecycle', 'current');
+  const rowsRef = (context: RulesTestContext) =>
+    doc(context.firestore(), 'users', uid, 'functionQuotas', 'togglQueueRows');
+  await seedToggl(uid, {windowStartedAt: Timestamp.now(), count: 10});
+
+  let sequence = 0;
+  const attempt = async (rows: Record<string, unknown> | null) => {
+    sequence += 1;
+    const start = `2026-08-24T12:${String(sequence).padStart(2, '0')}:00.000Z`;
+    const operationId = `op-${sequence}`;
+    const claim = localLifecycle('book', start, operationId);
+    await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+      await setDoc(doc(context.firestore(), 'users', uid, 'books', 'book'), {
+        title: 'Book', activeTimer: {start, operationId},
+      });
+      await setDoc(doc(context.firestore(), 'users', uid, 'timerLifecycle', 'current'), claim);
+      if (rows === null) await deleteDoc(rowsRef(context));
+      else await setDoc(rowsRef(context), rows);
+    });
+    const batch = writeBatch(db);
+    batch.update(bookRef, {activeTimer: null});
+    batch.set(lifecycleRef, idleLifecycle(claim));
+    batch.set(doc(db, 'users', uid, 'togglQueue', togglQueueId('book', start)), queueItem({
+      bookId: 'book', bookTitle: 'Book', start, timerClaimVersion: 1,
+    }));
+    return batch.commit();
+  };
+  const now = Timestamp.now();
+  const expired = Timestamp.fromMillis(Date.now() - 60 * 60 * 1000 - 1000);
+  const open = Timestamp.fromMillis(Date.now() - 60 * 60 * 1000 + 60 * 1000);
+  await assertSucceeds(attempt(null));
+  await assertSucceeds(attempt({windowStartedAt: now, count: 0}));
+  await assertSucceeds(attempt({windowStartedAt: open, count: 59}));
+  await assertFails(attempt({windowStartedAt: open, count: 60}));
+  await assertFails(attempt({windowStartedAt: now, count: 61}));
+  await assertFails(attempt({windowStartedAt: now, count: 1000}));
+  await assertSucceeds(attempt({windowStartedAt: expired, count: 1000}));
+  await assertFails(attempt({windowStartedAt: now, count: 'many'}));
+  await assertFails(attempt({windowStartedAt: 'now', count: 0}));
+  await assertFails(attempt({windowStartedAt: now, count: -1}));
+  await assertFails(attempt({windowStartedAt: now, count: 0, extra: true}));
+  await assertFails(attempt({count: 0}));
+  // The refused batch left the timer in place: nothing rolled back or was lost.
+  assert.deepEqual((await getDoc(bookRef)).data()?.activeTimer.operationId, `op-${sequence}`);
+  // The remote-call quota is not consulted for the atomic row (it is full
+  // above and the successes went through), only the row counter is.
+});
+
+test('a server-deferred queue row refuses a retry marker until its window ends', async () => {
+  // SEC-002: the trigger stamps an over-quota pending row with the end of
+  // the quota window; the client sweep may re-arm it only after that, so a
+  // deferred row costs one delivery per window instead of one per ten
+  // minutes. The stamp itself is server-owned: a retry cannot touch it.
+  const uid = 'queue-deferred';
+  const oldCreate = Timestamp.fromMillis(Date.now() - 20 * 60 * 1000);
+  const future = Timestamp.fromMillis(Date.now() + 30 * 60 * 1000);
+  const past = Timestamp.fromMillis(Date.now() - 60 * 1000);
+  const expiresAt = Timestamp.fromMillis(Date.now() + 90 * 24 * 60 * 60 * 1000);
+  await seedToggl(uid, {windowStartedAt: Timestamp.now(), count: 10});
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const queue = collection(context.firestore(), 'users', uid, 'togglQueue');
+    await setDoc(doc(queue, 'deferred'), queueItem({createdAt: oldCreate, deferredUntil: future, expiresAt}));
+    await setDoc(doc(queue, 'ended'), queueItem({createdAt: oldCreate, deferredUntil: past, expiresAt}));
+    await setDoc(doc(queue, 'ended-retried'), queueItem({
+      createdAt: oldCreate, deferredUntil: past, expiresAt,
+      attempts: 2, claimedAt: oldCreate, error: 'earlier failure',
+    }));
+    await setDoc(doc(queue, 'stamp-corrupt'), queueItem({createdAt: oldCreate, deferredUntil: 'soon'}));
+  });
+
+  const db = environment.authenticatedContext(uid).firestore();
+  const ref = (id: string) => doc(db, 'users', uid, 'togglQueue', id);
+  const retry = () => ({status: 'pending', retryRequestedAt: serverTimestamp()});
+  await assertFails(updateDoc(ref('deferred'), retry()));
+  await assertFails(updateDoc(ref('stamp-corrupt'), retry()));
+  await assertFails(updateDoc(ref('ended'), {...retry(), deferredUntil: deleteField()}));
+  await assertFails(updateDoc(ref('ended'), {...retry(), deferredUntil: future}));
+  await assertSucceeds(updateDoc(ref('ended'), retry()));
+  await assertSucceeds(updateDoc(ref('ended-retried'), retry()));
+  assert.equal((await getDoc(ref('ended'))).data()?.deferredUntil.toMillis(), past.toMillis());
 });
 
 test('local timer books and lifecycle claims must change in one exact batch', async () => {
@@ -2169,7 +2323,7 @@ test('book deletion discards only an exactly claimed local timer', async () => {
 test('function quota documents are inaccessible to their owner', async () => {
   const uid = 'quota-owner';
   const db = environment.authenticatedContext(uid).firestore();
-  for (const quotaName of ['booksApi', 'togglQueue']) {
+  for (const quotaName of ['booksApi', 'togglQueue', 'togglQueueRows', 'issueReports']) {
     const ref = doc(db, 'users', uid, 'functionQuotas', quotaName);
     await assertFails(getDoc(ref));
     await assertFails(setDoc(ref, {windowStartedAt: Timestamp.now(), count: 1}));

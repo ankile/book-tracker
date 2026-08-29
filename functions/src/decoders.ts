@@ -838,6 +838,9 @@ interface QueueLifecycle {
   claimedAt?: Timestamp;
   expiresAt?: Timestamp;
   retryRequestedAt?: Timestamp;
+  // Server-pinned end of the quota window that deferred a pending row; the
+  // rules refuse a client retry marker before it. Cleared on claim.
+  deferredUntil?: Timestamp;
   error?: string;
 }
 
@@ -872,6 +875,7 @@ export function decodeTogglQueueDocument(
       "bookId",
       "timerClaimVersion",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
+      "deferredUntil",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
     "Toggl queue item",
@@ -917,6 +921,11 @@ export function decodeTogglQueueDocument(
       "queue retry request time",
       fail,
     );
+  const deferredUntil = decoded.deferredUntil === undefined ? undefined :
+    firestoreTimestamp(decoded.deferredUntil, "queue deferral time", fail);
+  if (deferredUntil !== undefined && status !== "pending") {
+    fail("Only a pending queue item can be deferred.");
+  }
   // Historical rows may hold unsliced Toggl response bodies. The claim
   // transaction deletes them before remote work; all new writes are capped.
   const error = decoded.error === undefined ? undefined : (() => {
@@ -943,6 +952,7 @@ export function decodeTogglQueueDocument(
       claimedAt,
       expiresAt,
       retryRequestedAt,
+      deferredUntil,
       error,
     };
   }

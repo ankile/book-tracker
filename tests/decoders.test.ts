@@ -394,6 +394,31 @@ test('queue decoder accepts changed retries and terminal uncertain creates', () 
     error: 'POST outcome unknown',
   }), 'users/owner/togglQueue/uncertain');
   assert.equal(uncertain.status, 'outcome-unknown');
+  assert.equal(uncertain.deferredUntil, null);
+  // A server-deferred pending row carries the end of its quota window; the
+  // claim clears it, so any other status with the stamp is corrupt.
+  const deferredUntil = Timestamp.fromMillis(Date.now() + 60 * 60 * 1000);
+  const deferred = decodeQueueSweepItem('deferred', queueData({
+    deferredUntil,
+    expiresAt,
+  }), 'users/owner/togglQueue/deferred');
+  assert.equal(deferred.deferredUntil, deferredUntil);
+  assert.throws(
+    () => decodeQueueSweepItem('deferred-error', queueData({
+      status: 'error',
+      attempts: 1,
+      claimedAt: createdAt,
+      error: 'transient',
+      deferredUntil,
+    }), 'users/owner/togglQueue/deferred-error'),
+    /a deferral only on a pending queue item/,
+  );
+  assert.throws(
+    () => decodeQueueSweepItem('deferred-bad', queueData({
+      deferredUntil: 'soon',
+    }), 'users/owner/togglQueue/deferred-bad'),
+    /deferredUntil.*Firestore Timestamp/,
+  );
   assert.throws(
     () => decodeQueueSweepItem('bad-expiry', queueData({
       retryRequestedAt: updatedAt,

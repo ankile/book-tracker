@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { Timestamp } from 'firebase-admin/firestore';
 import { isTogglTimer } from '../src/lib/interfaces/book.ts';
@@ -67,15 +68,67 @@ test('the sweep opens transactions only for retryable lifecycle rows', () => {
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 4}, now.toMillis()), true);
   assert.equal(isTogglSweepTransactionCandidate({status: 'outcome-unknown', attempts: 1}, now.toMillis()), false);
   assert.equal(isTogglSweepTransactionCandidate({status: 'error', attempts: 5}, now.toMillis()), false);
+  // A server deferral holds the row until its quota window ends; the
+  // boundary itself is open, matching the rules' `deferredUntil <= request.time`.
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0,
+    deferredUntil: Timestamp.fromMillis(now.toMillis() + 1),
+  }, now.toMillis()), false);
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0,
+    deferredUntil: Timestamp.fromMillis(now.toMillis()),
+  }, now.toMillis()), true);
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'pending', attempts: 0, deferredUntil: null,
+  }, now.toMillis()), true);
+  // Only pending rows are ever deferred; a stale stamp on an error row
+  // (impossible by decoder, defensive here) must not hide a retryable row.
+  assert.equal(isTogglSweepTransactionCandidate({
+    status: 'error', attempts: 1,
+    deferredUntil: Timestamp.fromMillis(now.toMillis() + 60_000),
+  }, now.toMillis()), true);
 });
 
-test('only a pending retry marker can absorb a clock-skew rule denial', () => {
+test('the rules mirror the queue limits the trigger enforces', () => {
+  // The rules cannot import constants, so the literals in
+  // togglQueueRowsAvailable are pinned to functions/src/togglQueueLimits.ts.
+  const limits = readFileSync(new URL('../functions/src/togglQueueLimits.ts', import.meta.url), 'utf8');
+  const constant = (name: string): number => {
+    const match = limits.match(new RegExp(`export const ${name} = ([^;]+);`));
+    assert.ok(match, `${name} missing from togglQueueLimits.ts`);
+    return Number(new Function(`return (${match[1]});`)());
+  };
+  const rules = readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
+  const rowsGate = rules.slice(rules.indexOf('function togglQueueRowsAvailable('));
+  const body = rowsGate.slice(0, rowsGate.indexOf('\n    }'));
+  assert.match(body, /functionQuotas\/togglQueueRows;/);
+  assert.match(body, new RegExp(`duration\\.value\\(${constant('TOGGL_QUEUE_WINDOW_MS') / 1000}, 's'\\)`));
+  assert.match(body, new RegExp(`count < ${constant('TOGGL_QUEUE_ROW_LIMIT')}\\)`));
+  // The remote-call quota is no longer a rules gate at all: no client
+  // create is quota-gated, so the function must be gone, not just unused.
+  assert.equal(rules.includes('togglQueueQuotaAvailable'), false);
+  // And the create rule admits only the atomic offline-stop row.
+  const createRule = rules.slice(rules.indexOf('match /users/{userId}/togglQueue/{queueId}'));
+  const create = createRule.slice(createRule.indexOf('allow create'), createRule.indexOf('allow update'));
+  assert.match(create, /timerClaimVersion', 0\) == 1\n/);
+  assert.match(create, /validAtomicTimerStop\(userId, queueId\)/);
+  assert.match(create, /togglQueueRowsAvailable\(userId\)/);
+  assert.equal(create.includes('?'), false);
+});
+
+test('only a pending retry marker or deferral can absorb a clock-skew rule denial', () => {
   const marker = Timestamp.now();
   assert.equal(isExpectedTogglRetryMarkerDenial({
     status: 'pending', retryRequestedAt: marker,
   }, 'permission-denied'), true);
   assert.equal(isExpectedTogglRetryMarkerDenial({
     status: 'pending', retryRequestedAt: null,
+  }, 'permission-denied'), false);
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'pending', retryRequestedAt: null, deferredUntil: marker,
+  }, 'permission-denied'), true);
+  assert.equal(isExpectedTogglRetryMarkerDenial({
+    status: 'error', retryRequestedAt: null, deferredUntil: marker,
   }, 'permission-denied'), false);
   assert.equal(isExpectedTogglRetryMarkerDenial({
     status: 'error', retryRequestedAt: marker,

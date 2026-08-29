@@ -5,8 +5,16 @@ import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
 import {env} from "node:process";
 import {setTimeout as delay} from "node:timers/promises";
+import {logger} from "firebase-functions";
 import {CALLABLE_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logIssue} from "./logging";
+import {applyQuota} from "./quota";
+import {
+  TOGGL_QUEUE_LIMIT,
+  TOGGL_QUEUE_RETENTION_MS,
+  TOGGL_QUEUE_ROW_LIMIT,
+  TOGGL_QUEUE_WINDOW_MS,
+} from "./togglQueueLimits";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
 import {
   ActiveTimer,
@@ -39,9 +47,6 @@ const EMULATOR_ENTRY_ID = 900003;
 const EMULATOR_STOP_DURATION_SECONDS = 60;
 
 const MAX_QUEUE_ATTEMPTS = 5;
-const TOGGL_QUEUE_LIMIT = 10;
-const TOGGL_QUEUE_WINDOW_MS = 60 * 60 * 1000;
-const TOGGL_QUEUE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const START_CLAIM_STALE_MS = 5 * 60 * 1000;
 
 const invalidArgument = (message: string): never => {
@@ -81,13 +86,6 @@ class OutcomeUnknownError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OutcomeUnknownError";
-  }
-}
-
-class QueueQuotaDeferredError extends Error {
-  constructor() {
-    super("Toggl queue hourly limit reached; Eventarc will retry.");
-    this.name = "QueueQuotaDeferredError";
   }
 }
 
@@ -823,9 +821,19 @@ async function syncQueueItem(
 // terminal outcome-unknown state before the remote call, which also covers
 // crashes after Toggl accepts the request. Every rules-permitted invocation,
 // including malformed data, consumes the transactional per-user quota before
-// remote work; server-owned expiry bounds terminal-row retention. Quota
-// overflow leaves the row pending and throws so Eventarc redelivers it after
-// backoff without spending a remote-attempt slot.
+// remote work; server-owned expiry bounds terminal-row retention.
+//
+// Quota overflow (SEC-002): the row stays pending and is stamped with the
+// server-pinned deferredUntil, the end of the current quota window. Rules
+// refuse a client retry marker before that instant, and the trigger writes
+// the stamp once per window and returns — it never throws for overflow,
+// because a throw here made Eventarc redeliver every over-quota row with
+// backoff for a day, and the rows an account can mint are what this
+// finding is about. Nothing wakes a deferred row by itself: the client
+// sweep re-arms it on the next launch after the window ends, which is the
+// honest-user trade for not being a retry storm. Every row is also counted
+// once, in the transaction that first marks it, against the per-user row
+// bound the rules read (TOGGL_QUEUE_ROW_LIMIT).
 // timeoutSeconds leaves headroom for the 429 backoff; maxInstances limits
 // reconnect bursts.
 exports.syncqueue = onDocumentWritten(
@@ -849,6 +857,10 @@ exports.syncqueue = onDocumentWritten(
     const quotaRef = db.doc(
       `users/${event.params.uid}/functionQuotas/togglQueue`,
     );
+    const rowsRef = db.doc(
+      `users/${event.params.uid}/functionQuotas/togglQueueRows`,
+    );
+    let rowsFirstRefusal = false;
     const claim = await db.runTransaction<
       | {status: "claimed"; item: TogglQueueDocument; token: QueueClaimToken}
       | {status: "deferred"}
@@ -861,12 +873,59 @@ exports.syncqueue = onDocumentWritten(
       if (!data || data.status !== "pending") return null;
       const now = Timestamp.now();
       const expiresAt = queueExpiry(now);
+      // A row this trigger has never touched carries no lifecycle field: a
+      // claim adds attempts and claimedAt, a deferral adds deferredUntil, a
+      // malformed row gets attempts and error. Counting exactly those rows,
+      // inside the transaction that first marks them, keeps the per-user
+      // row bound exact under concurrent deliveries and stale redeliveries
+      // (a redelivered create event reads the live row, which is no longer
+      // fresh). The bound is read by the rules, so the count is kept even
+      // when the row is only deferred.
+      const fresh = data.attempts === undefined &&
+        data.claimedAt === undefined && data.deferredUntil === undefined &&
+        data.error === undefined;
+      rowsFirstRefusal = false;
       const quotaSnap = await tx.get(quotaRef);
+      const rowsSnap = fresh ? await tx.get(rowsRef) : null;
+      const countRow = () => {
+        if (rowsSnap === null) return;
+        const decision = applyQuota(
+          tx, rowsRef, rowsSnap.data(), TOGGL_QUEUE_ROW_LIMIT,
+          TOGGL_QUEUE_WINDOW_MS, now,
+        );
+        if (!decision.granted && decision.firstRefusal) rowsFirstRefusal = true;
+      };
       const quota = quotaSnap.exists ? decodeQueueQuota(quotaSnap.data()) : null;
       if (quota !== null &&
           quota.windowStartedAt.toMillis() >
             now.toMillis() - TOGGL_QUEUE_WINDOW_MS &&
           quota.count >= TOGGL_QUEUE_LIMIT) {
+        const until = Timestamp.fromMillis(
+          quota.windowStartedAt.toMillis() + TOGGL_QUEUE_WINDOW_MS,
+        );
+        if (data.deferredUntil instanceof Timestamp &&
+            data.deferredUntil.toMillis() === until.toMillis()) {
+          // Already stamped for this window. Writing the same stamp again
+          // would only fire this trigger once more.
+          return {status: "deferred"};
+        }
+        countRow();
+        // A correlated v1 stop row is the client's only recovery handle
+        // while its book stays in `stopping` (see the claim below); every
+        // other deferred row gets a finite expiry measured from its
+        // creation, so a row deferred window after window still ends.
+        const retained = data.type === "stop" &&
+          data.timerClaimVersion === 1 && typeof data.bookId === "string";
+        const createdAtMillis = data.createdAt instanceof Timestamp ?
+          data.createdAt.toMillis() : now.toMillis();
+        tx.update(after.ref, {
+          deferredUntil: until,
+          ...(retained || data.expiresAt instanceof Timestamp ? {} : {
+            expiresAt: Timestamp.fromMillis(
+              createdAtMillis + TOGGL_QUEUE_RETENTION_MS,
+            ),
+          }),
+        });
         return {status: "deferred"};
       }
 
@@ -889,6 +948,7 @@ exports.syncqueue = onDocumentWritten(
         } else {
           tx.update(quotaRef, {count: quota.count + 1});
         }
+        countRow();
         tx.update(after.ref, {
           status: "error",
           attempts: MAX_QUEUE_ATTEMPTS,
@@ -896,6 +956,7 @@ exports.syncqueue = onDocumentWritten(
           expiresAt: malformedExpiry,
           error: `Malformed queue item: ${raw}`.slice(0, 1000),
           retryRequestedAt: FieldValue.delete(),
+          deferredUntil: FieldValue.delete(),
         });
         return {status: "malformed", error: raw};
       }
@@ -914,6 +975,7 @@ exports.syncqueue = onDocumentWritten(
           expiresAt: retainedExpiry,
           error: "Queue retry limit reached.",
           retryRequestedAt: FieldValue.delete(),
+          deferredUntil: FieldValue.delete(),
         });
         return null;
       }
@@ -923,6 +985,7 @@ exports.syncqueue = onDocumentWritten(
       } else {
         tx.update(quotaRef, {count: quota.count + 1});
       }
+      countRow();
       // claimedAt lets the client sweep distinguish a live invocation from
       // a dead one; attempts caps how often a poison item is retried.
       tx.update(after.ref, {
@@ -932,6 +995,7 @@ exports.syncqueue = onDocumentWritten(
         attempts: current.attempts + 1,
         error: FieldValue.delete(),
         retryRequestedAt: FieldValue.delete(),
+        deferredUntil: FieldValue.delete(),
       });
       return {
         status: "claimed",
@@ -939,8 +1003,12 @@ exports.syncqueue = onDocumentWritten(
         token: {attempts: current.attempts + 1, claimedAt: now},
       };
     });
-    if (claim === null) return;
-    if (claim.status === "deferred") throw new QueueQuotaDeferredError();
+    if (rowsFirstRefusal) {
+      // Once per window per user: the rules refuse further atomic creates
+      // from here on, so this is the only server-side sign of a row flood.
+      logger.warn("toggl.queue_rows_exceeded", {uid: event.params.uid});
+    }
+    if (claim === null || claim.status === "deferred") return;
     if (claim.status === "malformed") throw new Error(claim.error);
     const claimedItem = claim.item;
 

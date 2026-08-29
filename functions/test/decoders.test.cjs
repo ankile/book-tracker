@@ -2,7 +2,7 @@ require("./setup.cjs");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
 
 const decoders = require("../lib/decoders");
 const deployed = require("../lib");
@@ -306,8 +306,26 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     claimedAt: undefined,
     expiresAt: undefined,
     retryRequestedAt: undefined,
+    deferredUntil: undefined,
     error: undefined,
   });
+  // A server deferral stamps a pending row with the end of its quota
+  // window; the stamp is cleared on claim, so it is only valid on pending.
+  const deferredUntil = Timestamp.fromMillis(Date.now() + 3_600_000);
+  assert.equal(
+    decoders.decodeTogglQueueDocument({...create, deferredUntil}).deferredUntil,
+    deferredUntil,
+  );
+  assert.throws(
+    () => decoders.decodeTogglQueueDocument({...create, deferredUntil: "soon"}),
+    /queue deferral time/,
+  );
+  assert.throws(
+    () => decoders.decodeTogglQueueDocument({
+      ...create, status: "processing", attempts: 1, claimedAt, deferredUntil,
+    }),
+    /Only a pending queue item can be deferred/,
+  );
   assert.equal(decoders.decodeTogglQueueDocument({
     ...create,
     bookId: "book-123",
@@ -546,19 +564,29 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     createdAt: Timestamp.now(),
   };
   const ref = {};
+  const rowsRef = {};
+  let rows;
   t.mock.method(db, "doc", (path) => {
+    if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
   t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (target) => target === ref ?
-      {exists: true, data: () => item} :
-      {exists: true, data: () => quota},
+    get: async (target) => {
+      if (target === ref) return {exists: true, data: () => item};
+      if (target === rowsRef) return {exists: rows !== undefined, data: () => rows};
+      return {exists: true, data: () => quota};
+    },
     update: (target, value) => {
       if (target === ref) updates.push(value);
+      else if (target === rowsRef) rows = {...rows, ...value};
       else quota = {...quota, ...value};
     },
     set: (target, value) => {
+      if (target === rowsRef) {
+        rows = value;
+        return;
+      }
       assert.equal(target, quotaRef);
       quota = value;
     },
@@ -587,7 +615,11 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     expiresAt: updates[0].expiresAt,
     error: "Malformed queue item: queue start must be an ISO-8601 timestamp.",
     retryRequestedAt: updates[0].retryRequestedAt,
+    deferredUntil: updates[0].deferredUntil,
   }]);
+  assert.deepEqual(updates[0].deferredUntil, FieldValue.delete());
+  // Malformed rows are rows: counted against the per-user row bound.
+  assert.equal(rows.count, 1);
   assert.ok(updates[0].claimedAt instanceof Timestamp);
   assert.ok(updates[0].expiresAt instanceof Timestamp);
   assert.equal(

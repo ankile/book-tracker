@@ -37,6 +37,23 @@ const { markCorrelatedStopFailure } = functionsRequire('./lib/toggl-recovery') a
   ) => Promise<boolean>;
 };
 
+const { logger } = functionsRequire('firebase-functions') as {
+  logger: { warn: (...args: unknown[]) => void };
+};
+const {
+  TOGGL_QUEUE_LIMIT,
+  TOGGL_QUEUE_RETENTION_MS,
+  TOGGL_QUEUE_ROW_LIMIT,
+  TOGGL_QUEUE_WINDOW_MS,
+} = functionsRequire('./lib/togglQueueLimits') as {
+  TOGGL_QUEUE_LIMIT: number;
+  TOGGL_QUEUE_RETENTION_MS: number;
+  TOGGL_QUEUE_ROW_LIMIT: number;
+  TOGGL_QUEUE_WINDOW_MS: number;
+};
+
+type AdminTimestamp = import('firebase-admin/firestore').Timestamp;
+
 const db = getFirestore();
 const uid = `toggl-transaction-${Date.now()}`;
 const userRef = db.doc(`users/${uid}`);
@@ -125,26 +142,68 @@ test('missing or malformed lifecycle state fails before a Toggl request', async 
   await db.recursiveDelete(brokenUser);
 });
 
-test('one remaining queue slot defers and later recovers the other claim', async (t) => {
+function captureWarnings(t: { mock: { method: (obj: object, name: 'warn', fn: (...args: unknown[]) => void) => unknown } }): unknown[][] {
+  const warnings: unknown[][] = [];
+  t.mock.method(logger, 'warn', (...args: unknown[]) => {
+    warnings.push(args);
+  });
+  return warnings;
+}
+
+const freshCreate = (title: string, createdAt = new Date()) => ({
+  type: 'create',
+  bookTitle: title,
+  start: '2026-08-24T12:00:00.000Z',
+  stop: '2026-08-24T12:20:00.000Z',
+  status: 'pending',
+  createdAt,
+});
+
+const runQueue = (snap: import('firebase-admin/firestore').DocumentSnapshot) =>
+  deployed.toggl.syncqueue.run({data: {after: snap}, params: {uid, queueId: snap.id}});
+
+// Concurrent deliveries for one user contend on the shared counters. In
+// production a lost transaction is ABORTED (retried by the SDK) or, past the
+// retry budget, a thrown handler that Eventarc redelivers; the emulator's
+// pessimistic locks also surface it as INVALID_ARGUMENT "Transaction is
+// invalid or closed". This models the redelivery: the same event payload
+// again, which the handler must treat idempotently (the stale-redelivery
+// test below pins that). Any other error is a real failure.
+const isContention = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error &&
+  ((error as {code: unknown}).code === 10 ||
+    ((error as {code: unknown}).code === 3 && /Transaction is invalid or closed/.test(String(error))));
+async function deliver(
+  t: {diagnostic: (message: string) => void},
+  snap: import('firebase-admin/firestore').DocumentSnapshot,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await runQueue(snap);
+      return;
+    } catch (error) {
+      if (!isContention(error) || attempt === 5) throw error;
+      t.diagnostic(`redelivering ${snap.id} after contention (attempt ${attempt})`);
+    }
+  }
+}
+
+test('one remaining queue slot claims one row and stamps the other until the window ends', async (t) => {
   await userRef.set({
     uid,
     email: 'timer@example.com',
     toggl: {apiToken: 'token', workspaceId: 3, projectId: 4},
   }, {merge: true});
   const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
-  await quotaRef.set({windowStartedAt: new Date(), count: 9});
+  const rowsRef = userRef.collection('functionQuotas').doc('togglQueueRows');
+  await rowsRef.delete();
+  const windowStartedAt = new Date();
+  await quotaRef.set({windowStartedAt, count: TOGGL_QUEUE_LIMIT - 1});
   const queue = userRef.collection('togglQueue');
-  const item = (title: string) => ({
-    type: 'create',
-    bookTitle: title,
-    start: '2026-08-24T12:00:00.000Z',
-    stop: '2026-08-24T12:20:00.000Z',
-    status: 'pending',
-    createdAt: new Date(),
-  });
+  const createdAt = new Date(Date.now() - 60_000);
   await Promise.all([
-    queue.doc('first').set(item('First')),
-    queue.doc('second').set(item('Second')),
+    queue.doc('first').set(freshCreate('First', createdAt)),
+    queue.doc('second').set(freshCreate('Second', createdAt)),
   ]);
   const [first, second] = await Promise.all([
     queue.doc('first').get(),
@@ -156,48 +215,162 @@ test('one remaining queue slot defers and later recovers the other claim', async
     fetchCalls += 1;
     return new Response(JSON.stringify({id: 200 + fetchCalls}), {status: 200});
   });
-  const firstResults = await Promise.allSettled([
-    deployed.toggl.syncqueue.run({
-      data: {after: first},
-      params: {uid, queueId: 'first'},
-    }),
-    deployed.toggl.syncqueue.run({
-      data: {after: second},
-      params: {uid, queueId: 'second'},
-    }),
-  ]);
+  // Both deliveries resolve: the over-quota one no longer throws for
+  // Eventarc to redeliver (SEC-002).
+  await Promise.all([deliver(t, first), deliver(t, second)]);
 
-  assert.equal(firstResults.filter((result) => result.status === 'fulfilled').length, 1);
-  const deferred = firstResults.find((result) => result.status === 'rejected');
-  assert.ok(deferred && deferred.status === 'rejected');
-  assert.match(String(deferred.reason), /Eventarc will retry/);
   assert.equal(fetchCalls, 1);
-  assert.equal((await quotaRef.get()).data()?.count, 10);
+  assert.equal((await quotaRef.get()).data()?.count, TOGGL_QUEUE_LIMIT);
   let remaining = await queue.get();
   assert.equal(remaining.size, 1);
-  assert.equal(remaining.docs[0].data().status, 'pending');
-  assert.equal(remaining.docs[0].data().attempts, undefined);
+  const deferred = remaining.docs[0].data();
+  assert.equal(deferred.status, 'pending');
+  assert.equal(deferred.attempts, undefined);
+  assert.equal(deferred.claimedAt, undefined);
+  // Stamped with the server-pinned end of the quota window, given a finite
+  // expiry measured from creation, and counted as a row like the claimed one.
+  assert.equal(
+    (deferred.deferredUntil as AdminTimestamp).toMillis(),
+    windowStartedAt.getTime() + TOGGL_QUEUE_WINDOW_MS,
+  );
+  assert.equal(
+    (deferred.expiresAt as AdminTimestamp).toMillis(),
+    createdAt.getTime() + TOGGL_QUEUE_RETENTION_MS,
+  );
+  assert.equal((await rowsRef.get()).data()?.count, 2);
 
+  // A second delivery inside the same window (the stamp write itself fires
+  // the trigger again) writes nothing at all.
+  const stamped = await remaining.docs[0].ref.get();
+  await Promise.all([deliver(t, stamped), deliver(t, stamped)]);
+  const untouched = await remaining.docs[0].ref.get();
+  assert.equal(untouched.updateTime?.isEqual(stamped.updateTime!), true);
+  assert.equal((await rowsRef.get()).data()?.count, 2);
+  assert.equal(fetchCalls, 1);
+
+  // Once the window has ended the same row is claimed and synced; the stamp
+  // does not survive the claim.
   await quotaRef.set({
-    windowStartedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-    count: 10,
+    windowStartedAt: new Date(Date.now() - 2 * TOGGL_QUEUE_WINDOW_MS),
+    count: TOGGL_QUEUE_LIMIT,
   });
   const retried = await remaining.docs[0].ref.get();
-  await Promise.all([
-    deployed.toggl.syncqueue.run({
-      data: {after: retried},
-      params: {uid, queueId: retried.id},
-    }),
-    deployed.toggl.syncqueue.run({
-      data: {after: retried},
-      params: {uid, queueId: retried.id},
-    }),
-  ]);
+  await Promise.all([deliver(t, retried), deliver(t, retried)]);
 
   assert.equal(fetchCalls, 2);
   assert.equal((await quotaRef.get()).data()?.count, 1);
   remaining = await queue.get();
   assert.equal(remaining.empty, true);
+  // The claim of an already-counted row did not count it again.
+  assert.equal((await rowsRef.get()).data()?.count, 2);
+});
+
+test('the claim clears the deferral stamp even when the sync then fails', async (t) => {
+  const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
+  const queue = userRef.collection('togglQueue');
+  const windowStartedAt = new Date(Date.now() - 2 * TOGGL_QUEUE_WINDOW_MS);
+  await quotaRef.set({windowStartedAt, count: TOGGL_QUEUE_LIMIT});
+  const ref = queue.doc('stamped-then-failing');
+  await ref.set({
+    ...freshCreate('Stamped'),
+    deferredUntil: Timestamp.fromMillis(windowStartedAt.getTime() + TOGGL_QUEUE_WINDOW_MS),
+    expiresAt: Timestamp.fromMillis(Date.now() + TOGGL_QUEUE_RETENTION_MS),
+  });
+  t.mock.method(globalThis, 'fetch', async () => new Response('down', {status: 400}));
+  await assert.rejects(runQueue(await ref.get()), /status 400/);
+  const failed = (await ref.get()).data();
+  assert.equal(failed?.status, 'error');
+  assert.equal(failed?.attempts, 1);
+  assert.equal(failed?.deferredUntil, undefined);
+  await ref.delete();
+});
+
+test('a flood of admitted rows is counted once each, deferred without a storm, and warned once', async (t) => {
+  // The rules admit at most one atomic-stop row per timer clear and close
+  // once the counter below reaches TOGGL_QUEUE_ROW_LIMIT; this exercises
+  // the trigger's half against rows the rules already admitted, including
+  // the burst that lands before the counter catches up.
+  const warnings = captureWarnings(t);
+  const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
+  const rowsRef = userRef.collection('functionQuotas').doc('togglQueueRows');
+  const queue = userRef.collection('togglQueue');
+  const windowStartedAt = new Date();
+  const total = TOGGL_QUEUE_ROW_LIMIT + 5;
+  await Promise.all([
+    quotaRef.set({windowStartedAt, count: TOGGL_QUEUE_LIMIT}),
+    rowsRef.delete(),
+  ]);
+  const refs = Array.from({length: total}, (_, index) => queue.doc(`flood-${index}`));
+  await Promise.all(refs.map((ref, index) => ref.set(freshCreate(`Flood ${index}`))));
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    throw new Error('the quota is full; nothing may reach Toggl');
+  });
+
+  // Five concurrent deliveries at a time, so the row counter sees real
+  // contention on the emulator without exhausting the SDK's retry budget.
+  const snaps = await Promise.all(refs.map((ref) => ref.get()));
+  for (let index = 0; index < snaps.length; index += 5) {
+    await Promise.all(snaps.slice(index, index + 5).map((snap) => deliver(t, snap)));
+  }
+
+  assert.equal(fetchCalls, 0);
+  assert.equal((await quotaRef.get()).data()?.count, TOGGL_QUEUE_LIMIT);
+  const rows = (await rowsRef.get()).data();
+  assert.equal(rows?.count, TOGGL_QUEUE_ROW_LIMIT + 1);
+  assert.deepEqual(warnings, [['toggl.queue_rows_exceeded', {uid}]]);
+  const until = windowStartedAt.getTime() + TOGGL_QUEUE_WINDOW_MS;
+  const after = await Promise.all(refs.map((ref) => ref.get()));
+  for (const snap of after) {
+    const data = snap.data();
+    assert.equal(data?.status, 'pending');
+    assert.equal(data?.attempts, undefined);
+    assert.equal((data?.deferredUntil as AdminTimestamp).toMillis(), until);
+    assert.ok(data?.expiresAt instanceof Timestamp);
+  }
+
+  // Redelivering every stamped row (which is what the stamp writes cause)
+  // changes nothing: no writes, no counting, no second warning.
+  for (let index = 0; index < after.length; index += 5) {
+    await Promise.all(after.slice(index, index + 5).map((snap) => deliver(t, snap)));
+  }
+  const again = await Promise.all(refs.map((ref) => ref.get()));
+  again.forEach((snap, index) => {
+    assert.equal(snap.updateTime?.isEqual(after[index].updateTime!), true);
+  });
+  assert.equal((await rowsRef.get()).data()?.count, TOGGL_QUEUE_ROW_LIMIT + 1);
+  assert.equal(warnings.length, 1);
+  await Promise.all(refs.map((ref) => ref.delete()));
+});
+
+test('a stale redelivery of a create event neither counts nor claims a row twice', async (t) => {
+  const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
+  const rowsRef = userRef.collection('functionQuotas').doc('togglQueueRows');
+  const queue = userRef.collection('togglQueue');
+  await Promise.all([
+    quotaRef.set({windowStartedAt: new Date(), count: 0}),
+    rowsRef.set({windowStartedAt: new Date(), count: 4}),
+  ]);
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify({id: 300 + fetchCalls}), {status: 200});
+  });
+  const ref = queue.doc('stale-redelivery');
+  await ref.set(freshCreate('Stale'));
+  const stale = await ref.get();
+  await runQueue(stale);
+  assert.equal(fetchCalls, 1);
+  assert.equal((await ref.get()).exists, false);
+  assert.equal((await rowsRef.get()).data()?.count, 5);
+
+  // Eventarc redelivers the original create payload; the handler reads the
+  // live row (gone) and does nothing.
+  await runQueue(stale);
+  assert.equal(fetchCalls, 1);
+  assert.equal((await rowsRef.get()).data()?.count, 5);
+  assert.equal((await quotaRef.get()).data()?.count, 1);
 });
 
 test('a correlated queued stop clears its exact book and lifecycle atomically', async (t) => {

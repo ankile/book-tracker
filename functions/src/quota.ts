@@ -1,4 +1,4 @@
-import {Firestore, Timestamp} from "firebase-admin/firestore";
+import {DocumentReference, Firestore, Timestamp, Transaction} from "firebase-admin/firestore";
 
 export type QuotaDecision =
   | {granted: true}
@@ -6,15 +6,14 @@ export type QuotaDecision =
   // refusal without the log line becoming an attacker-controlled cost.
   | {granted: false; firstRefusal: boolean};
 
-// Per-user fixed-window counter behind a callable. The document lives under
-// users/{uid}/functionQuotas/{name}, which has no client rule, so only the
-// Admin SDK can read or move it; the transaction makes the read-and-increment
-// atomic, so N concurrent calls cannot all see count < limit (the rules-side
-// togglQueue quota has that race; a callable does not). A malformed or
-// expired window restarts at 1 rather than failing, so a bad document can
-// never lock a user out — and that forgiving branch is only safe because no
-// client can write the document: junk written before every call would
-// otherwise be an unlimited quota.
+// Per-user fixed-window counter behind a callable or trigger. The document
+// lives under users/{uid}/functionQuotas/{name}, which has no client rule,
+// so only the Admin SDK can move it; the transaction makes the
+// read-and-increment atomic, so N concurrent calls cannot all see
+// count < limit. A malformed or expired window restarts at 1 rather than
+// failing, so a bad document can never lock a user out — and that forgiving
+// branch is only safe because no client can write the document: junk
+// written before every call would otherwise be an unlimited quota.
 //
 // Refusals cost one billed read each (the transaction has to look). All
 // but the first refusal of a window commit nothing, so they cannot contend
@@ -26,6 +25,37 @@ export type QuotaDecision =
 // to write, Firestore aborts one commit, and its retry reads limit + 1 and
 // reports firstRefusal false. Without the write the two transactions would
 // not conflict and both would log.
+//
+// applyQuota is the same decision inside a caller's own transaction, for
+// counters that must move atomically with another write (the Toggl queue
+// counts a row in the transaction that first touches it, so a redelivered
+// event cannot count it twice). The read must have happened in that
+// transaction already; the writes are queued on it.
+export function applyQuota(
+  tx: Transaction,
+  quotaRef: DocumentReference,
+  data: Record<string, unknown> | undefined,
+  limit: number,
+  windowMs: number,
+  now: Timestamp,
+): QuotaDecision {
+  const windowStartedAt = data?.windowStartedAt;
+  const count = data?.count;
+  if (!(windowStartedAt instanceof Timestamp) ||
+      typeof count !== "number" || !Number.isInteger(count) || count < 0 ||
+      windowStartedAt.toMillis() <= now.toMillis() - windowMs) {
+    tx.set(quotaRef, {windowStartedAt: now, count: 1});
+    return {granted: true};
+  }
+  if (count >= limit) {
+    const firstRefusal = count === limit;
+    if (firstRefusal) tx.update(quotaRef, {count: count + 1});
+    return {granted: false, firstRefusal};
+  }
+  tx.update(quotaRef, {count: count + 1});
+  return {granted: true};
+}
+
 export async function consumeQuota(
   db: Firestore,
   path: string,
@@ -36,21 +66,6 @@ export async function consumeQuota(
   const now = Timestamp.now();
   return db.runTransaction(async (tx): Promise<QuotaDecision> => {
     const snap = await tx.get(quotaRef);
-    const data = snap.data();
-    const windowStartedAt = data?.windowStartedAt;
-    const count = data?.count;
-    if (!(windowStartedAt instanceof Timestamp) ||
-        typeof count !== "number" || !Number.isInteger(count) || count < 0 ||
-        windowStartedAt.toMillis() <= now.toMillis() - windowMs) {
-      tx.set(quotaRef, {windowStartedAt: now, count: 1});
-      return {granted: true};
-    }
-    if (count >= limit) {
-      const firstRefusal = count === limit;
-      if (firstRefusal) tx.update(quotaRef, {count: count + 1});
-      return {granted: false, firstRefusal};
-    }
-    tx.update(quotaRef, {count: count + 1});
-    return {granted: true};
+    return applyQuota(tx, quotaRef, snap.data(), limit, windowMs, now);
   });
 }

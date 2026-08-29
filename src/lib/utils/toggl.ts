@@ -51,22 +51,34 @@ interface TogglRetryRequestTimestamp {
   toMillis(): number;
 }
 
+// Both server-pinned instants are compared against request.time by the
+// rules while the sweep reads the device clock, so a fast device can ask
+// slightly before the marker window or the deferral has ended. Those two
+// denials are expected and must not abort the sweep or raise a toast.
 export function isExpectedTogglRetryMarkerDenial(item: {
   status: string;
   retryRequestedAt?: TogglRetryRequestTimestamp | null;
+  deferredUntil?: TogglRetryRequestTimestamp | null;
 }, errorCode: string): boolean {
   return errorCode === 'permission-denied' &&
-    item.status === 'pending' && item.retryRequestedAt != null;
+    item.status === 'pending' &&
+    (item.retryRequestedAt != null || item.deferredUntil != null);
 }
 
+// A pending row the server deferred stays untouched until its quota window
+// ends: the rules would refuse the marker, and asking anyway is the churn
+// the deferral exists to stop.
 export function isTogglSweepTransactionCandidate(item: {
   status: string;
   attempts: number;
   retryRequestedAt?: TogglRetryRequestTimestamp | null;
+  deferredUntil?: TogglRetryRequestTimestamp | null;
 }, now = Date.now()): boolean {
   const freshRetryRequest = item.status === 'pending' &&
     item.retryRequestedAt != null &&
     item.retryRequestedAt.toMillis() >= now - TOGGL_RETRY_REQUEST_STALE_MS;
+  const deferred = item.status === 'pending' &&
+    item.deferredUntil != null && item.deferredUntil.toMillis() > now;
   return item.status !== 'outcome-unknown' && item.attempts < 5 &&
-    !freshRetryRequest;
+    !freshRetryRequest && !deferred;
 }
