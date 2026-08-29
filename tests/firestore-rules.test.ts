@@ -202,6 +202,29 @@ test('publishing needs a verified account whose users document still exists', as
   legacyDelete.delete(doc(unverified, 'profiles', 'legacy-reader'));
   legacyDelete.delete(doc(unverified, 'profileOwners', 'unverified'));
   await assertSucceeds(legacyDelete.commit());
+
+  // A deleted account is tombstoned, not removed (SEC-006): the users
+  // document stays with deletedAt, and the identity — verified, with an
+  // ID token that outlives the account by up to an hour — can neither
+  // publish, update, mark, nor delete its tombstoned profile.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const admin = context.firestore();
+    await setDoc(doc(admin, 'users', 'tomb'), { uid: 'tomb', email: 'tomb@example.test', deletedAt: Timestamp.now() });
+    await setDoc(doc(admin, 'profiles', 'tomb-reader'), { ...profile('tomb'), deletedAt: Timestamp.now() });
+    await setDoc(doc(admin, 'profileOwners', 'tomb'), { username: 'tomb-reader' });
+    await setDoc(doc(admin, 'users', 'tomb-fresh'), { uid: 'tomb-fresh', email: 'f@example.test', deletedAt: Timestamp.now() });
+  });
+  const tomb = verified('tomb');
+  await assertFails(setDoc(doc(tomb, 'profiles', 'tomb-reader'), profile('tomb', { familyName: 'Byron' })));
+  await assertFails(updateDoc(doc(tomb, 'profiles', 'tomb-reader'), { familyName: 'Byron', updatedAt: serverTimestamp() }));
+  await assertFails(setDoc(doc(tomb, 'profileDiscovery', 'tomb-reader'), marker('tomb')));
+  const tombDelete = writeBatch(tomb);
+  tombDelete.delete(doc(tomb, 'profiles', 'tomb-reader'));
+  tombDelete.delete(doc(tomb, 'profileOwners', 'tomb'));
+  await assertFails(tombDelete.commit());
+  await assertFails(deleteDoc(doc(tomb, 'profiles', 'tomb-reader')));
+  // Nor start over under another name with the same identity.
+  await assertFails(createProfileBatch(verified('tomb-fresh'), 'tomb-fresh', 'tomb-fresh-reader'));
 });
 
 test('one profile per account: a second needs the first gone in the same batch', async () => {

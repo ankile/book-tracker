@@ -256,9 +256,13 @@ exports.overview = adminCallable(async () => {
       signedUpAt: millis(authUser?.metadata.creationTime),
       lastSignInAt,
       lastActiveAt: activity.length > 0 ? Math.max(...activity) : null,
-      anomaly: !authUser ?
-        (profileByUid.has(uid) ? "auth user deleted" : "orphaned data") :
-        !profileByUid.has(uid) ? "profile doc missing" : null,
+      // A tombstoned document is the expected state of a deleted account
+      // (SEC-006), not an anomaly — unless its auth user still exists.
+      anomaly: profileByUid.get(uid)?.get("deletedAt") !== undefined ?
+        (authUser ? "tombstoned but auth user exists" : "account deleted") :
+        !authUser ?
+          (profileByUid.has(uid) ? "auth user deleted" : "orphaned data") :
+          !profileByUid.has(uid) ? "profile doc missing" : null,
       ...stats,
     };
   }));

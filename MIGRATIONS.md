@@ -16,6 +16,7 @@ backfills — and still went through the whole loop; that run is the template.)
 | `db-restore.ts` | load a dump into the emulator (or prod, disaster only) | yes |
 | `db-audit.ts` | read-only drift report, diff-friendly output | no |
 | `migrate-*.ts` | one script per migration, kept forever as history | yes |
+| `migrate-purge-deleted-accounts.ts` | physical purge of ONE tombstoned account (SEC-006); the only removal path, never scheduled | yes |
 
 All scripts share the same target rules, enforced in `migrate-lib.ts`:
 
@@ -341,6 +342,12 @@ re-run, and why the follow-up audit exists.
   `id === authorIdFor(name)` on an author doc. One sanctioned exception:
   legacy `authors` arrays on book docs, which only pre-rename old clients
   produce, may be asserted during that migration's re-runs.
+- **Account deletion is a soft delete** (SEC-006, 2026-08-29): the Auth
+  trigger stamps `deletedAt` on `users/{uid}` and the account's profiles
+  and removes nothing. Migrations and the audit must treat a tombstoned
+  account as data to keep: never "repair" a tombstone away, never skip a
+  tombstoned tree in a snapshot. Removal is `migrate-purge-deleted-accounts.ts`,
+  one uid per run, after a snapshot, by an explicit operator decision.
 - **Rules-shape mirror**: `rules-shape.ts` re-states the allowlists and
   byte caps of `firestore.rules` (books, authors, profiles, ownership
   records) so `db-audit.ts` can flag a stored document the rules would

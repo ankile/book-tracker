@@ -983,9 +983,13 @@ service cloud.firestore {
     // and unverified, and an account deleted in Auth keeps a valid ID token
     // for up to an hour, so without both checks anyone could plant an
     // indexable page under a name nobody could later delete.
+    // A deleted account is tombstoned, not removed (SEC-006): its users
+    // document stays with deletedAt set, and for the hour its ID token
+    // outlives it the identity must not publish. A missing document is a
+    // null-value error here, which denies — the same outcome exists() gave.
     function verifiedAccount() {
       return request.auth.token.get('email_verified', false) == true
-             && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+             && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deletedAt', null) == null;
     }
 
     match /profileDiscovery/{username} {
@@ -1071,8 +1075,11 @@ service cloud.firestore {
                     && verifiedAccount()
                     && resource.data.uid == request.auth.uid
                     && validProfile();
+      // A tombstoned profile is the record of a deleted account; only an
+      // operator purge removes it.
       allow delete: if request.auth != null
                     && resource.data.uid == request.auth.uid
+                    && resource.data.get('deletedAt', null) == null
                     && validProfileRelease(username);
     }
 

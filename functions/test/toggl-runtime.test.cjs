@@ -1321,7 +1321,7 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
   const writes = [];
   let exists = true;
   const userRef = {
-    get: async () => ({exists}),
+    get: async () => ({exists, data: () => ({})}),
     update: async (value) => writes.push({value}),
     set: async () => assert.fail("savetoken must not create a user document"),
   };
@@ -1387,7 +1387,7 @@ test("savetoken is metered per user and warns once per window", async (t) => {
   const warnings = [];
   t.mock.method(logger, "warn", (...args) => warnings.push(args));
   const userRef = {
-    get: async () => ({exists: true}),
+    get: async () => ({exists: true, data: () => ({})}),
     update: async () => {},
   };
   const quota = installTokenQuota(t, userRef, {
@@ -1416,7 +1416,7 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
   enableFunctionsEmulator(t);
   const writes = [];
   const userRef = {
-    get: async () => ({exists: true}),
+    get: async () => ({exists: true, data: () => ({})}),
     update: async (value) => writes.push({value}),
   };
   installTokenQuota(t, userRef);
@@ -1441,7 +1441,7 @@ test("cleartoken removes the stored Toggl credential and nothing else", async (t
   let exists = true;
   let claimState = "idle";
   const userRef = {
-    get: async () => ({exists}),
+    get: async () => ({exists, data: () => ({})}),
     update: async (value) => writes.push(value),
   };
   const claimRef = {get: async () => ({exists: true, get: (field) => {
@@ -1474,4 +1474,35 @@ test("cleartoken removes the stored Toggl credential and nothing else", async (t
     (error) => error.code === "failed-precondition",
   );
   assert.equal(writes.length, 1);
+});
+
+// A deleted account is tombstoned, never removed (SEC-006), so its Toggl
+// credential is still on the document: every path that would use or
+// replace it refuses first, for the hour the ID token outlives the account
+// and for queued rows that outlive it.
+test("a tombstoned account cannot use, save or clear a Toggl token", async (t) => {
+  const tombstoned = snapshot({
+    uid: "owner",
+    deletedAt: Timestamp.fromMillis(1),
+    toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
+  });
+  const userRef = {
+    get: async () => tombstoned,
+    update: async () => assert.fail("a tombstoned document must not be updated"),
+    set: async () => assert.fail("a tombstoned document must not be replaced"),
+  };
+  installTokenQuota(t, userRef);
+  t.mock.method(global, "fetch", async () => assert.fail("no Toggl request for a deleted account"));
+  const context = {auth: {uid: "owner", token: {email_verified: true}}};
+  for (const [name, call] of [
+    ["savetoken", () => deployed.toggl.savetoken.run({token: "x".repeat(32)}, context)],
+    ["cleartoken", () => deployed.toggl.cleartoken.run({}, context)],
+    ["start", () => deployed.toggl.start.run({bookId: "book"}, context)],
+  ]) {
+    await assert.rejects(call(), (error) => {
+      assert.equal(error.code, "failed-precondition", name);
+      assert.match(error.message, /account has been deleted/, name);
+      return true;
+    });
+  }
 });

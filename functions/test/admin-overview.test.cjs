@@ -35,7 +35,7 @@ const emptyQuery = () => {
 // sends to Firestore are the thing under test, not just how the rows are
 // assembled afterwards (round-2 red-team: dropping the uid filter or the
 // +1 survived the suite before this file existed).
-function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonymous = false} = {}) {
+function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonymous = false, tombstoned = [], docs = []} = {}) {
   const issueQueries = [];
   t.mock.method(auth, "listUsers", async () => ({
     users: uids.map((uid) => ({
@@ -51,9 +51,18 @@ function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonym
   t.mock.method(db, "collection", (name) => {
     if (name === "adminAudit") return {add: async () => ({id: "audit"})};
     if (name === "users") {
+      const userDoc = (uid) => ({
+        id: uid,
+        get: (field) => {
+          if (field === "deletedAt") return tombstoned.includes(uid) ? Timestamp.fromMillis(1) : undefined;
+          if (field === "email") return `${uid}@doc.test`;
+          assert.fail(`unexpected user field ${field}`);
+        },
+      });
+      const docIds = [...new Set([...docs, ...tombstoned])];
       return {
-        get: async () => ({docs: []}),
-        listDocuments: async () => uids.map((uid) => ({id: uid})),
+        get: async () => ({docs: docIds.map(userDoc)}),
+        listDocuments: async () => [...new Set([...uids, ...docIds])].map((uid) => ({id: uid})),
       };
     }
     if (name === "logEvents") {
@@ -208,4 +217,23 @@ test("when every read fails the feed is empty but the wire says why", async (t) 
   assert.equal(result.issueCaps.unreadAccounts, uids.length);
   assert.equal(result.issueCaps.anonymousUnread, true);
   assert.equal(errors.length, uids.length + 1);
+});
+
+// A deleted account keeps a tombstoned document (SEC-006). The overview
+// must show it as the expected state of a deleted account, keep the
+// pre-tombstone anomalies for documents that are merely orphaned, and
+// flag a tombstone whose auth user still exists.
+test("the overview labels tombstoned accounts and keeps orphan anomalies apart", async (t) => {
+  installOverviewStore(t, ["live", "stale"], {
+    tombstoned: ["gone", "stale"],
+    docs: ["live", "orphan-doc"],
+  });
+  const result = await deployed.admin.overview.run({}, adminContext);
+  const anomalies = Object.fromEntries(result.users.map((row) => [row.uid, row.anomaly]));
+  assert.deepEqual(anomalies, {
+    live: null,
+    gone: "account deleted",
+    stale: "tombstoned but auth user exists",
+    "orphan-doc": "auth user deleted",
+  });
 });

@@ -172,76 +172,125 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
   ]);
 });
 
-test("user deletion pages through profiles, deletes only markers it still owns, and retries", async (t) => {
-  const userRef = {path: "users/owner", deleted: 0, delete: async function() { this.deleted += 1; }};
+test("user deletion tombstones the user document and its profiles, pages by id, and deletes nothing", async (t) => {
+  // Nothing in this store can delete: a trigger that reached for delete()
+  // on any ref, batch or transaction would throw here (SEC-006 is a soft
+  // delete by owner decision).
+  const noDelete = () => assert.fail("account deletion must not delete a document");
+  const sets = [];
+  let userValue = {email: "owner@example.test", uid: "owner", toggl: {apiToken: "t"}};
+  const userRef = {path: "users/owner", delete: noDelete};
+  const queries = [];
   const pages = [];
-  const deletes = [];
-  let commits = 0;
-  let markerOwner = "owner";
-  let getAllCount = 0;
-  const profileRef = (name) => ({path: `profiles/${name}`});
-  const discoveryRef = (name) => ({path: `profileDiscovery/${name}`});
+  const profileDoc = (name, deletedAt) => ({
+    id: name,
+    ref: {path: `profiles/${name}`, delete: noDelete},
+    get: (field) => {
+      assert.equal(field, "deletedAt");
+      return deletedAt;
+    },
+  });
   const profiles = {
     where: (field, operator, value) => {
       assert.deepEqual([field, operator, value], ["uid", "==", "owner"]);
-      return {limit: (size) => {
-        assert.equal(size, 100);
-        return {get: async () => {
+      const call = {orderBy: null, limit: null, startAfter: null};
+      queries.push(call);
+      const query = {
+        orderBy: (path) => {
+          call.orderBy = path;
+          return query;
+        },
+        limit: (size) => {
+          call.limit = size;
+          return query;
+        },
+        startAfter: (cursor) => {
+          call.startAfter = cursor.id;
+          return query;
+        },
+        get: async () => {
           const docs = pages.shift() ?? [];
           return {empty: docs.length === 0, size: docs.length, docs};
-        }};
-      }};
+        },
+      };
+      return query;
     },
   };
-  const ownerRef = {path: "profileOwners/owner", deleted: 0, delete: async function() { this.deleted += 1; }};
   t.mock.method(db, "collection", (path) => {
     if (path === "profiles") return profiles;
     if (path === "users") return {doc: (uid) => {
       assert.equal(uid, "owner");
       return userRef;
     }};
-    if (path === "profileOwners") return {doc: (uid) => {
-      assert.equal(uid, "owner");
-      return ownerRef;
-    }};
-    assert.equal(path, "profileDiscovery");
-    return {doc: (username) => discoveryRef(username)};
+    assert.fail(`unexpected collection ${path}`);
   });
-  t.mock.method(db, "getAll", async (...refs) => {
-    getAllCount += 1;
-    return refs.map((ref) => ({exists: true, ref, get: (field) => {
-      assert.equal(field, "uid");
-      return markerOwner;
-    }}));
-  });
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (ref) => {
+      assert.equal(ref, userRef);
+      return {exists: userValue !== undefined, get: (field) => userValue?.[field]};
+    },
+    set: (ref, value, options) => {
+      assert.equal(ref, userRef);
+      sets.push([ref.path, value, options]);
+      userValue = {...userValue, ...value};
+    },
+    update: noDelete,
+    delete: noDelete,
+  }));
+  t.mock.method(db, "getAll", noDelete);
+  let commits = 0;
   t.mock.method(db, "batch", () => ({
-    delete: (ref) => deletes.push(ref.path),
+    set: (ref, value, options) => sets.push([ref.path, value, options]),
+    delete: noDelete,
+    update: noDelete,
     commit: async () => {
       commits += 1;
     },
   }));
 
-  // Two full pages and a partial one: three batches, three marker lookups.
+  // Two full pages and a partial one; the second page's first profile is
+  // already tombstoned (a retried delivery) and must not be stamped again.
   const names = Array.from({length: 250}, (_, i) => `user-${String(i).padStart(3, "0")}`);
-  pages.push(names.slice(0, 100).map((n) => ({id: n, ref: profileRef(n)})));
-  pages.push(names.slice(100, 200).map((n) => ({id: n, ref: profileRef(n)})));
-  pages.push(names.slice(200).map((n) => ({id: n, ref: profileRef(n)})));
+  pages.push(names.slice(0, 100).map((n) => profileDoc(n, undefined)));
+  pages.push(names.slice(100, 200).map((n, i) => profileDoc(n, i === 0 ? {seconds: 1} : undefined)));
+  pages.push(names.slice(200).map((n) => profileDoc(n, undefined)));
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.equal(userRef.deleted, 1);
-  // The one-profile-per-account record goes with the user document.
-  assert.equal(ownerRef.deleted, 1);
-  assert.equal(commits, 3);
-  assert.equal(getAllCount, 3);
-  assert.equal(deletes.length, 500);
-  assert.ok(deletes.includes("profiles/user-249") && deletes.includes("profileDiscovery/user-249"));
 
-  // A marker under the same username that another account now owns (the
-  // name was freed and re-claimed) is left alone.
-  deletes.length = 0;
-  markerOwner = "squatter";
-  pages.push([{id: "ada-lovelace", ref: profileRef("ada-lovelace")}]);
+  // The user document keeps every field and gains the tombstone.
+  assert.equal(sets[0][0], "users/owner");
+  assert.deepEqual(Object.keys(sets[0][1]).sort(), ["deletedAt", "uid"]);
+  assert.deepEqual(sets[0][2], {merge: true});
+  assert.equal(userValue.toggl.apiToken, "t");
+  // Profiles: 249 stamped (one already was), three batches, cursor paging
+  // by document id — the tombstone does not change the query, so a
+  // limit-only loop could never advance.
+  const profileSets = sets.slice(1);
+  assert.equal(profileSets.length, 249);
+  assert.ok(profileSets.every(([, value, options]) =>
+    Object.keys(value).join() === "deletedAt" && options.merge === true));
+  assert.ok(!profileSets.some(([path]) => path === "profiles/user-100"));
+  assert.equal(commits, 3);
+  assert.deepEqual(queries.map((q) => [q.orderBy.constructor.name, q.limit, q.startAfter]), [
+    ["FieldPath", 100, null],
+    ["FieldPath", 100, "user-099"],
+    ["FieldPath", 100, "user-199"],
+  ]);
+
+  // Redelivery: the user document is already tombstoned, so nothing is
+  // written for it; a page of tombstoned profiles commits no batch.
+  sets.length = 0;
+  commits = 0;
+  pages.push([profileDoc("ada-lovelace", {seconds: 1})]);
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.deepEqual(deletes, ["profiles/ada-lovelace"]);
+  assert.deepEqual(sets, []);
+  assert.equal(commits, 0);
+
+  // A uid whose document never existed still gets a tombstone, so the
+  // admin overview can tell "deleted" from "orphaned".
+  userValue = undefined;
+  await functions.deleteUserDocument.run({uid: "owner"});
+  assert.equal(sets.length, 1);
+  assert.equal(sets[0][1].uid, "owner");
 
   // A delivery that fails is retried rather than dropped — for both Auth
   // triggers: nothing else can create users/{uid}.

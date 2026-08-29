@@ -79,14 +79,37 @@ for (const discovery of profileDiscoveries.docs) {
 // record without its profile, or naming a profile that is not the
 // account's, is drift the rules should have made impossible.
 const ownerRecordsByUid = new Map(profileOwners.docs.map((record) => [record.id, record.data()]));
+// Account deletion is a soft delete (SEC-006): users/{uid} and the
+// account's profiles carry deletedAt and nothing is removed. A profile of
+// a tombstoned account without its own tombstone is still public — the
+// trigger's job left undone; a tombstoned profile on a live account is
+// drift no path produces. Tombstoned profiles are not client-writable, so
+// the rules-shape mirror (which would flag deletedAt) does not apply.
+const tombstonedUsers = new Set(
+  userProfiles.docs.filter((d) => d.get('deletedAt') !== undefined).map((d) => d.id),
+);
+for (const user of userProfiles.docs) {
+  const deletedAt = user.get('deletedAt');
+  if (deletedAt !== undefined && !(deletedAt instanceof Timestamp)) {
+    found('user.bad-tombstone', user.ref.path, JSON.stringify(deletedAt));
+  }
+}
 for (const profile of publicProfiles.docs) {
   const data = profile.data();
   const path = profile.ref.path;
-  for (const violation of profileShapeViolations(data, String(data.uid))) {
-    found('profile.rules-shape', path, violation);
+  const tombstoned = data.deletedAt !== undefined;
+  if (tombstoned && !(data.deletedAt instanceof Timestamp)) {
+    found('profile.bad-tombstone', path, JSON.stringify(data.deletedAt));
+  }
+  if (!tombstoned) {
+    for (const violation of profileShapeViolations(data, String(data.uid))) {
+      found('profile.rules-shape', path, violation);
+    }
   }
   if (typeof data.uid !== 'string') continue;
   if (!existingUsers.has(data.uid)) found('profile.account-missing', path, data.uid);
+  if (tombstonedUsers.has(data.uid) && !tombstoned) found('profile.tombstone-missing', path, data.uid);
+  if (!tombstonedUsers.has(data.uid) && tombstoned) found('profile.tombstone-orphan', path, data.uid);
   const record = ownerRecordsByUid.get(data.uid);
   if (record === undefined) found('profile.owner-record-missing', path, `profileOwners/${data.uid}`);
   else if (record.username !== profile.id) {
@@ -331,4 +354,5 @@ console.log(`author-orphans: ${authorOrphanCount}`);
 console.log(`public-profiles: ${publicProfiles.size}`);
 console.log(`profile-discoveries: ${profileDiscoveries.size}`);
 console.log(`profile-owners: ${profileOwners.size}`);
+console.log(`deleted-accounts: ${tombstonedUsers.size}`);
 console.log(`findings: ${findings.length}`);

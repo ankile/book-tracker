@@ -355,7 +355,7 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
   };
 }
 
-const firestoreRepository: PublicWebRepository = {
+export const firestoreRepository: PublicWebRepository = {
   async getProfile(username) {
     const snapshot = await getFirestore().collection("profiles").doc(username).get();
     return snapshot.exists ? snapshot.data() ?? null : null;
@@ -392,9 +392,15 @@ function jsonHeaders(): Record<string, string> {
   };
 }
 
+// Public means opted in AND not tombstoned: account deletion keeps the
+// profile document and stamps deletedAt (SEC-006), and that document must
+// be as invisible to strangers as a missing one — the same 404, and no
+// sitemap row (checked before decoding, so a tombstone is never logged as
+// a malformed skip).
 function profileIsPublic(value: unknown): boolean {
   return typeof value === "object" && value !== null &&
-    !Array.isArray(value) && "public" in value && value.public === true;
+    !Array.isArray(value) && "public" in value && value.public === true &&
+    !("deletedAt" in value);
 }
 
 interface SitemapEntry {

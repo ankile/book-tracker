@@ -610,12 +610,26 @@ operator action, in this order:
 4. Only then delete the account — one at a time with `deleteUser(uid)`.
    `deleteUsers([...])` (bulk) does **not** fire the deletion trigger, so
    `deleteUserDocument` would never run and the public profiles would stay
-   live. `deleteUserDocument` removes the user document, its profiles and
-   their markers. Subcollections (`books`,
-   `authors`, `updates`, `togglQueue`, `timerLifecycle`) remain until
-   SEC-006 lands — clean them with the Admin SDK if needed.
+   live. Deletion is a **soft delete** (SEC-006): `deleteUserDocument`
+   stamps `deletedAt` on `users/{uid}` and on the account's profiles and
+   removes nothing — books, sessions, authors, queue rows, quotas, the
+   ownership record and the discovery marker stay as they were, and the
+   username stays reserved. Everything that serves strangers or acts for
+   the account treats the tombstone as absence: the profile page, its JSON
+   twin and the sitemap answer as for a missing name; the Toggl callables
+   and queue worker refuse the account (its stored token is retained but
+   never used); the rules refuse the identity's profile writes for the
+   hour its ID token outlives the account; the admin overview labels the
+   row "account deleted".
 5. Check `/sitemap.xml` and `profiles` for documents whose `uid` no longer
-   exists in Auth (the admin overview does not list them).
+   exists in Auth **and** carry no `deletedAt` (`node db-audit.ts --prod`
+   reports them as `profile.tombstone-missing`; the admin overview labels
+   an untombstoned orphan "auth user deleted").
+6. Retention: tombstoned data is kept until an operator decides otherwise.
+   The only path that removes it is `migrate-purge-deleted-accounts.ts`
+   (one uid per run, dry-run by default, refuses a live account) under the
+   migration playbook — snapshot first, it is the one migration the
+   database cannot undo.
 
 An account can also lose `/admin` access by changing its email — the
 verified flag resets and the app has no verification flow yet; re-verify

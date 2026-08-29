@@ -26,6 +26,8 @@ const {
   resolvePublicWebRequest,
 } = require("../lib/publicWeb");
 
+const {logger} = require("firebase-functions");
+
 const shell = readFileSync(
   join(__dirname, "..", "assets", "profile-shell.html"),
   "utf8",
@@ -991,4 +993,35 @@ test("a failure after the scan is memoised like a failed scan, never rescanned p
     clock += 1_000;
   }
   assert.equal(scans, 1);
+});
+
+// Account deletion tombstones the profile in place (SEC-006): the document
+// stays, with its public flag, plus deletedAt. To a stranger it must be
+// exactly a missing profile — the same 404 on the page and the JSON twin,
+// no sitemap row, and no "malformed" skip logged for it.
+test("a tombstoned profile is a 404 and leaves the sitemap without a skip", async (t) => {
+  const warnings = [];
+  t.mock.method(logger, "warn", (event, detail) => warnings.push([event, detail]));
+  const tombstone = Timestamp.fromDate(new Date("2026-08-29T20:00:00.000Z"));
+  const store = repository({
+    profiles: {
+      "ada-lovelace": storedProfile(),
+      "gone-reader": storedProfile({uid: "gone", deletedAt: tombstone}),
+    },
+    discoveries: {"ada-lovelace": marker, "gone-reader": {...marker, uid: "gone"}},
+  });
+
+  const page = await resolvePublicWebRequest({method: "GET", path: "/profiles/gone-reader"}, store, shell);
+  assert.equal(page.status, 404);
+  const missing = await resolvePublicWebRequest({method: "GET", path: "/profiles/never-existed"}, store, shell);
+  assert.equal(page.body, missing.body);
+  assert.deepEqual(page.headers, missing.headers);
+  const json = await resolvePublicWebRequest({method: "GET", path: "/profiles/gone-reader.json"}, store, shell);
+  assert.equal(json.status, 404);
+
+  const sitemap = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, store, shell);
+  assert.equal(sitemap.status, 200);
+  assert.match(sitemap.body, /profiles\/ada-lovelace/);
+  assert.doesNotMatch(sitemap.body, /gone-reader/);
+  assert.deepEqual(warnings, []);
 });

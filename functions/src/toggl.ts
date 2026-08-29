@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions/v1";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {DocumentReference, FieldValue, Timestamp, getFirestore} from "firebase-admin/firestore";
+import type {DocumentData} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
 import {env} from "node:process";
@@ -209,9 +210,24 @@ function requireUid(context: functions.https.CallableContext): string {
   return context.auth.uid;
 }
 
+// A deleted account is tombstoned, not removed (SEC-006): its document
+// keeps every field, including the Toggl credential, so every path that
+// would act on that credential refuses first. The identity's ID token can
+// outlive the account by up to an hour, and its queued rows outlive it
+// until they are processed.
+function refuseDeletedAccount(user: DocumentData | undefined): void {
+  if (user?.deletedAt !== undefined) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "This account has been deleted.",
+    );
+  }
+}
+
 async function getTogglConfig(uid: string): Promise<TogglConfig> {
   const userSnap = await db.doc(`users/${uid}`).get();
   const user = userSnap.data();
+  refuseDeletedAccount(user);
   const toggl = user?.toggl;
   if (!toggl) {
     throw new functions.https.HttpsError(
@@ -285,6 +301,19 @@ exports.savetoken = functions
         "Connecting Toggl needs a verified email address. The app cannot verify it yet — ask the administrator.",
       );
     }
+    // Read before any outbound call: the user document is created only by
+    // the sign-up trigger, and an identity whose account has been deleted
+    // keeps a valid ID token for up to an hour — it must neither recreate
+    // its document (and re-enable queue processing) nor spend Toggl calls.
+    const userRef = db.doc(`users/${uid}`);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Your account is still being set up. Wait a few seconds and try again.",
+      );
+    }
+    refuseDeletedAccount(userSnap.data());
     const decision = await consumeQuota(
       db,
       `users/${uid}/functionQuotas/togglToken`,
@@ -324,17 +353,7 @@ exports.savetoken = functions
       );
     }
 
-    // update, never a merge-set: the user document is created only by the
-    // sign-up trigger, and an identity whose account has been deleted keeps
-    // a valid ID token for up to an hour — it must not be able to recreate
-    // its document (and re-enable queue processing) through this callable.
-    const userRef = db.doc(`users/${uid}`);
-    if (!(await userRef.get()).exists) {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "Your account is still being set up. Wait a few seconds and try again.",
-      );
-    }
+    // update, never a merge-set (see the existence check above).
     await userRef.update({
       toggl: {
         apiToken: token,
@@ -357,9 +376,11 @@ exports.cleartoken = functions
     const uid = requireUid(context);
     decodeEmptyCallableRequest(data, invalidArgument);
     const userRef = db.doc(`users/${uid}`);
-    if (!(await userRef.get()).exists) {
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
       throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
     }
+    refuseDeletedAccount(userSnap.data());
     // A running remote timer can only be stopped through Toggl; without the
     // token the stop callable fails and every other timer stays blocked.
     const claimSnap = await db.doc(`users/${uid}/timerLifecycle/current`).get();

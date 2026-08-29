@@ -1,7 +1,8 @@
 import * as functions from "firebase-functions/v1";
 import {onDocumentDeleted} from "firebase-functions/v2/firestore";
 import {initializeApp} from "firebase-admin/app";
-import {getFirestore} from "firebase-admin/firestore";
+import {FieldPath, FieldValue, getFirestore} from "firebase-admin/firestore";
+import type {QueryDocumentSnapshot} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
 import {AUTH_TRIGGER_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
@@ -78,15 +79,56 @@ exports.createUserDocument = functions
     return null;
   });
 
-// Rules now allow one profile per account (SEC-032, profileOwners/{uid}),
-// but accounts from before that cap may hold more, so deletion still
-// pages: each page is one bounded batch (≤ 2 × page ops), and the markers
-// of a page are fetched with one getAll. failurePolicy
-// makes a failed delivery retry — every step here is idempotent, and
-// without it a transient error would leave a deleted account's profiles
-// public and in the sitemap forever (no client can delete them once the
-// auth user is gone).
-const PROFILE_DELETE_PAGE = 100;
+// Account deletion is a soft delete (SEC-006, owner decision 2026-08-29):
+// nothing is removed. The user document and every profile of the uid get
+// a server-pinned `deletedAt`, and everything that acts on the account
+// treats that tombstone as absence — the public renderer and the sitemap
+// (publicWeb.ts), the Toggl callables and queue worker (toggl.ts), the
+// admin overview, and the rules, which refuse the identity's profile
+// writes for the hour its ID token outlives the account (verifiedAccount).
+// Reading data, authors, queue rows, quotas, the ownership record and the
+// discovery marker stay exactly as they were; a username stays reserved
+// by its tombstoned profile. A physical purge is an operator-run
+// migration (migrate-purge-deleted-accounts.ts), never this trigger.
+//
+// failurePolicy makes a failed delivery retry, and every step is
+// idempotent: deletedAt is written only where it is absent, so a
+// redelivery never moves a timestamp. Rules allow one profile per account
+// (SEC-032), but accounts from before that cap may hold more, so the
+// profile pass pages by document id (the tombstone does not change the
+// query, so a limit-only loop would never advance).
+const PROFILE_TOMBSTONE_PAGE = 100;
+
+async function tombstoneUser(uid: string): Promise<void> {
+  const userRef = db.collection("users").doc(uid);
+  await db.runTransaction(async (tx) => {
+    const user = await tx.get(userRef);
+    if (user.get("deletedAt") !== undefined) return;
+    tx.set(userRef, {uid, deletedAt: FieldValue.serverTimestamp()}, {merge: true});
+  });
+}
+
+async function tombstoneProfiles(uid: string): Promise<void> {
+  let after: QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let query = db.collection("profiles")
+      .where("uid", "==", uid)
+      .orderBy(FieldPath.documentId())
+      .limit(PROFILE_TOMBSTONE_PAGE);
+    if (after !== undefined) query = query.startAfter(after);
+    const page = await query.get();
+    const live = page.docs.filter((profile) => profile.get("deletedAt") === undefined);
+    if (live.length > 0) {
+      const batch = db.batch();
+      for (const profile of live) {
+        batch.set(profile.ref, {deletedAt: FieldValue.serverTimestamp()}, {merge: true});
+      }
+      await batch.commit();
+    }
+    if (page.size < PROFILE_TOMBSTONE_PAGE) break;
+    after = page.docs[page.size - 1];
+  }
+}
 
 exports.deleteUserDocument = functions
   .region("europe-west1")
@@ -97,32 +139,8 @@ exports.deleteUserDocument = functions
   })
   .auth.user()
   .onDelete(async (user) => {
-    // Account deletion must immediately remove both the public document and
-    // its search opt-in. Otherwise a deleted account could remain in Google
-    // and in the sitemap indefinitely.
-    await db.collection("users").doc(user.uid).delete();
-    await db.collection("profileOwners").doc(user.uid).delete();
-    for (;;) {
-      const page = await db.collection("profiles")
-        .where("uid", "==", user.uid)
-        .limit(PROFILE_DELETE_PAGE)
-        .get();
-      if (page.empty) break;
-      // The marker is deleted only when it is still this user's: a freed
-      // username is first-writer-wins, so by now the marker under the same
-      // id may belong to another account (SEC-036).
-      const markers = await db.getAll(
-        ...page.docs.map((profile) => db.collection("profileDiscovery").doc(profile.id)),
-      );
-      const batch = db.batch();
-      page.docs.forEach((profile, index) => {
-        batch.delete(profile.ref);
-        const marker = markers[index];
-        if (marker.exists && marker.get("uid") === user.uid) batch.delete(marker.ref);
-      });
-      await batch.commit();
-      if (page.size < PROFILE_DELETE_PAGE) break;
-    }
+    await tombstoneUser(user.uid);
+    await tombstoneProfiles(user.uid);
     return null;
   });
 
