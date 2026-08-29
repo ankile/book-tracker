@@ -3,6 +3,7 @@ require("./setup.cjs");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
+const {logger} = require("firebase-functions");
 
 const decoders = require("../lib/decoders");
 const deployed = require("../lib");
@@ -307,8 +308,17 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     expiresAt: undefined,
     retryRequestedAt: undefined,
     deferredUntil: undefined,
+    deferrals: 0,
     error: undefined,
   });
+  assert.equal(decoders.decodeTogglQueueDocument({...create, deferrals: 3}).deferrals, 3);
+  assert.equal(decoders.decodeTogglQueueDocument({
+    ...create, status: "error", attempts: 5, claimedAt, deferrals: 25, error: "capped",
+  }).deferrals, 25);
+  assert.throws(
+    () => decoders.decodeTogglQueueDocument({...create, deferrals: -1}),
+    /queue deferrals/,
+  );
   // A server deferral stamps a pending row with the end of its quota
   // window; the stamp is cleared on claim, so it is only valid on pending.
   const deferredUntil = Timestamp.fromMillis(Date.now() + 3_600_000);
@@ -602,10 +612,15 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     params: {uid: "owner", queueId: "bad"},
   };
 
-  await assert.rejects(
-    deployed.toggl.syncqueue.run(event),
-    /queue start must be an ISO-8601 timestamp/,
-  );
+  const errors = [];
+  t.mock.method(logger, "error", (...args) => errors.push(args));
+  // Terminal and logged, not thrown: a throw is an Eventarc redelivery.
+  await deployed.toggl.syncqueue.run(event);
+  assert.deepEqual(errors, [["toggl.queue_malformed", {
+    uid: "owner",
+    queueId: "bad",
+    message: "queue start must be an ISO-8601 timestamp.",
+  }]]);
   assert.equal(fetchCalls, 0);
   assert.equal(quota.count, 10);
   assert.deepEqual(updates, [{

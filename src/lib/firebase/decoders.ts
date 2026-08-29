@@ -71,6 +71,9 @@ interface QueueBase {
   // Server-pinned end of the quota window that deferred a pending row. The
   // rules refuse a retry marker before it, so the sweep must not ask.
   deferredUntil: Timestamp | null;
+  // Windows that have deferred the row; the server makes it terminal past
+  // its cap. Informational on the client.
+  deferrals: number;
 }
 
 export interface CreateQueueItem extends QueueBase {
@@ -636,7 +639,7 @@ export function decodeQueueSweepItem(
       'bookId',
       'timerClaimVersion',
       'attempts', 'claimedAt', 'expiresAt', 'retryRequestedAt', 'error',
-      'deferredUntil',
+      'deferredUntil', 'deferrals',
       ...(type === 'stop' ? ['entryId'] : []),
     ],
     path,
@@ -659,6 +662,8 @@ export function decodeQueueSweepItem(
   if (deferredUntil !== null && status !== 'pending') {
     fail(path, 'a deferral only on a pending queue item');
   }
+  const deferrals = data.deferrals === undefined ? 0 : integer(data.deferrals, `${path}.deferrals`);
+  if (deferrals < 0) fail(`${path}.deferrals`, 'a non-negative integer');
   const bookId = data.bookId === undefined
     ? undefined
     : boundedString(data.bookId, `${path}.bookId`, 500);
@@ -681,6 +686,7 @@ export function decodeQueueSweepItem(
     error,
     retryRequestedAt,
     deferredUntil,
+    deferrals,
   };
   if (status === 'pending') {
     if (attempts === 0 && (

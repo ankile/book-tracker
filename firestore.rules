@@ -684,11 +684,17 @@ service cloud.firestore {
                     && togglRetryWindowOpen();
     }
 
+    // createdAt stays client-chosen (an offline stop is recorded with the
+    // device clock) but may not run ahead of the server by more than the
+    // skew allowance: the retry window and the deferred row's expiry are
+    // both measured from it, and a forward-dated row was re-armable at
+    // once and, once deferred, TTL-immortal.
     function validInitialTogglQueueItem() {
       let item = request.resource.data;
       return validTogglQueuePayload(item)
              && item.status == 'pending'
              && item.createdAt is timestamp
+             && item.createdAt <= request.time + duration.value(300, 's')
              && item.keys().hasOnly([
                   'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
                   'timerClaimVersion', 'status', 'createdAt'
@@ -705,7 +711,7 @@ service cloud.firestore {
              && item.keys().hasOnly([
                   'type', 'bookId', 'bookTitle', 'start', 'stop', 'entryId',
                   'timerClaimVersion', 'status', 'createdAt', 'attempts', 'claimedAt', 'error',
-                  'expiresAt', 'retryRequestedAt', 'deferredUntil'
+                  'expiresAt', 'retryRequestedAt', 'deferredUntil', 'deferrals'
                 ])
              && ((!item.keys().hasAny(['attempts', 'claimedAt', 'error']))
                   || (item.attempts is int
@@ -789,22 +795,28 @@ service cloud.firestore {
                      && afterClaim.queueId == after.activeTimer.queueId));
     }
 
-    // A pending row the server deferred (quota window full) carries the
+    // A row the server deferred (quota window full) carries the
     // server-pinned end of that window; no retry marker before it, so a
-    // deferred row costs one delivery per window instead of six.
+    // deferred row costs one delivery per window instead of six. The
+    // trigger only stamps pending rows and clears the stamp on every
+    // transition, but the gate covers every branch rather than trust that.
     function togglRetryWindowOpen() {
-      return resource.data.status == 'error'
+      return togglDeferralEnded()
+             && (resource.data.status == 'error'
              || (resource.data.status == 'pending'
                  && resource.data.createdAt is timestamp
                  && resource.data.createdAt
-                    < request.time - duration.value(600, 's')
-                 && (!resource.data.keys().hasAny(['deferredUntil'])
-                     || (resource.data.deferredUntil is timestamp
-                         && resource.data.deferredUntil <= request.time)))
+                    < request.time - duration.value(600, 's'))
              || (resource.data.status == 'processing'
                  && resource.data.claimedAt is timestamp
                  && resource.data.claimedAt
-                    < request.time - duration.value(21600, 's'));
+                    < request.time - duration.value(21600, 's')));
+    }
+
+    function togglDeferralEnded() {
+      return !resource.data.keys().hasAny(['deferredUntil'])
+             || (resource.data.deferredUntil is timestamp
+                 && resource.data.deferredUntil <= request.time);
     }
 
     // A pending retry marker suppresses duplicate Eventarc deliveries during

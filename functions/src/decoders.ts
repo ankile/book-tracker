@@ -841,6 +841,8 @@ interface QueueLifecycle {
   // Server-pinned end of the quota window that deferred a pending row; the
   // rules refuse a client retry marker before it. Cleared on claim.
   deferredUntil?: Timestamp;
+  // How many windows have deferred the row; terminal past the cap.
+  deferrals: number;
   error?: string;
 }
 
@@ -875,7 +877,7 @@ export function decodeTogglQueueDocument(
       "bookId",
       "timerClaimVersion",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
-      "deferredUntil",
+      "deferredUntil", "deferrals",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
     "Toggl queue item",
@@ -926,6 +928,8 @@ export function decodeTogglQueueDocument(
   if (deferredUntil !== undefined && status !== "pending") {
     fail("Only a pending queue item can be deferred.");
   }
+  const deferrals = decoded.deferrals === undefined ? 0 :
+    nonNegativeInteger(decoded.deferrals, "queue deferrals", fail);
   // Historical rows may hold unsliced Toggl response bodies. The claim
   // transaction deletes them before remote work; all new writes are capped.
   const error = decoded.error === undefined ? undefined : (() => {
@@ -953,6 +957,7 @@ export function decodeTogglQueueDocument(
       expiresAt,
       retryRequestedAt,
       deferredUntil,
+      deferrals,
       error,
     };
   }
@@ -964,7 +969,7 @@ export function decodeTogglQueueDocument(
     if (retryRequestedAt !== undefined) {
       fail("A processing queue item cannot have a retry request time.");
     }
-    return {...payload, status, createdAt, attempts, claimedAt, expiresAt};
+    return {...payload, status, createdAt, attempts, claimedAt, expiresAt, deferrals};
   }
   if (status === "error") {
     if (error === undefined) fail("An error queue item must have an error.");
@@ -972,7 +977,7 @@ export function decodeTogglQueueDocument(
       fail("An error queue item cannot have a retry request time.");
     }
     return {
-      ...payload, status, createdAt, attempts, claimedAt, expiresAt, error,
+      ...payload, status, createdAt, attempts, claimedAt, expiresAt, deferrals, error,
     };
   }
   if (status === "outcome-unknown") {
@@ -986,7 +991,7 @@ export function decodeTogglQueueDocument(
       fail("An outcome-unknown queue item cannot have a retry request time.");
     }
     return {
-      ...payload, status, createdAt, attempts, claimedAt, expiresAt, error,
+      ...payload, status, createdAt, attempts, claimedAt, expiresAt, deferrals, error,
     };
   }
   const entryId = payload.type === "stop" ? payload.entryId :
@@ -1002,6 +1007,7 @@ export function decodeTogglQueueDocument(
     attempts,
     claimedAt,
     expiresAt,
+    deferrals,
     entryId,
   };
 }

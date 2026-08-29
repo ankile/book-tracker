@@ -17,7 +17,12 @@
 // the limit by whatever lands before the trigger catches up; it cannot
 // sustain. An honest user is nowhere near sixty timer stops an hour, and a
 // refused stop leaves the timer running rather than losing the interval.
+// TOGGL_QUEUE_MAX_DEFERRALS caps how many consecutive windows a pending
+// row can be deferred before it becomes terminal; a day over quota means
+// the rows were never going to drain, and without the cap each was one
+// delivery per window for its whole 90-day retention.
 export const TOGGL_QUEUE_LIMIT = 10;
+export const TOGGL_QUEUE_MAX_DEFERRALS = 24;
 export const TOGGL_QUEUE_ROW_LIMIT = 60;
 export const TOGGL_QUEUE_WINDOW_MS = 60 * 60 * 1000;
 export const TOGGL_QUEUE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;

@@ -42,11 +42,13 @@ const { logger } = functionsRequire('firebase-functions') as {
 };
 const {
   TOGGL_QUEUE_LIMIT,
+  TOGGL_QUEUE_MAX_DEFERRALS,
   TOGGL_QUEUE_RETENTION_MS,
   TOGGL_QUEUE_ROW_LIMIT,
   TOGGL_QUEUE_WINDOW_MS,
 } = functionsRequire('./lib/togglQueueLimits') as {
   TOGGL_QUEUE_LIMIT: number;
+  TOGGL_QUEUE_MAX_DEFERRALS: number;
   TOGGL_QUEUE_RETENTION_MS: number;
   TOGGL_QUEUE_ROW_LIMIT: number;
   TOGGL_QUEUE_WINDOW_MS: number;
@@ -237,6 +239,7 @@ test('one remaining queue slot claims one row and stamps the other until the win
     (deferred.expiresAt as AdminTimestamp).toMillis(),
     createdAt.getTime() + TOGGL_QUEUE_RETENTION_MS,
   );
+  assert.equal(deferred.deferrals, 1);
   assert.equal((await rowsRef.get()).data()?.count, 2);
 
   // A second delivery inside the same window (the stamp write itself fires
@@ -327,6 +330,7 @@ test('a flood of admitted rows is counted once each, deferred without a storm, a
     assert.equal(data?.status, 'pending');
     assert.equal(data?.attempts, undefined);
     assert.equal((data?.deferredUntil as AdminTimestamp).toMillis(), until);
+    assert.equal(data?.deferrals, 1);
     assert.ok(data?.expiresAt instanceof Timestamp);
   }
 
@@ -342,6 +346,67 @@ test('a flood of admitted rows is counted once each, deferred without a storm, a
   assert.equal((await rowsRef.get()).data()?.count, TOGGL_QUEUE_ROW_LIMIT + 1);
   assert.equal(warnings.length, 1);
   await Promise.all(refs.map((ref) => ref.delete()));
+});
+
+test('a row deferred in every window of a day becomes terminal, and a correlated stop is never deferred', async (t) => {
+  const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
+  const queue = userRef.collection('togglQueue');
+  const windowStartedAt = new Date(Date.now() - 10 * 60 * 1000);
+  await quotaRef.set({windowStartedAt, count: TOGGL_QUEUE_LIMIT});
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify({id: 400 + fetchCalls}), {status: 200});
+  });
+
+  // Windows 1..24 each stamp the row once; the 25th makes it terminal —
+  // not re-armable (attempts 5), expiring, and no longer stamped.
+  const ref = queue.doc('deferred-daily');
+  await ref.set(freshCreate('Deferred daily'));
+  // Time does not advance in a test, so each "new window" is a full quota
+  // window that started a second later than the previous one: still
+  // current, still full, and with a different end for the stamp.
+  for (let window = 0; window <= TOGGL_QUEUE_MAX_DEFERRALS; window += 1) {
+    const started = new Date(windowStartedAt.getTime() + window * 1000);
+    await quotaRef.set({windowStartedAt: started, count: TOGGL_QUEUE_LIMIT});
+    await deliver(t, await ref.get());
+    const data = (await ref.get()).data();
+    if (window < TOGGL_QUEUE_MAX_DEFERRALS) {
+      assert.equal(data?.status, 'pending');
+      assert.equal(data?.deferrals, window + 1);
+    } else {
+      assert.equal(data?.status, 'error');
+      assert.equal(data?.attempts, 5);
+      assert.equal(data?.deferrals, TOGGL_QUEUE_MAX_DEFERRALS + 1);
+      assert.equal(data?.deferredUntil, undefined);
+      assert.ok(data?.expiresAt instanceof Timestamp);
+      assert.match(String(data?.error), /consecutive hours/);
+    }
+  }
+  assert.equal(fetchCalls, 0);
+  await ref.delete();
+
+  // A correlated stop holds the account's single timer lock, so it goes
+  // through the full window and releases the book.
+  await quotaRef.set({windowStartedAt, count: TOGGL_QUEUE_LIMIT});
+  const start = '2026-08-24T15:00:00.000Z';
+  const queueId = `book_${start}`;
+  const bookRef = userRef.collection('books').doc('book');
+  await Promise.all([
+    bookRef.set({title: 'Book', activeTimer: {state: 'stopping', entryId: 777, start, queueId}}),
+    lifecycleRef.set({version: 1, state: 'stopping', bookId: 'book', entryId: 777, start, queueId}),
+    queue.doc(queueId).set({
+      type: 'stop', bookId: 'book', timerClaimVersion: 1, entryId: 777,
+      bookTitle: 'Book', start, stop: '2026-08-24T15:20:00.000Z',
+      status: 'pending', createdAt: new Date(),
+    }),
+  ]);
+  await deliver(t, await queue.doc(queueId).get());
+  assert.equal(fetchCalls, 1);
+  assert.equal((await queue.doc(queueId).get()).exists, false);
+  assert.equal((await bookRef.get()).data()?.activeTimer, null);
+  assert.equal((await lifecycleRef.get()).data()?.state, 'idle');
+  assert.equal((await quotaRef.get()).data()?.count, TOGGL_QUEUE_LIMIT + 1);
 });
 
 test('a stale redelivery of a create event neither counts nor claims a row twice', async (t) => {

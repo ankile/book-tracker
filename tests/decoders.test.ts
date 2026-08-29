@@ -403,6 +403,14 @@ test('queue decoder accepts changed retries and terminal uncertain creates', () 
     expiresAt,
   }), 'users/owner/togglQueue/deferred');
   assert.equal(deferred.deferredUntil, deferredUntil);
+  assert.equal(deferred.deferrals, 0);
+  assert.equal(decodeQueueSweepItem('deferred-thrice', queueData({
+    deferredUntil, deferrals: 3,
+  }), 'users/owner/togglQueue/deferred-thrice').deferrals, 3);
+  assert.throws(
+    () => decodeQueueSweepItem('deferrals-bad', queueData({deferrals: -1}), 'users/owner/togglQueue/deferrals-bad'),
+    /deferrals.*non-negative/,
+  );
   assert.throws(
     () => decodeQueueSweepItem('deferred-error', queueData({
       status: 'error',

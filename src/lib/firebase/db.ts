@@ -1006,11 +1006,12 @@ class Database {
             const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
             if (item === null) return;
             if (!isTogglSweepTransactionCandidate(item)) return;
-            const { status, claimedAt, createdAt, deferredUntil } = item;
+            // A deferred row was already excluded by the candidate check
+            // above, which is the one place that decides it.
+            const { status, claimedAt, createdAt } = item;
             const retry =
               status === 'error' ||
-              (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000 &&
-                (deferredUntil === null || deferredUntil.toMillis() <= Date.now())) ||
+              (status === 'pending' && createdAt.toMillis() < Date.now() - 10 * 60 * 1000) ||
               (status === 'processing' && claimedAt !== null && claimedAt.toMillis() < Date.now() - 6 * 60 * 60 * 1000);
             if (!retry) return;
             attemptedItem = item;

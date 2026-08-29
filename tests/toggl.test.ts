@@ -114,6 +114,11 @@ test('the rules mirror the queue limits the trigger enforces', () => {
   assert.match(create, /validAtomicTimerStop\(userId, queueId\)/);
   assert.match(create, /togglQueueRowsAvailable\(userId\)/);
   assert.equal(create.includes('?'), false);
+  // Every retry branch sits behind the deferral gate, and createdAt is
+  // capped against the server clock.
+  const retryWindow = rules.slice(rules.indexOf('function togglRetryWindowOpen('));
+  assert.match(retryWindow.slice(0, retryWindow.indexOf('\n    }')), /return togglDeferralEnded\(\)\n\s+&& \(/);
+  assert.match(rules, /item\.createdAt <= request\.time \+ duration\.value\(300, 's'\)/);
 });
 
 test('only a pending retry marker or deferral can absorb a clock-skew rule denial', () => {

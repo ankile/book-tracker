@@ -1866,9 +1866,13 @@ test('atomic queue rows reject malformed payloads and lifecycle fields', async (
     {expiresAt: serverTimestamp()},
     {deferredUntil: serverTimestamp()},
     {deferredUntil: Timestamp.fromMillis(Date.now() - 1000)},
+    {deferrals: 0},
     {unexpected: true},
     {createdAt: 'today'},
     {timerClaimVersion: 2},
+    // createdAt may not run more than the skew allowance ahead of the server.
+    {createdAt: Timestamp.fromMillis(Date.now() + 6 * 60 * 1000)},
+    {createdAt: Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000)},
   ];
   for (const [index, overrides] of cases.entries()) {
     await assertFails((await localStopBatch(uid, index + 1, overrides)).commit());
@@ -1888,8 +1892,15 @@ test('atomic queue rows reject malformed payloads and lifecycle fields', async (
     bookId: 'book', bookTitle: 'Book', start: legacyStart,
   }));
   await assertFails(legacyBatch.commit());
-  // Control: the same harness admits the well-formed row.
+  // Control: the same harness admits the well-formed row, including one
+  // stamped by a device clock a few minutes fast and one hours old.
   await assertSucceeds((await localStopBatch(uid, 500)).commit());
+  await assertSucceeds((await localStopBatch(uid, 501, {
+    createdAt: Timestamp.fromMillis(Date.now() + 4 * 60 * 1000),
+  })).commit());
+  await assertSucceeds((await localStopBatch(uid, 502, {
+    createdAt: Timestamp.fromMillis(Date.now() - 6 * 60 * 60 * 1000),
+  })).commit());
 });
 
 test('owners can retry only stale or failed queue states below the cap', async () => {
@@ -2210,10 +2221,26 @@ test('a server-deferred queue row refuses a retry marker until its window ends',
     await setDoc(doc(queue, 'deferred'), queueItem({createdAt: oldCreate, deferredUntil: future, expiresAt}));
     await setDoc(doc(queue, 'ended'), queueItem({createdAt: oldCreate, deferredUntil: past, expiresAt}));
     await setDoc(doc(queue, 'ended-retried'), queueItem({
-      createdAt: oldCreate, deferredUntil: past, expiresAt,
+      createdAt: oldCreate, deferredUntil: past, expiresAt, deferrals: 3,
       attempts: 2, claimedAt: oldCreate, error: 'earlier failure',
     }));
+    await setDoc(doc(queue, 'capped'), queueItem({
+      createdAt: oldCreate, expiresAt, deferrals: 25,
+      status: 'error', attempts: 5, claimedAt: oldCreate,
+      error: 'Toggl queue limit reached in 24 consecutive hours.',
+    }));
     await setDoc(doc(queue, 'stamp-corrupt'), queueItem({createdAt: oldCreate, deferredUntil: 'soon'}));
+    // The trigger never stamps a non-pending row; the gate covers every
+    // branch anyway rather than trust that.
+    await setDoc(doc(queue, 'deferred-error'), queueItem({
+      createdAt: oldCreate, deferredUntil: future, expiresAt,
+      status: 'error', attempts: 1, claimedAt: oldCreate, error: 'earlier failure',
+    }));
+    await setDoc(doc(queue, 'deferred-processing'), queueItem({
+      createdAt: oldCreate, deferredUntil: future,
+      status: 'processing', attempts: 1,
+      claimedAt: Timestamp.fromMillis(Date.now() - 7 * 60 * 60 * 1000),
+    }));
   });
 
   const db = environment.authenticatedContext(uid).firestore();
@@ -2221,11 +2248,18 @@ test('a server-deferred queue row refuses a retry marker until its window ends',
   const retry = () => ({status: 'pending', retryRequestedAt: serverTimestamp()});
   await assertFails(updateDoc(ref('deferred'), retry()));
   await assertFails(updateDoc(ref('stamp-corrupt'), retry()));
+  await assertFails(updateDoc(ref('deferred-error'), retry()));
+  await assertFails(updateDoc(ref('deferred-processing'), retry()));
   await assertFails(updateDoc(ref('ended'), {...retry(), deferredUntil: deleteField()}));
   await assertFails(updateDoc(ref('ended'), {...retry(), deferredUntil: future}));
+  await assertFails(updateDoc(ref('ended-retried'), {...retry(), deferrals: 0}));
+  await assertFails(updateDoc(ref('ended-retried'), {...retry(), deferrals: deleteField()}));
+  // The server's deferral cap is terminal: attempts 5 refuses every re-arm.
+  await assertFails(updateDoc(ref('capped'), retry()));
   await assertSucceeds(updateDoc(ref('ended'), retry()));
   await assertSucceeds(updateDoc(ref('ended-retried'), retry()));
   assert.equal((await getDoc(ref('ended'))).data()?.deferredUntil.toMillis(), past.toMillis());
+  assert.equal((await getDoc(ref('ended-retried'))).data()?.deferrals, 3);
 });
 
 test('local timer books and lifecycle claims must change in one exact batch', async () => {
