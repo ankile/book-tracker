@@ -18,6 +18,7 @@ import {
   previewAdminCatalogOperation,
   scanAdminCatalog,
 } from "./adminCatalog";
+import {logAppCheckPresence} from "./appCheck";
 import {
   ANONYMOUS_ISSUE_LIMIT,
   assembleIssueFeed,
@@ -136,6 +137,7 @@ async function requireAdmin(
 // wrapper is what makes forgetting the check impossible rather than
 // merely unlikely.
 function adminCallable<Request>(
+  endpointName: string,
   decode: (_value: unknown, _fail: DecodeFailure) => Request,
   handler: (
     _request: Request,
@@ -147,6 +149,7 @@ function adminCallable<Request>(
     .region("europe-west1")
     .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: ADMIN_MAX_INSTANCES})
     .https.onCall(async (data: unknown, context) => {
+      logAppCheckPresence(endpointName, context);
       const identity = await requireAdmin(context);
       if (options.recentAuth === true) {
         const authTime = context.auth?.token.auth_time;
@@ -248,7 +251,7 @@ async function readIssuesFor(
   };
 }
 
-exports.overview = adminCallable(decodeEmptyCallableRequest, async () => {
+exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, async () => {
   // listUsers returns one capped page; stopping there would silently
   // truncate the table and undercount every total, so follow pageToken
   // until the API stops handing one back.
@@ -362,18 +365,21 @@ exports.overview = adminCallable(decodeEmptyCallableRequest, async () => {
 }, {auditView: true});
 
 exports.catalogscan = adminCallable(
+  "admin.catalogscan",
   decodeAdminCatalogScanRequest,
   async ({bookCursor}: AdminCatalogScanRequest) => scanAdminCatalog(db, bookCursor),
   {auditView: true},
 );
 
 exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
+  "admin.catalogpreview",
   decodeAdminCatalogPreviewRequest,
   async ({operation}) => previewAdminCatalogOperation(db, operation),
   {auditView: true},
 );
 
 exports.catalogapply = adminCallable<AdminCatalogApplyRequest>(
+  "admin.catalogapply",
   decodeAdminCatalogApplyRequest,
   async (request, context) => applyAdminCatalogOperation(
     db,

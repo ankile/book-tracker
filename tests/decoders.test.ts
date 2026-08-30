@@ -175,9 +175,26 @@ test('author and user decoders reject malformed nested data', () => {
     () => decodeUser({
       uid: 'owner',
       email: 'owner@example.com',
-      toggl: {apiToken: 'token', workspaceId: 1.5, projectId: 2},
+      toggl: {workspaceId: 1.5, projectId: 2, connectedAt: Timestamp.now()},
     }, 'users/owner'),
     /workspaceId.*integer/,
+  );
+  // SEC-004: the client never sees the credential; the status mirror
+  // carries connectedAt, and the legacy token shape (no connectedAt) is a
+  // decode error, not silently accepted.
+  const status = decodeUser({
+    uid: 'owner',
+    email: 'owner@example.com',
+    toggl: {workspaceId: 1, projectId: 2, connectedAt: Timestamp.now()},
+  }, 'users/owner');
+  assert.deepEqual(Object.keys(status.toggl ?? {}).sort(), ['connectedAt', 'projectId', 'workspaceId']);
+  assert.throws(
+    () => decodeUser({
+      uid: 'owner',
+      email: 'owner@example.com',
+      toggl: {apiToken: 'token', workspaceId: 1, projectId: 2},
+    }, 'users/owner'),
+    /connectedAt/,
   );
 });
 

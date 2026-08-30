@@ -12,11 +12,14 @@ import {
   assertMigrationProjectionSourcesEligible,
   assertMigrationSeedSourcesEligible,
   assertMigrationSourceVersions,
+  OPERATOR_UID,
 } from '../migration-seed-consent.ts'
 
-const db = getFirestore(initializeApp({ projectId: 'book-tracker-d8f24' }, 'catalog-migration-test'))
+const app = initializeApp({ projectId: 'book-tracker-d8f24' }, 'catalog-migration-test')
+const db = getFirestore(app)
+const secretsDb = getFirestore(app, 'secrets')
 const suffix = Date.now().toString(36)
-const sharingUid = `catalog-sharing-${suffix}`
+const sharingUid = `0catalog-sharing-${suffix}`
 const privateUid = `catalog-private-${suffix}`
 const username = `catalog-${suffix}`.slice(0, 30)
 const privateRaceUsername = `race-${suffix}`.slice(0, 30)
@@ -47,6 +50,7 @@ const catalogTesterAuthorId = deterministicCatalogId('author', 'catalog tester')
 const kindPersonUid = `catalog-kind-person-${suffix}`
 const kindEntityUid = `catalog-kind-entity-${suffix}`
 const conflictingKindAuthorId = deterministicCatalogId('author', 'same catalog name')
+const operatorPriorityBookId = `catalog-priority-${suffix}`
 
 after(async () => {
   await Promise.all([
@@ -54,6 +58,8 @@ after(async () => {
     db.recursiveDelete(db.doc(`users/${privateUid}`)),
     db.recursiveDelete(db.doc(`users/${kindPersonUid}`)),
     db.recursiveDelete(db.doc(`users/${kindEntityUid}`)),
+    db.doc(`users/${OPERATOR_UID}/books/${operatorPriorityBookId}`).delete(),
+    db.doc(`users/${OPERATOR_UID}/authors/ursula-priority`).delete(),
     db.doc(`profiles/${username}`).delete(),
     db.doc(`profiles/${privateRaceUsername}`).delete(),
     db.doc(`works/${workId}`).delete(),
@@ -79,6 +85,7 @@ after(async () => {
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).delete(),
     db.doc(`catalogAuthors/${catalogTesterAuthorId}`).delete(),
     db.doc(`catalogAuthors/${conflictingKindAuthorId}`).delete(),
+    secretsDb.doc(`togglTokens/${privateUid}`).delete(),
   ])
 })
 
@@ -170,10 +177,13 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const privateConflictBook = privateUser.collection('books').doc('isbn-conflict-copy')
   const originalUpdatedAt = Timestamp.fromMillis(123_456)
   const now = Timestamp.now()
+  const operatorUser = db.doc(`users/${OPERATOR_UID}`)
+  const operatorBook = operatorUser.collection('books').doc(operatorPriorityBookId)
 
   await Promise.all([
     sharingUser.set({ uid: sharingUid }),
     privateUser.set({ uid: privateUid }),
+    operatorUser.set({uid: OPERATOR_UID}, {merge: true}),
     db.doc(`profiles/${username}`).set({ uid: sharingUid, public: true }),
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).set({
       canonicalName: 'Someone Else', alternateNames: [], nameKeys: ['someone else'],
@@ -190,6 +200,15 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     sharingUser.collection('authors').doc('octavia').set({ name: 'Octavia E. Butler', kind: 'person' }),
     privateUser.collection('authors').doc('ursula').set({ name: 'Ursula K. Le Guin', kind: 'person' }),
     privateUser.collection('authors').doc('octavia').set({ name: 'Octavia E. Butler', kind: 'person' }),
+    operatorUser.collection('authors').doc('ursula-priority').set({
+      name: 'Ursula K. Le Guin', kind: 'person',
+    }),
+    operatorBook.set({
+      title: 'The Left Hand of Darkness', isbn, authorIds: ['ursula-priority'],
+      pageCount: 333, publisher: 'Operator Press', publishedDate: '1969',
+      coverUrl: 'https://operator.example.test/cover.jpg',
+      subjects: ['Science fiction'], fiction: true, updatedAt: originalUpdatedAt,
+    }),
     sharedBook.set({
       title: 'The Left Hand of Darkness',
       isbn,
@@ -243,9 +262,16 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const applied = runScript(migrationPath, '--apply')
   assert.match(applied, new RegExp(`SET  create works/${workId}`))
   assert.match(applied, /REVIEW existing-isbn-text-conflict/)
-  assert.equal((await db.doc(`works/${workId}`).get()).data()?.coverUrl, '')
+  const createdWork = (await db.doc(`works/${workId}`).get()).data()
+  assert.equal(createdWork?.coverUrl, 'https://operator.example.test/cover.jpg')
+  assert.deepEqual(createdWork?.subjects, ['Science fiction'])
+  assert.equal(createdWork?.fiction, true)
   assert.equal((await db.doc(`catalogAuthors/${leGuinAuthorId}`).get()).get('canonicalName'), 'Ursula K. Le Guin')
-  assert.equal((await db.doc(`editions/${editionId}`).get()).data()?.coverUrl, '')
+  const createdEdition = (await db.doc(`editions/${editionId}`).get()).data()
+  assert.equal(createdEdition?.coverUrl, 'https://operator.example.test/cover.jpg')
+  assert.equal(createdEdition?.suggestedPageCount, 333)
+  assert.equal(createdEdition?.publisher, 'Operator Press')
+  assert.equal(createdEdition?.publishedDate, '1969')
   assert.deepEqual((await db.doc(`isbnIndex/${isbn}`).get()).data(), { workId, editionId })
   assert.equal((await db.doc(`isbnIndex/${privateIsbn}`).get()).exists, false)
   assert.equal((await db.doc(`editions/${privateEditionId}`).get()).exists, false)
@@ -465,6 +491,13 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       createdAt: now,
       updatedAt: now,
     }),
+    privateUser.update({toggl: null}),
+    secretsDb.doc(`togglTokens/${privateUid}`).set({
+      apiToken: 'local-corrupt-shape-fixture',
+      workspaceId: 1,
+      projectId: 2,
+      updatedAt: now,
+    }),
   ])
   const corruptAudit = runScript(auditPath)
   assert.match(corruptAudit, /^catalog\.work\.merge-cycle /m)
@@ -484,4 +517,6 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.match(corruptAudit, new RegExp(`^update\\.owner-mismatch users/${sharingUid}/books/shared-copy/updates/bad-references`, 'm'))
   assert.match(corruptAudit, new RegExp(`^update\\.book-mismatch users/${sharingUid}/books/shared-copy/updates/bad-references`, 'm'))
   assert.match(corruptAudit, new RegExp(`^catalog\\.book\\.isbn-provenance-mismatch users/${privateUid}/books/private-copy`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^user\\.toggl-status\\.bad-shape users/${privateUid}`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^toggl-secret\\.status-missing secrets:togglTokens/${privateUid}`, 'm'))
 })

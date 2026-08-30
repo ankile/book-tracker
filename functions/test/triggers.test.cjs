@@ -10,6 +10,7 @@ const {sharedWorkOwnerId} = require("../lib/catalogProjection");
 
 const functions = require("../lib");
 const db = getFirestore();
+const secretsDb = getFirestore("secrets");
 
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
@@ -471,15 +472,36 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
 
 test("user deletion tombstones the user document and its profiles, deletes only uid-matched markers, and pages by id", async (t) => {
   const noDeleteUser = () => assert.fail("the user document and profiles must never be deleted");
+  const cleanupEvents = [];
   const sets = [];
   const deletes = [];
   let sharingDeletes = 0;
   const sharingRef = {
     path: "users/owner/settings/bookSharing",
-    delete: async () => { sharingDeletes += 1; },
+    delete: async () => { sharingDeletes += 1; cleanupEvents.push("sharing"); },
   };
-  let userValue = {email: "owner@example.test", uid: "owner", toggl: {apiToken: "t"}};
+  let userValue = {email: "owner@example.test", uid: "owner", toggl: {workspaceId: 3, projectId: 4}};
   const userRef = {path: "users/owner", delete: noDeleteUser};
+  // The credential in the secrets database is deleted (SEC-004) — the one
+  // per-account document deletion runs, and it is idempotent, so a
+  // redelivery repeats the no-op delete.
+  const credentialDeletes = [];
+  let credentialFailure = false;
+  t.mock.method(secretsDb, "doc", (path) => {
+    assert.equal(path, "togglTokens/owner");
+    return {delete: async () => {
+      // Order pin (SEC-004 review F4): the tombstone must already be on
+      // the user document when the credential is deleted, so a
+      // concurrent savetoken's post-write re-check always sees it.
+      assert.ok(
+        userValue.deletedAt !== undefined,
+        "the tombstone must be set before the credential is deleted",
+      );
+      credentialDeletes.push(path);
+      cleanupEvents.push("credential");
+      if (credentialFailure) throw new Error("secrets database unavailable");
+    }};
+  });
   const queries = [];
   const pages = [];
   let markerOwner = "owner";
@@ -528,6 +550,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
       assert.equal(ref, userRef);
       sets.push([ref.path, value, options]);
       userValue = {...userValue, ...value};
+      cleanupEvents.push("user");
     },
     update: noDeleteUser,
     delete: noDeleteUser,
@@ -547,7 +570,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
     set: (ref, value, options) => sets.push([ref.path, value, options]),
     delete: (ref) => deletes.push(ref.path),
     update: noDeleteUser,
-    commit: async () => { commits += 1; },
+    commit: async () => { commits += 1; cleanupEvents.push("profiles"); },
   }));
 
   // Two full pages and a partial one; page 2's first profile is already
@@ -559,12 +582,17 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   pages.push(names.slice(200).map((n) => profileDoc(n, undefined)));
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.equal(sharingDeletes, 1);
+  assert.equal(cleanupEvents[0], "user");
+  assert.equal(cleanupEvents.filter((event) => event === "profiles").length, 3);
+  assert.ok(cleanupEvents.includes("credential"));
+  assert.ok(cleanupEvents.includes("sharing"));
 
   // The user document keeps every field and gains the tombstone.
   assert.equal(sets[0][0], "users/owner");
   assert.deepEqual(Object.keys(sets[0][1]).sort(), ["deletedAt", "uid"]);
   assert.deepEqual(sets[0][2], {merge: true});
-  assert.equal(userValue.toggl.apiToken, "t");
+  assert.deepEqual(userValue.toggl, {workspaceId: 3, projectId: 4});
+  assert.equal(credentialDeletes.length, 1);
   // Profiles: 249 tombstoned (one already was); three batches; cursor
   // paging by document id.
   const profileSets = sets.slice(1);
@@ -609,6 +637,19 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   assert.equal(sets.length, 1);
   assert.equal(sets[0][1].uid, "owner");
   assert.equal(sharingDeletes, 4);
+
+  // A failure in one cleanup subsystem does not prevent the other two from
+  // converging, and the retryable trigger still reports the failure.
+  sets.length = 0; deletes.length = 0; commits = 0;
+  credentialFailure = true;
+  pages.push([profileDoc("cleanup-survivor", undefined)]);
+  await assert.rejects(
+    functions.deleteUserDocument.run({uid: "owner"}),
+    /Account deletion cleanup failed/,
+  );
+  assert.ok(sets.some(([path]) => path === "profiles/cleanup-survivor"));
+  assert.ok(deletes.includes("profileDiscovery/cleanup-survivor"));
+  assert.equal(sharingDeletes, 5);
 
   // A delivery that fails is retried rather than dropped — for both Auth
   // triggers: nothing else can create users/{uid}.

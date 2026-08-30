@@ -93,12 +93,16 @@ exports.createUserDocument = functions
 // writes for the hour its ID token outlives the account (verifiedAccount).
 // Reading data, authors, queue rows, quotas and the ownership record stay
 // exactly as they were; a username stays reserved by its tombstoned
-// profile. The one thing deletion prunes is the profileDiscovery marker —
-// a search-index opt-in pointer, not retained content: a deleted account
-// leaves the search index, so its uid-matched markers are removed (the
-// profile itself, the actual content, is kept and tombstoned). This is a
-// deliberate, narrow exception to the soft-delete default. A physical purge is an operator-run
-// migration (migrate-purge-deleted-accounts.ts), never this trigger.
+// profile. Deletion prunes exactly two things, both deliberate, narrow
+// exceptions to the soft-delete default and neither retained content:
+// the profileDiscovery markers (search-index opt-in pointers — a deleted
+// account leaves the search index; removed only while they still name
+// this uid) and the Toggl credential in the secrets database (SEC-004: a
+// live credential for the user's whole Toggl account is not data to
+// retain for an account that can never use it; the status-only mirror in
+// users/{uid}.toggl stays, tombstoned with the rest). A physical purge is
+// an operator-run migration (migrate-purge-deleted-accounts.ts), never
+// this trigger.
 //
 // failurePolicy makes a failed delivery retry, and every step is
 // idempotent: deletedAt is written only where it is absent, so a
@@ -107,6 +111,12 @@ exports.createUserDocument = functions
 // profile pass pages by document id (the tombstone does not change the
 // query, so a limit-only loop would never advance).
 const PROFILE_TOMBSTONE_PAGE = 100;
+
+async function deleteTogglCredential(uid: string): Promise<void> {
+  // The secrets database (SEC-004); deleting a missing document is a
+  // no-op, so a redelivery converges.
+  await getFirestore("secrets").doc(`togglTokens/${uid}`).delete();
+}
 
 async function tombstoneUser(uid: string): Promise<void> {
   const userRef = db.collection("users").doc(uid);
@@ -161,12 +171,28 @@ exports.deleteUserDocument = functions
   })
   .auth.user()
   .onDelete(async (user) => {
-    // A sharing-setting delete lets the projection trigger remove discovery
-    // rows promptly. Live account checks still make any stale row inert while
-    // the retryable Auth trigger converges.
-    await db.doc(`users/${user.uid}/settings/bookSharing`).delete();
+    // Tombstone FIRST, credential second: savetoken re-checks the
+    // tombstone after writing a credential and undoes itself, so any
+    // credential that lands after this delete step is written by a call
+    // that will see the already-set tombstone and remove it (review F4 —
+    // the reverse order left a race where a still-valid ID token could
+    // strand a live credential on a deleted account).
     await tombstoneUser(user.uid);
-    await tombstoneProfiles(user.uid);
+    // Each cleanup must run even if another subsystem is temporarily down.
+    // The durable user tombstone already makes stale sharing rows inert; the
+    // profile tombstone closes public rendering, while retries converge all
+    // three cleanup operations.
+    const cleanup = await Promise.allSettled([
+      tombstoneProfiles(user.uid),
+      deleteTogglCredential(user.uid),
+      db.doc(`users/${user.uid}/settings/bookSharing`).delete(),
+    ]);
+    const failures = cleanup.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Account deletion cleanup failed.");
+    }
     return null;
   });
 
@@ -176,12 +202,7 @@ exports.syncsharingprofileprojection = syncsharingprofileprojection;
 
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
-const catalog = require("./catalog");
-exports.catalog = {
-  search: catalog.search,
-  ensureauthors: catalog.ensureauthors,
-  workreaders: catalog.workreaders,
-};
+exports.catalog = require("./catalogEndpoints");
 exports.telemetry = require("./telemetry");
 exports.toggl = require("./toggl");
 exports.publicweb = publicweb;

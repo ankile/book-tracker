@@ -55,9 +55,11 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 305 -> 324 KiB for shared works: catalog suggestions and
   // runtime decoders, the work/readers route, sharing controls, and the
   // admin curation route add 15.1 KiB compressed, with explicit headroom.
+  // Total raised 324 -> 326 KiB when integrating the App Check monitoring
+  // client from the current base; the merged production build is 324.7 KiB.
   assert.ok(
-    totalBytes <= 324 * 1024,
-    `Expected at most 324 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 326 * 1024,
+    `Expected at most 326 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

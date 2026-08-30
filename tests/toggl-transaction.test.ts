@@ -6,7 +6,7 @@ import test, { after } from 'node:test';
 
 const functionsRequire = createRequire(new URL('../functions/package.json', import.meta.url));
 const { getFirestore, Timestamp } = functionsRequire('firebase-admin/firestore') as {
-  getFirestore: () => import('firebase-admin/firestore').Firestore;
+  getFirestore: (databaseId?: string) => import('firebase-admin/firestore').Firestore;
   Timestamp: typeof import('firebase-admin/firestore').Timestamp;
 };
 const deployed = functionsRequire('./lib') as {
@@ -65,11 +65,23 @@ const {
 type AdminTimestamp = import('firebase-admin/firestore').Timestamp;
 
 const db = getFirestore();
+// The credential store (SEC-004): getTogglConfig reads it, savetoken
+// writes it, so timer tests seed it alongside the status mirror.
+const secretsDb = getFirestore('secrets');
 const uid = `toggl-transaction-${Date.now()}`;
 const userRef = db.doc(`users/${uid}`);
 const lifecycleRef = userRef.collection('timerLifecycle').doc('current');
 
-after(() => db.recursiveDelete(userRef));
+const togglSecret = (forUid: string) => secretsDb.doc(`togglTokens/${forUid}`);
+async function seedTogglSecret(forUid: string): Promise<void> {
+  await togglSecret(forUid).set({apiToken: 'token', workspaceId: 3, projectId: 4, updatedAt: Timestamp.now()});
+}
+const togglStatus = () => ({workspaceId: 3, projectId: 4, connectedAt: Timestamp.now()});
+
+after(async () => {
+  await db.recursiveDelete(userRef);
+  await togglSecret(uid).delete();
+});
 
 test('savetoken admits a verified account five times an hour and refuses the sixth before Toggl is called', async (t) => {
   const warnings = captureWarnings(t);
@@ -99,8 +111,18 @@ test('savetoken admits a verified account five times an hour and refuses the six
     );
   }
   assert.equal(fetchCalls, 2 * TOGGL_TOKEN_LIMIT);
-  const stored = (await userRef.get()).data()?.toggl;
-  assert.deepEqual(stored, {apiToken: 'secret', workspaceId: 6, projectId: 7});
+  // The user document carries only the status mirror; the credential is
+  // in the secrets database and nowhere in the user document (SEC-004).
+  const mirror = (await userRef.get()).data()?.toggl as Record<string, unknown>;
+  assert.deepEqual(Object.keys(mirror).sort(), ['connectedAt', 'projectId', 'workspaceId']);
+  assert.equal(mirror.workspaceId, 6);
+  assert.equal(mirror.projectId, 7);
+  assert.ok(!JSON.stringify((await userRef.get()).data()).includes('secret'));
+  const storedSecret = (await togglSecret(uid).get()).data() as Record<string, unknown>;
+  assert.deepEqual(Object.keys(storedSecret).sort(), ['apiToken', 'projectId', 'updatedAt', 'workspaceId']);
+  assert.equal(storedSecret.apiToken, 'secret');
+  assert.equal(storedSecret.workspaceId, 6);
+  assert.equal(storedSecret.projectId, 7);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await assert.rejects(
@@ -118,14 +140,16 @@ test('savetoken admits a verified account five times an hour and refuses the six
   });
   await deployed.toggl.savetoken.run({token: 'secret'}, verified);
   assert.equal((await quotaRef.get()).data()?.count, 1);
-  await userRef.update({toggl: {apiToken: 'token', workspaceId: 3, projectId: 4}});
+  await seedTogglSecret(uid);
+  await userRef.update({toggl: togglStatus()});
 });
 
 test('Firestore serializes simultaneous starts on different books', async (t) => {
+  await seedTogglSecret(uid);
   await userRef.set({
     uid,
     email: 'timer@example.com',
-    toggl: {apiToken: 'token', workspaceId: 3, projectId: 4},
+    toggl: togglStatus(),
   });
   const books = userRef.collection('books');
   await Promise.all([
@@ -172,10 +196,12 @@ test('missing or malformed lifecycle state fails before a Toggl request', async 
   const brokenUid = `${uid}-broken`;
   const brokenUser = db.doc(`users/${brokenUid}`);
   const bookRef = brokenUser.collection('books').doc('book');
+  await seedTogglSecret(brokenUid);
+  t.after(() => togglSecret(brokenUid).delete());
   await brokenUser.set({
     uid: brokenUid,
     email: 'broken@example.test',
-    toggl: {apiToken: 'token', workspaceId: 3, projectId: 4},
+    toggl: togglStatus(),
   });
   await bookRef.set({title: 'Book', activeTimer: null});
   let fetchCalls = 0;
@@ -249,10 +275,11 @@ async function deliver(
 }
 
 test('one remaining queue slot claims one row and stamps the other until the window ends', async (t) => {
+  await seedTogglSecret(uid);
   await userRef.set({
     uid,
     email: 'timer@example.com',
-    toggl: {apiToken: 'token', workspaceId: 3, projectId: 4},
+    toggl: togglStatus(),
   }, {merge: true});
   const quotaRef = userRef.collection('functionQuotas').doc('togglQueue');
   const rowsRef = userRef.collection('functionQuotas').doc('togglQueueRows');
@@ -624,6 +651,17 @@ test('checked recovery clears capped failures but refuses live processing work',
   assert.equal((await bookRef.get()).data()?.activeTimer, null);
   assert.equal((await lifecycleRef.get()).data()?.state, 'idle');
   assert.equal((await queueRef.get()).exists, false);
+
+  await seed('error', Timestamp.now(), 1);
+  await userRef.update({deletedAt: Timestamp.now()});
+  await assert.rejects(
+    deployed.toggl.clearstopping.run({bookId}, context),
+    (error: unknown) => error instanceof Error && 'code' in error &&
+      error.code === 'failed-precondition' && /account has been deleted/.test(error.message),
+  );
+  assert.equal((await bookRef.get()).data()?.activeTimer.state, 'stopping');
+  assert.equal((await queueRef.get()).exists, true);
+  await userRef.set({uid});
 
   await seed('processing', Timestamp.now());
   await assert.rejects(

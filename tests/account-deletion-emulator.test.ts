@@ -16,12 +16,18 @@ import { fileURLToPath } from 'node:url';
 // live project.
 const functionsRequire = createRequire(new URL('../functions/package.json', import.meta.url));
 const { getFirestore, Timestamp, FieldValue } = functionsRequire('firebase-admin/firestore') as {
-  getFirestore: (app?: unknown) => import('firebase-admin/firestore').Firestore;
+  getFirestore: (appOrDatabaseId?: unknown, databaseId?: string) => import('firebase-admin/firestore').Firestore;
   Timestamp: typeof import('firebase-admin/firestore').Timestamp;
   FieldValue: typeof import('firebase-admin/firestore').FieldValue;
 };
 const { initializeApp } = functionsRequire('firebase-admin/app') as {
   initializeApp: (options: { projectId: string }, name: string) => unknown;
+};
+const { getAuth } = functionsRequire('firebase-admin/auth') as {
+  getAuth: (app?: unknown) => {
+    createUser: (user: { uid: string; email: string }) => Promise<unknown>;
+    deleteUser: (uid: string) => Promise<void>;
+  };
 };
 const { logger } = functionsRequire('firebase-functions') as {
   logger: { warn: (...args: unknown[]) => void };
@@ -42,6 +48,10 @@ const shell = readFileSync(fileURLToPath(new URL('../functions/assets/profile-sh
 type Db = import('firebase-admin/firestore').Firestore;
 type DocRef = import('firebase-admin/firestore').DocumentReference;
 const db = getFirestore();
+// The Toggl credential store (SEC-004): a separate `secrets` database the
+// deletion trigger clears — the one credential an account holds is not
+// content to retain.
+const secrets = getFirestore('secrets');
 const run = `del${Date.now()}`;
 
 const profileFor = (uid: string) => ({
@@ -62,9 +72,10 @@ const profileFor = (uid: string) => ({
 
 // Everything an account can own, so the assertion "nothing else changed"
 // covers every collection deletion used to leave behind.
-async function seedAccount(target: Db, uid: string, username: string): Promise<void> {
+async function seedAccount(target: Db, uid: string, username: string, secretsTarget: Db = secrets): Promise<void> {
   const user = target.collection('users').doc(uid);
-  await user.set({ uid, email: `${uid}@example.test`, toggl: { apiToken: 'secret-token', workspaceId: 3, projectId: 4 } });
+  await user.set({ uid, email: `${uid}@example.test`, toggl: { workspaceId: 3, projectId: 4, connectedAt: Timestamp.now() } });
+  await secretsTarget.collection('togglTokens').doc(uid).set({ apiToken: 'stored-credential', workspaceId: 3, projectId: 4, updatedAt: Timestamp.now() });
   const book = user.collection('books').doc('book-1');
   await book.set({ title: 'Kept', currentPage: 20, pageCount: 100, finished: false, pagesRead: 20, timeRead: 60, activeTimer: null, currentPageUpdateId: null, authorIds: ['author-1'], owner: user, updatedAt: Timestamp.now(), createdAt: Timestamp.now() });
   await book.collection('updates').doc('u1').set({ owner: user, book, type: 'reading', timeRead: 60, fromPage: 0, toPage: 20, pagesRead: 20, updatedAt: Timestamp.now(), createdAt: Timestamp.now() });
@@ -123,9 +134,11 @@ test('deleting an account tombstones its document and profile and removes nothin
   await deployed.deleteUserDocument.run({ uid });
 
   const afterFirst = await dumpAccount(db, uid, username);
-  // The discovery marker — a search-index pointer, not content — is the
-  // one thing deletion removes; everything else survives, with a tombstone
-  // on the user document and the profile.
+  // Deletion removes exactly two things, neither of them content: the
+  // discovery marker (a search-index pointer) and the Toggl credential in
+  // the secrets database. Everything else survives, with a tombstone on
+  // the user document and the profile.
+  assert.equal((await secrets.doc(`togglTokens/${uid}`).get()).exists, false, 'the credential must be deleted');
   const markerPath = `profileDiscovery/${username}`;
   assert.ok(before.has(markerPath));
   assert.ok(!afterFirst.has(markerPath), 'the discovery marker must be deleted');
@@ -142,10 +155,15 @@ test('deleting an account tombstones its document and profile and removes nothin
       assert.equal(stored, json, `${path} must be untouched`);
     }
   }
-  // The credential is retained with the rest (the owner's retention
-  // decision); toggl.ts refuses to use it for a tombstoned account.
-  assert.equal((await db.doc(`users/${uid}`).get()).get('toggl').apiToken, 'secret-token');
+  // The status mirror stays (tombstoned with the rest, and harmless: the
+  // credential it mirrored is gone and every Toggl path refuses the
+  // tombstone first); the bystander keeps both mirror and credential.
+  assert.deepEqual(
+    Object.keys((await db.doc(`users/${uid}`).get()).get('toggl')).sort(),
+    ['connectedAt', 'projectId', 'workspaceId'],
+  );
   assert.deepEqual(await dumpAccount(db, bystander, bystander), bystanderBefore);
+  assert.equal((await secrets.doc(`togglTokens/${bystander}`).get()).get('apiToken'), 'stored-credential');
 
   // Redelivery (failurePolicy): idempotent to the byte — the tombstones
   // keep their first timestamp.
@@ -172,6 +190,46 @@ test('deleting an account tombstones its document and profile and removes nothin
   assert.deepEqual(skipped, []);
 });
 
+// The trigger pages profiles by document id, 100 at a time, behind a
+// cursor — a limit-only page would never advance, since the tombstone does
+// not change the query. The unit test pins the query shape against a
+// mock; this runs the real cursor against the emulator, so a paging bug
+// that a mock cannot see (an infinite loop, a skipped page) shows here.
+test('a 101-profile account is tombstoned page by page and only its own markers go', async () => {
+  const uid = `many-${run}`;
+  const squatter = `squat-${run}`;
+  const usernames = Array.from({ length: 101 }, (_, i) => `many-${run}-${String(i).padStart(3, '0')}`);
+  const batch = db.batch();
+  batch.set(db.doc(`users/${uid}`), { uid, email: `${uid}@example.test` });
+  for (const username of usernames) {
+    batch.set(db.doc(`profiles/${username}`), profileFor(uid));
+    batch.set(db.doc(`profileDiscovery/${username}`), { uid, createdAt: Timestamp.now() });
+  }
+  // A marker that names another account under one of this account's
+  // profile names: drift the rules make unlikely, but the marker rule's
+  // promise is that a marker is only ever removed by the uid it names.
+  const reclaimed = `many-${run}-rc`;
+  batch.set(db.doc(`profiles/${reclaimed}`), profileFor(uid));
+  batch.set(db.doc(`profileDiscovery/${reclaimed}`), { uid: squatter, createdAt: Timestamp.now() });
+  await batch.commit();
+
+  await deployed.deleteUserDocument.run({ uid });
+
+  const profiles = await db.collection('profiles').where('uid', '==', uid).get();
+  assert.equal(profiles.size, 102);
+  for (const profile of profiles.docs) {
+    assert.ok(profile.get('deletedAt') instanceof Timestamp, `${profile.id} must be tombstoned`);
+  }
+  for (const username of usernames) {
+    assert.equal((await db.doc(`profileDiscovery/${username}`).get()).exists, false, `${username} marker must go`);
+  }
+  assert.equal((await db.doc(`profileDiscovery/${reclaimed}`).get()).get('uid'), squatter);
+  // The namespace is shared across the emulator session: a marker that
+  // names a uid with no matching profile would be a sitemap skip for
+  // every later test, so it goes here.
+  await db.doc(`profileDiscovery/${reclaimed}`).delete();
+});
+
 // The purge script is the only path that removes an account's data. It
 // runs against its own project namespace (migrate-lib pins the real
 // project id; the emulator keys data by project), one uid per run, and
@@ -179,21 +237,43 @@ test('deleting an account tombstones its document and profile and removes nothin
 test('the purge script refuses a live account, dry-runs, and removes exactly one tombstoned tree', async () => {
   const purgeApp = initializeApp({ projectId: 'book-tracker-d8f24' }, `purge-${run}`);
   const target = getFirestore(purgeApp);
+  const targetSecrets = getFirestore(purgeApp, 'secrets');
   const gone = `purge-${run}`;
   const kept = `keep-${run}`;
-  await seedAccount(target, gone, gone);
-  await seedAccount(target, kept, kept);
+  await seedAccount(target, gone, gone, targetSecrets);
+  await seedAccount(target, kept, kept, targetSecrets);
   const keptBefore = await dumpAccount(target, kept, kept);
+  const auth = getAuth(purgeApp);
+  await auth.createUser({ uid: gone, email: `${gone}@example.test` });
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const script = fileURLToPath(new URL('../migrate-purge-deleted-accounts.ts', import.meta.url));
   const purge = (uid: string, ...flags: string[]) => spawnSync('node', [script, uid, ...flags], {
-    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    cwd: root,
     encoding: 'utf8',
     env: { ...process.env, FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST },
   });
+  const audit = () => {
+    const result = spawnSync('node', [fileURLToPath(new URL('../db-audit.ts', import.meta.url))], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
 
-  // Live account: refused, even with --apply, and it changed nothing.
+  // Live account, still in Auth: refused, even with --apply, before it
+  // looks at Firestore at all, and it changed nothing.
   const goneBefore = await dumpAccount(target, gone, gone);
   assert.ok(goneBefore.size > 0);
+  const inAuth = purge(gone, '--apply');
+  assert.notEqual(inAuth.status, 0);
+  assert.match(inAuth.stderr, /still exists in Auth/);
+  assert.deepEqual(await dumpAccount(target, gone, gone), goneBefore);
+
+  // Gone from Auth but not tombstoned (the trigger has not run, or
+  // never will — deleteUsers() in bulk does not fire it): refused too.
+  await auth.deleteUser(gone);
   const refused = purge(gone, '--apply');
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /not tombstoned/);
@@ -203,20 +283,47 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   await target.doc(`profiles/${gone}`).set({ deletedAt: FieldValue.serverTimestamp() }, { merge: true });
   const tombstoned = await dumpAccount(target, gone, gone);
 
+  // A tombstone on an account that exists in Auth is drift (only the
+  // deletion trigger writes one), and purging it would destroy a working
+  // account: refused, before anything is read.
+  await auth.createUser({ uid: gone, email: `${gone}@example.test` });
+  const drift = purge(gone, '--apply');
+  assert.notEqual(drift.status, 0);
+  assert.match(drift.stderr, /still exists in Auth/);
+  assert.deepEqual(await dumpAccount(target, gone, gone), tombstoned);
+  await auth.deleteUser(gone);
+
+  // No trigger ran in this namespace, so the marker is still there on a
+  // tombstoned profile and the credential is still stored — the half-done
+  // states the audit must report (the tombstone leaves `public` true, so
+  // no older check catches the marker).
+  const preAudit = audit();
+  assert.match(preAudit, new RegExp(`^profile-discovery\\.profile-tombstoned profileDiscovery/${gone}$`, 'm'));
+  assert.match(preAudit, new RegExp(`^toggl-secret\\.tombstoned secrets:togglTokens/${gone}`, 'm'));
+  assert.match(preAudit, /^deleted-accounts: [1-9]/m);
+  // And the audit never prints a credential value.
+  assert.ok(!preAudit.includes('stored-credential'));
+
   const dry = purge(gone);
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /TARGET: emulator/);
+  assert.match(dry.stdout, new RegExp(`^${gone} is not in Auth$`, 'm'));
   assert.match(dry.stdout, new RegExp(`DRY profileDiscovery/${gone}`));
   assert.match(dry.stdout, new RegExp(`DRY profiles/${gone}`));
   assert.match(dry.stdout, new RegExp(`DRY profileOwners/${gone}`));
+  assert.match(dry.stdout, new RegExp(`DRY secrets:togglTokens/${gone}`));
+  assert.ok(!dry.stdout.includes('stored-credential'), 'the purge never prints a credential');
   assert.match(dry.stdout, /tree: 7 documents/);
   assert.match(dry.stdout, /nothing written/);
   assert.deepEqual(await dumpAccount(target, gone, gone), tombstoned);
+  assert.equal((await targetSecrets.doc(`togglTokens/${gone}`).get()).exists, true);
 
   const applied = purge(gone, '--apply');
   assert.equal(applied.status, 0, applied.stderr);
-  assert.match(applied.stdout, /3 public documents and a 7-document tree deleted/);
+  assert.match(applied.stdout, /3 public documents, 1 stored credential and a 7-document tree deleted/);
   assert.equal((await dumpAccount(target, gone, gone)).size, 0);
+  assert.equal((await targetSecrets.doc(`togglTokens/${gone}`).get()).exists, false);
+  assert.equal((await targetSecrets.doc(`togglTokens/${kept}`).get()).get('apiToken'), 'stored-credential');
   assert.deepEqual(await target.collection('users').doc(gone).listCollections(), []);
   assert.deepEqual(await dumpAccount(target, kept, kept), keptBefore);
 
@@ -226,5 +333,22 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   const again = purge(gone, '--apply');
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /is absent/);
-  assert.match(again.stdout, /0 public documents and a 0-document tree deleted/);
+  assert.match(again.stdout, /0 public documents, 0 stored credentials and a 0-document tree deleted/);
+  const postAudit = audit();
+  assert.doesNotMatch(postAudit, new RegExp(`profileDiscovery/${gone}`));
+  assert.doesNotMatch(postAudit, new RegExp(`togglTokens/${gone}`));
+
+  // A purge interrupted after the root document went (root-last makes
+  // that the only possible partial state): the re-run finds the orphaned
+  // subcollections under the missing root, removes them, and reports it.
+  await target.doc(`users/${gone}/books/orphan`).set({ title: 'Orphan' });
+  await target.doc(`users/${gone}/books/orphan/updates/u1`).set({ pagesRead: 1 });
+  const cleaned = purge(gone, '--apply');
+  assert.equal(cleaned.status, 0, cleaned.stderr);
+  assert.match(cleaned.stdout, /is absent/);
+  assert.match(cleaned.stdout, /tree: 2 documents/);
+  assert.match(cleaned.stdout, /0 public documents, 0 stored credentials and a 2-document tree deleted/);
+  assert.equal((await dumpAccount(target, gone, gone)).size, 0);
+  assert.deepEqual(await target.collection('users').doc(gone).listCollections(), []);
+  assert.deepEqual(await dumpAccount(target, kept, kept), keptBefore);
 });

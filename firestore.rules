@@ -1035,19 +1035,25 @@ service cloud.firestore {
                     < request.time - duration.value(600, 's'));
     }
 
+    // Status-only mirror written by toggl-savetoken (SEC-004): the
+    // credential itself lives in the `secrets` database, which client
+    // rules deny outright and this engine cannot reach either (get()
+    // reads the database it runs in). The gate checks that the server
+    // recorded a connection, not the credential; the pre-SEC-004 shape
+    // (with apiToken) fails hasOnly, so a queue create against an
+    // unmigrated account refuses rather than trusting a stale token.
     function togglConfigured(userId) {
       let path = /databases/$(database)/documents/users/$(userId);
       let toggl = get(path).data.get('toggl', null);
       return exists(path)
              && toggl is map
-             && toggl.keys().hasAll(['apiToken', 'workspaceId', 'projectId'])
-             && toggl.keys().hasOnly(['apiToken', 'workspaceId', 'projectId'])
-             && toggl.apiToken is string
-             && toggl.apiToken.size() > 0
+             && toggl.keys().hasAll(['workspaceId', 'projectId', 'connectedAt'])
+             && toggl.keys().hasOnly(['workspaceId', 'projectId', 'connectedAt'])
              && toggl.workspaceId is int
              && toggl.workspaceId > 0
              && toggl.projectId is int
-             && toggl.projectId > 0;
+             && toggl.projectId > 0
+             && toggl.connectedAt is timestamp;
     }
 
     // Mirrors functions/src/togglQueueLimits.ts (TOGGL_QUEUE_ROW_LIMIT,

@@ -67,7 +67,9 @@ const db = getFirestore();
 const auth = getAuth();
 const run = `tel-${Date.now()}`;
 const ADMIN_UID = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2';
-const asUser = (uid: string): CallableContext => ({ auth: { uid, token: {} } });
+const asUser = (uid: string): CallableContext => ({
+  auth: {uid, token: {email_verified: true}},
+});
 const report = {
   level: 'error',
   event: 'firestore.listener_failed',
@@ -91,6 +93,10 @@ async function rowsFor(uid: string | null) {
 
 async function quota(uid: string) {
   return (await db.doc(`users/${uid}/functionQuotas/issueReports`).get()).data();
+}
+
+async function activateCaller(uid: string): Promise<void> {
+  await db.doc(`users/${uid}`).set({uid}, {merge: true});
 }
 
 function captureWarnings(t: { mock: { method: (o: object, m: string, f: (...a: unknown[]) => void) => void } }) {
@@ -122,6 +128,7 @@ after(async () => {
 test('the callable stores exactly twenty rows an hour, pins the uid, and warns once', async (t) => {
   const uid = `${run}-seq`;
   createdAuthUsers.push(uid);
+  await activateCaller(uid);
   const warnings = captureWarnings(t);
   for (let index = 0; index < 20; index += 1) {
     assert.deepEqual(await deployed.telemetry.reportissue.run({ ...report, message: `${run} ${index}` }, asUser(uid)), {
@@ -152,6 +159,7 @@ test('the callable stores exactly twenty rows an hour, pins the uid, and warns o
 test('concurrent reports contend on the real transaction and never exceed the quota', async (t) => {
   const uid = `${run}-race`;
   createdAuthUsers.push(uid);
+  await activateCaller(uid);
   const warnings = captureWarnings(t);
   const outcomes = await Promise.all(
     Array.from({ length: 30 }, (_, index) =>
@@ -214,6 +222,7 @@ test('a refused, malformed or anonymous report touches neither the counter nor t
 test('an expired window restarts at one and a stale first-refusal marker does not warn again', async (t) => {
   const uid = `${run}-window`;
   createdAuthUsers.push(uid);
+  await activateCaller(uid);
   const warnings = captureWarnings(t);
   await db.doc(`users/${uid}/functionQuotas/issueReports`).set({
     windowStartedAt: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000),

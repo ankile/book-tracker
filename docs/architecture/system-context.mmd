@@ -3,34 +3,31 @@ title: Book Tracker system context
 ---
 flowchart LR
   accTitle: Book Tracker system context
-  accDescr: Readers track personal books, use a shared author and work catalog, and may opt into reader comparisons. The operator curates shared authors, works, and editions. Book Tracker also reads external metadata, serves public profiles, and optionally synchronizes timers with Toggl Track.
+  accDescr: Readers use Book Tracker to manage a private reading library. People may also view shared profiles. The app obtains book information from external catalog services and can connect to an optional time-tracking service.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef system fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:3px;
   classDef external fill:#f7f3ed,stroke:#9b7b52,color:#4c3926,stroke-width:2px;
-  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
 
-  subgraph people[People]
+  subgraph people[People · gray]
     direction TB
-    reader["<b>Reader</b><br/>Tracks books, links shared works,<br/>and optionally shares reading summaries"]:::person
+    reader["<b>Reader</b><br/>Tracks books, progress, sessions,<br/>authors, and reading statistics"]:::person
     visitor["<b>Profile visitor</b><br/>Reads a shared public profile"]:::person
-    operator["<b>Operator</b><br/>Reviews operations and curates<br/>shared works and editions"]:::person
-    crawler["<b>Search crawler</b><br/>Indexes opted-in public profiles"]:::person
+    operator["<b>Authorized operator</b><br/>Reviews operations and curates<br/>the shared book catalog"]:::person
+    crawler["<b>Search indexer</b><br/>Finds profiles shared for discovery"]:::person
   end
 
-  app["<b>Book Tracker</b><br/>Private, offline-capable reading tracker<br/>with shared works, opt-in comparisons,<br/>public profiles, and optional Toggl sync"]:::system
+  app["<b>Book Tracker</b><br/>Private, offline-capable reading tracker<br/>with optional sharing and integrations"]:::system
 
-  subgraph providers[External systems]
+  subgraph providers[External services · sand]
     direction TB
-    catalogs["<b>Book metadata providers</b><br/>Open Library · Google Books<br/>Nasjonalbiblioteket"]:::external
-    toggl["<b>Toggl Track</b><br/>Reading project and time entries"]:::external
+    catalogs["<b>Book information services</b><br/>Metadata and cover information"]:::external
+    timer["<b>Optional time-tracking service</b><br/>Reading activity synchronization"]:::external
   end
 
   reader -->|"uses"| app
   visitor -->|"opens shared profile"| app
-  operator -->|"opens restricted overview and catalog"| app
-  crawler -->|"reads sitemap and profile HTML"| app
-  app -->|"looks up ISBN metadata"| catalogs
-  app -->|"creates and stops timers"| toggl
-
-  legend["<b>Legend</b><br/>Teal = Book Tracker · Gray = people · Sand = external system"]:::legend
+  operator -->|"uses restricted operations"| app
+  crawler -->|"reads discoverable pages"| app
+  app -->|"looks up book information"| catalogs
+  app -->|"synchronizes reading activity"| timer

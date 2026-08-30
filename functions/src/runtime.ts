@@ -4,11 +4,13 @@
 // The accounts and their bindings live in IAM (see MIGRATIONS.md,
 // 2026-08-27); this file only names them.
 //
-// publicweb-runtime: roles/datastore.viewer. The one function strangers
-// reach can read Firestore — the whole database, Firestore IAM has no
-// collection scoping, so that includes users' stored Toggl tokens — and
-// nothing else: no writes, no secrets, no Auth, no deploys. Scoping the
-// read further means a second Firestore database for public data.
+// publicweb-runtime: roles/datastore.viewer, conditioned by IAM to the
+// (default) database only (SEC-097: `resource.name` condition). The one
+// function strangers reach can read the default database — Firestore IAM
+// has no collection scoping — and nothing else: no writes, no Auth, no
+// deploys, and no access to the `secrets` database where the integration
+// credentials live (SEC-004), so a renderer compromise cannot reach a
+// credential.
 export const PUBLICWEB_RUNTIME_SERVICE_ACCOUNT =
   "publicweb-runtime@book-tracker-d8f24.iam.gserviceaccount.com";
 

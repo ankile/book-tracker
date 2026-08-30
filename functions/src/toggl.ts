@@ -19,6 +19,7 @@ import {
   TOGGL_TOKEN_LIMIT,
 } from "./togglQueueLimits";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
+import {logAppCheckPresence} from "./appCheck";
 import {
   ActiveTimer,
   TimerClaim,
@@ -40,6 +41,19 @@ import {
 } from "./decoders";
 
 const db = getFirestore();
+
+// Integration credentials live in the `secrets` Firestore database
+// (SEC-004/SEC-097): a separate database because Firestore IAM has no
+// collection scoping, and publicweb-runtime's read role is conditioned to
+// the default database, so the internet-facing renderer's identity cannot
+// reach this store at all. Client rules on the secrets database deny
+// everything; only these functions and the operator scripts touch it.
+// users/{uid}.toggl keeps a status-only mirror {workspaceId, projectId,
+// connectedAt} for the Me page and the togglQueue create gate — never the
+// token, which used to sit in the owner-readable user document and every
+// device's IndexedDB mirror.
+const secretsDb = getFirestore("secrets");
+const togglTokenRef = (uid: string) => secretsDb.doc(`togglTokens/${uid}`);
 
 const TOGGL_BASE = "https://api.track.toggl.com/api/v9";
 const PROJECT_NAME = "Reading";
@@ -226,10 +240,10 @@ function refuseDeletedAccount(user: DocumentData | undefined): void {
 
 async function getTogglConfig(uid: string): Promise<TogglConfig> {
   const userSnap = await db.doc(`users/${uid}`).get();
-  const user = userSnap.data();
-  refuseDeletedAccount(user);
-  const toggl = user?.toggl;
-  if (!toggl) {
+  refuseDeletedAccount(userSnap.data());
+  const tokenSnap = await togglTokenRef(uid).get();
+  const toggl = tokenSnap.data();
+  if (toggl === undefined) {
     throw new functions.https.HttpsError(
       "failed-precondition",
       "Add your Toggl API token on the Me page first.",
@@ -287,6 +301,7 @@ exports.savetoken = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.savetoken", context);
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
 
@@ -353,12 +368,36 @@ exports.savetoken = functions
       );
     }
 
+    // The credential goes to the secrets database first, the status
+    // mirror second. If the second write is lost the account shows
+    // disconnected while a token is stored; the next savetoken overwrites
+    // both, and db-audit reports the drift (toggl-secret.status-missing).
+    await togglTokenRef(uid).set({
+      apiToken: token,
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    // The tombstone check at the top and this write are seconds apart
+    // (two outbound Toggl calls in between), and a cross-database
+    // transaction does not exist: re-check after writing and undo, so an
+    // account deleted mid-call cannot keep a live credential. The
+    // deletion trigger sets the tombstone before its own credential
+    // delete, so one of the two paths always removes this write.
+    const recheck = await userRef.get();
+    if (recheck.data()?.deletedAt !== undefined) {
+      await togglTokenRef(uid).delete();
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "This account has been deleted.",
+      );
+    }
     // update, never a merge-set (see the existence check above).
     await userRef.update({
       toggl: {
-        apiToken: token,
         workspaceId: project.workspaceId,
         projectId: project.id,
+        connectedAt: FieldValue.serverTimestamp(),
       },
     });
 
@@ -373,6 +412,7 @@ exports.cleartoken = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.cleartoken", context);
     const uid = requireUid(context);
     decodeEmptyCallableRequest(data, invalidArgument);
     const userRef = db.doc(`users/${uid}`);
@@ -390,6 +430,13 @@ exports.cleartoken = functions
         "Stop your running timer before disconnecting Toggl.",
       );
     }
+    // Withdrawing the credential is the part that must not be lost:
+    // secret first, then the status mirror. If the second write is lost
+    // the account still looks connected but every use refuses ("Add your
+    // Toggl API token"), and db-audit reports the drift
+    // (user.toggl-status-orphan). Deleting a missing document is a no-op,
+    // so a retry converges either way.
+    await togglTokenRef(uid).delete();
     await userRef.update({toggl: FieldValue.delete()});
     return {cleared: true};
   });
@@ -398,6 +445,7 @@ exports.start = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.start", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
     const toggl = await getTogglConfig(uid);
@@ -572,6 +620,7 @@ exports.stop = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.stop", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
 
@@ -665,15 +714,25 @@ exports.clearstopping = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.clearstopping", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
+    const userRef = db.doc(`users/${uid}`);
     const bookRef = db.doc(`users/${uid}/books/${bookId}`);
     const claimRef = db.doc(`users/${uid}/timerLifecycle/current`);
     await db.runTransaction(async (tx) => {
-      const [bookSnap, claimSnap] = await Promise.all([
+      const [userSnap, bookSnap, claimSnap] = await Promise.all([
+        tx.get(userRef),
         tx.get(bookRef),
         tx.get(claimRef),
       ]);
+      refuseDeletedAccount(userSnap.data());
+      if (!userSnap.exists) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "This account is not active.",
+        );
+      }
       if (!bookSnap.exists || !claimSnap.exists) {
         throw new functions.https.HttpsError(
           "failed-precondition",

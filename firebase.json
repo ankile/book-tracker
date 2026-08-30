@@ -1,8 +1,15 @@
 {
-  "firestore": {
-    "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json"
-  },
+  "firestore": [
+    {
+      "database": "(default)",
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
+    },
+    {
+      "database": "secrets",
+      "rules": "firestore-secrets.rules"
+    }
+  ],
   "storage": {
     "rules": "storage.rules"
   },

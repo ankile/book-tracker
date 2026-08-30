@@ -7,7 +7,7 @@ const {logger} = require("firebase-functions");
 
 const deployed = require("../lib");
 const db = getFirestore();
-const authContext = {auth: {uid: "owner", token: {}}};
+const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
 const report = {
   level: "error",
   event: "firestore.listener_failed",
@@ -22,7 +22,7 @@ function snapshot(data) {
 // Mirrors booksapi-runtime: the quota transaction and the logEvents add are
 // the only Firestore calls the callable makes, and both go through the
 // singleton getFirestore() instance, so mocking that instance captures them.
-function installStore(t, initialQuota) {
+function installStore(t, initialQuota, userData = {}) {
   const quotaRef = {};
   let quota = initialQuota;
   const rows = [];
@@ -44,7 +44,18 @@ function installStore(t, initialQuota) {
       quota = {...quota, ...patch};
     },
   }));
+  let userReads = 0;
   t.mock.method(db, "collection", (name) => {
+    if (name === "users") return {doc: (uid) => {
+      assert.equal(uid, "owner");
+      return {get: async () => {
+        userReads += 1;
+        return {
+          exists: userData !== undefined,
+          get: (field) => userData?.[field],
+        };
+      }};
+    }};
     assert.equal(name, "logEvents");
     return {
       add: async (row) => {
@@ -53,8 +64,27 @@ function installStore(t, initialQuota) {
       },
     };
   });
-  return {quota: () => quota, rows};
+  return {quota: () => quota, rows, userReads: () => userReads};
 }
+
+test("reportissue rejects unverified and deleted accounts before quota or storage", async (t) => {
+  const store = installStore(t, undefined, {deletedAt: {seconds: 1}});
+  await assert.rejects(
+    deployed.telemetry.reportissue.run(
+      report,
+      {auth: {uid: "owner", token: {email_verified: false}}},
+    ),
+    (error) => error.code === "failed-precondition" && /Verify your email/.test(error.message),
+  );
+  assert.equal(store.userReads(), 0);
+  await assert.rejects(
+    deployed.telemetry.reportissue.run(report, authContext),
+    (error) => error.code === "failed-precondition" && /not active/.test(error.message),
+  );
+  assert.equal(store.userReads(), 1);
+  assert.equal(store.quota(), undefined);
+  assert.equal(store.rows.length, 0);
+});
 
 test("reportissue stores an allowlisted row under the caller's uid", async (t) => {
   const store = installStore(t);

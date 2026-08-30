@@ -1,57 +1,46 @@
 ---
-title: Pages, navigation, and page-local actions
+title: Pages and navigation
 ---
 flowchart LR
-  accTitle: Book Tracker pages, navigation, and page-local actions
-  accDescr: Signed-in readers use the primary navigation for their library and settings. Linked books open authenticated shared-work pages with opted-in reader summaries. My site controls book-sharing consent. The restricted admin overview links to catalog curation. Dotted links open write dialogs or page-local actions rather than new routes.
+  accTitle: Book Tracker pages and navigation
+  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and catalog curation pages. The separate route access matrix lists readers and writes for every page.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
   classDef page fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:2px;
   classDef public fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
-  classDef action fill:#f4eef8,stroke:#7d5b91,color:#40284e,stroke-width:2px;
   classDef admin fill:#fff7f6,stroke:#b42318,color:#651c15,stroke-width:2px;
-  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
 
   subgraph entry[How people enter]
     direction TB
     signedout["<b>Signed-out visitor</b><br/>Private URL or app home"]:::person
     owner["<b>Signed-in reader</b><br/>Restored browser session"]:::person
     publicentry["<b>Public visitor</b><br/>Shared link · search result<br/>or direct profile URL"]:::person
-    operator["<b>Verified operator</b><br/>Direct <code>/admin</code> URL<br/>recent authentication for catalog writes"]:::person
+    operator["<b>Authorized operator</b><br/>Restricted entry"]:::person
   end
 
-  subgraph routes[Application routes]
+  subgraph routes[Routes · teal private · blue profile · red admin]
     direction TB
     auth["<b>Login or register</b><br/>Rendered at <code>/</code> or the requested<br/>private route, then resumes it"]:::gate
     shell["<b>Signed-in shell</b><br/>Primary navbar"]:::gate
 
     current["<b>Currently Reading</b><br/><code>/</code><br/>Books in progress · pages · timers"]:::page
     finished["<b>Finished</b><br/><code>/finished</code><br/>Search · sort · year filter · totals"]:::page
-    me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · integrations"]:::page
+    me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · optional integrations"]:::page
 
-    authors["<b>Authors</b><br/><code>/authors</code><br/>Shared catalog · personal book counts"]:::page
+    authors["<b>Authors</b><br/><code>/authors</code><br/>Browse the shared author catalog"]:::page
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
+    work["<b>Shared Work</b><br/><code>/books/[workId]</code><br/>Work metadata · opted-in reader summaries"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
-    work["<b>Shared work</b><br/><code>/books/[workId]</code><br/>Editions · opted-in readers · rereads"]:::public
-    admin["<b>Admin overview</b><br/><code>/admin</code><br/>Account activity · recent issues"]:::admin
-    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Authors · works · unmatched books · findings"]:::admin
-  end
-
-  subgraph actions[Dialogs and page-local writes]
-    direction TB
-    bookaction["<b>Add or edit book</b><br/>Metadata lookup · catalog suggestions<br/>link, unlink, reread · delete"]:::action
-    sessionaction["<b>Progress and sessions</b><br/>Set page · log, edit, or delete session"]:::action
-    timeraction["<b>Reading timers</b><br/>Local or Toggl start/stop<br/>offline queue and stalled recovery"]:::action
-    profileaction["<b>Profile settings</b><br/>Create · rename · publish · discovery<br/>book sharing · links · delete"]:::action
-    catalogaction["<b>Curate catalog</b><br/>Preview then apply author/work create and merge<br/>links, editions, and ISBN corrections"]:::action
-    togglaction["<b>Toggl settings</b><br/>Connect · replace · disconnect token"]:::action
+    admin["<b>Restricted overview</b><br/><code>/admin</code><br/>Operational summary"]:::admin
+    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Authors · Works · Editions · matching"]:::admin
   end
 
   signedout --> auth --> shell
   owner --> shell
   publicentry --> profile
   operator --> admin
+  operator --> admincatalog
 
   shell -->|"Currently Reading"| current
   shell -->|"Finished"| finished
@@ -59,21 +48,5 @@ flowchart LR
   me -->|"Authors card"| authors
   me -->|"Needs an ISBN card"| isbns
   me -->|"Profile link"| profile
-  current -->|"Linked work"| work
-  finished -->|"Linked work"| work
-  profile -->|"Go to app"| auth
-  admin -->|"Catalog"| admincatalog
-
-  current -.-> bookaction
-  finished -.-> bookaction
-  me -.-> bookaction
-  isbns -.-> bookaction
-  current -.-> sessionaction
-  finished -.-> sessionaction
-  current -.-> timeraction
-  me -.-> profileaction
-  me -.-> togglaction
-  admincatalog -.-> catalogaction
-
-  legend["<b>Legend</b><br/>Solid = route navigation · Dotted = dialog or local action<br/>Teal = signed-in page · Blue = profile · Red = privileged route"]:::legend
-  catalogaction ~~~ legend
+  current -->|"Catalog link"| work
+  finished -->|"Catalog link"| work

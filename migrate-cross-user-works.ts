@@ -554,7 +554,7 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
 function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): CreateSpec[] {
   const now = Timestamp.now()
   const titleKeys = catalogTitleKeys(group.canonicalTitle, group.alternateTitles)
-  const preferred = group.candidates.find((candidate) => candidate.book.eligibleSeed) ?? group.candidates[0]
+  const preferred = preferredSeedCandidate(group)
   const seedSources = migrationGroupSeedSources(group)
   const work: CatalogDoc = {
     canonicalTitle: group.canonicalTitle,
@@ -619,9 +619,7 @@ function editionCreateSpecs(db: Firestore, group: MigrationGroup, target: Catalo
   const specs: CreateSpec[] = []
   const seedSources = migrationGroupSeedSources(group)
   for (const isbn of group.seedIsbns) {
-    const candidate = group.candidates.find(
-      (item) => item.book.eligibleSeed && item.isbn13 === isbn,
-    )
+    const candidate = preferredSeedCandidate(group, (item) => item.isbn13 === isbn)
     if (!candidate) throw new Error(`missing eligible edition source for ${isbn}`)
     const editionId = target.editionIds.get(isbn)
     if (!editionId) throw new Error(`missing edition id for ${isbn}`)
@@ -651,6 +649,21 @@ function editionCreateSpecs(db: Firestore, group: MigrationGroup, target: Catalo
     })
   }
   return specs
+}
+
+function preferredSeedCandidate(
+  group: MigrationGroup,
+  predicate: (candidate: MigrationCandidate) => boolean = () => true,
+): MigrationCandidate {
+  const candidates = group.candidates
+    .filter((candidate) => candidate.book.eligibleSeed && predicate(candidate))
+    .sort((left, right) =>
+      left.book.seedPriority - right.book.seedPriority ||
+      left.book.path.localeCompare(right.book.path),
+    )
+  const preferred = candidates[0]
+  if (!preferred) throw new Error(`migration group ${group.key} has no eligible metadata source`)
+  return preferred
 }
 
 function migrationGroupSeedSources(group: MigrationGroup): MigrationSeedSource[] {

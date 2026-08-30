@@ -1,80 +1,60 @@
 ---
-title: Book Tracker container and trust boundaries
+title: Book Tracker application architecture
 ---
-flowchart LR
-  accTitle: Book Tracker container and trust boundaries
-  accDescr: The browser and Firebase Hosting form the delivery edge. Browser Firestore access is checked by Security Rules. Shared-catalog search, reader summaries, and administration use authorized Cloud Functions with Admin SDK access. External metadata and Toggl requests use their existing direct or mediated paths.
+flowchart TB
+  accTitle: Book Tracker application architecture and trust boundaries
+  accDescr: A managed delivery layer serves the web app and published profile pages. The browser uses managed identity and owner-scoped data permissions. Backend services handle privileged operations and external integrations. Background jobs process lifecycle events and deferred work.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef client fill:#e8f2f1,stroke:#35686a,color:#173f41,stroke-width:2px;
-  classDef edge fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
-  classDef firebase fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
+  classDef delivery fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
+  classDef service fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
   classDef data fill:#eaf7ef,stroke:#2e7d55,color:#17482f,stroke-width:2px;
   classDef external fill:#f7f3ed,stroke:#9b7b52,color:#4c3926,stroke-width:2px;
   classDef security fill:#fff1f0,stroke:#b42318,color:#651c15,stroke-width:2px;
   classDef neutral fill:#ffffff,stroke:#8b9691,color:#263331,stroke-width:1.5px;
-  classDef legend fill:#ffffff,stroke:#c9d1cf,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
 
-  people["<b>People and crawlers</b><br/>Reader · profile visitor<br/>operator · search crawler"]:::person
+  people["<b>People and indexers</b><br/>Readers · profile visitors<br/>authorized operators · search services"]:::person
+  delivery["<b>Managed web delivery</b><br/>Static application assets<br/>and published profile responses"]:::delivery
+  browser["<b>Browser or installed app</b><br/>User interface and client state"]:::client
+  local["<b>Local persistence</b><br/>Cached app shell and offline work"]:::client
 
-  subgraph booktracker[Book Tracker system]
-    direction LR
+  identity["<b>Managed identity</b><br/>Sign-in and authenticated sessions"]:::security
+  permissions["<b>Data access controls</b><br/>Owner scope and write validation"]:::security
+  appdata[("<b>Application data</b><br/>Private libraries · shared book catalog<br/>sharing data · deferred work · operations data")]:::data
 
-    subgraph device[User device]
-      direction TB
-      browser["<b>Browser or installed PWA</b><br/>SvelteKit 2 · Svelte 5<br/>Firebase web SDKs"]:::client
-      local["<b>Local persistence</b><br/>Service worker + Cache Storage<br/>Firestore IndexedDB · multi-tab"]:::client
-      browser -->|"app shell and queued writes"| local
-    end
+  publicrenderer["<b>Public profile renderer</b><br/>Produces bounded public pages"]:::service
+  apis["<b>Backend service layer</b><br/>Authorization · validation<br/>catalog and privileged operations"]:::service
+  events["<b>Managed event delivery</b><br/>Identity and data lifecycle events"]:::neutral
+  workers["<b>Background workers</b><br/>Cleanup and deferred synchronization"]:::service
+  configuration["<b>Protected configuration</b><br/>Server-only integration credentials"]:::security
+  observability["<b>Operational telemetry</b><br/>Runtime health and issue reporting"]:::neutral
 
-    subgraph firebase[Firebase project · book-tracker-d8f24]
-      direction TB
-      hosting["<b>Hosting + CDN</b><br/>Static SPA and immutable assets<br/>Pinned rewrite for public web"]:::edge
-      auth["<b>Firebase Authentication</b><br/>Email/password sessions<br/>Auth lifecycle events"]:::firebase
-      rules["<b>Firestore Security Rules</b><br/>Owner checks and write invariants"]:::security
-      firestore[("<b>Cloud Firestore · eur3</b><br/>Private libraries · shared catalog<br/>consent · profiles · quotas · operations")]:::data
-      publicweb["<b>publicweb · Gen 2</b><br/>Pinned Cloud Run revision<br/><code>publicweb-runtime</code> · read-only IAM"]:::edge
-      callables["<b>Callable functions · Gen 1</b><br/>Metadata · catalog · admin · Toggl<br/>handlers authorize · bounded instances"]:::firebase
-      eventarc["<b>Event delivery</b><br/>Auth events + Eventarc<br/>Firestore ingress is internal-only"]:::neutral
-      background["<b>Background functions</b><br/>Gen 1 Auth + Gen 2 Firestore triggers<br/><code>functions-runtime</code>"]:::firebase
-      secrets["<b>Secret Manager</b><br/><code>FUNCTIONS_CONFIG_EXPORT</code>"]:::security
-      logs["<b>Cloud Logging + Monitoring</b><br/>Function logs, uptime checks,<br/>error and delivery alerts"]:::neutral
-    end
-  end
+  catalogs["<b>Book information services</b><br/>Metadata and cover information"]:::external
+  timer["<b>Optional time-tracking service</b><br/>Reading activity synchronization"]:::external
 
-  subgraph providers[External systems]
-    direction TB
-    directCatalogs["<b>Direct catalog APIs</b><br/>Open Library<br/>Nasjonalbiblioteket"]:::external
-    google["<b>Google Books API</b><br/>Metered ISBN metadata"]:::external
-    toggl["<b>Toggl Track API v9</b><br/>Reading project and time entries"]:::external
-  end
+  people -->|"HTTPS"| delivery
+  delivery -->|"application"| browser
+  delivery -->|"published profile request"| publicrenderer
+  browser -->|"cache and queued work"| local
 
-  people -->|"HTTPS"| hosting
-  hosting -->|"static app"| browser
-  hosting -->|"<code>/profiles/**</code> and <code>/sitemap.xml</code>"| publicweb
+  browser -->|"sign in"| identity
+  browser -->|"owner reads and writes"| permissions
+  permissions -->|"allow or reject"| appdata
+  browser -->|"authenticated requests"| apis
 
-  browser -->|"sign in and restore session"| auth
-  browser -->|"Firebase ID token"| callables
-  browser -->|"owner reads and writes"| rules
-  rules -->|"allow or reject"| firestore
-  browser -->|"CORS requests"| directCatalogs
+  publicrenderer -->|"published projection only"| appdata
+  apis -->|"privileged application access"| appdata
+  configuration -. "server-only values" .-> apis
+  apis -->|"book lookup"| catalogs
+  apis -->|"integration requests"| timer
 
-  publicweb -->|"Admin SDK + read-only IAM"| firestore
-  callables -->|"Admin SDK + IAM, bypasses Rules"| firestore
-  callables -->|"list users for admin"| auth
-  secrets -. "Google API key" .-> callables
-  callables -->|"keyed lookup"| google
-  callables -->|"token and timer requests"| toggl
+  identity -->|"account lifecycle"| events
+  appdata -->|"data lifecycle"| events
+  events --> workers
+  workers -->|"maintenance"| appdata
+  workers -->|"deferred integration work"| timer
 
-  auth -->|"create or delete event"| eventarc
-  firestore -->|"book, sharing, profile, or queue write"| eventarc
-  eventarc --> background
-  background -->|"Admin SDK + IAM"| firestore
-  background -->|"queued time entry"| toggl
-
-  publicweb -.-> logs
-  callables -.-> logs
-  background -.-> logs
-
-  legend["<b>Legend</b><br/>Solid = request or data access · Dotted = config or observability<br/>Red = enforcement boundary · Sand = delivery edge or external system"]:::legend
-  logs ~~~ legend
+  publicrenderer -.-> observability
+  apis -.-> observability
+  workers -.-> observability

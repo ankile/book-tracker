@@ -1,6 +1,5 @@
 <script lang="ts">
   import { user, signOut } from '$lib/firebase/auth.ts';
-  import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
@@ -55,8 +54,9 @@
   let newBookModal = $state(false);
 
   async function handleSignOut() {
+    // signOut ends with a clean reload onto the front page (SEC-004:
+    // the local Firestore mirror is dropped), so no goto here.
     await signOut();
-    goto('/', { replaceState: true });
   }
 
   const toggleModal = () => (newBookModal = !newBookModal);

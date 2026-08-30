@@ -1,14 +1,18 @@
 // Physical purge of ONE tombstoned account (SEC-006). Account deletion is
 // a soft delete: deleteUserDocument stamps deletedAt on users/{uid} and
-// on the account's profiles and removes nothing. This script is the only
-// path that removes the data, and it is an operator decision per account,
-// never scheduled: one uid per run, dry-run by default, and it refuses a
-// document that is not tombstoned.
+// on the account's profiles and removes nothing but the account's
+// discovery markers. This script is the only path that removes the data,
+// and it is an operator decision per account, never scheduled: one uid
+// per run, dry-run by default, and it refuses a document that is not
+// tombstoned and an account that still exists in Auth (a tombstone is
+// only ever written by the deletion trigger; one on a live account is
+// drift, and purging it would destroy a working account's data).
 //
 // What goes, in this order: every profile of the uid together with its
 // discovery marker (only while the marker still names this uid — a freed
-// username is first-writer-wins), the ownership record, then the whole
-// users/{uid} tree (books with their updates, authors, timerLifecycle,
+// username is first-writer-wins), the ownership record, the Toggl
+// credential in the `secrets` database (normally already deleted by the
+// deletion trigger, SEC-004), then the whole users/{uid} tree (books with their updates, authors, timerLifecycle,
 // togglQueue, functionQuotas) by recursiveDelete. A book delete in
 // production also fires deletebookupdates, which is idempotent with the
 // recursive delete. Take a snapshot first (db-snapshot.ts --prod), as the
@@ -19,6 +23,9 @@
 //   node migrate-purge-deleted-accounts.ts <uid> --apply          # emulator apply
 //   node migrate-purge-deleted-accounts.ts <uid> --prod           # prod dry-run
 //   node migrate-purge-deleted-accounts.ts <uid> --prod --apply   # prod apply (typed confirm)
+import { getApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 import type { DocumentReference } from 'firebase-admin/firestore';
 import { parseFlags, connect, batcher } from './migrate-lib.ts';
 
@@ -28,6 +35,17 @@ const [uid] = flags.rest;
 const { db } = await connect({ ...flags, confirmWrite: flags.apply });
 const writes = batcher(db, { apply: flags.apply });
 const tag = flags.apply ? 'DELETE' : 'DRY';
+
+// Auth first: the account must be gone there. getUser throws
+// auth/user-not-found for a deleted (or never-created) uid; any other
+// outcome, including a network error, stops the run.
+try {
+  await getAuth().getUser(uid);
+  throw new Error(`${uid} still exists in Auth; refusing to purge a live account`);
+} catch (error) {
+  if (!(error instanceof Error && 'code' in error && error.code === 'auth/user-not-found')) throw error;
+}
+console.log(`${uid} is not in Auth`);
 
 const userRef = db.collection('users').doc(uid);
 const user = await userRef.get();
@@ -64,6 +82,17 @@ if (owner.exists) {
 }
 await writes.flush();
 
+// The credential in the secrets database (SEC-004). The deletion trigger
+// removes it at deletion time, so this is normally absent; a batcher is
+// bound to one database, hence the direct delete.
+const tokenRef = getFirestore(getApp(), 'secrets').collection('togglTokens').doc(uid);
+let credentials = 0;
+if ((await tokenRef.get()).exists) {
+  console.log(`${tag} secrets:${tokenRef.path}`);
+  if (flags.apply) await tokenRef.delete();
+  credentials = 1;
+}
+
 // The tree: counted by listing (so orphans under a missing root count
 // too), removed subcollection by subcollection with recursiveDelete, and
 // the root document deleted LAST. Root-last is what makes a re-run of an
@@ -87,5 +116,5 @@ if (flags.apply) {
 }
 
 console.log(
-  `${writes.count()} public documents and a ${treeSize}-document tree ${flags.apply ? 'deleted' : '(dry run, nothing written)'}`,
+  `${writes.count()} public documents, ${credentials} stored credential${credentials === 1 ? '' : 's'} and a ${treeSize}-document tree ${flags.apply ? 'deleted' : '(dry run, nothing written)'}`,
 );

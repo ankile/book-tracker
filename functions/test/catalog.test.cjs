@@ -12,6 +12,9 @@ const catalog = require("../lib/catalog");
 const {sharedWorkOwnerId} = require("../lib/catalogProjection");
 const db = getFirestore();
 const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
+const liveUserCollection = () => ({
+  doc: () => ({get: async () => ({exists: true, get: () => undefined})}),
+});
 const activeAuthor = (canonicalName) => ({
   canonicalName,
   alternateNames: [],
@@ -197,6 +200,10 @@ test("catalog search has a separate bounded hourly quota", async (t) => {
     assert.equal(path, quotaRef.path);
     return quotaRef;
   });
+  t.mock.method(db, "collection", (name) => {
+    assert.equal(name, "users");
+    return liveUserCollection();
+  });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async () => ({data: () => quota}),
     update: () => undefined,
@@ -210,6 +217,10 @@ test("catalog search has a separate bounded hourly quota", async (t) => {
 test("title search has a global hourly spend breaker", async (t) => {
   const paths = [];
   t.mock.method(db, "doc", (path) => ({path}));
+  t.mock.method(db, "collection", (name) => {
+    assert.equal(name, "users");
+    return liveUserCollection();
+  });
   t.mock.method(db, "runTransaction", async (handler) => handler({
     get: async (reference) => {
       paths.push(reference.path);
@@ -232,7 +243,7 @@ test("title search has a global hourly spend breaker", async (t) => {
   ]);
 });
 
-test("shared author resolution rejects deleted accounts before quotas or catalog reads", async (t) => {
+test("catalog callables reject deleted accounts before quotas or catalog reads", async (t) => {
   let catalogTouched = false;
   t.mock.method(db, "collection", (name) => {
     if (name === "users") {
@@ -245,6 +256,14 @@ test("shared author resolution rejects deleted accounts before quotas or catalog
     deployed.catalog.ensureauthors.run({authors: [{
       canonicalName: "Author", sortName: "Author", kind: "person",
     }]}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  await assert.rejects(
+    deployed.catalog.search.run({title: "Book", authorNames: ["Author"]}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  await assert.rejects(
+    deployed.catalog.workreaders.run({workId: "work"}, authContext),
     (error) => error.code === "failed-precondition",
   );
   assert.equal(catalogTouched, false);
@@ -325,6 +344,31 @@ test("ordinary users resolve existing shared authors and create only missing cat
     {path: "users/owner/functionQuotas/catalogEnsureAuthors", count: 2},
     {path: "functionGlobalQuotas/catalogEnsureAuthors", count: 1},
   ]);
+
+  await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "Ursula K. Le Guin", sortName: "Le Guin", kind: "entity",
+    }]}, authContext),
+    (error) => error.code === "failed-precondition" && /different type/.test(error.message),
+  );
+
+  rows.set("catalogAuthors/le-guin", {
+    ...rows.get("catalogAuthors/le-guin"),
+    nameKeys: ["canonical target"],
+  });
+  rows.set("catalogAuthors/legacy-le-guin", {
+    ...activeAuthor("Ursula K. Le Guin"),
+    nameKeys: ["ursula k le guin"],
+    kind: "entity",
+    status: "merged",
+    mergedInto: "le-guin",
+  });
+  await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "Ursula K. Le Guin", sortName: "Le Guin", kind: "entity",
+    }]}, authContext),
+    (error) => error.code === "failed-precondition" && /different type/.test(error.message),
+  );
 });
 
 function installMissingAuthorBoundaryStore(t, {catalogSize, globalCount}) {
@@ -422,6 +466,7 @@ test("an exact title with the wrong author is not returned", async (t) => {
     set: () => undefined,
   }));
   t.mock.method(db, "collection", (name) => {
+    if (name === "users") return liveUserCollection();
     if (name === "workTitleIndex") {
       const query = {
         where: (...args) => {
@@ -915,13 +960,14 @@ test("work readers resolve aliases and return only consented redacted summaries"
   assert.equal(JSON.stringify(result).includes("shared-reader"), false);
   assert.equal(JSON.stringify(result).includes("private-reader"), false);
   assert.equal(JSON.stringify(result).includes("must-not-be-returned"), false);
-  assert.equal(logs[0][0], "catalog.work_readers");
-  assert.deepEqual(logs[0][1], {
+  const readerLog = logs.find(([message]) => message === "catalog.work_readers");
+  assert.ok(readerLog);
+  assert.deepEqual(readerLog[1], {
     workId: "canonical-work",
     personalBooks: 1,
     optedInRows: 1,
     readers: 1,
-    durationMs: logs[0][1].durationMs,
+    durationMs: readerLog[1].durationMs,
     aliasesQueried: true,
   });
   for (const hiddenId of ["missing-work", "internal-work", "broken-work"]) {

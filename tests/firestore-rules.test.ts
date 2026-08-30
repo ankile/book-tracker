@@ -293,6 +293,34 @@ test('publishing needs a verified account whose users document still exists', as
   windowDelete.delete(doc(tombwin, 'profileOwners', 'tombwin'));
   await assertFails(windowDelete.commit());
   await assertFails(deleteDoc(doc(tombwin, 'profiles', 'tombwin-reader')));
+
+  // The delete rule's own clause, isolated: a tombstoned profile on a
+  // LIVE account (drift no path produces; the audit reports it as
+  // profile.tombstone-orphan) is still not the owner's to delete. With
+  // only the cases above, dropping that clause left the suite green.
+  // And a positive control with the same fixture shape and no tombstone
+  // anywhere, so the denials here come from the tombstones and not from
+  // the fixture.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const admin = context.firestore();
+    await setDoc(doc(admin, 'users', 'tombprof'), { uid: 'tombprof', email: 'p@example.test' });
+    await setDoc(doc(admin, 'profiles', 'tombprof-reader'), { ...profile('tombprof'), deletedAt: Timestamp.now() });
+    await setDoc(doc(admin, 'profileOwners', 'tombprof'), { username: 'tombprof-reader' });
+    await setDoc(doc(admin, 'users', 'tombctl'), { uid: 'tombctl', email: 'c@example.test' });
+    await setDoc(doc(admin, 'profiles', 'tombctl-reader'), profile('tombctl'));
+    await setDoc(doc(admin, 'profileOwners', 'tombctl'), { username: 'tombctl-reader' });
+  });
+  const tombprof = verified('tombprof');
+  const orphanDelete = writeBatch(tombprof);
+  orphanDelete.delete(doc(tombprof, 'profiles', 'tombprof-reader'));
+  orphanDelete.delete(doc(tombprof, 'profileOwners', 'tombprof'));
+  await assertFails(orphanDelete.commit());
+  await assertFails(deleteDoc(doc(tombprof, 'profiles', 'tombprof-reader')));
+  const tombctl = verified('tombctl');
+  const controlDelete = writeBatch(tombctl);
+  controlDelete.delete(doc(tombctl, 'profiles', 'tombctl-reader'));
+  controlDelete.delete(doc(tombctl, 'profileOwners', 'tombctl'));
+  await assertSucceeds(controlDelete.commit());
 });
 
 test('one profile per account: a second needs the first gone in the same batch', async () => {
@@ -1164,7 +1192,7 @@ async function timerBatchesPassWith(rules: string, projectId: string): Promise<T
       const seeded = context.firestore();
       await setDoc(doc(seeded, 'users', uid), {
         uid, email: `${uid}@example.test`,
-        toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+        toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() },
       });
       await setDoc(doc(seeded, 'users', uid, 'books', 'local'), creatableBook());
       await setDoc(doc(seeded, 'users', uid, 'books', 'remote'), {
@@ -2410,7 +2438,7 @@ const seedToggl = async (
   await setDoc(doc(db, 'users', uid), {
     uid,
     email: `${uid}@example.test`,
-    toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+    toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() },
   });
   if (quota !== undefined) {
     await setDoc(doc(db, 'users', uid, 'functionQuotas', 'togglQueue'), quota);
@@ -2659,7 +2687,7 @@ test('logEvents is not reachable under any writable parent path', async () => {
 
 test('the users document cannot be created, rewritten or nudged one field by any client', async () => {
   const uid = 'users-doc-shape';
-  const body = { uid, email: `${uid}@example.test`, toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 } };
+  const body = { uid, email: `${uid}@example.test`, toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() } };
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await setDoc(doc(context.firestore(), 'users', uid), body);
   });
@@ -2815,6 +2843,36 @@ test('owners can create only the atomic offline-stop row and read their own queu
   await assertFails(forgedBatch.commit());
 });
 
+// SEC-004: the queue gate reads the status-only mirror the server writes
+// ({workspaceId, projectId, connectedAt}); the credential itself lives in
+// the secrets database, out of this engine's reach. A users document
+// still carrying the pre-migration token shape must refuse the same
+// batch the test above accepts — the gate must not treat a stale
+// client-readable credential as a connection.
+test('the queue gate needs the status-only Toggl mirror, not the legacy token shape', async () => {
+  const uid = 'queue-legacy-shape';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), {
+      uid,
+      email: `${uid}@example.test`,
+      toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+    });
+  });
+  const legacy = await localStopBatch(uid, 1);
+  await assertFails(legacy.commit());
+  // The same account flips to refused->accepted on exactly the mirror
+  // shape: the positive control for the gate change.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'users', uid), {
+      uid,
+      email: `${uid}@example.test`,
+      toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() },
+    });
+  });
+  const migrated = await localStopBatch(uid, 2);
+  await assertSucceeds(migrated.commit());
+});
+
 test('atomic queue rows reject malformed payloads and lifecycle fields', async () => {
   const uid = 'queue-shape';
   await seedToggl(uid);
@@ -2937,7 +2995,7 @@ test('owners can retry only stale or failed queue states below the cap', async (
     await setDoc(doc(context.firestore(), 'users', 'queue-retry'), {
       uid: 'queue-retry',
       email: 'queue-retry@example.test',
-      toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+      toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() },
     });
     for (const [id, item] of Object.entries(docs)) {
       await setDoc(
@@ -3000,7 +3058,7 @@ test('queue retries cannot change payload or server lifecycle fields', async () 
     await setDoc(doc(context.firestore(), 'users', 'queue-immutable'), {
       uid: 'queue-immutable',
       email: 'queue-immutable@example.test',
-      toggl: { apiToken: 'server-validated', workspaceId: 1, projectId: 2 },
+      toggl: { workspaceId: 1, projectId: 2, connectedAt: Timestamp.now() },
     });
     await setDoc(
       doc(context.firestore(), 'users', 'queue-immutable', 'togglQueue', 'error'),

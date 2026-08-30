@@ -26,6 +26,7 @@ import {
 import {applyQuota, consumeQuota} from "./quota";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {logAppCheckPresence} from "./appCheck";
 
 const db = getFirestore();
 
@@ -1122,6 +1123,9 @@ export async function summarizeReaderBooks(
       rows.push({
         username: shared.username,
         displayName: shared.displayName,
+        // The shared-catalog privacy decision is work-level disclosure only.
+        // Keep the response shape forward-compatible without revealing which
+        // edition or ISBN this reader chose.
         editionIsbn13: null,
         ...summarizeReadingAttempt(
           identity,
@@ -1305,8 +1309,10 @@ exports.search = callable.https.onCall(async (
   data: unknown,
   context,
 ): Promise<{results: CatalogSearchResult[]}> => {
+  logAppCheckPresence("catalog.search", context);
   const uid = signedInUid(context);
   const request: CatalogSearchRequest = decodeCatalogSearchRequest(data, invalidArgument);
+  await requireLiveUser(uid);
   await requireQuota(uid, "catalogSearch", SEARCHES_PER_WINDOW);
   if (request.isbn13 !== undefined) {
     const exact = await exactIsbnResult(request.isbn13);
@@ -1327,6 +1333,7 @@ exports.ensureauthors = callable.https.onCall(async (
   data: unknown,
   context,
 ): Promise<{authorIds: string[]}> => {
+  logAppCheckPresence("catalog.ensureauthors", context);
   const uid = signedInUid(context);
   const request = decodeEnsureCatalogAuthorsRequest(data, invalidArgument);
   await requireLiveUser(uid);
@@ -1376,9 +1383,11 @@ exports.ensureauthors = callable.https.onCall(async (
     const resolved = new Map<string, string>();
     for (const [key, rows] of candidates) {
       const activeIds = new Set<string>();
+      const activeAuthors = new Map<string, StoredCatalogAuthor>();
       for (const row of rows) {
         if (row.author.status === "active") {
           activeIds.add(row.id);
+          activeAuthors.set(row.id, row.author);
           continue;
         }
         if (row.author.mergedInto === undefined) {
@@ -1389,6 +1398,7 @@ exports.ensureauthors = callable.https.onCall(async (
           throw new CatalogDataError(`Catalog author redirect is not one hop at catalogAuthors/${row.id}.`);
         }
         activeIds.add(row.author.mergedInto);
+        activeAuthors.set(row.author.mergedInto, target);
       }
       if (activeIds.size > 1) {
         throw new functions.https.HttpsError(
@@ -1397,7 +1407,20 @@ exports.ensureauthors = callable.https.onCall(async (
         );
       }
       const activeId = [...activeIds][0];
-      if (activeId !== undefined) resolved.set(key, activeId);
+      if (activeId !== undefined) {
+        const requested = byKey.get(key);
+        const active = activeAuthors.get(activeId);
+        if (requested === undefined || active === undefined) {
+          throw new Error(`Author ${key} was not resolved consistently.`);
+        }
+        if (active.kind !== requested.kind) {
+          throw new functions.https.HttpsError(
+            "failed-precondition",
+            "This author name has a different type in the shared catalog. An administrator must review it first.",
+          );
+        }
+        resolved.set(key, activeId);
+      }
     }
 
     const missing = [...byKey].filter(([key]) => !resolved.has(key));
@@ -1474,9 +1497,11 @@ exports.workreaders = callable.https.onCall(async (
   omittedAttempts: number;
   nextCursor: string | null;
 }> => {
+  logAppCheckPresence("catalog.workreaders", context);
   const startedAt = Date.now();
   const uid = signedInUid(context);
   const request = decodeWorkReadersRequest(data, invalidArgument);
+  await requireLiveUser(uid);
   await requireQuota(uid, "workReaders", READER_CALLS_PER_WINDOW);
   const resolved = await publicWorkOrNotFound(request.workId);
   await requireGlobalReaderQuota();

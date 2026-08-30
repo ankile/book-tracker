@@ -10,15 +10,29 @@ process.env.FUNCTIONS_CONFIG_EXPORT = JSON.stringify({
 
 const deployed = require("../lib");
 const db = getFirestore();
-const authContext = {auth: {uid: "owner", token: {}}};
+const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
 
 function snapshot(data) {
   return {data: () => data};
 }
 
-function installQuotaStore(t) {
+function installQuotaStore(t, userData = {}) {
   const quotaRef = {};
   let quota;
+  let userReads = 0;
+  t.mock.method(db, "collection", (name) => {
+    assert.equal(name, "users");
+    return {doc: (uid) => {
+      assert.equal(uid, "owner");
+      return {get: async () => {
+        userReads += 1;
+        return {
+          exists: userData !== undefined,
+          get: (field) => userData?.[field],
+        };
+      }};
+    }};
+  });
   t.mock.method(db, "doc", (path) => {
     assert.equal(path, "users/owner/functionQuotas/booksApi");
     return quotaRef;
@@ -37,8 +51,32 @@ function installQuotaStore(t) {
       quota = {...quota, ...patch};
     },
   }));
-  return {quota: () => quota};
+  return {quota: () => quota, userReads: () => userReads};
 }
+
+test("lookupisbn rejects unverified and deleted accounts before quota or fetch", async (t) => {
+  const store = installQuotaStore(t, {deletedAt: {seconds: 1}});
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run(
+      {isbn: "9780000000002"},
+      {auth: {uid: "owner", token: {email_verified: false}}},
+    ),
+    (error) => error.code === "failed-precondition" && /Verify your email/.test(error.message),
+  );
+  assert.equal(store.userReads(), 0);
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run({isbn: "9780000000002"}, authContext),
+    (error) => error.code === "failed-precondition" && /not active/.test(error.message),
+  );
+  assert.equal(store.userReads(), 1);
+  assert.equal(store.quota(), undefined);
+  assert.equal(fetchCalls, 0);
+});
 
 test("lookupisbn returns sanitized partial metadata", async (t) => {
   const quota = installQuotaStore(t);
