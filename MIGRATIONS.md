@@ -180,7 +180,7 @@ current deployment instructions.
 | `migrate-profile-owners.ts` | Add profile ownership records | Completed historical rollout |
 | `migrate-timer-claims.ts` | Add server-owned timer claim state | Completed historical rollout. Do not rerun during deployment. |
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
-| `migrate-grandfather-email-verified.ts` | Mark existing accounts that own books as email-verified | Pending: run once before any release starts requiring the email_verified claim. Keep the output file it writes; `--revert=<file>` undoes exactly that run. |
+| `migrate-grandfather-email-verified.ts` | Mark every existing account as email-verified except the test sign-ups listed in `--exclude=<file>` | Pending: run once before any release starts requiring the email_verified claim. Build the exclusion list from the dry-run listing (email, created, last sign-in, book count per account). Keep the output file it writes; `--revert=<file>` undoes exactly that run. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |

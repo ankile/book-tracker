@@ -2,15 +2,15 @@ import './setup.ts';
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
-// migrate-grandfather-email-verified.ts rehearsal: only unverified accounts
-// that own a book are flipped, the apply is idempotent and recorded, and
-// --revert restores exactly the recorded run. Runs on the migrate-lib
+// migrate-grandfather-email-verified.ts rehearsal: every unverified account
+// is flipped except the ones on the exclusion list, the apply is idempotent
+// and recorded, and --revert restores exactly the recorded run. Runs on the migrate-lib
 // namespace (the real project id keyed into the emulator), like the other
 // migration rehearsals.
 const functionsRequire = createRequire(new URL('../functions/package.json', import.meta.url));
@@ -37,19 +37,22 @@ const migrate = (
   env: NodeJS.ProcessEnv = { ...process.env },
 ) => spawnSync('node', [script, ...flags], { cwd: root, encoding: 'utf8', env });
 
-test('grandfathering flips only unverified accounts with books, records the run, and reverts it exactly', async (t) => {
-  const active = `active-${run}`;
-  const idle = `idle-${run}`;
-  const done = `done-${run}`;
-  for (const [uid, emailVerified] of [[active, false], [idle, false], [done, true]] as const) {
+test('grandfathering flips every unverified account except the excluded ones, records the run, and reverts it exactly', async (t) => {
+  const reader = `reader-${run}`; // a real person with books
+  const lurker = `lurker-${run}`; // a real person who never added a book
+  const probe = `probe-${run}`; // a test sign-up, on the exclusion list
+  const done = `done-${run}`; // verified already
+  for (const [uid, emailVerified] of [[reader, false], [lurker, false], [probe, false], [done, true]] as const) {
     await auth.createUser({ uid, email: `${uid}@example.test`, password: 'valid-test-password', emailVerified });
     await db.doc(`users/${uid}`).set({ uid, email: `${uid}@example.test` });
   }
-  t.after(() => Promise.all([active, idle, done].map((uid) => auth.deleteUser(uid))));
-  for (const uid of [active, done]) {
+  t.after(() => Promise.all([reader, lurker, probe, done].map((uid) => auth.deleteUser(uid))));
+  for (const uid of [reader, done]) {
     await db.doc(`users/${uid}/books/book-${run}`).set({ title: 'A Book', updatedAt: Timestamp.now() });
   }
   const outFile = join(root, `grandfathered-test-${run}.json`);
+  const excludeFile = join(root, `grandfathered-exclude-${run}.txt`);
+  writeFileSync(excludeFile, `# test sign-ups\n${probe}   # red-team probe\n\n`);
 
   // The Auth target is guarded like the Firestore one.
   const noAuthEmulator = { ...process.env };
@@ -58,40 +61,61 @@ test('grandfathering flips only unverified accounts with books, records the run,
   assert.notEqual(unguarded.status, 0);
   assert.match(unguarded.stderr, /no loopback FIREBASE_AUTH_EMULATOR_HOST/);
 
-  // Dry run decides but writes nothing.
-  const dry = migrate([]);
-  assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, new RegExp(`^DRY ${active} emailVerified -> true$`, 'm'));
-  assert.match(dry.stdout, new RegExp(`^skip ${idle} no books$`, 'm'));
-  assert.match(dry.stdout, new RegExp(`^ok ${done} already verified$`, 'm'));
-  assert.equal((await auth.getUser(active)).emailVerified, false);
+  // An exclusion list naming an unknown uid is a typo, not a no-op.
+  writeFileSync(`${excludeFile}.typo`, `${probe}\nno-such-uid-${run}\n`);
+  const typo = migrate([`--exclude=${excludeFile}.typo`]);
+  assert.notEqual(typo.status, 0);
+  assert.match(typo.stderr, new RegExp(`excluded uid no-such-uid-${run} is not an account`));
 
-  const applied = migrate(['--apply', `--out=${outFile}`]);
+  // Neither is an empty one.
+  writeFileSync(`${excludeFile}.empty`, '# nothing here\n');
+  const empty = migrate([`--exclude=${excludeFile}.empty`]);
+  assert.notEqual(empty.status, 0);
+  assert.match(empty.stderr, /lists no uids/);
+
+  // Dry run decides but writes nothing; every line carries the facts the
+  // exclusion list is built from.
+  const dry = migrate([`--exclude=${excludeFile}`]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, new RegExp(`^DRY ${reader} emailVerified -> true \\(${reader}@example.test, created .+, last sign-in .+, 1 book\\(s\\)\\)$`, 'm'));
+  assert.match(dry.stdout, new RegExp(`^DRY ${lurker} emailVerified -> true \\(${lurker}@example.test, created .+, last sign-in .+, 0 book\\(s\\)\\)$`, 'm'));
+  assert.match(dry.stdout, new RegExp(`^skip ${probe} excluded \\(`, 'm'));
+  assert.match(dry.stdout, new RegExp(`^ok ${done} already verified \\(`, 'm'));
+  assert.equal((await auth.getUser(reader)).emailVerified, false);
+  assert.equal((await auth.getUser(lurker)).emailVerified, false);
+
+  const applied = migrate(['--apply', `--exclude=${excludeFile}`, `--out=${outFile}`]);
   assert.equal(applied.status, 0, applied.stderr);
-  assert.match(applied.stdout, new RegExp(`^VERIFY ${active} emailVerified -> true$`, 'm'));
-  assert.equal((await auth.getUser(active)).emailVerified, true);
-  assert.equal((await auth.getUser(idle)).emailVerified, false);
+  assert.match(applied.stdout, new RegExp(`^VERIFY ${reader} emailVerified -> true`, 'm'));
+  assert.match(applied.stdout, new RegExp(`^VERIFY ${lurker} emailVerified -> true`, 'm'));
+  assert.equal((await auth.getUser(reader)).emailVerified, true);
+  assert.equal((await auth.getUser(lurker)).emailVerified, true);
+  assert.equal((await auth.getUser(probe)).emailVerified, false);
   assert.equal((await auth.getUser(done)).emailVerified, true);
 
   // The record holds exactly what this run changed — not the already-verified
-  // account — so a revert cannot un-verify anyone the script never touched.
+  // account, not the excluded one — so a revert cannot un-verify anyone the
+  // script never touched.
   const record = JSON.parse(readFileSync(outFile, 'utf8')) as { project: string; uids: string[] };
   assert.equal(record.project, 'book-tracker-d8f24');
-  assert.ok(record.uids.includes(active));
+  assert.ok(record.uids.includes(reader));
+  assert.ok(record.uids.includes(lurker));
   assert.ok(!record.uids.includes(done));
-  assert.ok(!record.uids.includes(idle));
+  assert.ok(!record.uids.includes(probe));
 
   // Idempotent: a re-run finds nothing to do and leaves no new record.
-  const again = migrate(['--apply', `--out=${outFile}.second`]);
+  const again = migrate(['--apply', `--exclude=${excludeFile}`, `--out=${outFile}.second`]);
   assert.equal(again.status, 0, again.stderr);
-  assert.match(again.stdout, new RegExp(`^ok ${active} already verified$`, 'm'));
+  assert.match(again.stdout, new RegExp(`^ok ${reader} already verified`, 'm'));
   assert.match(again.stdout, /^0 account\(s\) grandfathered/m);
   assert.throws(() => readFileSync(`${outFile}.second`), /ENOENT/);
 
   const revert = migrate([`--revert=${outFile}`, '--apply']);
   assert.equal(revert.status, 0, revert.stderr);
-  assert.match(revert.stdout, new RegExp(`^REVERT ${active} emailVerified -> false`, 'm'));
-  assert.equal((await auth.getUser(active)).emailVerified, false);
+  assert.match(revert.stdout, new RegExp(`^REVERT ${reader} emailVerified -> false`, 'm'));
+  assert.match(revert.stdout, new RegExp(`^REVERT ${lurker} emailVerified -> false`, 'm'));
+  assert.equal((await auth.getUser(reader)).emailVerified, false);
+  assert.equal((await auth.getUser(lurker)).emailVerified, false);
   assert.equal((await auth.getUser(done)).emailVerified, true);
 });
 
