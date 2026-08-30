@@ -1,8 +1,9 @@
 {
   "name": "functions",
   "scripts": {
-    "test": "npm run lint && npm run build && node --require ./test/setup.cjs --test test/*.test.cjs",
-    "lint": "eslint \"src/**/*\"",
+    "test": "npm run lint && npm run build && npm run check:test && node --require ./test/setup.cts --test test/*.test.cts",
+    "check:test": "tsc --noEmit -p tsconfig.test.json",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config \"src/**/*\"",
     "clean": "node -e \"require('node:fs').rmSync('lib', {recursive: true, force: true})\"",
     "build": "npm run clean && tsc",
     "serve": "npm run build && node lib/scripts/stage-emulator-secrets.js && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only auth,firestore,functions",

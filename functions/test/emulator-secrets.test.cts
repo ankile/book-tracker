@@ -1,16 +1,16 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const {
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
-} = require("node:fs");
-const {tmpdir} = require("node:os");
-const {join} = require("node:path");
-const {spawnSync} = require("node:child_process");
-const test = require("node:test");
+}: typeof import("node:fs") = require("node:fs");
+const {tmpdir}: typeof import("node:os") = require("node:os");
+const {join}: typeof import("node:path") = require("node:path");
+const {spawnSync}: typeof import("node:child_process") = require("node:child_process");
+const test: typeof import("node:test").test = require("node:test");
 
 const stageScript = join(
   __dirname,

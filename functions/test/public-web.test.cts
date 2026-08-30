@@ -1,17 +1,17 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const {readFileSync} = require("node:fs");
-const {join} = require("node:path");
-const test = require("node:test");
-const {Timestamp} = require("firebase-admin/firestore");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const {readFileSync}: typeof import("node:fs") = require("node:fs");
+const {join}: typeof import("node:path") = require("node:path");
+const test: typeof import("node:test").test = require("node:test");
+const {Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 
 const {
   renderNotFoundDocument,
   renderProfileDocument,
   renderSitemap,
-} = require("../lib/publicProfileRenderer");
-const {gunzipSync} = require("node:zlib");
+}: typeof import("../src/publicProfileRenderer") = require("../lib/publicProfileRenderer");
+const {gunzipSync}: typeof import("node:zlib") = require("node:zlib");
 const {
   MISS_BUDGET_EXHAUSTED,
   encodeResponse,
@@ -24,16 +24,24 @@ const {
   cachedPublicWebResponse,
   createTtlCache,
   resolvePublicWebRequest,
-} = require("../lib/publicWeb");
+}: typeof import("../src/publicWeb") = require("../lib/publicWeb");
 
-const {logger} = require("firebase-functions");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
+
+type PublicProfile = import("../src/decoders").PublicProfile;
+type PublicWebRepository = import("../src/publicWeb").PublicWebRepository;
+type PublicWebResponse = import("../src/publicWeb").PublicWebResponse;
+type TtlCache = import("../src/publicWeb").TtlCache<PublicWebResponse>;
 
 const shell = readFileSync(
   join(__dirname, "..", "assets", "profile-shell.html"),
   "utf8",
 );
 
-function profile(username = "ada-lovelace", overrides = {}) {
+function profile(
+  username = "ada-lovelace",
+  overrides: Partial<PublicProfile> = {},
+): PublicProfile {
   return {
     username,
     uid: "owner",
@@ -51,6 +59,7 @@ function profile(username = "ada-lovelace", overrides = {}) {
       avgTimePerBook: 480,
       authors: 9,
     },
+    records: null,
     years: [{year: 2026, count: 10, hours: 80, pages: 3200}],
     days: [{day: "2026-08-20", pagesRead: 120, timeRead: 95, sessions: 1}],
     updatedAt: Timestamp.fromDate(new Date("2026-08-24T12:00:00.000Z")),
@@ -58,15 +67,21 @@ function profile(username = "ada-lovelace", overrides = {}) {
   };
 }
 
-function storedProfile(overrides = {}) {
-  const {username: _username, ...stored} = profile("ada-lovelace", overrides);
-  return {...stored, records: null};
+function storedProfile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const {username: _username, ...stored} = profile();
+  return {...stored, ...overrides};
 }
 
-function repository({profiles = {}, discoveries = {}} = {}) {
+function repository({
+  profiles = {},
+  discoveries = {},
+}: {
+  profiles?: Record<string, unknown>;
+  discoveries?: Record<string, unknown>;
+} = {}): PublicWebRepository {
   return {
-    getProfile: async (username) => profiles[username] ?? null,
-    getDiscovery: async (username) => discoveries[username] ?? null,
+    getProfile: async (username: string) => profiles[username] ?? null,
+    getDiscovery: async (username: string) => discoveries[username] ?? null,
     listDiscoveries: async () => Object.entries(discoveries).map(([id, value]) => ({
       id,
       value,
@@ -91,9 +106,11 @@ test("renders a complete, escaped, indexable profile document", () => {
   assert.match(html, /property="og:title"/);
   assert.match(html, /property="og:image" content="https:\/\/book\.ankile\.com\/social\/profile-card\.png"/);
   assert.match(html, /name="twitter:card" content="summary_large_image"/);
-  const structuredData = JSON.parse(
-    html.match(/<script data-server-profile-meta type="application\/ld\+json">([^<]+)<\/script>/)[1],
+  const structuredDataMatch = html.match(
+    /<script data-server-profile-meta type="application\/ld\+json">([^<]+)<\/script>/,
   );
+  assert.ok(structuredDataMatch);
+  const structuredData = JSON.parse(structuredDataMatch[1]);
   assert.equal(structuredData["@type"], "ProfilePage");
   assert.equal(structuredData.mainEntity["@type"], "Person");
   assert.equal(structuredData.mainEntity.name, "Ada </script><script> Lovelace");
@@ -227,7 +244,7 @@ test("profile JSON projection serves public profiles without the owner uid", asy
 });
 
 test("profile JSON projection answers missing, private, and invalid names identically", async () => {
-  const cases = [
+  const cases: Array<[PublicWebRepository, string]> = [
     [repository(), "/profiles/ada-lovelace.json"],
     [repository({profiles: {"ada-lovelace": storedProfile({public: false})}}), "/profiles/ada-lovelace.json"],
     [repository({profiles: {"ada-lovelace": storedProfile()}}), "/profiles/Ada-Lovelace.json"],
@@ -250,8 +267,8 @@ test("profile JSON projection answers missing, private, and invalid names identi
 
 test("an unknown or private profile costs one read, a public one two", async () => {
   const calls = {profile: 0, discovery: 0};
-  const counting = (profiles) => ({
-    getProfile: async (username) => {
+  const counting = (profiles: Record<string, unknown>): PublicWebRepository => ({
+    getProfile: async (username: string) => {
       calls.profile += 1;
       return profiles[username] ?? null;
     },
@@ -282,11 +299,11 @@ test("an unknown or private profile costs one read, a public one two", async () 
 
 test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and meters misses", async () => {
   let clock = 1_000;
-  const cache = createTtlCache({
+  const cache = createTtlCache<string>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2, maxMissesPerWindow: 4, windowMs: 60_000, now: () => clock,
   });
   let loads = 0;
-  const load = (value) => async () => {
+  const load = (value: string) => async () => {
     loads += 1;
     return value;
   };
@@ -328,13 +345,12 @@ test("ttl cache shares in-flight loads, expires, evicts LRU, drops failures, and
 
   // A rejected load propagates and leaves nothing behind: the next call
   // loads again.
-  await assert.rejects(
-    cache.get("broken", async () => {
-      loads += 1;
-      throw new Error("firestore unavailable");
-    }),
-    /firestore unavailable/,
-  );
+  const broken = cache.get("broken", async () => {
+    loads += 1;
+    throw new Error("firestore unavailable");
+  });
+  assert.ok(broken instanceof Promise);
+  await assert.rejects(broken, /firestore unavailable/);
   assert.equal(await cache.get("broken", load("repaired")), "repaired");
   assert.equal(loads, 8);
 });
@@ -345,7 +361,7 @@ test("ttl cache pools transient values apart, serves retained ones stale, and dr
     /staleTtlMs must exceed ttlMs/,
   );
   let clock = 1_000;
-  const cache = createTtlCache({
+  const cache = createTtlCache<string>({
     ttlMs: 60_000,
     staleTtlMs: 300_000,
     maxEntries: 2,
@@ -356,7 +372,7 @@ test("ttl cache pools transient values apart, serves retained ones stale, and dr
     now: () => clock,
   });
   let loads = 0;
-  const load = (value) => async () => {
+  const load = (value: string) => async () => {
     loads += 1;
     return value;
   };
@@ -411,7 +427,7 @@ test("ttl cache pools transient values apart, serves retained ones stale, and dr
 
 test("cached responses serve repeats without reads, share HEAD with GET, and 503 past the budget", async () => {
   let clock = 1_000;
-  const cache = createTtlCache({
+  const cache = createTtlCache<PublicWebResponse>({
     ttlMs: 60_000,
     staleTtlMs: 300_000,
     maxEntries: 100,
@@ -423,14 +439,14 @@ test("cached responses serve repeats without reads, share HEAD with GET, and 503
   });
   let reads = 0;
   const repo = {
-    getProfile: async (username) => {
+    getProfile: async (username: string) => {
       reads += 1;
       return username === "ada-lovelace" ? storedProfile() : null;
     },
     getDiscovery: async () => null,
     listDiscoveries: async () => [],
   };
-  const get = (path, method = "GET") =>
+  const get = (path: string, method = "GET") =>
     cachedPublicWebResponse({method, path}, repo, shell, cache);
 
   const first = await get("/profiles/ada-lovelace.json");
@@ -557,7 +573,7 @@ test("a public profile that fails to decode is a memoised 404 on both routes, no
 
   // Through the cache the 404 is transient-pooled: a repeated hostile URL
   // costs no read and no budget after the first miss.
-  const cache = createTtlCache({
+  const cache = createTtlCache<PublicWebResponse>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 3, windowMs: 60_000, retain: (r) => r.status === 200,
   });
@@ -579,7 +595,7 @@ test("sitemap bounds its scan and reads profiles in batches, never all at once",
     Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
   );
   const batched = {
-    getProfile: async (username) => {
+    getProfile: async (username: string) => {
       inflight += 1;
       peak = Math.max(peak, inflight);
       await new Promise((resolve) => setImmediate(resolve));
@@ -587,7 +603,7 @@ test("sitemap bounds its scan and reads profiles in batches, never all at once",
       return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
     },
     getDiscovery: async () => null,
-    listDiscoveries: async (limit) => {
+    listDiscoveries: async (limit: number) => {
       requestedLimit = limit;
       return Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value}));
     },
@@ -602,12 +618,12 @@ test("sitemap bounds its scan and reads profiles in batches, never all at once",
 test("a pinned key survives a flood of retained 200s, stays fresh for its own ttl, and is served stale past the budget", async () => {
   let clock = 0;
   const loads = {s: 0, other: 0};
-  const cache = createTtlCache({
+  const cache = createTtlCache<string>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 500, windowMs: 60_000, retain: () => true,
     pin: (key) => key === "s", pinnedTtlMs: 300_000, now: () => clock,
   });
-  const load = (key) => () => {
+  const load = (key: string) => () => {
     if (key === "s") loads.s += 1; else loads.other += 1;
     return Promise.resolve(`${key}@${clock}`);
   };
@@ -652,14 +668,14 @@ test("sitemap stops scanning past its time budget and serves what it has", async
   );
   let reads = 0;
   const slow = {
-    getProfile: async (username) => {
+    getProfile: async (username: string) => {
       reads += 1;
       // Each batch of reads pushes the clock forward; the third batch crosses the budget.
       if (reads % SITEMAP_READ_CONCURRENCY === 0) clock += SITEMAP_SCAN_BUDGET_MS / 2 + 1;
       return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
     },
     getDiscovery: async () => null,
-    listDiscoveries: async (limit) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
+    listDiscoveries: async (limit: number) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
   };
   const result = await resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, slow, shell);
   assert.equal(result.status, 200);
@@ -668,7 +684,7 @@ test("sitemap stops scanning past its time budget and serves what it has", async
   assert.equal((result.body.match(/<loc>/g) ?? []).length, SITEMAP_READ_CONCURRENCY * 2);
   // A cut-short sitemap is held for its own short interval, not the hour:
   // no rescan a minute later, a rescan after five.
-  const cache = createTtlCache({
+  const cache = createTtlCache<PublicWebResponse>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 10, windowMs: 60_000,
     retain: (r) => r.status === 200 && r.partial !== true,
@@ -692,8 +708,8 @@ test("sitemap stops scanning past its time budget and serves what it has", async
 test("a degraded load never displaces a fresh pinned value and is served stale past the budget", async () => {
   let clock = 0;
   let next = "complete";
-  const loads = [];
-  const cache = createTtlCache({
+  const loads: number[] = [];
+  const cache = createTtlCache<string>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 3, windowMs: 60_000,
     retain: (value) => value === "complete",
@@ -752,7 +768,7 @@ test("profile JSON is never indexable and rejects a fractional year like the cli
 });
 
 test("memoised responses carry a gzip copy that is served only to callers who accept it", async () => {
-  const cache = createTtlCache({
+  const cache = createTtlCache<PublicWebResponse>({
     ttlMs: 60_000, staleTtlMs: 300_000, maxEntries: 2, maxTransientEntries: 2,
     maxMissesPerWindow: 10, windowMs: 60_000, retain: (r) => r.status === 200,
   });
@@ -797,7 +813,7 @@ test("sitemap renderer is deterministic and XML-safe", () => {
 
 // The production cache options with an injected clock, so these tests
 // cannot drift from what the deployed instance runs.
-function sitemapCache(now) {
+function sitemapCache(now: () => number): TtlCache {
   return createTtlCache({...RESPONSE_CACHE_OPTIONS, now});
 }
 
@@ -812,13 +828,13 @@ test("a sitemap scan that fails resolves as a memoised 503 instead of rescanning
   let scans = 0;
   let failing = true;
   const faulty = {
-    getProfile: async (username) => {
+    getProfile: async (username: string) => {
       reads += 1;
       if (failing && reads % (SITEMAP_READ_CONCURRENCY * 2) === 0) throw new Error("UNAVAILABLE");
       return storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
     },
     getDiscovery: async () => null,
-    listDiscoveries: async (limit) => {
+    listDiscoveries: async (limit: number) => {
       scans += 1;
       return Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value}));
     },
@@ -859,7 +875,7 @@ test("a marker list that never answers is cut off at the scan deadline as a 503"
   const hung = {
     getProfile: async () => storedProfile(),
     getDiscovery: async () => null,
-    listDiscoveries: () => new Promise(() => {}),
+    listDiscoveries: () => new Promise<Array<{id: string; value: unknown}>>(() => {}),
   };
   const pending = resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, hung, shell);
   t.mock.timers.tick(SITEMAP_SCAN_DEADLINE_MS);
@@ -946,9 +962,9 @@ test("a batch in flight at the deadline is given up but the entries already read
     Array.from({length: count}, (_, i) => [`user-${String(i).padStart(4, "0")}`, {...marker, uid: `u${i}`}]),
   );
   let reads = 0;
-  const holds = [];
+  const holds: Array<() => void> = [];
   const stalling = {
-    getProfile: (username) => {
+    getProfile: (username: string): Promise<unknown> => {
       reads += 1;
       const value = storedProfile({uid: `u${username.slice(5).replace(/^0+/, "") || "0"}`});
       // The first batch answers; the second hangs until released.
@@ -956,7 +972,7 @@ test("a batch in flight at the deadline is given up but the entries already read
       return new Promise((resolve) => holds.push(() => resolve(value)));
     },
     getDiscovery: async () => null,
-    listDiscoveries: async (limit) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
+    listDiscoveries: async (limit: number) => Object.entries(discoveries).slice(0, limit).map(([id, value]) => ({id, value})),
   };
   const pending = resolvePublicWebRequest({method: "GET", path: "/sitemap.xml"}, stalling, shell);
   // Let the first batch settle and the second start before the deadline fires.
@@ -977,7 +993,7 @@ test("a batch in flight at the deadline is given up but the entries already read
 test("a failure after the scan is memoised like a failed scan, never rescanned per request", async (t) => {
   let clock = 1_000_000;
   t.mock.method(Date, "now", () => clock);
-  const renderer = require("../lib/publicProfileRenderer");
+  const renderer: typeof import("../src/publicProfileRenderer") = require("../lib/publicProfileRenderer");
   t.mock.method(renderer, "renderSitemap", () => { throw new Error("render exploded"); });
   let scans = 0;
   const repo = {
@@ -1000,8 +1016,8 @@ test("a failure after the scan is memoised like a failed scan, never rescanned p
 // exactly a missing profile — the same 404 on the page and the JSON twin,
 // no sitemap row, and no "malformed" skip logged for it.
 test("a tombstoned profile is a 404 and leaves the sitemap without a skip", async (t) => {
-  const warnings = [];
-  t.mock.method(logger, "warn", (event, detail) => warnings.push([event, detail]));
+  const warnings: unknown[][] = [];
+  t.mock.method(logger, "warn", (event: unknown, detail: unknown) => warnings.push([event, detail]));
   const tombstone = Timestamp.fromDate(new Date("2026-08-29T20:00:00.000Z"));
   const store = repository({
     profiles: {

@@ -3,7 +3,9 @@ import {
   increment,
   Timestamp,
   writeBatch,
+  type DocumentReference,
   type Firestore,
+  type WriteBatch,
 } from 'firebase/firestore';
 import {
   planReadingSessionDelete,
@@ -13,8 +15,22 @@ import {
   type ReadingProgressUpdate,
 } from '../utils/readingSessionMutation.ts';
 
+export interface ReadingSessionWriteStore {
+  document(path: string, ...pathSegments: string[]): DocumentReference;
+  batch(): WriteBatch;
+}
+
+export function createReadingSessionWriteStore(
+  firestore: Firestore,
+): ReadingSessionWriteStore {
+  return {
+    document: (path, ...pathSegments) => doc(firestore, path, ...pathSegments),
+    batch: () => writeBatch(firestore),
+  };
+}
+
 interface ReadingSessionWriteBase {
-  firestore: Firestore;
+  firestore: ReadingSessionWriteStore;
   userId: string;
   bookId: string;
   sessionId: string;
@@ -42,10 +58,10 @@ export function queueReadingSessionUpdate({
   book,
   next,
 }: ReadingSessionUpdateWrite): Promise<void> {
-  const sessionRef = doc(firestore, 'users', userId, 'books', bookId, 'updates', sessionId);
-  const bookRef = doc(firestore, 'users', userId, 'books', bookId);
+  const sessionRef = firestore.document('users', userId, 'books', bookId, 'updates', sessionId);
+  const bookRef = firestore.document('users', userId, 'books', bookId);
   const mutation = planReadingSessionUpdate(previous, next, book, sessionId);
-  const batch = writeBatch(firestore);
+  const batch = firestore.batch();
   batch.update(sessionRef, {
     ...next,
     pagesRead: next.toPage - next.fromPage,
@@ -69,15 +85,15 @@ export function queueReadingSessionDelete({
   book,
   previousProgressUpdate,
 }: ReadingSessionDeleteWrite): Promise<void> {
-  const sessionRef = doc(firestore, 'users', userId, 'books', bookId, 'updates', sessionId);
-  const bookRef = doc(firestore, 'users', userId, 'books', bookId);
+  const sessionRef = firestore.document('users', userId, 'books', bookId, 'updates', sessionId);
+  const bookRef = firestore.document('users', userId, 'books', bookId);
   const mutation = planReadingSessionDelete(
     previous,
     book,
     sessionId,
     previousProgressUpdate,
   );
-  const batch = writeBatch(firestore);
+  const batch = firestore.batch();
   batch.delete(sessionRef);
   batch.update(bookRef, {
     pagesRead: increment(mutation.deltaPages),

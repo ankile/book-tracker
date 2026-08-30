@@ -1,12 +1,65 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const {readFileSync} = require("node:fs");
-const {join} = require("node:path");
-const test = require("node:test");
-const {getFirestore} = require("firebase-admin/firestore");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const {readFileSync}: typeof import("node:fs") = require("node:fs");
+const {join}: typeof import("node:path") = require("node:path");
+const test: typeof import("node:test").test = require("node:test");
+const {getFirestore}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 
-const functions = require("../lib");
+interface EventTrigger {
+  eventType: string;
+  retry?: boolean;
+  eventFilters: Record<string, string>;
+  eventFilterPathPatterns: Record<string, string>;
+}
+interface Endpoint {
+  platform: string;
+  region: string[];
+  eventTrigger: EventTrigger;
+  httpsTrigger?: {invoker?: unknown};
+  callableTrigger?: unknown;
+  maxInstances?: number;
+  concurrency?: number;
+  serviceAccountEmail?: unknown;
+  ingressSettings?: unknown;
+  secretEnvironmentVariables?: Array<{key: string}>;
+}
+interface EndpointFunction {
+  __endpoint: Endpoint;
+  __trigger?: {eventTrigger: EventTrigger};
+}
+interface DeployedFunction extends EndpointFunction {
+  run(...args: unknown[]): Promise<unknown>;
+}
+interface FunctionsBundle {
+  admin: {overview: DeployedFunction};
+  booksapi: {lookupisbn: DeployedFunction};
+  createUserDocument: DeployedFunction;
+  deleteUserDocument: DeployedFunction;
+  deletebookupdates: DeployedFunction;
+  publicweb: EndpointFunction;
+  telemetry: {reportissue: DeployedFunction};
+  toggl: {
+    clearstopping: DeployedFunction;
+    cleartoken: DeployedFunction;
+    savetoken: DeployedFunction;
+    start: DeployedFunction;
+    stop: DeployedFunction;
+    syncqueue: DeployedFunction;
+  };
+}
+type Write = [
+  ref: object,
+  value: Record<string, unknown>,
+  options: Record<string, unknown> | undefined,
+];
+type PathWrite = [
+  path: string,
+  value: Record<string, unknown>,
+  options: Record<string, unknown>,
+];
+
+const functions: FunctionsBundle = require("../lib");
 const db = getFirestore();
 const secretsDb = getFirestore("secrets");
 
@@ -79,10 +132,12 @@ test("keeps every function in europe-west1 on its required generation", () => {
 });
 
 test("preserves the Firestore and Authentication event contracts", () => {
+  assert.ok(functions.createUserDocument.__trigger);
   assert.equal(
     functions.createUserDocument.__trigger.eventTrigger.eventType,
     "providers/firebase.auth/eventTypes/user.create",
   );
+  assert.ok(functions.deleteUserDocument.__trigger);
   assert.equal(
     functions.deleteUserDocument.__trigger.eventTrigger.eventType,
     "providers/firebase.auth/eventTypes/user.delete",
@@ -112,32 +167,36 @@ test("preserves the Firestore and Authentication event contracts", () => {
 });
 
 test("user creation merges identity without erasing concurrent setup", async (t) => {
-  const writes = [];
+  const writes: Write[] = [];
   const lifecycleRef = {};
   const userRef = {
-    collection: (name) => {
+    collection: (name: string) => {
       assert.equal(name, "timerLifecycle");
-      return {doc: (id) => {
+      return {doc: (id: string) => {
         assert.equal(id, "current");
         return lifecycleRef;
       }};
     },
   };
-  t.mock.method(db, "collection", (path) => {
+  t.mock.method(db, "collection", (path: string) => {
     assert.equal(path, "users");
     return {
-      doc: (uid) => {
+      doc: (uid: string) => {
         assert.equal(uid, "owner");
         return userRef;
       },
     };
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: {
+    get(ref: object): Promise<{exists: boolean}>;
+    set(ref: object, value: Record<string, unknown>, options?: Record<string, unknown>): void;
+  }) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       assert.equal(ref, lifecycleRef);
       return {exists: false};
     },
-    set: (ref, value, options) => writes.push([ref, value, options]),
+    set: (ref: object, value: Record<string, unknown>, options?: Record<string, unknown>) =>
+      writes.push([ref, value, options]),
   }));
 
   await functions.createUserDocument.run({
@@ -152,15 +211,19 @@ test("user creation merges identity without erasing concurrent setup", async (t)
 });
 
 test("a retried user creation never overwrites an existing timer lifecycle", async (t) => {
-  const writes = [];
+  const writes: Write[] = [];
   const lifecycleRef = {};
   const userRef = {
     collection: () => ({doc: () => lifecycleRef}),
   };
   t.mock.method(db, "collection", () => ({doc: () => userRef}));
-  t.mock.method(db, "runTransaction", async (handler) => handler({
+  t.mock.method(db, "runTransaction", async (handler: (transaction: {
+    get(): Promise<{exists: boolean}>;
+    set(ref: object, value: Record<string, unknown>, options?: Record<string, unknown>): void;
+  }) => Promise<unknown>) => handler({
     get: async () => ({exists: true}),
-    set: (ref, value, options) => writes.push([ref, value, options]),
+    set: (ref: object, value: Record<string, unknown>, options?: Record<string, unknown>) =>
+      writes.push([ref, value, options]),
   }));
 
   await functions.createUserDocument.run({
@@ -174,21 +237,26 @@ test("a retried user creation never overwrites an existing timer lifecycle", asy
 });
 
 test("user deletion tombstones the user document and its profiles, deletes only uid-matched markers, and pages by id", async (t) => {
-  const noDeleteUser = () => assert.fail("the user document and profiles must never be deleted");
-  const sets = [];
-  const deletes = [];
-  let userValue = {email: "owner@example.test", uid: "owner", toggl: {workspaceId: 3, projectId: 4}};
+  const noDeleteUser = (): never => assert.fail("the user document and profiles must never be deleted");
+  const sets: PathWrite[] = [];
+  const deletes: string[] = [];
+  let userValue: Record<string, unknown> | undefined = {
+    email: "owner@example.test",
+    uid: "owner",
+    toggl: {workspaceId: 3, projectId: 4},
+  };
   const userRef = {path: "users/owner", delete: noDeleteUser};
   // The credential in the secrets database is deleted (SEC-004) — the one
   // per-account document deletion runs, and it is idempotent, so a
   // redelivery repeats the no-op delete.
-  const credentialDeletes = [];
-  t.mock.method(secretsDb, "doc", (path) => {
+  const credentialDeletes: string[] = [];
+  t.mock.method(secretsDb, "doc", (path: string) => {
     assert.equal(path, "togglTokens/owner");
     return {delete: async () => {
       // Order pin (SEC-004 review F4): the tombstone must already be on
       // the user document when the credential is deleted, so a
       // concurrent savetoken's post-write re-check always sees it.
+      assert.ok(userValue);
       assert.ok(
         userValue.deletedAt !== undefined,
         "the tombstone must be set before the credential is deleted",
@@ -196,26 +264,36 @@ test("user deletion tombstones the user document and its profiles, deletes only 
       credentialDeletes.push(path);
     }};
   });
-  const queries = [];
-  const pages = [];
+  interface ProfileDoc {
+    id: string;
+    ref: {path: string; delete(): never};
+    get(field: string): unknown;
+  }
+  interface QueryCall {
+    orderBy: object | null;
+    limit: number | null;
+    startAfter: string | null;
+  }
+  const queries: QueryCall[] = [];
+  const pages: ProfileDoc[][] = [];
   let markerOwner = "owner";
-  const profileDoc = (name, deletedAt) => ({
+  const profileDoc = (name: string, deletedAt: unknown): ProfileDoc => ({
     id: name,
     ref: {path: `profiles/${name}`, delete: noDeleteUser},
-    get: (field) => {
+    get: (field: string) => {
       assert.equal(field, "deletedAt");
       return deletedAt;
     },
   });
   const profiles = {
-    where: (field, operator, value) => {
+    where: (field: string, operator: string, value: unknown) => {
       assert.deepEqual([field, operator, value], ["uid", "==", "owner"]);
-      const call = {orderBy: null, limit: null, startAfter: null};
+      const call: QueryCall = {orderBy: null, limit: null, startAfter: null};
       queries.push(call);
       const query = {
-        orderBy: (path) => { call.orderBy = path; return query; },
-        limit: (size) => { call.limit = size; return query; },
-        startAfter: (cursor) => { call.startAfter = cursor.id; return query; },
+        orderBy: (path: object) => { call.orderBy = path; return query; },
+        limit: (size: number) => { call.limit = size; return query; },
+        startAfter: (cursor: ProfileDoc) => { call.startAfter = cursor.id; return query; },
         get: async () => {
           const docs = pages.shift() ?? [];
           return {empty: docs.length === 0, size: docs.length, docs};
@@ -224,19 +302,24 @@ test("user deletion tombstones the user document and its profiles, deletes only 
       return query;
     },
   };
-  const discoveryRef = (name) => ({path: `profileDiscovery/${name}`});
-  t.mock.method(db, "collection", (path) => {
+  const discoveryRef = (name: string) => ({path: `profileDiscovery/${name}`});
+  t.mock.method(db, "collection", (path: string) => {
     if (path === "profiles") return profiles;
-    if (path === "users") return {doc: (uid) => { assert.equal(uid, "owner"); return userRef; }};
+    if (path === "users") return {doc: (uid: string) => { assert.equal(uid, "owner"); return userRef; }};
     assert.equal(path, "profileDiscovery");
-    return {doc: (name) => discoveryRef(name)};
+    return {doc: (name: string) => discoveryRef(name)};
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: {
+    get(ref: object): Promise<{exists: boolean; get(field: string): unknown}>;
+    set(ref: object, value: Record<string, unknown>, options: Record<string, unknown>): void;
+    update(): never;
+    delete(): never;
+  }) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       assert.equal(ref, userRef);
-      return {exists: userValue !== undefined, get: (field) => userValue?.[field]};
+      return {exists: userValue !== undefined, get: (field: string) => userValue?.[field]};
     },
-    set: (ref, value, options) => {
+    set: (ref: object, value: Record<string, unknown>, options: Record<string, unknown>) => {
       assert.equal(ref, userRef);
       sets.push([ref.path, value, options]);
       userValue = {...userValue, ...value};
@@ -245,19 +328,20 @@ test("user deletion tombstones the user document and its profiles, deletes only 
     delete: noDeleteUser,
   }));
   let getAllCount = 0;
-  t.mock.method(db, "getAll", async (...refs) => {
+  t.mock.method(db, "getAll", async (...refs: Array<{path: string}>) => {
     getAllCount += 1;
     // Every marker exists; its uid is markerOwner (a freed-and-reclaimed
     // name would report a different owner and must be left alone).
-    return refs.map((ref) => ({exists: true, ref, get: (field) => {
+    return refs.map((ref) => ({exists: true, ref, get: (field: string) => {
       assert.equal(field, "uid");
       return markerOwner;
     }}));
   });
   let commits = 0;
   t.mock.method(db, "batch", () => ({
-    set: (ref, value, options) => sets.push([ref.path, value, options]),
-    delete: (ref) => deletes.push(ref.path),
+    set: (ref: {path: string}, value: Record<string, unknown>, options: Record<string, unknown>) =>
+      sets.push([ref.path, value, options]),
+    delete: (ref: {path: string}) => deletes.push(ref.path),
     update: noDeleteUser,
     commit: async () => { commits += 1; },
   }));
@@ -290,7 +374,10 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   assert.ok(deletes.includes("profileDiscovery/user-100") && deletes.includes("profileDiscovery/user-249"));
   assert.equal(getAllCount, 3);
   assert.equal(commits, 3);
-  assert.deepEqual(queries.map((q) => [q.orderBy.constructor.name, q.limit, q.startAfter]), [
+  assert.deepEqual(queries.map((q) => {
+    assert.ok(q.orderBy);
+    return [q.orderBy.constructor.name, q.limit, q.startAfter];
+  }), [
     ["FieldPath", 100, null],
     ["FieldPath", 100, "user-099"],
     ["FieldPath", 100, "user-199"],
@@ -317,7 +404,8 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   userValue = undefined;
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.equal(sets.length, 1);
-  assert.equal(sets[0][1].uid, "owner");
+  const tombstoneWrite = firstPathWrite(sets);
+  assert.equal(tombstoneWrite[1].uid, "owner");
 
   // A delivery that fails is retried rather than dropped — for both Auth
   // triggers: nothing else can create users/{uid}.
@@ -388,7 +476,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
   );
   assert.deepEqual([...new Set(boundKeys)].sort(), [fixtureKey]);
 
-  const packageJson = JSON.parse(readFileSync(
+  const packageJson: {scripts: Record<string, string>} = JSON.parse(readFileSync(
     join(__dirname, "..", "package.json"),
     "utf8",
   ));
@@ -431,18 +519,21 @@ test("runs every function as its dedicated least-privilege identity", () => {
   // typeof check (which also names the offender). Every export must also be
   // named in the tier map above: a new function is assigned a tier here
   // deliberately, not by matching a pattern.
-  const exported = [];
-  const walk = (value, path) => {
-    if (value && value.__endpoint) exported.push([path, value]);
-    else if (value && (typeof value === "object" || typeof value === "function")) {
+  const exported: Array<[string, EndpointFunction]> = [];
+  const walk = (value: unknown, path: string): void => {
+    if (isDeployedFunction(value)) {
+      exported.push([path, value]);
+    } else if (value && (typeof value === "object" || typeof value === "function")) {
       for (const [key, child] of Object.entries(value)) walk(child, `${path}.${key}`);
     }
   };
   walk(functions, "functions");
-  const tiers = new Map([
+  const tierEntries: Array<[string, string]> = [
     ["functions.publicweb", publicwebRuntime],
-    ...Object.keys(authenticated).map((name) => [`functions.${name}`, functionsRuntime]),
-  ]);
+    ...Object.keys(authenticated).map((name): [string, string] =>
+      [`functions.${name}`, functionsRuntime]),
+  ];
+  const tiers = new Map(tierEntries);
   assert.deepEqual(exported.map(([name]) => name).sort(), [...tiers.keys()].sort());
   for (const [name, deployedFunction] of exported) {
     const identity = deployedFunction.__endpoint.serviceAccountEmail;
@@ -459,7 +550,9 @@ test("runs every function as its dedicated least-privilege identity", () => {
   assert.deepEqual(raw.map(([name]) => name), ["functions.publicweb"]);
   for (const [name, deployedFunction] of raw) {
     assert.equal(deployedFunction.__endpoint.serviceAccountEmail, publicwebRuntime, name);
-    assert.equal(deployedFunction.__endpoint.httpsTrigger.invoker, undefined, name);
+    const httpsTrigger = deployedFunction.__endpoint.httpsTrigger;
+    assert.ok(httpsTrigger);
+    assert.equal(httpsTrigger.invoker, undefined, name);
   }
   // Eventarc delivers from Google's network: exactly the two event-driven
   // gen2 services accept no public ingress. Everything else — callables,
@@ -480,7 +573,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
   assert.equal(functions.deletebookupdates.__endpoint.maxInstances, 5);
   // Every gen-1 function is invokable (or triggerable) by strangers and is
   // billed before it rejects them: each carries an explicit instance cap.
-  const caps = {
+  const caps: Record<string, number> = {
     "functions.admin.overview": 2,
     "functions.booksapi.lookupisbn": 10,
     "functions.telemetry.reportissue": 10,
@@ -499,3 +592,15 @@ test("runs every function as its dedicated least-privilege identity", () => {
     assert.equal(deployedFunction.__endpoint.maxInstances, caps[name], `${name} maxInstances`);
   }
 });
+
+function isDeployedFunction(value: unknown): value is EndpointFunction {
+  return (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    "__endpoint" in value;
+}
+
+function firstPathWrite(writes: PathWrite[]): PathWrite {
+  const first = writes[0];
+  assert.ok(first);
+  return first;
+}

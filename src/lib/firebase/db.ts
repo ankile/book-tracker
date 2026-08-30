@@ -7,7 +7,6 @@ import {
   query,
   where,
   onSnapshot,
-  addDoc,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -52,6 +51,7 @@ import {
   stoppingTimer,
 } from '../utils/timerClaim.ts';
 import {
+  createReadingSessionWriteStore,
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from './readingSessionWrites.ts';
@@ -87,6 +87,7 @@ import {
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
+const readingSessionWriteStore = createReadingSessionWriteStore(db);
 
 // Migration-rehearsal hook (MIGRATIONS.md): VITE_EMULATOR=1 npm run dev
 // points the dev client at the local emulators to exercise real client
@@ -1117,7 +1118,7 @@ class Database {
     // Rules correlate these deltas with the server's current session; a
     // stale cross-device edit rejects atomically on reconnect.
     return queueReadingSessionUpdate({
-      firestore: db,
+      firestore: readingSessionWriteStore,
       userId,
       bookId,
       sessionId: session.id,
@@ -1135,7 +1136,7 @@ class Database {
     previousProgressUpdate,
   }: DeleteReadingSessionInput): Promise<void> {
     return queueReadingSessionDelete({
-      firestore: db,
+      firestore: readingSessionWriteStore,
       userId,
       bookId,
       sessionId: session.id,

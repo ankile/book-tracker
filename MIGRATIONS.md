@@ -198,7 +198,7 @@ or integrations, update the relevant files under `docs/architecture/`, render
 new SVG and PNG artifacts, and run:
 
 ```bash
-node docs/architecture/verify.mjs
+node docs/architecture/verify.ts
 ```
 
 When a migration completes, update this status ledger in the same commit that

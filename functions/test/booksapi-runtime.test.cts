@@ -1,38 +1,55 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {getFirestore} = require("firebase-admin/firestore");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {getFirestore}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+
+type TestContext = import("node:test").TestContext;
+type Quota = Record<string, unknown> | undefined;
+interface TransactionStub {
+  get(ref: object): Promise<{data(): Quota}>;
+  set(ref: object, value: Record<string, unknown>): void;
+  update(ref: object, patch: Record<string, unknown>): void;
+}
+interface Deployed {
+  booksapi: {
+    lookupisbn: {
+      run(data: unknown, context: unknown): Promise<{
+        volume: import("../src/decoders").GoogleVolumeInfo | null;
+      }>;
+    };
+  };
+}
 
 process.env.FUNCTIONS_CONFIG_EXPORT = JSON.stringify({
   booksapi: {url: "https://books.example/volumes", key: "secret"},
 });
 
-const deployed = require("../lib");
+const deployed: Deployed = require("../lib");
 const db = getFirestore();
 const authContext = {auth: {uid: "owner", token: {}}};
 
-function snapshot(data) {
+function snapshot(data: Quota): {data(): Quota} {
   return {data: () => data};
 }
 
-function installQuotaStore(t) {
+function installQuotaStore(t: TestContext): {quota(): Quota} {
   const quotaRef = {};
-  let quota;
-  t.mock.method(db, "doc", (path) => {
+  let quota: Quota;
+  t.mock.method(db, "doc", (path: string) => {
     assert.equal(path, "users/owner/functionQuotas/booksApi");
     return quotaRef;
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       assert.equal(ref, quotaRef);
       return snapshot(quota);
     },
-    set: (ref, value) => {
+    set: (ref: object, value: Record<string, unknown>) => {
       assert.equal(ref, quotaRef);
       quota = value;
     },
-    update: (ref, patch) => {
+    update: (ref: object, patch: Record<string, unknown>) => {
       assert.equal(ref, quotaRef);
       quota = {...quota, ...patch};
     },
@@ -42,8 +59,8 @@ function installQuotaStore(t) {
 
 test("lookupisbn returns sanitized partial metadata", async (t) => {
   const quota = installQuotaStore(t);
-  let requestedUrl;
-  t.mock.method(global, "fetch", async (url) => {
+  let requestedUrl: string | URL | Request | undefined;
+  t.mock.method(global, "fetch", async (url: string | URL | Request) => {
     requestedUrl = url;
     return new Response(JSON.stringify({
       totalItems: 1,
@@ -69,7 +86,7 @@ test("lookupisbn returns sanitized partial metadata", async (t) => {
     requestedUrl,
     "https://books.example/volumes?key=secret&q=isbn:9780000000002&country=NO",
   );
-  assert.equal(quota.quota().count, 1);
+  assert.equal(quota.quota()?.count, 1);
 });
 
 test("lookupisbn retries transient Google Books failures without charging quota again", async (t) => {
@@ -106,7 +123,7 @@ test("lookupisbn retries transient Google Books failures without charging quota 
     }},
   );
   assert.equal(fetchCalls, 3);
-  assert.equal(quota.quota().count, 1);
+  assert.equal(quota.quota()?.count, 1);
 });
 
 test("lookupisbn does not retry a non-transient Google Books rejection", async (t) => {
@@ -122,10 +139,10 @@ test("lookupisbn does not retry a non-transient Google Books rejection", async (
       {isbn: "9780316034418"},
       authContext,
     ),
-    (error) => error.code === "internal",
+    (error) => hasCode(error, "internal"),
   );
   assert.equal(fetchCalls, 1);
-  assert.equal(quota.quota().count, 1);
+  assert.equal(quota.quota()?.count, 1);
 });
 
 test("lookupisbn stops after four transient Google Books failures", async (t) => {
@@ -141,10 +158,10 @@ test("lookupisbn stops after four transient Google Books failures", async (t) =>
       {isbn: "9780316034418"},
       authContext,
     ),
-    (error) => error.code === "unavailable",
+    (error) => hasCode(error, "unavailable"),
   );
   assert.equal(fetchCalls, 4);
-  assert.equal(quota.quota().count, 1);
+  assert.equal(quota.quota()?.count, 1);
 });
 
 test("the Functions emulator returns a local miss without outbound fetch", async (t) => {
@@ -169,7 +186,7 @@ test("the Functions emulator returns a local miss without outbound fetch", async
     ),
     {volume: null},
   );
-  assert.equal(quota.quota().count, 1);
+  assert.equal(quota.quota()?.count, 1);
 });
 
 test("lookupisbn enforces the per-user hourly quota before fetch", async (t) => {
@@ -194,7 +211,14 @@ test("lookupisbn enforces the per-user hourly quota before fetch", async (t) => 
       {isbn: "9780000000002"},
       authContext,
     ),
-    (error) => error.code === "resource-exhausted",
+    (error) => hasCode(error, "resource-exhausted"),
   );
   assert.equal(fetchCalls, 60);
 });
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code;
+}

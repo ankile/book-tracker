@@ -2,24 +2,51 @@ const {
   DEAD_EMULATOR_HOST,
   MISSING_CREDENTIALS_PATH,
   UNIT_TEST_PROJECT,
-} = require("./setup.cjs");
+} = require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const {spawnSync} = require("node:child_process");
-const {existsSync, readFileSync, readdirSync} = require("node:fs");
-const {join} = require("node:path");
-const test = require("node:test");
-const {getApp} = require("firebase-admin/app");
-const {getFirestore} = require("firebase-admin/firestore");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const {spawnSync}: typeof import("node:child_process") = require("node:child_process");
+const {existsSync, readFileSync, readdirSync}: typeof import("node:fs") = require("node:fs");
+const {join}: typeof import("node:path") = require("node:path");
+const test: typeof import("node:test").test = require("node:test");
+const {getApp}: typeof import("firebase-admin/app") = require("firebase-admin/app");
+const {getFirestore}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 
 require("../lib");
+
+function firestoreConnection(value: object): {
+  projectId: string;
+  servicePath: string;
+  port: number;
+  ssl: boolean;
+} {
+  assert.ok("projectId" in value);
+  assert.ok(typeof value.projectId === "string");
+  assert.ok("_settings" in value);
+  assert.ok(typeof value._settings === "object" && value._settings !== null);
+  const settings = value._settings;
+  assert.ok("servicePath" in settings);
+  assert.ok(typeof settings.servicePath === "string");
+  assert.ok("port" in settings);
+  assert.ok(typeof settings.port === "number");
+  assert.ok("ssl" in settings);
+  assert.ok(typeof settings.ssl === "boolean");
+  return {
+    projectId: value.projectId,
+    servicePath: settings.servicePath,
+    port: settings.port,
+    ssl: settings.ssl,
+  };
+}
 
 test("Functions unit tests are contained to a dead local emulator", async () => {
   const app = getApp();
   const db = getFirestore();
+  const connection = firestoreConnection(db);
 
   assert.equal(process.env.GCLOUD_PROJECT, UNIT_TEST_PROJECT);
   assert.equal(process.env.GOOGLE_CLOUD_PROJECT, UNIT_TEST_PROJECT);
+  assert.ok(process.env.FIREBASE_CONFIG);
   assert.deepEqual(JSON.parse(process.env.FIREBASE_CONFIG), {
     projectId: UNIT_TEST_PROJECT,
   });
@@ -31,10 +58,10 @@ test("Functions unit tests are contained to a dead local emulator", async () => 
   );
   assert.equal(existsSync(MISSING_CREDENTIALS_PATH), false);
   assert.equal(app.options.projectId, UNIT_TEST_PROJECT);
-  assert.equal(db.projectId, UNIT_TEST_PROJECT);
-  assert.equal(db._settings.servicePath, "127.0.0.1");
-  assert.equal(db._settings.port, 1);
-  assert.equal(db._settings.ssl, false);
+  assert.equal(connection.projectId, UNIT_TEST_PROJECT);
+  assert.equal(connection.servicePath, "127.0.0.1");
+  assert.equal(connection.port, 1);
+  assert.equal(connection.ssl, false);
   await assert.rejects(
     global.fetch("https://firestore.googleapis.com"),
     /Network access is disabled/,
@@ -66,7 +93,7 @@ test("the preload replaces a hostile environment before bundle initialization", 
   `;
   const result = spawnSync(
     process.execPath,
-    ["--require", join(__dirname, "setup.cjs"), "-e", childScript],
+    ["--require", join(__dirname, "setup.cts"), "-e", childScript],
     {
       cwd: join(__dirname, ".."),
       encoding: "utf8",
@@ -90,12 +117,12 @@ test("the preload replaces a hostile environment before bundle initialization", 
 test("every Functions test self-loads the containment setup", () => {
   const testDirectory = __dirname;
   for (const name of readdirSync(testDirectory)) {
-    if (!name.endsWith(".test.cjs")) continue;
+    if (!name.endsWith(".test.cts")) continue;
     const source = readFileSync(join(testDirectory, name), "utf8");
     assert.match(
       source,
-      /require\("\.\/setup\.cjs"\)/,
-      `${name} must load setup.cjs for direct single-file runs`,
+      /require\("\.\/setup\.cts"\)/,
+      `${name} must load setup.cts for direct single-file runs`,
     );
   }
 });

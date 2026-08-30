@@ -77,10 +77,12 @@ test('the README documents the current routine release without completed migrati
   const deployment = section(readme, '## Deployment', '## Project layout');
 
   assertOrdered(deployment, [
-    'npm run validate',
+    'npm test',
     'npm run build',
-    'node docs/architecture/verify.mjs',
+    'node docs/architecture/verify.ts',
     'Commit the source and generated artifacts',
+    'npm run validate',
+    'artifact checks compare',
     'firebase-tools@15.24.0',
   ]);
   assert.match(deployment, /Hosting and the public profile renderer are coupled/i);

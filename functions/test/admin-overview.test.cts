@@ -1,13 +1,62 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {getAuth} = require("firebase-admin/auth");
-const {getFirestore, Timestamp} = require("firebase-admin/firestore");
-const {logger} = require("firebase-functions");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {getAuth}: typeof import("firebase-admin/auth") = require("firebase-admin/auth");
+const {getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
-const deployed = require("../lib");
-const {ANONYMOUS_ISSUE_LIMIT, FEED_LIMIT, ISSUES_PER_UID} = require("../lib/adminIssues");
+type TestContext = import("node:test").TestContext;
+type AdminIssueRow = import("../src/adminIssues").AdminIssueRow;
+type Filter = [field: string, op: string, value: unknown];
+interface IssueQueryCall {
+  filters: Filter[];
+  order: [field: string, direction: string] | null;
+  limit: number | null;
+}
+interface InstallOptions {
+  failFor?: string[];
+  rowsPerUid?: number;
+  failAnonymous?: boolean;
+  tombstoned?: string[];
+  docs?: string[];
+}
+interface EmptyQuery {
+  where(...args: unknown[]): EmptyQuery;
+  orderBy(...args: unknown[]): EmptyQuery;
+  limit(...args: unknown[]): EmptyQuery;
+  get(): Promise<{docs: never[]}>;
+  count(): {get(): Promise<{data(): Record<string, number>}>};
+  aggregate(spec: Record<string, unknown>): {
+    get(): Promise<{data(): Record<string, number>}>;
+  };
+}
+interface OverviewResult {
+  users: Array<{uid: string; anomaly: string | null}>;
+  issues: AdminIssueRow[];
+  issueCaps: {
+    perAccount: number;
+    cappedAccounts: number;
+    anonymous: number;
+    anonymousCapped: boolean;
+    shown: number;
+    total: number;
+    groupsWithRows: number;
+    groupsShown: number;
+    unreadAccounts: number;
+    anonymousUnread: boolean;
+  };
+}
+interface Deployed {
+  admin: {overview: {run(data: unknown, context: unknown): Promise<OverviewResult>}};
+}
+
+const deployed: Deployed = require("../lib");
+const {
+  ANONYMOUS_ISSUE_LIMIT,
+  FEED_LIMIT,
+  ISSUES_PER_UID,
+}: typeof import("../src/adminIssues") = require("../lib/adminIssues");
 
 const db = getFirestore();
 const auth = getAuth();
@@ -15,15 +64,17 @@ const adminContext = {
   auth: {uid: "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2", token: {email_verified: true}},
 };
 
-const emptyAggregate = (value) => ({get: async () => ({data: () => value})});
-const emptyQuery = () => {
-  const query = {
+const emptyAggregate = (value: Record<string, number>) => ({
+  get: async () => ({data: () => value}),
+});
+const emptyQuery = (): EmptyQuery => {
+  const query: EmptyQuery = {
     where: () => query,
     orderBy: () => query,
     limit: () => query,
     get: async () => ({docs: []}),
     count: () => emptyAggregate({count: 0}),
-    aggregate: (spec) => emptyAggregate(
+    aggregate: (spec: Record<string, unknown>) => emptyAggregate(
       Object.fromEntries(Object.keys(spec).map((key) => [key, 0])),
     ),
   };
@@ -35,8 +86,18 @@ const emptyQuery = () => {
 // sends to Firestore are the thing under test, not just how the rows are
 // assembled afterwards (round-2 red-team: dropping the uid filter or the
 // +1 survived the suite before this file existed).
-function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonymous = false, tombstoned = [], docs = []} = {}) {
-  const issueQueries = [];
+function installOverviewStore(
+  t: TestContext,
+  uids: string[],
+  {
+    failFor = [],
+    rowsPerUid = 0,
+    failAnonymous = false,
+    tombstoned = [],
+    docs = [],
+  }: InstallOptions = {},
+): IssueQueryCall[] {
+  const issueQueries: IssueQueryCall[] = [];
   t.mock.method(auth, "listUsers", async () => ({
     users: uids.map((uid) => ({
       uid,
@@ -48,12 +109,12 @@ function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonym
   }));
   t.mock.method(db, "doc", () => ({}));
   t.mock.method(db, "collectionGroup", () => emptyQuery());
-  t.mock.method(db, "collection", (name) => {
+  t.mock.method(db, "collection", (name: string) => {
     if (name === "adminAudit") return {add: async () => ({id: "audit"})};
     if (name === "users") {
-      const userDoc = (uid) => ({
+      const userDoc = (uid: string) => ({
         id: uid,
-        get: (field) => {
+        get: (field: string) => {
           if (field === "deletedAt") return tombstoned.includes(uid) ? Timestamp.fromMillis(1) : undefined;
           if (field === "email") return `${uid}@doc.test`;
           assert.fail(`unexpected user field ${field}`);
@@ -66,26 +127,30 @@ function installOverviewStore(t, uids, {failFor = [], rowsPerUid = 0, failAnonym
       };
     }
     if (name === "logEvents") {
-      const call = {filters: [], order: null, limit: null};
+      const call: IssueQueryCall = {filters: [], order: null, limit: null};
       issueQueries.push(call);
       const query = {
-        where: (field, op, value) => {
+        where: (field: string, op: string, value: unknown) => {
           call.filters.push([field, op, value]);
           return query;
         },
-        orderBy: (field, direction) => {
+        orderBy: (field: string, direction: string) => {
           call.order = [field, direction];
           return query;
         },
-        limit: (value) => {
+        limit: (value: number) => {
           call.limit = value;
           return query;
         },
         get: async () => {
           const uid = call.filters.find(([field]) => field === "uid")?.[2];
-          if (failFor.includes(uid)) throw new Error(`simulated failure for ${uid}`);
+          if (typeof uid === "string" && failFor.includes(uid)) {
+            throw new Error(`simulated failure for ${uid}`);
+          }
           if (uid === null && failAnonymous) throw new Error("simulated anonymous failure");
           if (uid === null || rowsPerUid === 0) return {docs: []};
+          assert.ok(typeof uid === "string");
+          assert.ok(call.limit !== null);
           // Newest first, as Firestore would return them; the limit is honoured
           // so the test sees exactly what the callable asked for.
           return {docs: Array.from({length: Math.min(rowsPerUid, call.limit)}, (_, index) => ({
@@ -170,7 +235,7 @@ test("the callable applies the shipped caps and the shipped feed limit to the wi
   assert.equal(result.issueCaps.anonymousCapped, false);
   assert.equal(result.issueCaps.groupsWithRows, uids.length);
   assert.equal(result.issueCaps.groupsShown, uids.length);
-  const perUid = new Map();
+  const perUid = new Map<string | null, number>();
   for (const row of result.issues) perUid.set(row.uid, (perUid.get(row.uid) ?? 0) + 1);
   // Round-robin: every account is present and none exceeds its cap.
   assert.equal(perUid.size, uids.length);
@@ -183,8 +248,8 @@ test("the callable applies the shipped caps and the shipped feed limit to the wi
 test("one failed per-account read is dropped, logged and counted, not fatal", async (t) => {
   const uids = ["owner", "broken", "stranger"];
   installOverviewStore(t, uids, {failFor: ["broken"]});
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: unknown[][] = [];
+  t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
 
   const result = await deployed.admin.overview.run({}, adminContext);
 
@@ -210,8 +275,8 @@ test("when every read fails the feed is empty but the wire says why", async (t) 
   // page must not read that as "all clear" (round-3 red-team).
   const uids = ["owner", "stranger", "third"];
   installOverviewStore(t, uids, {failFor: uids, failAnonymous: true});
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: unknown[][] = [];
+  t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
   const result = await deployed.admin.overview.run({}, adminContext);
   assert.deepEqual(result.issues, []);
   assert.equal(result.issueCaps.unreadAccounts, uids.length);

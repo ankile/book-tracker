@@ -167,6 +167,12 @@ tests, PWA tests, Functions tests, a production build, artifact checks, bundle
 budgets, and dependency audits. The root audit excludes development-only
 packages; the Functions audit checks its complete package tree.
 
+Maintained source, tests, configuration, and repository tooling are
+TypeScript-only. `public/service-worker.js` is the sole JavaScript exception:
+it is generated from `src/service-worker.ts` during the build. Unit tests
+enforce both this boundary and the absence of unchecked TypeScript escape
+hatches.
+
 Root package commands:
 
 | Command | Purpose |
@@ -183,22 +189,23 @@ Root package commands:
 | `npm run check:watch` | Watch-mode Svelte checks |
 | `npm run test:unit` | Application and migration unit tests |
 | `npm run test:rules` | Firestore Rules and integration tests against local emulators |
-| `npm run test:functions` | Functions lint, build, and tests |
+| `npm run test:functions` | Functions lint, production build, strict test type-check, and tests |
 | `npm run test:pwa` | Service-worker and PWA behavior tests |
 | `npm run test:artifacts` | Generated build and renderer artifact checks |
 | `npm run test:bundle` | JavaScript and CSS bundle budgets |
 | `npm run test:e2e` | Browser tests against local emulators |
 | `npm run test:e2e:browser` | Run Playwright against an already running test environment |
-| `node docs/architecture/verify.mjs` | Route coverage, image freshness, and map sanitization |
+| `node docs/architecture/verify.ts` | Route coverage, image freshness, and map sanitization |
 
 Functions package commands:
 
 | Command | Purpose |
 |---|---|
-| `npm --prefix functions test` | Lint, build, and test backend code |
+| `npm --prefix functions test` | Lint and type-check production/test backend code, then run backend tests |
 | `npm --prefix functions run lint` | Lint backend TypeScript |
 | `npm --prefix functions run clean` | Remove compiled backend output |
 | `npm --prefix functions run build` | Compile backend TypeScript |
+| `npm --prefix functions run check:test` | Strictly type-check backend tests |
 | `npm --prefix functions run serve` | Build and start the local emulator suite |
 | `npm --prefix functions run shell` | Alias for the emulator workflow |
 | `npm --prefix functions start` | Alias for the emulator workflow |
@@ -220,11 +227,14 @@ For a routine release:
 
 1. Start from a clean branch and install locked dependencies with `npm ci` in
    both package roots.
-2. Run `npm run validate` and any relevant browser end-to-end tests.
-3. Run `npm run build` and `node docs/architecture/verify.mjs`.
+2. Run `npm test` and any relevant browser end-to-end tests.
+3. Run `npm run build` and `node docs/architecture/verify.ts`.
 4. Review the generated web and profile-renderer artifacts together.
-5. Commit the source and generated artifacts before deployment.
-6. Deploy the configured targets with the pinned CLI and follow the private
+5. Commit the source and generated artifacts.
+6. Run `npm run validate` from that clean commit. The artifact checks compare
+   the generated files with `HEAD`, so this step belongs after the artifact
+   commit and before deployment. Confirm the working tree remains clean.
+7. Deploy the configured targets with the pinned CLI and follow the private
    verification and rollback runbooks.
 
 ```bash

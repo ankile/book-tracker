@@ -1,6 +1,7 @@
 import { build, files, version } from '$service-worker';
 
-const serviceWorker = self as unknown as ServiceWorkerGlobalScope;
+declare const self: ServiceWorkerGlobalScope;
+const serviceWorker = self;
 const CACHE_PREFIX = 'book-tracker-';
 const CACHE = `${CACHE_PREFIX}${version}`;
 const APP_SHELL = '/';

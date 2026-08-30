@@ -1,8 +1,8 @@
-const {join} = require("node:path");
+const {join}: typeof import("node:path") = require("node:path");
 
 const UNIT_TEST_PROJECT = "demo-book-tracker-test";
 const DEAD_EMULATOR_HOST = "127.0.0.1:1";
-// setup.cjs is a regular file, so no credential can exist beneath it.
+// setup.cts is a regular file, so no credential can exist beneath it.
 const MISSING_CREDENTIALS_PATH = join(__filename, "credentials.json");
 
 // Load this file before any Admin SDK import. A missed Firestore/Auth mock

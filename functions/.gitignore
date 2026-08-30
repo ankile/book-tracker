@@ -2,9 +2,6 @@
 **/*.js
 **/*.js.map
 
-# Except the ESLint config file
-!eslint.config.cjs
-
 # TypeScript v1 declaration files
 typings/
 

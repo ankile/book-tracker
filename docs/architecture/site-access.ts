@@ -1,7 +1,27 @@
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const rows = [
+type AccessKind = 'owner' | 'public' | 'privileged';
+
+interface AccessRow {
+  name: string;
+  path: string;
+  reached: string[];
+  read: string[];
+  readKind: AccessKind;
+  writes: string[];
+  writeKind?: 'privileged';
+}
+
+interface TextOptions {
+  fill?: string;
+  fontSize?: number;
+  weight?: number;
+  family?: string;
+  lineHeight?: number;
+}
+
+const rows: AccessRow[] = [
   {
     name: 'Currently Reading',
     path: '/',
@@ -102,7 +122,7 @@ const rowsTop = titleHeight + headerHeight + 14;
 const noteTop = rowsTop + rows.length * rowHeight + (rows.length - 1) * rowGap + noteGap;
 const height = noteTop + noteHeight + 38;
 
-function escapeXml(value) {
+function escapeXml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -111,11 +131,19 @@ function escapeXml(value) {
     .replaceAll("'", '&apos;');
 }
 
-function rect(x, y, cellWidth, cellHeight, fill, stroke, radius = 10) {
+function rect(
+  x: number,
+  y: number,
+  cellWidth: number,
+  cellHeight: number,
+  fill: string,
+  stroke: string,
+  radius = 10,
+): string {
   return `<rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="${radius}" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;
 }
 
-function lines(values, x, y, options = {}) {
+function lines(values: string[], x: number, y: number, options: TextOptions = {}): string {
   const {
     fill = palette.ink,
     fontSize = 17,
@@ -129,7 +157,7 @@ function lines(values, x, y, options = {}) {
   return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${fontSize}" font-weight="${weight}">${spans}</text>`;
 }
 
-function routeCell(row, x, y, cellWidth) {
+function routeCell(row: AccessRow, x: number, y: number, cellWidth: number): string {
   return [
     rect(x, y, cellWidth, rowHeight, palette.routeFill, palette.routeStroke),
     lines([row.name], x + 18, y + 38, { fontSize: 18, weight: 700 }),
@@ -141,7 +169,14 @@ function routeCell(row, x, y, cellWidth) {
   ].join('');
 }
 
-function standardCell(values, x, y, cellWidth, fill, stroke) {
+function standardCell(
+  values: string[],
+  x: number,
+  y: number,
+  cellWidth: number,
+  fill: string,
+  stroke: string,
+): string {
   const firstY = y + (values.length === 1 ? 64 : 48);
   return [
     rect(x, y, cellWidth, rowHeight, fill, stroke),
@@ -149,7 +184,7 @@ function standardCell(values, x, y, cellWidth, fill, stroke) {
   ].join('');
 }
 
-function readColors(kind) {
+function readColors(kind: AccessKind): [string, string] {
   if (kind === 'public') return [palette.publicFill, palette.publicStroke];
   if (kind === 'privileged') return [palette.privilegedFill, palette.privilegedStroke];
   return [palette.ownerFill, palette.ownerStroke];

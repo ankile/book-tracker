@@ -43,7 +43,7 @@ render_diagram app-architecture 2200
 render_diagram backend-runtime 2000
 render_diagram site-functionality 1800
 
-node docs/architecture/site-access.mjs
+node docs/architecture/site-access.ts
 "${CHROME_BIN}" \
   --headless=new \
   --disable-gpu \
@@ -54,4 +54,4 @@ node docs/architecture/site-access.mjs
   "file://${REPO_ROOT}/docs/architecture/site-access.svg" \
   >/dev/null 2>&1
 
-node docs/architecture/verify.mjs
+node docs/architecture/verify.ts

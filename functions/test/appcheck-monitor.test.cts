@@ -1,10 +1,10 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const {readdirSync, readFileSync} = require("node:fs");
-const {join} = require("node:path");
-const test = require("node:test");
-const {logger} = require("firebase-functions");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const {readdirSync, readFileSync}: typeof import("node:fs") = require("node:fs");
+const {join}: typeof import("node:path") = require("node:path");
+const test: typeof import("node:test").test = require("node:test");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
 const deployed = require("../lib");
 
@@ -14,17 +14,24 @@ const deployed = require("../lib");
 // still be counted), and it distinguishes a request that carried a valid
 // App Check token from one that did not.
 
-function captureInfo(t) {
-  const lines = [];
-  t.mock.method(logger, "info", (...args) => lines.push(args));
+function captureInfo(t: import("node:test").TestContext): unknown[][] {
+  const lines: unknown[][] = [];
+  t.mock.method(logger, "info", (...args: unknown[]) => lines.push(args));
   return lines;
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code;
 }
 
 test("a callable without an App Check token logs appcheck.monitor missing, before auth", async (t) => {
   const lines = captureInfo(t);
   await assert.rejects(
     deployed.toggl.start.run({bookId: "b1"}, {auth: undefined}),
-    (error) => error.code === "unauthenticated",
+    (error) => hasCode(error, "unauthenticated"),
   );
   const monitor = lines.filter(([event]) => event === "appcheck.monitor");
   assert.deepEqual(monitor, [["appcheck.monitor", {fn: "toggl.start", token: "missing"}]]);
@@ -34,7 +41,7 @@ test("a callable with an App Check token logs appcheck.monitor present", async (
   const lines = captureInfo(t);
   await assert.rejects(
     deployed.telemetry.reportissue.run({}, {auth: undefined, app: {appId: "1:440931185227:web:app"}}),
-    (error) => error.code === "unauthenticated",
+    (error) => hasCode(error, "unauthenticated"),
   );
   const monitor = lines.filter(([event]) => event === "appcheck.monitor");
   assert.deepEqual(monitor, [["appcheck.monitor", {fn: "telemetry.reportissue", token: "present"}]]);

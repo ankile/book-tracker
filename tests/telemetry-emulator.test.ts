@@ -2,7 +2,13 @@ import './setup.ts';
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import test, { after } from 'node:test';
+import test, { after, type TestContext } from 'node:test';
+import type {
+  FieldPath,
+  OrderByDirection,
+  Query,
+  WhereFilterOp,
+} from 'firebase-admin/firestore';
 
 // End-to-end against the Firestore + Auth emulators: the compiled callables
 // run unmodified, with a real transaction, real queries and real Auth
@@ -335,20 +341,25 @@ test('the overview reads every account separately and a flood cannot hide an hon
 // the real compiled callable — the way a missing composite index or an IAM
 // change fails in production.
 function failLogEventsReadsFor(
-  t: { mock: { method: (o: object, m: string, f: (...a: never[]) => unknown) => void } },
+  t: TestContext,
   fails: (uid: string | null | undefined) => boolean,
-) {
+): void {
   const original = db.collection.bind(db);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const wrap = (target: any, uid: string | null | undefined): any =>
+  const wrap = <T extends Query>(target: T, uid: string | null | undefined): T =>
     new Proxy(target, {
-      get(_t, prop) {
+      get(_target, prop): unknown {
         if (prop === 'where') {
-          return (field: string, op: string, value: unknown) =>
-            wrap(target.where(field, op, value), field === 'uid' ? (value as string | null) : uid);
+          return (field: string | FieldPath, op: WhereFilterOp, value: unknown) =>
+            wrap(
+              target.where(field, op, value),
+              field === 'uid' && (typeof value === 'string' || value === null) ? value : uid,
+            );
         }
-        if (prop === 'orderBy') return (...a: unknown[]) => wrap(target.orderBy(...a), uid);
-        if (prop === 'limit') return (...a: unknown[]) => wrap(target.limit(...a), uid);
+        if (prop === 'orderBy') {
+          return (field: string | FieldPath, direction?: OrderByDirection) =>
+            wrap(target.orderBy(field, direction), uid);
+        }
+        if (prop === 'limit') return (limit: number) => wrap(target.limit(limit), uid);
         if (prop === 'get') {
           return async () => {
             if (fails(uid)) throw new Error(`simulated read failure for ${String(uid)}`);
@@ -362,7 +373,7 @@ function failLogEventsReadsFor(
   t.mock.method(db, 'collection', ((path: string) => {
     const real = original(path);
     return path === 'logEvents' ? wrap(real, undefined) : real;
-  }) as never);
+  }));
 }
 
 const issueRow = (uid: string | null, at: number, message: string) => ({
