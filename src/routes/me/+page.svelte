@@ -305,13 +305,13 @@
       // The rules turn "slug taken" into permission-denied (create on an
       // existing doc evaluates as an update of someone else's doc); a
       // reserved name lands there too. So does an unverified account —
-      // publishing needs email_verified, and the app has no verification
-      // flow yet — which must not be reported as a taken name.
+      // publishing needs email_verified — which must not be reported as a
+      // taken name.
       profileError = errorCode(error) !== 'permission-denied'
         ? errorMessage(error)
         : currentUser.emailVerified
           ? `"${chosenSlug}" is not available.`
-          : 'Publishing a profile needs a verified email address. The app cannot verify it yet — ask the administrator.';
+          : 'Publishing a profile needs a verified email address. Use the link in the verification email (the banner at the top can resend it), then try again.';
     } finally {
       savingProfile = false;
     }
