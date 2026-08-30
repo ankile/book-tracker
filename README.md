@@ -135,7 +135,13 @@ Open `http://localhost:5173`.
 
 Plain `npm run dev` does not enable the emulators. It uses the Firebase
 configuration bundled with the application and should be used only by someone
-who understands and is authorized to access that environment.
+who understands and is authorized to access that environment. App Check is
+enforced there, so the dev client must present a registered debug token: put
+it in a gitignored `.env.local` as `VITE_APPCHECK_DEBUG_TOKEN` (register the
+value under App Check → Apps → Manage debug tokens, or via the
+`firebaseappcheck` REST API). Without it the SDK prints a fresh token to the
+browser console and every request is refused until that token is registered.
+Never commit a debug token — it bypasses attestation for whoever holds it.
 
 ### Build and preview
 
