@@ -126,7 +126,11 @@ function adminCallable(
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
-    .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: ADMIN_MAX_INSTANCES})
+    .runWith({
+      serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+      maxInstances: ADMIN_MAX_INSTANCES,
+      enforceAppCheck: true,
+    })
     .https.onCall(async (data: unknown, context) => {
       logAppCheckPresence("admin.overview", context);
       await requireAdmin(context);
