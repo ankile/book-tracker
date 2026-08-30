@@ -1,0 +1,66 @@
+require("./setup.cjs");
+
+const assert = require("node:assert/strict");
+const {readdirSync, readFileSync} = require("node:fs");
+const {join} = require("node:path");
+const test = require("node:test");
+const {logger} = require("firebase-functions");
+
+const deployed = require("../lib");
+
+// SEC-014 monitor phase. The appcheck.monitor line is the evidence the
+// enforcement flip stands on, so these tests check the line itself: it
+// fires before any auth check (a scripted caller with no account must
+// still be counted), and it distinguishes a request that carried a valid
+// App Check token from one that did not.
+
+function captureInfo(t) {
+  const lines = [];
+  t.mock.method(logger, "info", (...args) => lines.push(args));
+  return lines;
+}
+
+test("a callable without an App Check token logs appcheck.monitor missing, before auth", async (t) => {
+  const lines = captureInfo(t);
+  await assert.rejects(
+    deployed.toggl.start.run({bookId: "b1"}, {auth: undefined}),
+    (error) => error.code === "unauthenticated",
+  );
+  const monitor = lines.filter(([event]) => event === "appcheck.monitor");
+  assert.deepEqual(monitor, [["appcheck.monitor", {fn: "toggl.start", token: "missing"}]]);
+});
+
+test("a callable with an App Check token logs appcheck.monitor present", async (t) => {
+  const lines = captureInfo(t);
+  await assert.rejects(
+    deployed.telemetry.reportissue.run({}, {auth: undefined, app: {appId: "1:440931185227:web:app"}}),
+    (error) => error.code === "unauthenticated",
+  );
+  const monitor = lines.filter(([event]) => event === "appcheck.monitor");
+  assert.deepEqual(monitor, [["appcheck.monitor", {fn: "telemetry.reportissue", token: "present"}]]);
+});
+
+// Source pin: a new callable that forgets the monitor line would silently
+// fall out of the evidence the enforcement decision reads. Every
+// https.onCall handler body must call logAppCheckPresence before anything
+// else, and each call site must name its own function.
+test("every https.onCall handler starts with logAppCheckPresence", () => {
+  const sourceDir = join(__dirname, "..", "src");
+  const names = [];
+  let handlers = 0;
+  for (const file of readdirSync(sourceDir).filter((f) => f.endsWith(".ts"))) {
+    const source = readFileSync(join(sourceDir, file), "utf8");
+    const pattern = /\.https\.onCall\(async \([^)]*\)(?:: [^=]*)? => \{\s*(\w+)\("([^"]+)", context\);/g;
+    const total = source.split(".https.onCall(").length - 1;
+    let matched = 0;
+    for (const match of source.matchAll(pattern)) {
+      assert.equal(match[1], "logAppCheckPresence", `${file}: handler opens with ${match[1]}`);
+      names.push(match[2]);
+      matched += 1;
+    }
+    assert.equal(matched, total, `${file}: ${total} onCall handlers, ${matched} open with logAppCheckPresence`);
+    handlers += total;
+  }
+  assert.equal(handlers, 8, "eight deployed callables carry the monitor line");
+  assert.equal(new Set(names).size, names.length, "each call site names its own function");
+});

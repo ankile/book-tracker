@@ -10,6 +10,7 @@ import {
 } from "./decoders";
 import {consumeQuota} from "./quota";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {logAppCheckPresence} from "./appCheck";
 
 interface FunctionConfig {
   booksapi: {
@@ -78,6 +79,7 @@ exports.lookupisbn = functions
     data: unknown,
     context,
   ): Promise<{volume: GoogleVolumeInfo | null}> => {
+    logAppCheckPresence("booksapi.lookupisbn", context);
     if (context.auth === undefined) {
       throw new functions.https.HttpsError(
         "unauthenticated",

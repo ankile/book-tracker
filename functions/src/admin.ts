@@ -3,6 +3,7 @@ import {logger} from "firebase-functions";
 import {getAuth, UserRecord} from "firebase-admin/auth";
 import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore";
 import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {logAppCheckPresence} from "./appCheck";
 import {decodeEmptyCallableRequest} from "./decoders";
 import {
   ANONYMOUS_ISSUE_LIMIT,
@@ -127,6 +128,7 @@ function adminCallable(
     .region("europe-west1")
     .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: ADMIN_MAX_INSTANCES})
     .https.onCall(async (data: unknown, context) => {
+      logAppCheckPresence("admin.overview", context);
       await requireAdmin(context);
       decodeEmptyCallableRequest(data, invalidArgument);
       return handler();

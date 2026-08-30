@@ -5,6 +5,7 @@ import {decodeIssueReport} from "./decoders";
 import {logIssue} from "./logging";
 import {consumeQuota} from "./quota";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {logAppCheckPresence} from "./appCheck";
 
 const db = getFirestore();
 
@@ -37,6 +38,7 @@ exports.reportissue = functions
   })
   .region("europe-west1")
   .https.onCall(async (data: unknown, context): Promise<{recorded: true}> => {
+    logAppCheckPresence("telemetry.reportissue", context);
     if (context.auth === undefined) {
       throw new functions.https.HttpsError(
         "unauthenticated",

@@ -19,6 +19,7 @@ import {
   TOGGL_TOKEN_LIMIT,
 } from "./togglQueueLimits";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
+import {logAppCheckPresence} from "./appCheck";
 import {
   ActiveTimer,
   TimerClaim,
@@ -300,6 +301,7 @@ exports.savetoken = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.savetoken", context);
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
 
@@ -410,6 +412,7 @@ exports.cleartoken = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.cleartoken", context);
     const uid = requireUid(context);
     decodeEmptyCallableRequest(data, invalidArgument);
     const userRef = db.doc(`users/${uid}`);
@@ -442,6 +445,7 @@ exports.start = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.start", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
     const toggl = await getTogglConfig(uid);
@@ -616,6 +620,7 @@ exports.stop = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.stop", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
 
@@ -709,6 +714,7 @@ exports.clearstopping = functions
   .region("europe-west1")
   .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
   .https.onCall(async (data: unknown, context) => {
+    logAppCheckPresence("toggl.clearstopping", context);
     const uid = requireUid(context);
     const {bookId} = decodeBookCallableRequest(data, invalidArgument);
     const bookRef = db.doc(`users/${uid}/books/${bookId}`);
