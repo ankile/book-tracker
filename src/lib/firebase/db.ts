@@ -1,7 +1,9 @@
 import {
+  clearIndexedDbPersistence,
   collection,
   collectionGroup,
   doc,
+  terminate,
   query,
   where,
   onSnapshot,
@@ -91,6 +93,23 @@ const db = initializeFirestore(app, {
 // code against migrated snapshot data. DEV-gated so it cannot ship.
 if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
+}
+
+// Sign-out tail (SEC-004): terminate the client, drop the IndexedDB
+// mirror, and land on the front page with a clean reload — terminate()
+// invalidates every listener this module handed out, so the only way
+// back is a fresh document. clearIndexedDbPersistence refuses while
+// another tab holds the cache (multi-tab persistence); that tab keeps
+// its mirror until it closes, which nothing here can change, so the
+// refusal is logged and the reload proceeds.
+export async function clearLocalData(): Promise<void> {
+  await terminate(db);
+  try {
+    await clearIndexedDbPersistence(db);
+  } catch (error) {
+    console.warn('IndexedDB cache not cleared (another tab holds it)', error);
+  }
+  location.replace('/');
 }
 
 // The stalled-Toggl-sync sweep runs once per signed-in account per session,

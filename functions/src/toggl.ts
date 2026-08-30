@@ -41,6 +41,19 @@ import {
 
 const db = getFirestore();
 
+// Integration credentials live in the `secrets` Firestore database
+// (SEC-004/SEC-097): a separate database because Firestore IAM has no
+// collection scoping, and publicweb-runtime's read role is conditioned to
+// the default database, so the internet-facing renderer's identity cannot
+// reach this store at all. Client rules on the secrets database deny
+// everything; only these functions and the operator scripts touch it.
+// users/{uid}.toggl keeps a status-only mirror {workspaceId, projectId,
+// connectedAt} for the Me page and the togglQueue create gate — never the
+// token, which used to sit in the owner-readable user document and every
+// device's IndexedDB mirror.
+const secretsDb = getFirestore("secrets");
+const togglTokenRef = (uid: string) => secretsDb.doc(`togglTokens/${uid}`);
+
 const TOGGL_BASE = "https://api.track.toggl.com/api/v9";
 const PROJECT_NAME = "Reading";
 
@@ -226,10 +239,10 @@ function refuseDeletedAccount(user: DocumentData | undefined): void {
 
 async function getTogglConfig(uid: string): Promise<TogglConfig> {
   const userSnap = await db.doc(`users/${uid}`).get();
-  const user = userSnap.data();
-  refuseDeletedAccount(user);
-  const toggl = user?.toggl;
-  if (!toggl) {
+  refuseDeletedAccount(userSnap.data());
+  const tokenSnap = await togglTokenRef(uid).get();
+  const toggl = tokenSnap.data();
+  if (toggl === undefined) {
     throw new functions.https.HttpsError(
       "failed-precondition",
       "Add your Toggl API token on the Me page first.",
@@ -353,12 +366,22 @@ exports.savetoken = functions
       );
     }
 
+    // The credential goes to the secrets database first, the status
+    // mirror second. If the second write is lost the account shows
+    // disconnected while a token is stored; the next savetoken overwrites
+    // both, and db-audit reports the drift (toggl-secret.status-missing).
+    await togglTokenRef(uid).set({
+      apiToken: token,
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
     // update, never a merge-set (see the existence check above).
     await userRef.update({
       toggl: {
-        apiToken: token,
         workspaceId: project.workspaceId,
         projectId: project.id,
+        connectedAt: FieldValue.serverTimestamp(),
       },
     });
 
@@ -390,6 +413,13 @@ exports.cleartoken = functions
         "Stop your running timer before disconnecting Toggl.",
       );
     }
+    // Withdrawing the credential is the part that must not be lost:
+    // secret first, then the status mirror. If the second write is lost
+    // the account still looks connected but every use refuses ("Add your
+    // Toggl API token"), and db-audit reports the drift
+    // (user.toggl-status-orphan). Deleting a missing document is a no-op,
+    // so a retry converges either way.
+    await togglTokenRef(uid).delete();
     await userRef.update({toggl: FieldValue.delete()});
     return {cleared: true};
   });

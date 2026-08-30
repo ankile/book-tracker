@@ -10,8 +10,9 @@
 //
 // What goes, in this order: every profile of the uid together with its
 // discovery marker (only while the marker still names this uid — a freed
-// username is first-writer-wins), the ownership record, then the whole
-// users/{uid} tree (books with their updates, authors, timerLifecycle,
+// username is first-writer-wins), the ownership record, the Toggl
+// credential in the `secrets` database (normally already deleted by the
+// deletion trigger, SEC-004), then the whole users/{uid} tree (books with their updates, authors, timerLifecycle,
 // togglQueue, functionQuotas) by recursiveDelete. A book delete in
 // production also fires deletebookupdates, which is idempotent with the
 // recursive delete. Take a snapshot first (db-snapshot.ts --prod), as the
@@ -22,7 +23,9 @@
 //   node migrate-purge-deleted-accounts.ts <uid> --apply          # emulator apply
 //   node migrate-purge-deleted-accounts.ts <uid> --prod           # prod dry-run
 //   node migrate-purge-deleted-accounts.ts <uid> --prod --apply   # prod apply (typed confirm)
+import { getApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 import type { DocumentReference } from 'firebase-admin/firestore';
 import { parseFlags, connect, batcher } from './migrate-lib.ts';
 
@@ -79,6 +82,17 @@ if (owner.exists) {
 }
 await writes.flush();
 
+// The credential in the secrets database (SEC-004). The deletion trigger
+// removes it at deletion time, so this is normally absent; a batcher is
+// bound to one database, hence the direct delete.
+const tokenRef = getFirestore(getApp(), 'secrets').collection('togglTokens').doc(uid);
+let credentials = 0;
+if ((await tokenRef.get()).exists) {
+  console.log(`${tag} secrets:${tokenRef.path}`);
+  if (flags.apply) await tokenRef.delete();
+  credentials = 1;
+}
+
 // The tree: counted by listing (so orphans under a missing root count
 // too), removed subcollection by subcollection with recursiveDelete, and
 // the root document deleted LAST. Root-last is what makes a re-run of an
@@ -102,5 +116,5 @@ if (flags.apply) {
 }
 
 console.log(
-  `${writes.count()} public documents and a ${treeSize}-document tree ${flags.apply ? 'deleted' : '(dry run, nothing written)'}`,
+  `${writes.count()} public documents, ${credentials} stored credential${credentials === 1 ? '' : 's'} and a ${treeSize}-document tree ${flags.apply ? 'deleted' : '(dry run, nothing written)'}`,
 );

@@ -333,6 +333,20 @@ readable; the next edit sheds the field. The pre-migration `author`/
 `authors` fields are not admitted (no live document has them). Connecting Toggl (`savetoken`)
 requires a verified account and is metered at five attempts per user per
 hour (`functionQuotas/togglToken`, SEC-024).
+The Toggl API token itself lives in the `secrets` Firestore database
+(`togglTokens/{uid}`, SEC-004) — a separate database because Firestore
+IAM has no collection scoping. Client rules there deny everything
+(`firestore-secrets.rules`); `users/{uid}.toggl` carries only the status
+mirror `{workspaceId, projectId, connectedAt}` that the Me page and the
+queue-create gate read; sign-out terminates the client and drops the
+local IndexedDB mirror; and the internet-facing `publicweb-runtime@`
+identity is excluded from the secrets database by an IAM condition on
+its read role (SEC-097: `resource.name` limited to the default
+database), so a renderer compromise cannot reach a credential. The
+secrets database is deliberately outside `db-snapshot.ts` and the backup
+schedule: a credential is re-issuable, never restored.
+`migrate-toggl-tokens.ts` moved (and `--rotate` rotated) the pre-SEC-004
+tokens.
 Queued Toggl work is claimed under a server-owned ten-per-hour user quota;
 an over-quota `create` row is stamped with the end of the window
 (`deferredUntil`) and left pending — the trigger never throws for overflow,
@@ -486,6 +500,8 @@ ambiguous remote Toggl outcome that the pre-release stack cannot reconcile.
 ```bash
 # 1. Reject uncorrelated legacy timer writes.
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
+# (`--only firestore` covers both databases: `firestore.rules` to
+# (default) and the deny-all `firestore-secrets.rules` to `secrets`.)
 
 # 2. Deploy the claim-aware callables.
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
@@ -612,15 +628,18 @@ operator action, in this order:
    `deleteUserDocument` would never run and the public profiles would stay
    live. Deletion is a **soft delete** (SEC-006): `deleteUserDocument`
    stamps `deletedAt` on `users/{uid}` and on the account's profiles and
-   removes nothing but the account's search-index markers — books,
-   sessions, authors, queue rows, quotas and the ownership record stay as
-   they were, the username stays reserved, and a `profileDiscovery` marker
-   (an opt-in pointer, not content) is deleted only while it still names
-   the deleted uid. Everything that serves strangers or acts for
+   removes nothing but the account's search-index markers and its stored
+   Toggl credential — books, sessions, authors, queue rows, quotas and
+   the ownership record stay as they were, the username stays reserved, a
+   `profileDiscovery` marker (an opt-in pointer, not content) is deleted
+   only while it still names the deleted uid, and the credential
+   (`secrets:togglTokens/{uid}`, SEC-004: a live credential is not data
+   to retain for an account that can never use it) is deleted with it,
+   leaving the status mirror. Everything that serves strangers or acts for
    the account treats the tombstone as absence: the profile page, its JSON
    twin and the sitemap answer as for a missing name; the Toggl callables
-   and queue worker refuse the account (its stored token is retained but
-   never used); the rules refuse the identity's profile writes for the
+   and queue worker refuse the tombstone itself, before any credential
+   read; the rules refuse the identity's profile writes for the
    hour its ID token outlives the account; the admin overview labels the
    row "account deleted".
 5. Check `/sitemap.xml` and `profiles` for documents whose `uid` no longer

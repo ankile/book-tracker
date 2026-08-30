@@ -8,6 +8,7 @@ const {getFirestore} = require("firebase-admin/firestore");
 
 const functions = require("../lib");
 const db = getFirestore();
+const secretsDb = getFirestore("secrets");
 
 test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions).sort(), [
@@ -176,8 +177,16 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   const noDeleteUser = () => assert.fail("the user document and profiles must never be deleted");
   const sets = [];
   const deletes = [];
-  let userValue = {email: "owner@example.test", uid: "owner", toggl: {apiToken: "t"}};
+  let userValue = {email: "owner@example.test", uid: "owner", toggl: {workspaceId: 3, projectId: 4}};
   const userRef = {path: "users/owner", delete: noDeleteUser};
+  // The credential in the secrets database is deleted (SEC-004) — the one
+  // per-account document deletion runs, and it is idempotent, so a
+  // redelivery repeats the no-op delete.
+  const credentialDeletes = [];
+  t.mock.method(secretsDb, "doc", (path) => {
+    assert.equal(path, "togglTokens/owner");
+    return {delete: async () => credentialDeletes.push(path)};
+  });
   const queries = [];
   const pages = [];
   let markerOwner = "owner";
@@ -257,7 +266,8 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   assert.equal(sets[0][0], "users/owner");
   assert.deepEqual(Object.keys(sets[0][1]).sort(), ["deletedAt", "uid"]);
   assert.deepEqual(sets[0][2], {merge: true});
-  assert.equal(userValue.toggl.apiToken, "t");
+  assert.deepEqual(userValue.toggl, {workspaceId: 3, projectId: 4});
+  assert.equal(credentialDeletes.length, 1);
   // Profiles: 249 tombstoned (one already was); three batches; cursor
   // paging by document id.
   const profileSets = sets.slice(1);

@@ -46,10 +46,13 @@ export class DataDecodeError extends Error {
 export interface UserDocument {
   uid: string;
   email: string;
+  // Status-only (SEC-004): the credential lives server-side in the
+  // secrets database and never reaches the client or its IndexedDB
+  // mirror. Presence of this map means "connected".
   toggl?: {
-    apiToken: string;
     workspaceId: number;
     projectId: number;
+    connectedAt: Timestamp;
   };
 }
 
@@ -581,9 +584,9 @@ export function decodeUser(value: unknown, path: string): UserDocument {
     uid: nonEmptyString(data.uid, `${path}.uid`),
     email: nonEmptyString(data.email, `${path}.email`),
     toggl: {
-      apiToken: nonEmptyString(toggl.apiToken, `${path}.toggl.apiToken`),
       workspaceId: integer(toggl.workspaceId, `${path}.toggl.workspaceId`),
       projectId: integer(toggl.projectId, `${path}.toggl.projectId`),
+      connectedAt: timestamp(toggl.connectedAt, `${path}.toggl.connectedAt`),
     },
   };
 }

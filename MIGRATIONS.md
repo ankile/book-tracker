@@ -17,6 +17,7 @@ backfills — and still went through the whole loop; that run is the template.)
 | `db-audit.ts` | read-only drift report, diff-friendly output | no |
 | `migrate-*.ts` | one script per migration, kept forever as history | yes |
 | `migrate-purge-deleted-accounts.ts` | physical purge of ONE tombstoned account (SEC-006); the only removal path, never scheduled | yes |
+| `migrate-toggl-tokens.ts` | move Toggl credentials to the `secrets` database, leave the status mirror (SEC-004); `--rotate` rotates at Toggl; never prints a token | yes |
 
 All scripts share the same target rules, enforced in `migrate-lib.ts`:
 
@@ -348,6 +349,15 @@ re-run, and why the follow-up audit exists.
   account as data to keep: never "repair" a tombstone away, never skip a
   tombstoned tree in a snapshot. Removal is `migrate-purge-deleted-accounts.ts`,
   one uid per run, after a snapshot, by an explicit operator decision.
+- **Integration credentials live in the `secrets` database** (SEC-004,
+  2026-08-30): `togglTokens/{uid}` in the second Firestore database, which
+  client rules deny outright and the publicweb identity cannot read
+  (SEC-097 IAM condition). Scripts reach it with
+  `getFirestore(getApp(), 'secrets')` after `connect()`; `db-audit.ts`
+  checks shape and linkage but never prints a value; the default
+  `db-snapshot.ts` run and the backup schedule exclude it on purpose — a
+  credential is re-issuable, never restored. No migration may copy a
+  credential back into a client-readable document.
 - **Rules-shape mirror**: `rules-shape.ts` re-states the allowlists and
   byte caps of `firestore.rules` (books, authors, profiles, ownership
   records) so `db-audit.ts` can flag a stored document the rules would

@@ -8,6 +8,8 @@
 //
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
+import { getApp } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 import { parseFlags, connect } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
@@ -37,6 +39,10 @@ const found = (cls: string, path: string, detail = ''): void => {
 
 const userProfiles = await db.collection('users').get();
 const users = await db.collection('users').listDocuments();
+// Integration credentials (SEC-004) live in the `secrets` database; this
+// audit reads their shape and linkage but NEVER their values — no finding
+// detail below may carry a token.
+const togglTokens = await getFirestore(getApp(), 'secrets').collection('togglTokens').get();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
 const profileOwners = await db.collection('profileOwners').get();
@@ -98,6 +104,63 @@ for (const user of userProfiles.docs) {
   const deletedAt = user.get('deletedAt');
   if (deletedAt !== undefined && !(deletedAt instanceof Timestamp)) {
     found('user.bad-tombstone', user.ref.path, JSON.stringify(deletedAt));
+  }
+}
+
+// SEC-004: the credential lives only in secrets:togglTokens/{uid}; the
+// user document carries a status-only mirror. A token still on a user
+// document is the pre-migration state and a live client-readable
+// credential — the finding every other check here exists to prevent.
+const togglSecretUids = new Set(togglTokens.docs.map((d) => d.id));
+const togglStatusShape = (toggl: Record<string, unknown>): boolean =>
+  Object.keys(toggl).sort().join(',') === 'connectedAt,projectId,workspaceId' &&
+  toggl.connectedAt instanceof Timestamp &&
+  Number.isInteger(toggl.workspaceId) && (toggl.workspaceId as number) > 0 &&
+  Number.isInteger(toggl.projectId) && (toggl.projectId as number) > 0;
+for (const user of userProfiles.docs) {
+  const toggl = user.get('toggl') as Record<string, unknown> | undefined;
+  if (toggl === undefined) continue;
+  if ('apiToken' in toggl) {
+    found('user.toggl-legacy-token', user.ref.path, 'credential stored client-readable');
+    continue;
+  }
+  if (!togglStatusShape(toggl)) {
+    found('user.toggl-status.bad-shape', user.ref.path, Object.keys(toggl).sort().join(','));
+    continue;
+  }
+  // A tombstoned account keeps its status mirror while the trigger
+  // deletes the credential, so the orphan check is for live accounts.
+  if (!togglSecretUids.has(user.id) && !tombstonedUsers.has(user.id)) {
+    found('user.toggl-status-orphan', user.ref.path);
+  }
+}
+for (const secret of togglTokens.docs) {
+  const data = secret.data();
+  const path = `secrets:${secret.ref.path}`;
+  const keys = Object.keys(data).sort().join(',');
+  if (
+    keys !== 'apiToken,projectId,updatedAt,workspaceId' ||
+    typeof data.apiToken !== 'string' || data.apiToken === '' ||
+    !Number.isInteger(data.workspaceId) || data.workspaceId <= 0 ||
+    !Number.isInteger(data.projectId) || data.projectId <= 0 ||
+    !(data.updatedAt instanceof Timestamp)
+  ) {
+    found('toggl-secret.bad-shape', path, keys);
+    continue;
+  }
+  if (!existingUsers.has(secret.id)) {
+    found('toggl-secret.account-missing', path, secret.id);
+    continue;
+  }
+  if (tombstonedUsers.has(secret.id)) {
+    found('toggl-secret.tombstoned', path, secret.id);
+    continue;
+  }
+  const status = userProfiles.docs.find((d) => d.id === secret.id)?.get('toggl') as Record<string, unknown> | undefined;
+  if (status === undefined || 'apiToken' in status) {
+    found('toggl-secret.status-missing', path);
+  } else if (status.workspaceId !== data.workspaceId || status.projectId !== data.projectId) {
+    found('toggl-secret.status-mismatch', path, `${String(status.workspaceId)}/${String(status.projectId)} != ${String(data.workspaceId)}/${String(data.projectId)}`);
   }
 }
 for (const profile of publicProfiles.docs) {
@@ -361,4 +424,5 @@ console.log(`public-profiles: ${publicProfiles.size}`);
 console.log(`profile-discoveries: ${profileDiscoveries.size}`);
 console.log(`profile-owners: ${profileOwners.size}`);
 console.log(`deleted-accounts: ${tombstonedUsers.size}`);
+console.log(`toggl-secrets: ${togglTokens.size}`);
 console.log(`findings: ${findings.length}`);

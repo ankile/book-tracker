@@ -88,12 +88,16 @@ exports.createUserDocument = functions
 // writes for the hour its ID token outlives the account (verifiedAccount).
 // Reading data, authors, queue rows, quotas and the ownership record stay
 // exactly as they were; a username stays reserved by its tombstoned
-// profile. The one thing deletion prunes is the profileDiscovery marker —
-// a search-index opt-in pointer, not retained content: a deleted account
-// leaves the search index, so its uid-matched markers are removed (the
-// profile itself, the actual content, is kept and tombstoned). This is a
-// deliberate, narrow exception to the soft-delete default. A physical purge is an operator-run
-// migration (migrate-purge-deleted-accounts.ts), never this trigger.
+// profile. Deletion prunes exactly two things, both deliberate, narrow
+// exceptions to the soft-delete default and neither retained content:
+// the profileDiscovery markers (search-index opt-in pointers — a deleted
+// account leaves the search index; removed only while they still name
+// this uid) and the Toggl credential in the secrets database (SEC-004: a
+// live credential for the user's whole Toggl account is not data to
+// retain for an account that can never use it; the status-only mirror in
+// users/{uid}.toggl stays, tombstoned with the rest). A physical purge is
+// an operator-run migration (migrate-purge-deleted-accounts.ts), never
+// this trigger.
 //
 // failurePolicy makes a failed delivery retry, and every step is
 // idempotent: deletedAt is written only where it is absent, so a
@@ -102,6 +106,12 @@ exports.createUserDocument = functions
 // profile pass pages by document id (the tombstone does not change the
 // query, so a limit-only loop would never advance).
 const PROFILE_TOMBSTONE_PAGE = 100;
+
+async function deleteTogglCredential(uid: string): Promise<void> {
+  // The secrets database (SEC-004); deleting a missing document is a
+  // no-op, so a redelivery converges.
+  await getFirestore("secrets").doc(`togglTokens/${uid}`).delete();
+}
 
 async function tombstoneUser(uid: string): Promise<void> {
   const userRef = db.collection("users").doc(uid);
@@ -156,6 +166,7 @@ exports.deleteUserDocument = functions
   })
   .auth.user()
   .onDelete(async (user) => {
+    await deleteTogglCredential(user.uid);
     await tombstoneUser(user.uid);
     await tombstoneProfiles(user.uid);
     return null;

@@ -14,10 +14,41 @@ const {
 
 const deployed = require("../lib");
 const db = getFirestore();
+const secretsDb = getFirestore("secrets");
 const authContext = {auth: {uid: "owner", token: {}}};
 
 function snapshot(data, exists = true) {
   return {exists, data: () => data};
+}
+
+// The credential store (SEC-004): getTogglConfig reads
+// secrets:togglTokens/{uid}, savetoken sets it, cleartoken and the
+// deletion trigger delete it. `data: undefined` models a disconnected
+// account.
+function installTogglSecret(t, data = {apiToken: "token", workspaceId: 3, projectId: 4, updatedAt: Timestamp.fromMillis(1)}) {
+  const writes = [];
+  let stored = data;
+  const tokenRef = {
+    get: async () => snapshot(stored, stored !== undefined),
+    set: async (value) => {
+      stored = value;
+      writes.push({type: "set", value});
+    },
+    delete: async () => {
+      stored = undefined;
+      writes.push({type: "delete"});
+    },
+  };
+  t.mock.method(secretsDb, "doc", (path) => {
+    assert.equal(path, "togglTokens/owner");
+    return tokenRef;
+  });
+  return {
+    writes,
+    get stored() {
+      return stored;
+    },
+  };
 }
 
 function enableFunctionsEmulator(t) {
@@ -70,11 +101,10 @@ function installQueueStore(t, item, {quota, rows} = {}) {
   const userRef = {
     get: async () => {
       configReads += 1;
-      return snapshot({
-        toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
-      });
+      return snapshot({uid: "owner"});
     },
   };
+  installTogglSecret(t);
   const quotaRef = {};
   const rowsRef = {};
   t.mock.method(db, "doc", (path) => {
@@ -180,10 +210,9 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
   const quotaRef = {};
   const rowsRef = {};
   const userRef = {
-    get: async () => snapshot({
-      toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
-    }),
+    get: async () => snapshot({uid: "owner"}),
   };
+  installTogglSecret(t);
   const issues = [];
   let transactionNumber = 0;
   t.mock.method(db, "doc", (path) => {
@@ -969,10 +998,9 @@ test("a failed terminal cleanup leaves a durable synced queue item", async (t) =
 
 function installBooksStore(t, books) {
   const userRef = {
-    get: async () => snapshot({
-      toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
-    }),
+    get: async () => snapshot({uid: "owner"}),
   };
+  installTogglSecret(t);
   const active = Object.entries(books).find(([, book]) => book.activeTimer !== null);
   let claim = active === undefined ?
     {version: 1, state: "idle", cleared: null} :
@@ -1320,9 +1348,15 @@ function installTokenQuota(t, userRef, {quota} = {}) {
 test("savetoken validates Toggl responses and stores the selected project", async (t) => {
   const writes = [];
   let exists = true;
+  const secret = installTogglSecret(t, undefined);
   const userRef = {
     get: async () => ({exists, data: () => ({})}),
-    update: async (value) => writes.push({value}),
+    update: async (value) => {
+      // Credential first, mirror second: if the mirror write is lost the
+      // account merely shows disconnected.
+      assert.equal(secret.writes.length, 1, "the credential is stored before the mirror");
+      writes.push({value});
+    },
     set: async () => assert.fail("savetoken must not create a user document"),
   };
   const quota = installTokenQuota(t, userRef);
@@ -1341,11 +1375,19 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     await deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
     {workspaceId: 6, projectId: 7},
   );
-  assert.deepEqual(writes, [{
-    value: {
-      toggl: {apiToken: "valid-token", workspaceId: 6, projectId: 7},
-    },
-  }]);
+  // The credential goes only to the secrets store; the user document gets
+  // the status mirror and never the token (SEC-004).
+  assert.equal(secret.writes.length, 1);
+  assert.equal(secret.writes[0].type, "set");
+  assert.deepEqual(Object.keys(secret.writes[0].value).sort(), ["apiToken", "projectId", "updatedAt", "workspaceId"]);
+  assert.equal(secret.writes[0].value.apiToken, "valid-token");
+  assert.equal(secret.writes[0].value.workspaceId, 6);
+  assert.equal(secret.writes[0].value.projectId, 7);
+  assert.equal(writes.length, 1);
+  const mirror = writes[0].value.toggl;
+  assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
+  assert.equal(mirror.workspaceId, 6);
+  assert.equal(mirror.projectId, 7);
   assert.equal(requested.length, 2);
   assert.equal(quota.quota.count, 1);
 
@@ -1356,6 +1398,7 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     (error) => error.code === "failed-precondition",
   );
   assert.equal(writes.length, 1);
+  assert.equal(secret.writes.length, 1);
 });
 
 test("savetoken refuses unverified accounts before any Toggl call or quota spend", async (t) => {
@@ -1415,6 +1458,7 @@ test("savetoken is metered per user and warns once per window", async (t) => {
 test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
   enableFunctionsEmulator(t);
   const writes = [];
+  const secret = installTogglSecret(t, undefined);
   const userRef = {
     get: async () => ({exists: true, data: () => ({})}),
     update: async (value) => writes.push({value}),
@@ -1425,24 +1469,26 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
     await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, verifiedContext),
     {workspaceId: 900001, projectId: 900002},
   );
-  assert.deepEqual(writes, [{
-    value: {
-      toggl: {
-        apiToken: "snapshot-production-token",
-        workspaceId: 900001,
-        projectId: 900002,
-      },
-    },
-  }]);
+  assert.equal(secret.writes[0].value.apiToken, "snapshot-production-token");
+  assert.equal(writes.length, 1);
+  const mirror = writes[0].value.toggl;
+  assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
+  assert.equal(mirror.workspaceId, 900001);
+  assert.equal(mirror.projectId, 900002);
 });
 
 test("cleartoken removes the stored Toggl credential and nothing else", async (t) => {
   const writes = [];
   let exists = true;
   let claimState = "idle";
+  const secret = installTogglSecret(t);
   const userRef = {
     get: async () => ({exists, data: () => ({})}),
-    update: async (value) => writes.push(value),
+    update: async (value) => {
+      // Withdrawal first: the credential must be gone before the mirror.
+      assert.deepEqual(secret.writes, [{type: "delete"}], "the credential is deleted before the mirror");
+      writes.push(value);
+    },
   };
   const claimRef = {get: async () => ({exists: true, get: (field) => {
     assert.equal(field, "state");
@@ -1474,17 +1520,20 @@ test("cleartoken removes the stored Toggl credential and nothing else", async (t
     (error) => error.code === "failed-precondition",
   );
   assert.equal(writes.length, 1);
+  // Every refusal above stopped before touching the credential store.
+  assert.equal(secret.writes.length, 1);
 });
 
-// A deleted account is tombstoned, never removed (SEC-006), so its Toggl
-// credential is still on the document: every path that would use or
-// replace it refuses first, for the hour the ID token outlives the account
-// and for queued rows that outlive it.
+// A deleted account is tombstoned, never removed (SEC-006). The deletion
+// trigger deletes its credential from the secrets store, but the refusal
+// below must not depend on that: for the hour the ID token outlives the
+// account (and for queued rows that outlive it) every path refuses on the
+// tombstone alone, before any secrets read or Toggl call.
 test("a tombstoned account cannot use, save or clear a Toggl token", async (t) => {
   const tombstoned = snapshot({
     uid: "owner",
     deletedAt: Timestamp.fromMillis(1),
-    toggl: {apiToken: "token", workspaceId: 3, projectId: 4},
+    toggl: {workspaceId: 3, projectId: 4, connectedAt: Timestamp.fromMillis(1)},
   });
   const userRef = {
     get: async () => tombstoned,
