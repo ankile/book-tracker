@@ -17,16 +17,15 @@
 //   node migrate-toggl-tokens.ts --apply            # emulator apply
 //   node migrate-toggl-tokens.ts --prod             # prod dry-run
 //   node migrate-toggl-tokens.ts --prod --apply [--rotate]
-import { getApp } from 'firebase-admin/app';
-import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
-import { parseFlags, connect } from './migrate-lib.ts';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
 
 const argv = process.argv.slice(2);
 const rotateFlag = argv.includes('--rotate');
 const flags = parseFlags(argv.filter((arg) => arg !== '--rotate'));
 if (rotateFlag && !flags.apply) throw new Error('--rotate changes the credential at Toggl; it needs --apply');
 const { db } = await connect({ ...flags, confirmWrite: flags.apply });
-const secretsDb = getFirestore(getApp(), 'secrets');
+const secretsDb = openDatabase('secrets');
 const tag = flags.apply ? 'MIGRATE' : 'DRY';
 
 const isStatus = (toggl: Record<string, unknown>): boolean =>

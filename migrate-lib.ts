@@ -3,21 +3,22 @@
 // never drift between copies: the emulator/prod target guard, batched
 // writing with the updatedAt tripwire, and the snapshot type codec.
 // See MIGRATIONS.md for the playbook these scripts belong to.
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { initializeApp, cert } from 'firebase-admin/app';
+import { initializeApp } from 'firebase-admin/app';
+import type { Credential } from 'firebase-admin/app';
 import {
-  getFirestore,
+  Firestore,
   Timestamp,
   GeoPoint,
   DocumentReference,
 } from 'firebase-admin/firestore';
 import type {
   DocumentData,
-  Firestore,
   SetOptions,
 } from 'firebase-admin/firestore';
+import { OAuth2Client } from 'google-auth-library';
 
 export interface MigrationFlags {
   prod: boolean;
@@ -30,12 +31,6 @@ interface ConnectOptions {
   prod: boolean;
   database?: string;
   confirmWrite?: boolean;
-}
-
-interface ServiceAccountFile {
-  project_id: string;
-  client_email: string;
-  private_key: string;
 }
 
 type EncodedMarker =
@@ -82,6 +77,62 @@ export interface MigrationBatcher {
 
 export const PROJECT_ID = 'book-tracker-d8f24';
 
+// Production credential (SEC-048/SEC-057): no key file. The operator's own
+// gcloud login mints a one-hour access token on demand; both clients ask
+// again when it expires, so long runs keep working and nothing secret is
+// ever on disk. The account is pinned because this machine's default gcloud
+// account is a different one — an unexpected account fails inside gcloud
+// instead of silently targeting production as someone else. Revoking the
+// login (`gcloud auth revoke`, or the Google Account's third-party access
+// page) ends every script's access at once.
+export const OPERATOR_ACCOUNT = 'lars.ankile@gmail.com';
+
+export function mintOperatorToken(): string {
+  const token = execFileSync(
+    'gcloud',
+    ['auth', 'print-access-token', `--account=${OPERATOR_ACCOUNT}`],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] },
+  ).trim();
+  if (token === '') throw new Error('gcloud returned an empty access token');
+  return token;
+}
+
+// firebase-admin's credential shape — used only for the Auth admin API
+// (migrate-purge-deleted-accounts). firebase-admin's own Firestore wrapper
+// refuses anything but a key file or ADC, so Firestore is opened directly
+// below with the google-auth-library client instead.
+export function gcloudCredential(): Credential {
+  return {
+    async getAccessToken() {
+      return { access_token: mintOperatorToken(), expires_in: 3600 };
+    },
+  };
+}
+
+// google-auth-library's shape — handed to the Firestore gRPC channel. The
+// refresh handler IS the gcloud call; the quota project is what user
+// credentials need for APIs that bill per project.
+function gcloudAuthClient(): OAuth2Client {
+  const client = new OAuth2Client({ quotaProjectId: PROJECT_ID });
+  client.refreshHandler = async () => ({
+    access_token: mintOperatorToken(),
+    expiry_date: Date.now() + 55 * 60 * 1000,
+  });
+  return client;
+}
+
+// Set by connect(); openDatabase() reads it so every script opens every
+// database (default or `secrets`) against the same confirmed target.
+let target: { prod: false } | { prod: true; authClient: OAuth2Client } | undefined;
+
+export function openDatabase(databaseId?: string): Firestore {
+  if (target === undefined) throw new Error('openDatabase() before connect()');
+  const settings = databaseId === undefined ? {} : { databaseId };
+  return target.prod
+    ? new Firestore({ projectId: PROJECT_ID, authClient: target.authClient, ...settings })
+    : new Firestore({ projectId: PROJECT_ID, ...settings });
+}
+
 // --prod / --apply / --database=<id>; everything else passes through in
 // rest (e.g. a snapshot filename). Unknown --flags crash rather than being
 // silently ignored — a typoed --aply must not demote a run to dry-run.
@@ -106,9 +157,9 @@ export function parseFlags(argv: string[]): MigrationFlags {
   return flags;
 }
 
-// Target guard. Default target is the EMULATOR: without --prod the
-// service account key is never read, so reaching production from that
-// code path is impossible rather than merely guarded. --prod with the
+// Target guard. Default target is the EMULATOR: without --prod gcloud is
+// never consulted, so reaching production from that code path is
+// impossible rather than merely guarded. --prod with the
 // emulator env var set is a contradiction and crashes. confirmWrite makes
 // prod runs interactive: the operator must type the project id.
 export async function connect({
@@ -117,24 +168,16 @@ export async function connect({
   confirmWrite = false,
 }: ConnectOptions): Promise<{ db: Firestore }> {
   if (database === '') throw new Error('database id must not be empty');
-  let app;
+  if (target !== undefined) throw new Error('connect() called twice');
   if (prod) {
     if (process.env.FIRESTORE_EMULATOR_HOST) {
       throw new Error('--prod with FIRESTORE_EMULATOR_HOST set: ambiguous target, refusing');
     }
-    const key: ServiceAccountFile = JSON.parse(
-      readFileSync('./serviceAccountKey.json', 'utf8'),
-    );
-    if (key.project_id !== PROJECT_ID) {
-      throw new Error(`serviceAccountKey.json is for ${key.project_id}, expected ${PROJECT_ID}`);
-    }
-    app = initializeApp({
-      credential: cert({
-        projectId: key.project_id,
-        clientEmail: key.client_email,
-        privateKey: key.private_key,
-      }),
-    });
+    // User credentials need a quota project for the Auth admin API
+    // (identitytoolkit); firebase-admin reads this variable for every request.
+    process.env.GOOGLE_CLOUD_QUOTA_PROJECT = PROJECT_ID;
+    initializeApp({ projectId: PROJECT_ID, credential: gcloudCredential() });
+    target = { prod: true, authClient: gcloudAuthClient() };
     console.log(`TARGET: PRODUCTION ${PROJECT_ID}${database !== undefined ? ` database=${database}` : ''}`);
     if (confirmWrite) {
       const rl = createInterface({ input: stdin, output: stdout });
@@ -149,10 +192,11 @@ export async function connect({
     if (!/^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST)) {
       throw new Error('Firestore emulator host must be loopback (127.0.0.1 or localhost)');
     }
-    app = initializeApp({ projectId: PROJECT_ID });
+    initializeApp({ projectId: PROJECT_ID });
+    target = { prod: false };
     console.log(`TARGET: emulator ${process.env.FIRESTORE_EMULATOR_HOST} (${PROJECT_ID})`);
   }
-  return { db: database !== undefined ? getFirestore(app, database) : getFirestore(app) };
+  return { db: openDatabase(database) };
 }
 
 // Batched writer with dry-run counting and 500-op rollover.

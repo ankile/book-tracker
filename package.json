@@ -44,6 +44,7 @@
   "dependencies": {
     "bootstrap": "5.3.8",
     "firebase": "^12.16.0",
+    "google-auth-library": "^10.9.1",
     "simple-icons": "^16.28.0"
   },
   "overrides": {
