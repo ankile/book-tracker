@@ -8,9 +8,7 @@
 //
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
-import { getApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
-import { parseFlags, connect } from './migrate-lib.ts';
+import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
@@ -42,7 +40,7 @@ const users = await db.collection('users').listDocuments();
 // Integration credentials (SEC-004) live in the `secrets` database; this
 // audit reads their shape and linkage but NEVER their values — no finding
 // detail below may carry a token.
-const togglTokens = await getFirestore(getApp(), 'secrets').collection('togglTokens').get();
+const togglTokens = await openDatabase('secrets').collection('togglTokens').get();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
 const profileOwners = await db.collection('profileOwners').get();
