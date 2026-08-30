@@ -152,8 +152,6 @@ serviceAccountKey.json
 /nb-cache.json
 /gr-cache.json
 *-backup-*.json
-/grandfathered-*.json
-/grandfathered-exclude*
 *-backup-*.yaml
 .env*
 !.env.example

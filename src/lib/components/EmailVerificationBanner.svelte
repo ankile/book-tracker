@@ -3,10 +3,13 @@
   import { RESEND_COOLDOWN_MS, canResend } from '$lib/firebase/emailVerification.ts';
   import { describeAuthFailure } from '$lib/utils/authFailure.ts';
 
-  // Shown to a signed-in account whose address is not verified yet. It
-  // informs and offers the two actions; it blocks nothing — the features
-  // that need the claim (publishing a profile today, the shared catalog
-  // next) refuse on their own and point back here.
+  // Shown to a signed-in account whose address is not verified yet —
+  // a fresh sign-up that has a link in its inbox, or an account from
+  // before verification existed that has never been sent one; nobody is
+  // grandfathered, the wording covers both. It informs and offers the
+  // two actions; it blocks nothing — the features that need the claim
+  // (publishing a profile today, the shared catalog next) refuse on
+  // their own and point back here.
   let busy = $state(false);
   let message = $state('');
   let lastSentAt = $state<number | null>(null);
@@ -67,8 +70,8 @@
 {#if $user && !$user.emailVerified}
   <div class="alert alert-warning verification" role="status">
     <strong>Verify your email address.</strong>
-    We sent a link to {$user.email}. Sharing your books with other readers
-    will need a verified address.
+    Sharing your books with other readers will need a verified address.
+    Use the link in the email we sent to {$user.email}, or request a new one.
     <div class="actions">
       <button type="button" class="btn btn-sm btn-dark" onclick={check} disabled={busy}>
         I've verified
@@ -78,7 +81,7 @@
         class="btn btn-sm btn-outline-dark"
         onclick={resend}
         disabled={busy || !resendReady}>
-        Resend email
+        Send verification email
       </button>
     </div>
     {#if message}

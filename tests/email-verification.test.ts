@@ -59,6 +59,10 @@ test('every signed-in page shows the banner to an unverified account', () => {
   assert.match(bannerSource, /onclick=\{resend\}/);
   assert.match(bannerSource, /await confirmEmailVerified\(\)/);
   assert.match(bannerSource, /await resendVerificationEmail\(\)/);
+  // Accounts from before verification existed never received a link, so
+  // the button must read as a first send, not only a resend.
+  assert.match(bannerSource, /or request a new one/);
+  assert.match(bannerSource, />\s*Send verification email\s*</);
 });
 
 test('the profile page no longer tells an unverified user the app cannot verify them', () => {

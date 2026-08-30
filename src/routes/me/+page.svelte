@@ -311,7 +311,7 @@
         ? errorMessage(error)
         : currentUser.emailVerified
           ? `"${chosenSlug}" is not available.`
-          : 'Publishing a profile needs a verified email address. Use the link in the verification email (the banner at the top can resend it), then try again.';
+          : 'Publishing a profile needs a verified email address. Use the link in the verification email (the banner at the top can send one), then try again.';
     } finally {
       savingProfile = false;
     }
