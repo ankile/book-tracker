@@ -185,8 +185,21 @@ export interface EncodedResponse {
 // Chooses the representation for one caller: compressed when advertised and
 // available, always with Vary so shared caches keep both. HEAD carries no
 // payload either way.
+// SEC-007: every publicweb response carries the browser-hardening headers,
+// including error and JSON shapes, and including callers that hit the
+// run.app origin directly where Firebase Hosting's header config does not
+// apply. The CSP here only pins framing; the full policy travels as a
+// <meta> tag inside the profile shell (built by sync-profile-shell.ts from
+// public/index.html, where SvelteKit injects it with the script hashes).
+const SECURITY_HEADERS: Record<string, string> = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+};
+
 export function encodeResponse(request: PublicWebRequest, response: PublicWebResponse): EncodedResponse {
-  const headers = {...response.headers};
+  const headers = {...SECURITY_HEADERS, ...response.headers};
   if (response.gzipped !== undefined) headers["Vary"] = "Accept-Encoding";
   if (request.method === "HEAD") return {status: response.status, headers, payload: ""};
   if (request.acceptsGzip === true && response.gzipped !== undefined) {
