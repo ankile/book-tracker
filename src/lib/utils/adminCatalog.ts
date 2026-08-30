@@ -1,6 +1,7 @@
 import { FunctionsError } from 'firebase/functions';
 import type {
   AdminCatalogApplyResponse,
+  AdminCatalogAuthorRow,
   AdminCatalogBookRow,
   AdminCatalogBookTarget,
   AdminCatalogChange,
@@ -109,6 +110,32 @@ function workStatus(value: unknown, context: string): WorkStatus {
   return value;
 }
 
+function decodeAuthor(value: unknown, context: string): AdminCatalogAuthorRow {
+  const data = record(value, context);
+  exactKeys(data, [
+    'authorId', 'canonicalName', 'alternateNames', 'nameKeys', 'sortName',
+    'kind', 'status', 'mergedInto', 'mergedFrom', 'updatedAt', 'workCount',
+    'warnings',
+  ], context);
+  if (data.kind !== 'person' && data.kind !== 'entity' && data.kind !== 'placeholder') {
+    throw new TypeError(`${context}.kind: expected a supported catalog author kind`);
+  }
+  return {
+    authorId: nonEmptyString(data.authorId, `${context}.authorId`),
+    canonicalName: nonEmptyString(data.canonicalName, `${context}.canonicalName`),
+    alternateNames: strings(data.alternateNames, `${context}.alternateNames`),
+    nameKeys: strings(data.nameKeys, `${context}.nameKeys`),
+    sortName: nonEmptyString(data.sortName, `${context}.sortName`),
+    kind: data.kind,
+    status: workStatus(data.status, `${context}.status`),
+    mergedInto: nullableString(data.mergedInto, `${context}.mergedInto`),
+    mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
+    updatedAt: finiteNumber(data.updatedAt, `${context}.updatedAt`),
+    workCount: nonNegativeInteger(data.workCount, `${context}.workCount`),
+    warnings: strings(data.warnings, `${context}.warnings`),
+  };
+}
+
 function editionFormat(value: unknown, context: string): EditionFormat {
   if (value !== 'full' && value !== 'abridged' && value !== 'revised' && value !== 'unknown') {
     throw new TypeError(`${context}: expected a supported edition format`);
@@ -167,7 +194,7 @@ function decodeBookTarget(value: unknown, context: string): AdminCatalogBookTarg
 function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
   const data = record(value, context);
   exactKeys(data, [
-    'workId', 'canonicalTitle', 'alternateTitles', 'authorNames', 'coverUrl', 'subjects',
+    'workId', 'canonicalTitle', 'alternateTitles', 'authorIds', 'coverUrl', 'subjects',
     'fiction', 'visibility', 'status', 'mergedInto', 'mergedFrom', 'updatedAt',
     'editionCount', 'linkedBookCount', 'warnings',
   ], context);
@@ -175,7 +202,7 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
     workId: nonEmptyString(data.workId, `${context}.workId`),
     canonicalTitle: nonEmptyString(data.canonicalTitle, `${context}.canonicalTitle`),
     alternateTitles: strings(data.alternateTitles, `${context}.alternateTitles`),
-    authorNames: strings(data.authorNames, `${context}.authorNames`),
+    authorIds: strings(data.authorIds, `${context}.authorIds`),
     coverUrl: string(data.coverUrl, `${context}.coverUrl`),
     subjects: strings(data.subjects, `${context}.subjects`),
     fiction: nullableBoolean(data.fiction, `${context}.fiction`),
@@ -193,7 +220,7 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
 function decodeEdition(value: unknown, context: string): AdminCatalogEditionRow {
   const data = record(value, context);
   exactKeys(data, [
-    'editionId', 'workId', 'isbn13', 'title', 'authorNames', 'publisher', 'publishedDate',
+    'editionId', 'workId', 'isbn13', 'title', 'publisher', 'publishedDate',
     'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
     'externalIds', 'updatedAt',
   ], context);
@@ -206,7 +233,6 @@ function decodeEdition(value: unknown, context: string): AdminCatalogEditionRow 
     workId: nonEmptyString(data.workId, `${context}.workId`),
     isbn13: nullableString(data.isbn13, `${context}.isbn13`),
     title: nonEmptyString(data.title, `${context}.title`),
-    authorNames: strings(data.authorNames, `${context}.authorNames`),
     publisher: string(data.publisher, `${context}.publisher`),
     publishedDate: string(data.publishedDate, `${context}.publishedDate`),
     language: string(data.language, `${context}.language`),
@@ -265,24 +291,29 @@ function decodeFinding(value: unknown, context: string): AdminCatalogFinding {
 
 function decodeLimits(value: unknown, context: string): AdminCatalogLimits {
   const data = record(value, context);
-  exactKeys(data, ['works', 'editions', 'books', 'isbnIndexes', 'externalIdIndexes', 'authors'], context);
+  exactKeys(data, [
+    'catalogAuthors', 'works', 'editions', 'books', 'isbnIndexes',
+    'externalIdIndexes', 'authorsPerWork',
+  ], context);
   return {
+    catalogAuthors: positiveInteger(data.catalogAuthors, `${context}.catalogAuthors`),
     works: positiveInteger(data.works, `${context}.works`),
     editions: positiveInteger(data.editions, `${context}.editions`),
     books: positiveInteger(data.books, `${context}.books`),
     isbnIndexes: positiveInteger(data.isbnIndexes, `${context}.isbnIndexes`),
     externalIdIndexes: positiveInteger(data.externalIdIndexes, `${context}.externalIdIndexes`),
-    authors: positiveInteger(data.authors, `${context}.authors`),
+    authorsPerWork: positiveInteger(data.authorsPerWork, `${context}.authorsPerWork`),
   };
 }
 
 export function decodeAdminCatalogScanResponse(value: unknown): AdminCatalogScanResponse {
   const data = record(value, 'admin-catalogscan response');
   exactKeys(data, [
-    'works', 'editions', 'books', 'nextBookCursor', 'bookCountsComplete',
+    'authors', 'works', 'editions', 'books', 'nextBookCursor', 'bookCountsComplete',
     'findings', 'limits',
   ], 'admin-catalogscan response');
   return {
+    authors: array(data.authors, 'admin-catalogscan response.authors', decodeAuthor),
     works: array(data.works, 'admin-catalogscan response.works', decodeWork),
     editions: array(data.editions, 'admin-catalogscan response.editions', decodeEdition),
     books: array(data.books, 'admin-catalogscan response.books', decodeBook),
@@ -339,7 +370,7 @@ export function adminCatalogCandidatesForBook(
 function decodeExpectedDocument(value: unknown, context: string): AdminCatalogExpectedDocument {
   const data = record(value, context);
   exactKeys(data, ['kind', 'id', 'exists', 'updatedAt'], context);
-  if (data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
+  if (data.kind !== 'author' && data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
       data.kind !== 'external-id' && data.kind !== 'title-index') {
     throw new TypeError(`${context}.kind: expected a versioned catalog document kind`);
   }
@@ -354,7 +385,8 @@ function decodeExpectedDocument(value: unknown, context: string): AdminCatalogEx
 function decodeExpectedBook(value: unknown, context: string): AdminCatalogExpectedBook {
   const data = record(value, context);
   exactKeys(data, [
-    'uid', 'bookId', 'workId', 'editionId', 'matchMethod', 'linkedAt', 'decisionIsbn13',
+    'uid', 'bookId', 'workId', 'editionId', 'matchMethod', 'linkedAt',
+    'decisionIsbn13', 'decisionAuthorIds',
   ], context);
   return {
     ...decodeBookTarget({uid: data.uid, bookId: data.bookId}, `${context}.target`),
@@ -363,6 +395,8 @@ function decodeExpectedBook(value: unknown, context: string): AdminCatalogExpect
     matchMethod: catalogMatchMethod(data.matchMethod, `${context}.matchMethod`),
     linkedAt: nullableNumber(data.linkedAt, `${context}.linkedAt`),
     decisionIsbn13: nullableString(data.decisionIsbn13, `${context}.decisionIsbn13`),
+    decisionAuthorIds: data.decisionAuthorIds === null ? null :
+      strings(data.decisionAuthorIds, `${context}.decisionAuthorIds`),
   };
 }
 
@@ -379,7 +413,7 @@ function decodeChange(value: unknown, context: string): AdminCatalogChange {
   const data = record(value, context);
   exactKeys(data, ['kind', 'id', 'action', 'before', 'after'], context);
   if (
-    data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
+    data.kind !== 'author' && data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
     data.kind !== 'external-id' &&
     data.kind !== 'book' && data.kind !== 'title-index'
   ) {

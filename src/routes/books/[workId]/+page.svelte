@@ -102,7 +102,7 @@
       <div>
         <a class="back" href="/">← Your books</a>
         <h1>{response.work.canonicalTitle}</h1>
-        <p class="authors">{response.work.authorNames.join(', ')}</p>
+        <p class="authors">{response.work.authors.map((author) => author.canonicalName).join(', ')}</p>
         {#if response.work.alternateTitles.length > 0}
           <p class="aliases">Also known as {response.work.alternateTitles.join(' · ')}</p>
         {/if}

@@ -40,6 +40,11 @@ This responsive single-page app allows one to keep track of what one's reading, 
   a fiction/non-fiction flag from the book's ISBN
 - **Shared Works**: Existing works and editions are suggested while adding a
   book; each reader still chooses the title and page count for their own copy
+- **Shared Authors**: Works and personal books reference one curated author
+  catalog. Existing names and alternate spellings are suggested across users
+- **Inherited Metadata**: Selecting a catalog match fills only empty fields,
+  using edition-specific title, pages and cover plus work-level authors, tags,
+  fiction classification and fallback cover
 - **Reader Comparisons**: Authenticated work pages group opted-in rereads and
   show date, duration, and qualified pace context without exposing raw sessions
 - **Book Covers**: Shown on the reading and finished lists, hot-linked from the
@@ -170,9 +175,16 @@ identifies an edition; several editions may point to one work. Personal books
 retain their own title, authors, ISBN text, page count, progress, and sessions,
 and may be unlinked or relinked at any time. Exact ISBN and trusted external-ID
 matches can be preselected. Title and author matches are suggestions that need
-an explicit choice. Ordinary accounts cannot create shared catalog entries; an
-unmatched book remains unlinked and fully usable until an operator curates it.
-Catalog failures never block the existing offline save path.
+an explicit choice and link only the Work unless an identifier proves the
+Edition. Ordinary accounts cannot create works or editions. A verified live
+account can resolve or create a genuinely missing shared author through the
+bounded author callable; books using only cached existing authors retain the
+offline save path. If a genuinely new author cannot be resolved because the
+browser is offline or a quota is exhausted, the dialog keeps the draft open and
+does not queue a partial book. An unmatched book remains unlinked and fully
+usable until an operator curates it. Personal shadows keep at most six unique
+author references; a larger shared Work remains intact, and selection explains
+that only its first six authors were inherited.
 
 Reader rows on `/books/[workId]` are separately opt-in. The account must choose
 an owned public profile and an IANA timezone in `/me`. The callable returns a
@@ -183,15 +195,19 @@ The consent/profile triggers intentionally trade bounded work for prompt
 privacy convergence: one meaningful change can refresh at most 500 linked
 books and 200 distinct works, with five trigger instances and ten refreshes at
 a time. Repeated consent toggles can therefore amplify Firestore reads and
-writes even though they cannot disclose data. The work-reader callable also
-has a deliberate shared 100-page/hour breaker after its per-account quota; a
-small group of verified accounts can exhaust it and temporarily hide reader
-summaries. Treat both as accepted availability/spend controls for the initial
-release. Before deployment, add alerts for
+writes even though they cannot disclose data. The work-reader callable has a
+deliberate shared 100-page/hour breaker after its per-account quota. Title
+search likewise has a 100-search/hour shared breaker after its 60-search/account
+quota; exact ISBN and external-ID hits return before consuming that shared
+title-search budget. A small group of verified accounts can therefore exhaust
+either shared breaker and temporarily hide reader summaries or title
+suggestions. Treat these as accepted availability/spend controls for the
+initial release. Before deployment, add alerts for
 `catalog.shared_work_owner.catalog_bound_exceeded`, sustained projection
-writes, and work-reader quota exhaustion; if real usage approaches the bounds,
-move consent changes behind a rate-limited callable or adopt generation-based
-projection invalidation and partitioned reader budgets.
+writes, work-reader quota exhaustion, and catalog-search quota exhaustion; if
+real usage approaches the bounds, move consent changes behind a rate-limited
+callable or adopt generation-based projection invalidation and partitioned
+reader budgets.
 
 The fixed verified operator curates works, editions, aliases, links, ISBN
 mappings, and exact or likely unmatched-book candidates at `/admin/catalog`.
@@ -371,7 +387,10 @@ allows: storage that PITR and 98 daily backups multiply, and that a delete
 event carries in full into Pub/Sub; SEC-039/071). Progress and timer
 updates skip the field allowlist but still type the fields they may
 touch, so a document with an unknown field from before the rule stays
-readable; the next edit sheds the field. The pre-migration `author`/
+readable; the next edit sheds the field. Personal books accept up to six
+unique shared author references so Rules can verify each document exists; cached
+one-hop merge aliases remain valid, while deleted per-user author IDs do not.
+The pre-migration `author`/
 `authors` fields are not admitted (no live document has them). Connecting Toggl (`savetoken`)
 requires a verified account and is metered at five attempts per user per
 hour (`functionQuotas/togglToken`, SEC-024).

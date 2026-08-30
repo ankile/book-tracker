@@ -52,7 +52,7 @@
           {/if}
           <div>
             <strong>{selectedResult.work.canonicalTitle}</strong>
-            <div>{selectedResult.work.authorNames.join(', ')}</div>
+            <div>{selectedResult.work.authors.map((author) => author.canonicalName).join(', ')}</div>
             {#if editionDetail(selectedResult)}<small>{editionDetail(selectedResult)}</small>{/if}
           </div>
         </div>
@@ -80,7 +80,7 @@
             {/if}
             <div>
               <strong>{result.work.canonicalTitle}</strong>
-              <div>{result.work.authorNames.join(', ')}</div>
+              <div>{result.work.authors.map((author) => author.canonicalName).join(', ')}</div>
               <small>{result.reason}{editionDetail(result) ? ` · ${editionDetail(result)}` : ''}</small>
             </div>
           </div>

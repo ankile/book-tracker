@@ -1,17 +1,11 @@
 <script lang="ts">
   import { user } from '$lib/firebase/auth.ts';
   import { Database } from '$lib/firebase/db.ts';
-  import ModalCard from '$lib/components/ModalCard.svelte';
-  import Input from '$lib/components/Input.svelte';
   import {
-    AUTHOR_KINDS,
     bookAuthorReferenceCounts,
-    booksReferencingAuthor,
     selectableAuthors,
-    splitPersonName,
-    joinPersonName,
   } from '$lib/utils/authors.ts';
-  import type { Author, AuthorKind } from '$lib/interfaces/author.ts';
+  import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
 
   let authorList = $state<Author[] | undefined>(undefined);
@@ -32,89 +26,11 @@
     }
   });
 
-  // Persons sort by their explicit family name — the point of storing it.
-  const sortKey = (a: Author) => (a.kind === 'person' && a.familyName ? `${a.familyName} ${a.name}` : a.name).toLowerCase();
+  const sortKey = (author: Author) => `${author.sortName ?? author.name} ${author.name}`.toLowerCase();
   const authors = $derived(selectableAuthors(authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
   const authorMap = $derived(new Map((authorList ?? []).map((author) => [author.id, author])));
 
-  // Read-only counts keep an unresolvable raw id instead of taking down the
-  // management page. This is fail-safe for deletion and merge confirmation:
-  // a referenced active id still has a non-zero count even if another
-  // redirect in the library is corrupt.
   const bookCounts = $derived(bookAuthorReferenceCounts(allBooks ?? [], authorMap));
-
-  let editAuthor = $state<Author | null>(null);
-  let editName = $state('');
-  let editKind = $state<AuthorKind>('person');
-  let editGivenName = $state('');
-  let editFamilyName = $state('');
-  function openEdit(author: Author) {
-    editAuthor = author;
-    editName = author.name;
-    // Docs written before the kind/parts migrations lack the fields; the
-    // form defaults kind to person and prefills the parts from the split,
-    // and saving backfills both.
-    editKind = author.kind ?? 'person';
-    const parts = author.familyName !== undefined ? author : splitPersonName(author.name);
-    editGivenName = parts.givenName ?? '';
-    editFamilyName = parts.familyName;
-  }
-  function saveEdit() {
-    const currentUser = $user;
-    if (currentUser === null || currentUser === undefined || editAuthor === null) {
-      throw new Error('An authenticated user and selected author are required.');
-    }
-    Database.updateAuthor({
-      userId: currentUser.uid,
-      authorId: editAuthor.id,
-      // name is the write value for non-person kinds and the error-banner
-      // label either way.
-      name: editKind === 'person' ? joinPersonName({ givenName: editGivenName, familyName: editFamilyName }) : editName,
-      kind: editKind,
-      givenName: editGivenName,
-      familyName: editFamilyName,
-    });
-    editAuthor = null;
-  }
-
-  let mergeSource = $state<Author | null>(null);
-  let mergeTargetId = $state('');
-  function openMerge(author: Author) {
-    mergeSource = author;
-    mergeTargetId = '';
-  }
-  function doMerge() {
-    const currentUser = $user;
-    if (currentUser === null || currentUser === undefined || mergeSource === null) {
-      throw new Error('An authenticated user and merge source are required.');
-    }
-    if (allBooks === undefined) throw new Error('Books must finish loading before authors can be merged.');
-    const target = authors.find((a) => a.id === mergeTargetId);
-    if (target === undefined) throw new Error('A merge target is required.');
-    const source = mergeSource;
-    const books = booksReferencingAuthor(allBooks, source.id, authorMap);
-    const confirmed = confirm(
-      `Merge "${source.name}" into "${target.name}"? ${books.length} book(s) will resolve to "${target.name}" and "${source.name}" will be hidden.`
-    );
-    if (!confirmed) return;
-    Database.mergeAuthors({
-      userId: currentUser.uid,
-      sourceId: source.id,
-      targetId: target.id,
-      sourceName: source.name,
-      targetName: target.name,
-    });
-    mergeSource = null;
-  }
-
-  function deleteAuthor(author: Author) {
-    const currentUser = $user;
-    if (currentUser === null || currentUser === undefined) throw new Error('An authenticated user is required.');
-    const confirmed = confirm(`Delete author "${author.name}"? No books reference them.`);
-    if (confirmed) {
-      Database.deleteAuthor({ userId: currentUser.uid, authorId: author.id, name: author.name });
-    }
-  }
 </script>
 
 <style>
@@ -176,31 +92,13 @@
     text-align: right;
   }
 
-  .actions-cell {
-    text-align: right;
-    white-space: nowrap;
-  }
-
-  .row-action {
-    background: none;
-    border: none;
-    color: #007bff;
-    cursor: pointer;
-    font-size: 0.9rem;
-    text-decoration: underline;
-    padding: 0 0.3rem;
-  }
-
-  .row-action.danger {
-    color: #d9534f;
-  }
 </style>
 
 <div class="authors-container">
   <h1>Authors</h1>
   <p class="hint">
-    Renames and sort-name changes apply to every book instantly. Merge fixes
-    duplicate spellings; delete is offered once no book references an author.
+    Authors are shared across Book Tracker. The book count is for your library.
+    Catalog administrators manage names, alternate spellings, and merges.
   </p>
 
   {#if authorList === undefined}
@@ -216,7 +114,6 @@
             <th>Kind</th>
             <th>Family name</th>
             <th class="count">Books</th>
-            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -225,17 +122,8 @@
             <tr>
               <td>{author.name}</td>
               <td class="kind">{author.kind ?? 'person'}</td>
-              <td class="sort-name">{author.familyName ?? '—'}</td>
+              <td class="sort-name">{author.sortName ?? author.name}</td>
               <td class="count">{count}</td>
-              <td class="actions-cell">
-                <button type="button" class="row-action" onclick={() => openEdit(author)}>Edit</button>
-                {#if allBooks !== undefined && authors.length > 1}
-                  <button type="button" class="row-action" onclick={() => openMerge(author)}>Merge</button>
-                {/if}
-                {#if allBooks !== undefined && count === 0}
-                  <button type="button" class="row-action danger" onclick={() => deleteAuthor(author)}>Delete</button>
-                {/if}
-              </td>
             </tr>
           {/each}
         </tbody>
@@ -243,59 +131,3 @@
     </div>
   {/if}
 </div>
-
-<ModalCard
-  open={editAuthor !== null}
-  onclose={() => (editAuthor = null)}
-  header="Edit author"
-  primaryText="Save"
-  primaryAction={saveEdit}>
-  <Input label="Kind" inputId="author-kind">
-    <select id="author-kind" class="form-select" bind:value={editKind}>
-      {#each AUTHOR_KINDS as kind (kind)}
-        <option value={kind}>{kind}</option>
-      {/each}
-    </select>
-  </Input>
-  <div style="height: 1em"></div>
-  {#if editKind === 'person'}
-    <Input label="First name(s)" inputId="author-given-name">
-      <input
-        id="author-given-name"
-        class="form-control"
-        type="text"
-        bind:value={editGivenName}
-        placeholder="Empty for mononyms (Homer)" />
-    </Input>
-    <div style="height: 1em"></div>
-    <Input label="Last name" inputId="author-family-name">
-      <input
-        id="author-family-name"
-        class="form-control"
-        type="text"
-        required
-        bind:value={editFamilyName}
-        placeholder='Sorts and abbreviates, e.g. "Le Guin"' />
-    </Input>
-  {:else}
-    <Input label="Name" inputId="author-name">
-      <input id="author-name" class="form-control" type="text" required bind:value={editName} />
-    </Input>
-  {/if}
-</ModalCard>
-
-<ModalCard
-  open={mergeSource !== null}
-  onclose={() => (mergeSource = null)}
-  header={`Merge "${mergeSource?.name ?? ''}"`}
-  primaryText="Merge"
-  primaryAction={doMerge}>
-  <Input label="Merge into" inputId="merge-target">
-    <select id="merge-target" class="form-select" required bind:value={mergeTargetId}>
-      <option value="" disabled>Choose an author…</option>
-      {#each authors.filter((a) => a.id !== mergeSource?.id) as author (author.id)}
-        <option value={author.id}>{author.name}</option>
-      {/each}
-    </select>
-  </Input>
-</ModalCard>

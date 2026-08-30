@@ -35,6 +35,10 @@ export type PreparedBookWriteResult =
   | { valid: true; write: PreparedBookWrite }
   | { valid: false; message: string };
 
+// Firestore Rules verify every referenced shared author. Eight keeps the
+// book write within the Rules document-access and expression budgets.
+export const MAX_BOOK_AUTHORS = 6;
+
 export interface BookWriter {
   addBook(input: AddBookWriteInput): Promise<void>;
   updateBook(input: UpdateBookWriteInput): Promise<void>;
@@ -129,6 +133,12 @@ export function prepareBookWrite({
   catalogSelectionTouched?: boolean;
   catalogSelectionIsbn13?: string | null;
 }): PreparedBookWriteResult {
+  if (authorChips.length > MAX_BOOK_AUTHORS) {
+    return {
+      valid: false,
+      message: `A personal book may reference at most ${MAX_BOOK_AUTHORS} authors.`,
+    };
+  }
   if (authorChips.some((chip) => chip.id !== null && 'unresolved' in chip)) {
     return {
       valid: false,

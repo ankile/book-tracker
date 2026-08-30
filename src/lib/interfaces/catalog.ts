@@ -2,6 +2,8 @@ import type { Timestamp } from 'firebase/firestore';
 
 export type WorkVisibility = 'internal' | 'searchable';
 export type WorkStatus = 'active' | 'merged';
+export type CatalogAuthorKind = 'person' | 'entity' | 'placeholder';
+export type CatalogAuthorStatus = 'active' | 'merged';
 export type EditionFormat = 'full' | 'abridged' | 'revised' | 'unknown';
 export type CatalogMatchMethod =
   | 'isbn'
@@ -21,8 +23,7 @@ export interface WorkDocument {
   canonicalTitle: string;
   alternateTitles: string[];
   titleKeys: string[];
-  authorNames: string[];
-  authorNamesLower: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
@@ -32,6 +33,30 @@ export interface WorkDocument {
   mergedFrom?: string[];
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+export interface CatalogAuthorDocument {
+  canonicalName: string;
+  alternateNames: string[];
+  nameKeys: string[];
+  sortName: string;
+  kind: CatalogAuthorKind;
+  status: CatalogAuthorStatus;
+  mergedInto?: string;
+  mergedFrom?: string[];
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface CatalogAuthor extends CatalogAuthorDocument {
+  id: string;
+}
+
+export interface CatalogAuthorSummary {
+  authorId: string;
+  canonicalName: string;
+  sortName: string;
+  kind: CatalogAuthorKind;
 }
 
 export interface Work extends WorkDocument {
@@ -49,7 +74,6 @@ export interface EditionDocument {
   workId: string;
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -88,8 +112,10 @@ export interface CatalogWorkSummary {
   workId: string;
   canonicalTitle: string;
   alternateTitles: string[];
-  authorNames: string[];
+  authors: CatalogAuthorSummary[];
   coverUrl: string;
+  subjects: string[];
+  fiction: boolean | null;
   mergedFrom: string[];
 }
 
@@ -98,7 +124,6 @@ export interface CatalogEditionSummary {
   workId: string;
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -124,16 +149,36 @@ export interface CatalogSearchResponse {
 export interface CatalogWorkInput {
   canonicalTitle: string;
   alternateTitles: string[];
-  authorNames: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
 }
 
+export interface CatalogAuthorInput {
+  canonicalName: string;
+  alternateNames: string[];
+  sortName: string;
+  kind: CatalogAuthorKind;
+}
+
+export interface CatalogAuthorCreateInput {
+  canonicalName: string;
+  sortName: string;
+  kind: CatalogAuthorKind;
+}
+
+export interface EnsureCatalogAuthorsRequest {
+  authors: CatalogAuthorCreateInput[];
+}
+
+export interface EnsureCatalogAuthorsResponse {
+  authorIds: string[];
+}
+
 export interface CatalogEditionInput {
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -180,7 +225,7 @@ export interface AdminCatalogWorkRow {
   workId: string;
   canonicalTitle: string;
   alternateTitles: string[];
-  authorNames: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
@@ -191,6 +236,21 @@ export interface AdminCatalogWorkRow {
   updatedAt: number;
   editionCount: number;
   linkedBookCount: number;
+  warnings: string[];
+}
+
+export interface AdminCatalogAuthorRow {
+  authorId: string;
+  canonicalName: string;
+  alternateNames: string[];
+  nameKeys: string[];
+  sortName: string;
+  kind: CatalogAuthorKind;
+  status: CatalogAuthorStatus;
+  mergedInto: string | null;
+  mergedFrom: string[];
+  updatedAt: number;
+  workCount: number;
   warnings: string[];
 }
 
@@ -234,15 +294,17 @@ export interface AdminCatalogFinding {
 }
 
 export interface AdminCatalogLimits {
+  catalogAuthors: number;
   works: number;
   editions: number;
   books: number;
   isbnIndexes: number;
   externalIdIndexes: number;
-  authors: number;
+  authorsPerWork: number;
 }
 
 export interface AdminCatalogScanResponse {
+  authors: AdminCatalogAuthorRow[];
   works: AdminCatalogWorkRow[];
   editions: AdminCatalogEditionRow[];
   books: AdminCatalogBookRow[];
@@ -257,6 +319,16 @@ export interface AdminCatalogScanRequest {
 }
 
 export type AdminCatalogOperation =
+  | {
+    type: 'upsertAuthor';
+    authorId: string;
+    author: CatalogAuthorInput;
+  }
+  | {
+    type: 'mergeAuthors';
+    sourceAuthorId: string;
+    targetAuthorId: string;
+  }
   | {
     type: 'createWork';
     workId: string;
@@ -293,7 +365,7 @@ export type AdminCatalogOperation =
   };
 
 export interface AdminCatalogExpectedDocument {
-  kind: 'work' | 'edition' | 'isbn' | 'external-id' | 'title-index';
+  kind: 'author' | 'work' | 'edition' | 'isbn' | 'external-id' | 'title-index';
   id: string;
   exists: boolean;
   updatedAt: number | null;
@@ -305,6 +377,7 @@ export interface AdminCatalogExpectedBook extends AdminCatalogBookTarget {
   matchMethod: CatalogMatchMethod | null;
   linkedAt: number | null;
   decisionIsbn13: string | null;
+  decisionAuthorIds: string[] | null;
 }
 
 export interface AdminCatalogExpectedState {
@@ -315,7 +388,7 @@ export interface AdminCatalogExpectedState {
 export type AdminCatalogDiffValue = Record<string, unknown> | null;
 
 export interface AdminCatalogChange {
-  kind: 'work' | 'edition' | 'isbn' | 'external-id' | 'book' | 'title-index';
+  kind: 'author' | 'work' | 'edition' | 'isbn' | 'external-id' | 'book' | 'title-index';
   id: string;
   action: 'create' | 'update' | 'delete';
   before: AdminCatalogDiffValue;

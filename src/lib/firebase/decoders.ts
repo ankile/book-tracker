@@ -386,7 +386,10 @@ export function decodeAuthor(id: string, value: unknown, path: string): Author {
 
   if (data.kind === undefined) {
     const parts = splitPersonName(name);
-    return { id, name, nameLower, kind: 'person', ...parts, ...retirementFields };
+    return {
+      id, name, nameLower, alternateNames: [], sortName: parts.familyName,
+      kind: 'person', ...parts, ...retirementFields,
+    };
   }
 
   const kindValue = string(data.kind, `${path}.kind`);
@@ -406,6 +409,8 @@ export function decodeAuthor(id: string, value: unknown, path: string): Author {
       id,
       name,
       nameLower,
+      alternateNames: [],
+      sortName: familyName,
       kind,
       familyName,
       ...(givenName ? { givenName } : {}),
@@ -415,7 +420,48 @@ export function decodeAuthor(id: string, value: unknown, path: string): Author {
   if (data.givenName !== undefined || data.familyName !== undefined) {
     fail(path, 'a non-person author without person name parts');
   }
-  return { id, name, nameLower, kind, ...retirementFields };
+  return { id, name, nameLower, alternateNames: [], sortName: name, kind, ...retirementFields };
+}
+
+export function decodeCatalogAuthor(id: string, value: unknown, path: string): Author {
+  const data = record(value, path);
+  const name = nonEmptyString(data.canonicalName, `${path}.canonicalName`);
+  const alternateNames = strings(data.alternateNames, `${path}.alternateNames`);
+  const sortName = nonEmptyString(data.sortName, `${path}.sortName`);
+  strings(data.nameKeys, `${path}.nameKeys`);
+  strings(data.mergedFrom, `${path}.mergedFrom`);
+  const kindValue = string(data.kind, `${path}.kind`);
+  if (kindValue !== 'person' && kindValue !== 'entity' && kindValue !== 'placeholder') {
+    fail(`${path}.kind`, 'person, entity, or placeholder');
+  }
+  const status = string(data.status, `${path}.status`);
+  let retirement: AuthorRetirement | undefined;
+  if (status === 'merged') {
+    retirement = {
+      reason: 'merged',
+      targetId: nonEmptyString(data.mergedInto, `${path}.mergedInto`),
+    };
+  } else if (status !== 'active') {
+    fail(`${path}.status`, 'active or merged');
+  }
+  const base = {
+    id,
+    name,
+    nameLower: name.toLowerCase(),
+    alternateNames,
+    sortName,
+    ...(retirement === undefined ? {} : {retirement}),
+  };
+  if (kindValue === 'person') {
+    const parts = splitPersonName(name);
+    return {
+      ...base,
+      kind: kindValue,
+      familyName: sortName,
+      ...(parts.givenName === '' ? {} : {givenName: parts.givenName}),
+    };
+  }
+  return {...base, kind: kindValue};
 }
 
 function profileLink(value: unknown, context: string): ProfileLink {

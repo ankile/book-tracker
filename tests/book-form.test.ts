@@ -7,6 +7,7 @@ import {
   fillMissingItems,
   fillMissingPageCount,
   fillMissingText,
+  MAX_BOOK_AUTHORS,
   prepareBookWrite,
   type BookWriter,
 } from '../src/lib/utils/bookForm.ts';
@@ -158,6 +159,18 @@ test('book form blocks writes while an unresolved repair chip remains', () => {
   assert.deepEqual(result, {
     valid: false,
     message: 'Remove each unresolved author and select or create a replacement before saving.',
+  });
+});
+
+test('book form rejects more shared authors than Rules can verify', () => {
+  const result = prepare(Array.from(
+    {length: MAX_BOOK_AUTHORS + 1},
+    (_, index) => ({id: `author-${index}`, name: `Author ${index}`}),
+  ));
+
+  assert.deepEqual(result, {
+    valid: false,
+    message: `A personal book may reference at most ${MAX_BOOK_AUTHORS} authors.`,
   });
 });
 

@@ -13,14 +13,17 @@ import {createHash, randomUUID} from "node:crypto";
 import {Buffer} from "node:buffer";
 import {
   CatalogCreateRequest,
+  CatalogAuthorCreateInput,
   CatalogEditionInput,
   CatalogExternalId,
   CatalogSearchRequest,
   CatalogWorkInput,
   decodeCatalogSearchRequest,
+  decodeEnsureCatalogAuthorsRequest,
   decodeWorkReadersRequest,
+  normalizeCatalogIdentity,
 } from "./decoders";
-import {consumeQuota} from "./quota";
+import {applyQuota, consumeQuota} from "./quota";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
@@ -36,9 +39,13 @@ const UPDATES_PER_BOOK_LIMIT = 200;
 const TOTAL_UPDATES_LIMIT = 10050;
 const SEARCHES_PER_WINDOW = 60;
 const READER_CALLS_PER_WINDOW = 5;
+const AUTHOR_NAMES_PER_WINDOW = 60;
 // Emergency spend breaker, not abuse isolation: the per-account quota is
 // the primary caller bound, while this high ceiling limits a sybil burst.
 const GLOBAL_READER_CALLS_PER_WINDOW = 100;
+const GLOBAL_SEARCHES_PER_WINDOW = 100;
+const GLOBAL_AUTHOR_NAMES_PER_WINDOW = 500;
+const MAX_CATALOG_AUTHORS = 500;
 const QUOTA_WINDOW_MS = 60 * 60 * 1000;
 const SPEED_MIN_SESSION_MINUTES = 5;
 const SPEED_MAX_PAGES_PER_HOUR = 150;
@@ -51,8 +58,7 @@ interface StoredWork {
   canonicalTitle: string;
   alternateTitles: string[];
   titleKeys: string[];
-  authorNames: string[];
-  authorNamesLower: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
@@ -62,11 +68,21 @@ interface StoredWork {
   mergedFrom: string[];
 }
 
+interface StoredCatalogAuthor {
+  canonicalName: string;
+  alternateNames: string[];
+  nameKeys: string[];
+  sortName: string;
+  kind: "person" | "entity" | "placeholder";
+  status: "active" | "merged";
+  mergedInto?: string;
+  mergedFrom: string[];
+}
+
 interface StoredEdition {
   workId: string;
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -86,9 +102,18 @@ interface WorkSummary {
   workId: string;
   canonicalTitle: string;
   alternateTitles: string[];
-  authorNames: string[];
+  authors: AuthorSummary[];
   coverUrl: string;
+  subjects: string[];
+  fiction: boolean | null;
   mergedFrom: string[];
+}
+
+interface AuthorSummary {
+  authorId: string;
+  canonicalName: string;
+  sortName: string;
+  kind: StoredCatalogAuthor["kind"];
 }
 
 interface EditionSummary {
@@ -96,7 +121,6 @@ interface EditionSummary {
   workId: string;
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -165,16 +189,32 @@ function signedInUid(context: functions.https.CallableContext): string {
   return context.auth.uid;
 }
 
+function catalogAuthorId(nameKey: string): string {
+  return `author_${createHash("sha256")
+    .update(`author\0${nameKey}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+async function requireLiveUser(uid: string): Promise<void> {
+  const user = await db.collection("users").doc(uid).get();
+  if (!user.exists || user.get("deletedAt") !== undefined) {
+    throw new functions.https.HttpsError("failed-precondition", "This account is not active.");
+  }
+}
+
 async function requireQuota(
   uid: string,
   name: string,
   limit: number,
+  amount = 1,
 ): Promise<void> {
   const decision = await consumeQuota(
     db,
     `users/${uid}/functionQuotas/${name}`,
     limit,
     QUOTA_WINDOW_MS,
+    amount,
   );
   if (!decision.granted) {
     throw new functions.https.HttpsError(
@@ -195,6 +235,21 @@ async function requireGlobalReaderQuota(): Promise<void> {
     throw new functions.https.HttpsError(
       "resource-exhausted",
       "Reader summaries are temporarily busy. Try again later.",
+    );
+  }
+}
+
+async function requireGlobalSearchQuota(): Promise<void> {
+  const decision = await consumeQuota(
+    db,
+    "functionGlobalQuotas/catalogSearch",
+    GLOBAL_SEARCHES_PER_WINDOW,
+    QUOTA_WINDOW_MS,
+  );
+  if (!decision.granted) {
+    throw new functions.https.HttpsError(
+      "resource-exhausted",
+      "Catalog search is temporarily busy. Try again later.",
     );
   }
 }
@@ -270,8 +325,7 @@ function storedWork(snapshot: DocumentSnapshot): StoredWork {
   const arrays = [
     data.alternateTitles,
     data.titleKeys,
-    data.authorNames,
-    data.authorNamesLower,
+    data.authorIds,
     data.subjects,
     data.mergedFrom ?? [],
   ];
@@ -290,8 +344,7 @@ function storedWork(snapshot: DocumentSnapshot): StoredWork {
     canonicalTitle: data.canonicalTitle,
     alternateTitles: data.alternateTitles,
     titleKeys: data.titleKeys,
-    authorNames: data.authorNames,
-    authorNamesLower: data.authorNamesLower,
+    authorIds: data.authorIds,
     coverUrl: data.coverUrl,
     subjects: data.subjects,
     fiction: data.fiction,
@@ -308,8 +361,7 @@ function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
   if (data === undefined) throw new Error(`Missing edition data ${snapshot.ref.path}.`);
   if (typeof data.workId !== "string" ||
       (data.isbn13 !== null && typeof data.isbn13 !== "string") ||
-      typeof data.title !== "string" || !Array.isArray(data.authorNames) ||
-      data.authorNames.some((name: unknown) => typeof name !== "string") ||
+      typeof data.title !== "string" ||
       typeof data.publisher !== "string" || typeof data.publishedDate !== "string" ||
       typeof data.language !== "string" || !Array.isArray(data.translatorNames) ||
       data.translatorNames.some((name: unknown) => typeof name !== "string") ||
@@ -325,7 +377,6 @@ function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
     workId: data.workId,
     isbn13: data.isbn13,
     title: data.title,
-    authorNames: data.authorNames,
     publisher: data.publisher,
     publishedDate: data.publishedDate,
     language: data.language,
@@ -335,6 +386,79 @@ function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
     coverUrl: data.coverUrl,
     externalIds: data.externalIds,
   };
+}
+
+function storedCatalogAuthor(snapshot: DocumentSnapshot): StoredCatalogAuthor {
+  if (!snapshot.exists) {
+    throw new CatalogDataError(`Missing catalog author ${snapshot.ref.path}.`);
+  }
+  const data = snapshot.data();
+  if (data === undefined || typeof data.canonicalName !== "string" ||
+      typeof data.sortName !== "string" ||
+      !["person", "entity", "placeholder"].includes(data.kind) ||
+      (data.status !== "active" && data.status !== "merged")) {
+    throw new CatalogDataError(`Invalid catalog author ${snapshot.ref.path}.`);
+  }
+  const arrays = [data.alternateNames, data.nameKeys, data.mergedFrom ?? []];
+  if (arrays.some((value) => !Array.isArray(value) ||
+      value.some((entry) => typeof entry !== "string"))) {
+    throw new CatalogDataError(`Invalid catalog author arrays at ${snapshot.ref.path}.`);
+  }
+  if (data.mergedInto !== undefined && typeof data.mergedInto !== "string") {
+    throw new CatalogDataError(`Invalid catalog author redirect at ${snapshot.ref.path}.`);
+  }
+  return {
+    canonicalName: data.canonicalName,
+    alternateNames: data.alternateNames,
+    nameKeys: data.nameKeys,
+    sortName: data.sortName,
+    kind: data.kind,
+    status: data.status,
+    ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
+    mergedFrom: data.mergedFrom ?? [],
+  };
+}
+
+async function resolveCatalogAuthor(authorId: string): Promise<AuthorSummary> {
+  const snapshot = await db.collection("catalogAuthors").doc(authorId).get();
+  const author = storedCatalogAuthor(snapshot);
+  if (author.status === "active") {
+    return {
+      authorId: snapshot.id,
+      canonicalName: author.canonicalName,
+      sortName: author.sortName,
+      kind: author.kind,
+    };
+  }
+  if (author.mergedInto === undefined || author.mergedInto === snapshot.id) {
+    throw new CatalogDataError(`Broken catalog author redirect at ${snapshot.ref.path}.`);
+  }
+  const targetSnapshot = await db.collection("catalogAuthors").doc(author.mergedInto).get();
+  const target = storedCatalogAuthor(targetSnapshot);
+  if (target.status !== "active") {
+    throw new CatalogDataError(`Catalog author redirect is not one hop at ${snapshot.ref.path}.`);
+  }
+  return {
+    authorId: targetSnapshot.id,
+    canonicalName: target.canonicalName,
+    sortName: target.sortName,
+    kind: target.kind,
+  };
+}
+
+async function workAuthors(
+  work: StoredWork,
+  cache: Map<string, Promise<AuthorSummary>> = new Map(),
+): Promise<AuthorSummary[]> {
+  const resolved = await Promise.all(work.authorIds.map((authorId) => {
+    const cached = cache.get(authorId);
+    if (cached !== undefined) return cached;
+    const pending = resolveCatalogAuthor(authorId);
+    cache.set(authorId, pending);
+    return pending;
+  }));
+  const byId = new Map(resolved.map((author) => [author.authorId, author]));
+  return [...byId.values()];
 }
 
 export function externalIndexId(externalId: CatalogExternalId): string {
@@ -380,13 +504,18 @@ async function resolveTransactionWork(
   return {id: targetSnapshot.id, work: target};
 }
 
-function workSummary(resolved: ResolvedWork): WorkSummary {
+async function workSummary(
+  resolved: ResolvedWork,
+  authors?: AuthorSummary[],
+): Promise<WorkSummary> {
   return {
     workId: resolved.id,
     canonicalTitle: resolved.work.canonicalTitle,
     alternateTitles: resolved.work.alternateTitles,
-    authorNames: resolved.work.authorNames,
+    authors: authors ?? await workAuthors(resolved.work),
     coverUrl: resolved.work.coverUrl,
+    subjects: resolved.work.subjects,
+    fiction: resolved.work.fiction,
     mergedFrom: resolved.work.mergedFrom,
   };
 }
@@ -401,7 +530,6 @@ function editionSummary(
     workId: resolvedWorkId,
     isbn13: edition.isbn13,
     title: edition.title,
-    authorNames: edition.authorNames,
     publisher: edition.publisher,
     publishedDate: edition.publishedDate,
     language: edition.language,
@@ -446,7 +574,7 @@ async function exactIsbnResult(isbn13: string): Promise<CatalogSearchResult | nu
     editionId,
     confidence: "exact-edition",
     reason: "Exact ISBN match",
-    work: workSummary(resolved),
+    work: await workSummary(resolved),
     edition: editionSummary(editionId, edition, resolved.id),
   };
 }
@@ -492,7 +620,7 @@ async function exactExternalIdResult(
     editionId,
     confidence: "exact-edition",
     reason: "Exact external ID match",
-    work: workSummary(resolved),
+    work: await workSummary(resolved),
     edition: editionSummary(editionId, edition, resolved.id),
   };
 }
@@ -507,21 +635,11 @@ function tokenSimilarity(left: string, right: string): number {
   return (2 * overlap) / (leftTokens.size + rightTokens.size);
 }
 
-function authorAgreement(requested: readonly string[], work: StoredWork): number {
+function authorAgreement(requested: readonly string[], authors: readonly AuthorSummary[]): number {
   if (requested.length === 0) return 0;
-  const candidates = new Set(work.authorNames.map(normalizeCatalogText));
+  const candidates = new Set(authors.map((author) => normalizeCatalogText(author.canonicalName)));
   const normalized = [...new Set(requested.map(normalizeCatalogText))];
   return normalized.filter((name) => candidates.has(name)).length / normalized.length;
-}
-
-async function firstEdition(workId: string): Promise<EditionSummary | null> {
-  const snapshot = await db.collection("editions")
-    .where("workId", "==", workId)
-    .limit(1)
-    .get();
-  const first = snapshot.docs[0];
-  if (first === undefined) return null;
-  return editionSummary(first.id, storedEdition(first), workId);
 }
 
 async function titleResults(
@@ -546,14 +664,20 @@ async function titleResults(
   for (const candidate of resolved) {
     if (candidate.work.visibility === "searchable") byId.set(candidate.id, candidate);
   }
-  const scored = [...byId.values()].map((candidate) => {
+  const authorCache = new Map<string, Promise<AuthorSummary>>();
+  const hydrated = await Promise.all([...byId.values()].map(async (candidate) => ({
+    candidate,
+    authors: await workAuthors(candidate.work, authorCache),
+  })));
+  const scored = hydrated.map(({candidate, authors: candidateAuthors}) => {
     const bestTitle = Math.max(...candidate.work.titleKeys.map((candidateKey) =>
       tokenSimilarity(key, candidateKey),
     ));
-    const authorsMatch = authorAgreement(authors, candidate.work);
+    const authorsMatch = authorAgreement(authors, candidateAuthors);
     const exactTitle = candidate.work.titleKeys.includes(key);
     return {
       candidate,
+      candidateAuthors,
       exactTitle,
       authorsMatch,
       score: bestTitle * 0.75 + authorsMatch * 0.25,
@@ -564,17 +688,16 @@ async function titleResults(
     .sort((left, right) => right.score - left.score)
     .slice(0, SEARCH_LIMIT);
 
-  return Promise.all(scored.map(async ({candidate, exactTitle, authorsMatch}) => {
+  return Promise.all(scored.map(async ({candidate, candidateAuthors, exactTitle, authorsMatch}) => {
     const strong = exactTitle && authors.length > 0 && authorsMatch === 1;
-    const edition = await firstEdition(candidate.id);
     return {
       workId: candidate.id,
-      editionId: edition?.editionId ?? null,
+      editionId: null,
       confidence: strong ? "strong-work" as const : "possible-work" as const,
       reason: strong ? "Exact title and author match" :
         exactTitle ? "Exact title match; confirm the author" : "Similar title and author",
-      work: workSummary(candidate),
-      edition,
+      work: await workSummary(candidate, candidateAuthors),
+      edition: null,
     };
   }));
 }
@@ -587,8 +710,7 @@ function workDocument(work: CatalogWorkInput, now: Timestamp): StoredWork & {
     canonicalTitle: work.canonicalTitle,
     alternateTitles: work.alternateTitles,
     titleKeys: titleKeys(work),
-    authorNames: work.authorNames,
-    authorNamesLower: work.authorNames.map(normalizeCatalogText),
+    authorIds: work.authorIds,
     coverUrl: work.coverUrl,
     subjects: work.subjects,
     fiction: work.fiction,
@@ -644,10 +766,22 @@ export async function createCatalogEntry(
         ),
       }),
     );
-    const [isbnSnapshot, externalSnapshots] = await Promise.all([
+    const authorRefs = request.work.authorIds.map((authorId) =>
+      db.collection("catalogAuthors").doc(authorId),
+    );
+    const [isbnSnapshot, externalSnapshots, authorSnapshots] = await Promise.all([
       isbnRef === null ? Promise.resolve(null) : transaction.get(isbnRef),
       Promise.all(externalRefs.map(({ref}) => transaction.get(ref))),
+      Promise.all(authorRefs.map((ref) => transaction.get(ref))),
     ]);
+    for (const snapshot of authorSnapshots) {
+      if (storedCatalogAuthor(snapshot).status !== "active") {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "A selected catalog author is no longer active.",
+        );
+      }
+    }
     const existingIndexes = [
       ...(isbnSnapshot?.exists ? [{kind: "isbn" as const, snapshot: isbnSnapshot}] : []),
       ...externalSnapshots.flatMap((snapshot, index) => snapshot.exists ? [{
@@ -1148,7 +1282,7 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
   );
   return {
     response: {
-      work: workSummary(resolved),
+      work: await workSummary(resolved),
       editions,
       attempts: summarized.attempts,
       incomplete: summarized.incomplete,
@@ -1182,10 +1316,151 @@ exports.search = callable.https.onCall(async (
     const exact = await exactExternalIdResult(request.externalId);
     if (exact !== null) return {results: [exact]};
   }
+  if (request.title !== undefined) await requireGlobalSearchQuota();
   return {
     results: request.title === undefined ? [] :
       await titleResults(request.title, request.authorNames ?? []),
   };
+});
+
+exports.ensureauthors = callable.https.onCall(async (
+  data: unknown,
+  context,
+): Promise<{authorIds: string[]}> => {
+  const uid = signedInUid(context);
+  const request = decodeEnsureCatalogAuthorsRequest(data, invalidArgument);
+  await requireLiveUser(uid);
+
+  const byKey = new Map<string, CatalogAuthorCreateInput>();
+  const requestedKeys = request.authors.map((author) => {
+    const key = normalizeCatalogIdentity(author.canonicalName);
+    const prior = byKey.get(key);
+    if (prior !== undefined && prior.kind !== author.kind) {
+      invalidArgument(`Conflicting author kinds were supplied for ${author.canonicalName}.`);
+    }
+    if (prior === undefined) byKey.set(key, author);
+    return key;
+  });
+  const keys = [...byKey.keys()];
+  await requireQuota(uid, "catalogEnsureAuthors", AUTHOR_NAMES_PER_WINDOW, keys.length);
+  const authorIds = await db.runTransaction(async (tx) => {
+    const matching = await tx.get(
+      db.collection("catalogAuthors").where("nameKeys", "array-contains-any", keys),
+    );
+    const candidates = new Map<string, Array<{id: string; author: StoredCatalogAuthor}>>();
+    for (const snapshot of matching.docs) {
+      const author = storedCatalogAuthor(snapshot);
+      for (const key of author.nameKeys) {
+        if (!byKey.has(key)) continue;
+        const rows = candidates.get(key) ?? [];
+        rows.push({id: snapshot.id, author});
+        candidates.set(key, rows);
+      }
+    }
+
+    const mergedTargetIds = new Set<string>();
+    for (const rows of candidates.values()) {
+      for (const row of rows) {
+        if (row.author.status === "merged" && row.author.mergedInto !== undefined) {
+          mergedTargetIds.add(row.author.mergedInto);
+        }
+      }
+    }
+    const targetRefs = [...mergedTargetIds].map((id) => db.collection("catalogAuthors").doc(id));
+    const targetSnapshots = targetRefs.length === 0 ? [] : await tx.getAll(...targetRefs);
+    const targets = new Map(targetSnapshots.map((snapshot) => [
+      snapshot.id,
+      storedCatalogAuthor(snapshot),
+    ]));
+
+    const resolved = new Map<string, string>();
+    for (const [key, rows] of candidates) {
+      const activeIds = new Set<string>();
+      for (const row of rows) {
+        if (row.author.status === "active") {
+          activeIds.add(row.id);
+          continue;
+        }
+        if (row.author.mergedInto === undefined) {
+          throw new CatalogDataError(`Broken catalog author redirect at catalogAuthors/${row.id}.`);
+        }
+        const target = targets.get(row.author.mergedInto);
+        if (target === undefined || target.status !== "active") {
+          throw new CatalogDataError(`Catalog author redirect is not one hop at catalogAuthors/${row.id}.`);
+        }
+        activeIds.add(row.author.mergedInto);
+      }
+      if (activeIds.size > 1) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "This author name is ambiguous in the shared catalog. An administrator must merge it first.",
+        );
+      }
+      const activeId = [...activeIds][0];
+      if (activeId !== undefined) resolved.set(key, activeId);
+    }
+
+    const missing = [...byKey].filter(([key]) => !resolved.has(key));
+    const deterministicRefs = missing.map(([key]) =>
+      db.collection("catalogAuthors").doc(catalogAuthorId(key)),
+    );
+    if (missing.length > 0) {
+      const [catalogRows, quotaSnapshot, deterministicSnapshots] = await Promise.all([
+        tx.get(db.collection("catalogAuthors").limit(MAX_CATALOG_AUTHORS + 1)),
+        tx.get(db.doc("functionGlobalQuotas/catalogEnsureAuthors")),
+        tx.getAll(...deterministicRefs),
+      ]);
+      if (catalogRows.size + missing.length > MAX_CATALOG_AUTHORS) {
+        throw new functions.https.HttpsError(
+          "resource-exhausted",
+          "The shared author catalog is full. Ask an administrator to review its capacity.",
+        );
+      }
+      const quota = applyQuota(
+        tx,
+        quotaSnapshot.ref,
+        quotaSnapshot.data(),
+        GLOBAL_AUTHOR_NAMES_PER_WINDOW,
+        QUOTA_WINDOW_MS,
+        Timestamp.now(),
+        missing.length,
+      );
+      if (!quota.granted) {
+        throw new functions.https.HttpsError(
+          "resource-exhausted",
+          "Shared author creation is temporarily busy. Try again later.",
+        );
+      }
+      for (const [index, snapshot] of deterministicSnapshots.entries()) {
+        if (snapshot.exists) {
+          deterministicRefs[index] = db.collection("catalogAuthors").doc();
+        }
+      }
+    }
+
+    const now = Timestamp.now();
+    for (const [index, [key, author]] of missing.entries()) {
+      const authorRef = deterministicRefs[index];
+      tx.create(authorRef, {
+        canonicalName: author.canonicalName,
+        alternateNames: [],
+        nameKeys: [key],
+        sortName: author.sortName,
+        kind: author.kind,
+        status: "active",
+        mergedFrom: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+      resolved.set(key, authorRef.id);
+    }
+    return requestedKeys.map((key) => {
+      const authorId = resolved.get(key);
+      if (authorId === undefined) throw new Error(`Author ${key} was not resolved.`);
+      return authorId;
+    });
+  });
+  return {authorIds};
 });
 
 exports.workreaders = callable.https.onCall(async (

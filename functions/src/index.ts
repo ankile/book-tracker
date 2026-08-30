@@ -179,6 +179,7 @@ exports.booksapi = require("./booksapi");
 const catalog = require("./catalog");
 exports.catalog = {
   search: catalog.search,
+  ensureauthors: catalog.ensureauthors,
   workreaders: catalog.workreaders,
 };
 exports.telemetry = require("./telemetry");

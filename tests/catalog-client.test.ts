@@ -23,8 +23,10 @@ const work = {
   workId: 'work',
   canonicalTitle: 'The Left Hand of Darkness',
   alternateTitles: [],
-  authorNames: ['Ursula K. Le Guin'],
+  authors: [{authorId: 'le-guin', canonicalName: 'Ursula K. Le Guin', sortName: 'Le Guin', kind: 'person' as const}],
   coverUrl: '',
+  subjects: ['Science fiction'],
+  fiction: true,
   mergedFrom: ['old-work'],
 };
 const edition = {
@@ -32,7 +34,6 @@ const edition = {
   workId: 'work',
   isbn13: '9780441478125',
   title: 'The Left Hand of Darkness',
-  authorNames: ['Ursula K. Le Guin'],
   publisher: 'Ace',
   publishedDate: '1987',
   language: 'en',

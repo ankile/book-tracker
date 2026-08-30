@@ -40,11 +40,20 @@ const cycleWorkA = `work-cycle-a-${suffix}`
 const cycleWorkB = `work-cycle-b-${suffix}`
 const corruptExternalIndexId = `bad-external-index-${suffix}`
 const revokedSeedWorkId = `revoked-seed-${suffix}`
+const leGuinAuthorId = deterministicCatalogId('author', 'ursula k le guin')
+const butlerAuthorId = deterministicCatalogId('author', 'octavia e butler')
+const someoneElseAuthorId = deterministicCatalogId('author', 'someone else')
+const catalogTesterAuthorId = deterministicCatalogId('author', 'catalog tester')
+const kindPersonUid = `catalog-kind-person-${suffix}`
+const kindEntityUid = `catalog-kind-entity-${suffix}`
+const conflictingKindAuthorId = deterministicCatalogId('author', 'same catalog name')
 
 after(async () => {
   await Promise.all([
     db.recursiveDelete(db.doc(`users/${sharingUid}`)),
     db.recursiveDelete(db.doc(`users/${privateUid}`)),
+    db.recursiveDelete(db.doc(`users/${kindPersonUid}`)),
+    db.recursiveDelete(db.doc(`users/${kindEntityUid}`)),
     db.doc(`profiles/${username}`).delete(),
     db.doc(`profiles/${privateRaceUsername}`).delete(),
     db.doc(`works/${workId}`).delete(),
@@ -65,6 +74,11 @@ after(async () => {
     db.doc(`works/${cycleWorkB}`).delete(),
     db.doc(`externalIdIndex/${corruptExternalIndexId}`).delete(),
     db.doc(`works/${revokedSeedWorkId}`).delete(),
+    db.doc(`catalogAuthors/${leGuinAuthorId}`).delete(),
+    db.doc(`catalogAuthors/${butlerAuthorId}`).delete(),
+    db.doc(`catalogAuthors/${someoneElseAuthorId}`).delete(),
+    db.doc(`catalogAuthors/${catalogTesterAuthorId}`).delete(),
+    db.doc(`catalogAuthors/${conflictingKindAuthorId}`).delete(),
   ])
 })
 
@@ -79,14 +93,13 @@ function runScript(scriptPath: string, ...args: string[]): string {
   return result.stdout
 }
 
-function validWork(title: string, titleKey: string, authorNames: string[]) {
+function validWork(title: string, titleKey: string, authorIds: string[]) {
   const now = Timestamp.now()
   return {
     canonicalTitle: title,
     alternateTitles: [],
     titleKeys: [titleKey],
-    authorNames,
-    authorNamesLower: authorNames.map((name) => name.toLowerCase()),
+    authorIds,
     coverUrl: '',
     subjects: [],
     fiction: null,
@@ -120,6 +133,32 @@ async function migrationSource(
   }
 }
 
+test('author-kind conflicts preserve legacy rows instead of collapsing them', async () => {
+  const personUser = db.doc(`users/${kindPersonUid}`)
+  const entityUser = db.doc(`users/${kindEntityUid}`)
+  const personAuthor = personUser.collection('authors').doc('same-name')
+  const entityAuthor = entityUser.collection('authors').doc('same-name')
+  const personBook = personUser.collection('books').doc('person-book')
+  const entityBook = entityUser.collection('books').doc('entity-book')
+  await Promise.all([
+    personUser.set({uid: kindPersonUid}),
+    entityUser.set({uid: kindEntityUid}),
+    personAuthor.set({name: 'Same Catalog Name', kind: 'person'}),
+    entityAuthor.set({name: 'Same Catalog Name', kind: 'entity'}),
+    personBook.set({title: 'Person Classification', isbn: '', authorIds: ['same-name']}),
+    entityBook.set({title: 'Entity Classification', isbn: '', authorIds: ['same-name']}),
+  ])
+
+  const applied = runScript(migrationPath, '--apply')
+  assert.match(applied, /REVIEW author-kind-conflict/)
+  assert.equal((await db.doc(`catalogAuthors/${conflictingKindAuthorId}`).get()).exists, false)
+  assert.deepEqual((await personBook.get()).get('authorIds'), ['same-name'])
+  assert.deepEqual((await entityBook.get()).get('authorIds'), ['same-name'])
+  assert.equal((await personAuthor.get()).exists, true)
+  assert.equal((await entityAuthor.get()).exists, true)
+  await Promise.all([db.recursiveDelete(personUser), db.recursiveDelete(entityUser)])
+})
+
 test('catalog migration dry-runs, creates once, preserves updatedAt, and reports ISBN conflicts', async () => {
   const sharingUser = db.doc(`users/${sharingUid}`)
   const privateUser = db.doc(`users/${privateUid}`)
@@ -128,6 +167,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const privateMetadataBook = privateUser.collection('books').doc('private-metadata-copy')
   const unmatchedBook = privateUser.collection('books').doc('private-only')
   const conflictBook = sharingUser.collection('books').doc('isbn-conflict')
+  const privateConflictBook = privateUser.collection('books').doc('isbn-conflict-copy')
   const originalUpdatedAt = Timestamp.fromMillis(123_456)
   const now = Timestamp.now()
 
@@ -135,6 +175,11 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     sharingUser.set({ uid: sharingUid }),
     privateUser.set({ uid: privateUid }),
     db.doc(`profiles/${username}`).set({ uid: sharingUid, public: true }),
+    db.doc(`catalogAuthors/${someoneElseAuthorId}`).set({
+      canonicalName: 'Someone Else', alternateNames: [], nameKeys: ['someone else'],
+      sortName: 'Else', kind: 'person', status: 'active', mergedFrom: [],
+      createdAt: now, updatedAt: now,
+    }),
     sharingUser.collection('settings').doc('bookSharing').set({
       profileUsername: username,
       timeZone: 'America/Los_Angeles',
@@ -161,12 +206,12 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     }),
     unmatchedBook.set({ title: 'Parable of the Sower', isbn: '', authorIds: ['octavia'], pageCount: 264, updatedAt: originalUpdatedAt }),
     conflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 304, updatedAt: originalUpdatedAt }),
-    db.doc(`works/${conflictWorkId}`).set(validWork('A Different Book', conflictTitleKey, ['Someone Else'])),
+    privateConflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 288, updatedAt: originalUpdatedAt }),
+    db.doc(`works/${conflictWorkId}`).set(validWork('A Different Book', conflictTitleKey, [someoneElseAuthorId])),
     db.doc(`editions/${conflictEditionId}`).set({
       workId: conflictWorkId,
       isbn13: conflictIsbn,
       title: 'A Different Book',
-      authorNames: ['Someone Else'],
       publisher: '',
       publishedDate: '',
       language: '',
@@ -199,6 +244,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.match(applied, new RegExp(`SET  create works/${workId}`))
   assert.match(applied, /REVIEW existing-isbn-text-conflict/)
   assert.equal((await db.doc(`works/${workId}`).get()).data()?.coverUrl, '')
+  assert.equal((await db.doc(`catalogAuthors/${leGuinAuthorId}`).get()).get('canonicalName'), 'Ursula K. Le Guin')
   assert.equal((await db.doc(`editions/${editionId}`).get()).data()?.coverUrl, '')
   assert.deepEqual((await db.doc(`isbnIndex/${isbn}`).get()).data(), { workId, editionId })
   assert.equal((await db.doc(`isbnIndex/${privateIsbn}`).get()).exists, false)
@@ -219,6 +265,13 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const privateMetadataCopy = (await privateMetadataBook.get()).data()
   const unmatched = (await unmatchedBook.get()).data()
   const conflict = (await conflictBook.get()).data()
+  const privateConflict = (await privateConflictBook.get()).data()
+  for (const snapshot of [shared, privateCopy, privateMetadataCopy]) {
+    assert.deepEqual(snapshot?.authorIds, [leGuinAuthorId])
+  }
+  for (const snapshot of [unmatched, conflict, privateConflict]) assert.deepEqual(snapshot?.authorIds, [butlerAuthorId])
+  assert.equal((await sharingUser.collection('authors').get()).empty, true)
+  assert.equal((await privateUser.collection('authors').get()).empty, true)
   assert.equal(shared?.workId, workId)
   assert.equal(shared?.editionId, editionId)
   assert.equal(shared?.matchMethod, 'isbn')
@@ -235,7 +288,11 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     { workId: conflict?.workId, editionId: conflict?.editionId, matchMethod: conflict?.matchMethod, linkedAt: conflict?.linkedAt },
     { workId: null, editionId: null, matchMethod: null, linkedAt: null },
   )
-  for (const snapshot of [shared, privateCopy, privateMetadataCopy, unmatched, conflict]) {
+  assert.deepEqual(
+    { workId: privateConflict?.workId, editionId: privateConflict?.editionId, matchMethod: privateConflict?.matchMethod, linkedAt: privateConflict?.linkedAt },
+    { workId: null, editionId: null, matchMethod: null, linkedAt: null },
+  )
+  for (const snapshot of [shared, privateCopy, privateMetadataCopy, unmatched, conflict, privateConflict]) {
     assert.equal(snapshot?.updatedAt.toMillis(), originalUpdatedAt.toMillis())
   }
 
@@ -245,7 +302,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
 
   const latePrivateBook = privateUser.collection('books').doc('late-private-copy')
   await latePrivateBook.set({
-    title: 'The Left Hand of Darkness', isbn: latePrivateIsbn, authorIds: ['ursula'],
+    title: 'The Left Hand of Darkness', isbn: latePrivateIsbn, authorIds: [leGuinAuthorId],
     pageCount: 777, publisher: 'Still Private Press', updatedAt: originalUpdatedAt,
   })
   const lateApply = runScript(migrationPath, '--apply')
@@ -261,8 +318,8 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const raceSource = sharingUser.collection('books').doc('preferred-race-source')
   const revokedAlternateSource = privateUser.collection('books').doc('revoked-alternate-source')
   await Promise.all([
-    raceSource.set({title: 'Preferred Seed', authorIds: ['ursula'], pageCount: 100}),
-    revokedAlternateSource.set({title: 'Translated Seed', authorIds: ['ursula'], pageCount: 110}),
+    raceSource.set({title: 'Preferred Seed', authorIds: [leGuinAuthorId], pageCount: 100}),
+    revokedAlternateSource.set({title: 'Translated Seed', authorIds: [leGuinAuthorId], pageCount: 110}),
     db.doc(`profiles/${privateRaceUsername}`).set({uid: privateUid, public: true}),
     privateUser.collection('settings').doc('bookSharing').set({
       profileUsername: privateRaceUsername,
@@ -280,7 +337,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
         eligibleRaceSource,
         revokedRaceSource,
       ])
-      transaction.create(db.doc(`works/${revokedSeedWorkId}`), validWork('Revoked Seed', 'revoked seed', ['Ursula K. Le Guin']))
+      transaction.create(db.doc(`works/${revokedSeedWorkId}`), validWork('Revoked Seed', 'revoked seed', [leGuinAuthorId]))
     }),
     /is no longer eligible to publish metadata/,
   )
@@ -294,6 +351,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     /changed during migration/,
   )
   const ursulaRef = sharingUser.collection('authors').doc('ursula')
+  await ursulaRef.set({name: 'Ursula K. Le Guin', kind: 'person'})
   const authorRaceSource = await migrationSource(sharingUid, raceSource, [ursulaRef])
   await ursulaRef.update({name: 'Concurrent Author Edit'})
   await assert.rejects(
@@ -351,6 +409,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   await Promise.all([
     raceSource.delete(),
     revokedAlternateSource.delete(),
+    ursulaRef.delete(),
     db.doc(`profiles/${privateRaceUsername}`).delete(),
   ])
 
@@ -358,14 +417,19 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.doesNotMatch(audit, /^catalog\./m)
 
   await Promise.all([
+    db.doc(`catalogAuthors/${catalogTesterAuthorId}`).set({
+      canonicalName: 'Catalog Tester', alternateNames: [], nameKeys: ['catalog tester'],
+      sortName: 'Tester', kind: 'person', status: 'active', mergedFrom: [],
+      createdAt: now, updatedAt: now,
+    }),
     db.doc(`works/${cycleWorkA}`).set({
-      ...validWork('Cycle A', 'cycle a', ['Catalog Tester']),
+      ...validWork('Cycle A', 'cycle a', [catalogTesterAuthorId]),
       subjects: 'not-an-array',
       status: 'merged',
       mergedInto: cycleWorkB,
     }),
     db.doc(`works/${cycleWorkB}`).set({
-      ...validWork('Cycle B', 'cycle b', ['Catalog Tester']),
+      ...validWork('Cycle B', 'cycle b', [catalogTesterAuthorId]),
       status: 'merged',
       mergedInto: cycleWorkA,
     }),

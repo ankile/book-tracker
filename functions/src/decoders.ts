@@ -336,7 +336,7 @@ const CATALOG_CHARACTER_FOLDS: Readonly<Record<string, string>> = {
   "þ": "th",
 };
 
-function normalizeCatalogIdentity(value: string): string {
+export function normalizeCatalogIdentity(value: string): string {
   const folded = [...value.normalize("NFKD").toLowerCase()].map((character) =>
     CATALOG_CHARACTER_FOLDS[character] ?? character,
   ).join("");
@@ -347,6 +347,46 @@ function normalizeCatalogIdentity(value: string): string {
     .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
     .trim()
     .replace(/\s+/gu, " ");
+}
+
+export interface CatalogAuthorCreateInput {
+  canonicalName: string;
+  sortName: string;
+  kind: "person" | "entity" | "placeholder";
+}
+
+export interface EnsureCatalogAuthorsRequest {
+  authors: CatalogAuthorCreateInput[];
+}
+
+export function decodeEnsureCatalogAuthorsRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): EnsureCatalogAuthorsRequest {
+  const decoded = record(value, "request", fail);
+  exactKeys(decoded, ["authors"], "request", fail);
+  if (!Array.isArray(decoded.authors) || decoded.authors.length === 0 || decoded.authors.length > 20) {
+    fail("request.authors must contain between 1 and 20 authors.");
+  }
+  return {
+    authors: decoded.authors.map((entry, index) => {
+      const label = `request.authors[${index}]`;
+      const author = record(entry, label, fail);
+      exactKeys(author, ["canonicalName", "sortName", "kind"], label, fail);
+      const canonicalName = string(author.canonicalName, `${label}.canonicalName`, fail, 200).trim();
+      const sortName = string(author.sortName, `${label}.sortName`, fail, 200).trim();
+      const kind = string(author.kind, `${label}.kind`, fail, 20);
+      if (canonicalName === "" || sortName === "" ||
+          normalizeCatalogIdentity(canonicalName) === "" ||
+          normalizeCatalogIdentity(sortName) === "") {
+        fail(`${label} names must contain a letter or number.`);
+      }
+      if (kind !== "person" && kind !== "entity" && kind !== "placeholder") {
+        fail(`${label}.kind must be person, entity, or placeholder.`);
+      }
+      return {canonicalName, sortName, kind};
+    }),
+  };
 }
 
 function normalizedCatalogSearchLength(value: string): number {
@@ -419,16 +459,22 @@ export function decodeCatalogSearchRequest(
 export interface CatalogWorkInput {
   canonicalTitle: string;
   alternateTitles: string[];
-  authorNames: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
 }
 
+export interface CatalogAuthorInput {
+  canonicalName: string;
+  alternateNames: string[];
+  sortName: string;
+  kind: "person" | "entity" | "placeholder";
+}
+
 export interface CatalogEditionInput {
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -453,7 +499,7 @@ export function decodeCatalogWorkInput(
   const decoded = record(value, "work", fail);
   exactKeys(
     decoded,
-    ["canonicalTitle", "alternateTitles", "authorNames", "coverUrl", "subjects", "fiction"],
+    ["canonicalTitle", "alternateTitles", "authorIds", "coverUrl", "subjects", "fiction"],
     "work",
     fail,
   );
@@ -467,25 +513,57 @@ export function decodeCatalogWorkInput(
   if (fiction !== null && typeof fiction !== "boolean") {
     fail("work.fiction must be a boolean or null.");
   }
-  const authorNames = boundedStringArray(
-    decoded.authorNames, "work.authorNames", fail, 20, 200, 2000,
-  );
-  if (authorNames.length === 0 ||
-      authorNames.some((name) => normalizeCatalogIdentity(name) === "")) {
-    fail("work.authorNames must contain at least one valid author name.");
+  const authorIds = boundedStringArray(
+    decoded.authorIds, "work.authorIds", fail, 20, 100, 2000,
+  ).map((id, index) => catalogDocumentId(id, `work.authorIds[${index}]`, fail));
+  if (authorIds.length === 0 || new Set(authorIds).size !== authorIds.length) {
+    fail("work.authorIds must contain unique catalog author IDs.");
   }
   return {
     canonicalTitle,
     alternateTitles: boundedStringArray(
       decoded.alternateTitles, "work.alternateTitles", fail, 20, 500, 5000,
     ),
-    authorNames,
+    authorIds,
     coverUrl: optionalHttpsUrl(decoded.coverUrl, "work.coverUrl", fail),
     subjects: boundedStringArray(
       decoded.subjects, "work.subjects", fail, 25, 200, 2500,
     ),
     fiction,
   };
+}
+
+export function decodeCatalogAuthorInput(
+  value: unknown,
+  fail: DecodeFailure,
+): CatalogAuthorInput {
+  const decoded = record(value, "author", fail);
+  exactKeys(
+    decoded,
+    ["canonicalName", "alternateNames", "sortName", "kind"],
+    "author",
+    fail,
+  );
+  const canonicalName = string(
+    decoded.canonicalName, "author.canonicalName", fail, 200,
+  ).trim();
+  const sortName = string(decoded.sortName, "author.sortName", fail, 200).trim();
+  if (normalizeCatalogIdentity(canonicalName) === "" ||
+      normalizeCatalogIdentity(sortName) === "") {
+    fail("author names must contain a letter or number.");
+  }
+  const alternateNames = boundedStringArray(
+    decoded.alternateNames, "author.alternateNames", fail, 20, 200, 2000,
+  );
+  const nameKeys = [canonicalName, ...alternateNames].map(normalizeCatalogIdentity);
+  if (nameKeys.some((name) => name === "") || new Set(nameKeys).size !== nameKeys.length) {
+    fail("author canonical and alternate names must be unique after normalization.");
+  }
+  const kind = decoded.kind;
+  if (kind !== "person" && kind !== "entity" && kind !== "placeholder") {
+    fail("author.kind is unsupported.");
+  }
+  return {canonicalName, alternateNames, sortName, kind};
 }
 
 function decodeExternalIds(
@@ -515,7 +593,7 @@ export function decodeCatalogEditionInput(
   exactKeys(
     decoded,
     [
-      "isbn13", "title", "authorNames", "publisher", "publishedDate",
+      "isbn13", "title", "publisher", "publishedDate",
       "language", "translatorNames", "format", "suggestedPageCount",
       "coverUrl", "externalIds",
     ],
@@ -538,18 +616,10 @@ export function decodeCatalogEditionInput(
        suggestedPageCount <= 0 || suggestedPageCount > 100000)) {
     fail("edition.suggestedPageCount must be null or a positive safe integer at most 100000.");
   }
-  const authorNames = boundedStringArray(
-    decoded.authorNames, "edition.authorNames", fail, 20, 200, 2000,
-  );
-  if (authorNames.length === 0 ||
-      authorNames.some((name) => normalizeCatalogIdentity(name) === "")) {
-    fail("edition.authorNames must contain at least one valid author name.");
-  }
   return {
     isbn13: decoded.isbn13 === null ? null :
       checksumValidIsbn13(decoded.isbn13, "edition.isbn13", fail),
     title,
-    authorNames,
     publisher: boundedPossiblyEmptyString(
       decoded.publisher, "edition.publisher", fail, 500,
     ).trim(),
@@ -585,14 +655,6 @@ export function decodeCatalogCreateRequest(
   }
   const work = decodeCatalogWorkInput(decoded.work, fail);
   const edition = decodeCatalogEditionInput(decoded.edition, fail);
-  const workAuthors = [...new Set(work.authorNames.map(normalizeCatalogIdentity))].sort();
-  const editionAuthors = [...new Set(
-    edition.authorNames.map(normalizeCatalogIdentity),
-  )].sort();
-  if (workAuthors.length !== editionAuthors.length ||
-      workAuthors.some((author, index) => author !== editionAuthors[index])) {
-    fail("work.authorNames and edition.authorNames must identify the same authors.");
-  }
   if (boolean(
     decoded.promoteInternalCollision,
     "promoteInternalCollision",
@@ -635,6 +697,16 @@ type AdminWorkVisibility = "internal" | "searchable";
 
 export type AdminCatalogOperation =
   | {
+      type: "upsertAuthor";
+      authorId: string;
+      author: CatalogAuthorInput;
+    }
+  | {
+      type: "mergeAuthors";
+      sourceAuthorId: string;
+      targetAuthorId: string;
+    }
+  | {
       type: "createWork";
       workId: string;
       visibility: AdminWorkVisibility;
@@ -671,7 +743,7 @@ export type AdminCatalogOperation =
 
 export interface AdminCatalogExpected {
   catalog: Array<{
-    kind: "work" | "edition" | "isbn" | "external-id" | "title-index";
+    kind: "author" | "work" | "edition" | "isbn" | "external-id" | "title-index";
     id: string;
     exists: boolean;
     updatedAt: number | null;
@@ -685,6 +757,7 @@ export interface AdminCatalogExpected {
       "migration" | "admin" | null;
     linkedAt: number | null;
     decisionIsbn13: string | null;
+    decisionAuthorIds: string[] | null;
   }>;
 }
 
@@ -735,6 +808,32 @@ export function decodeAdminCatalogOperation(
 ): AdminCatalogOperation {
   const decoded = record(value, "operation", fail);
   const type = decoded.type;
+  if (type === "upsertAuthor") {
+    exactKeys(decoded, ["type", "authorId", "author"], "operation", fail);
+    return {
+      type,
+      authorId: catalogDocumentId(decoded.authorId, "operation.authorId", fail),
+      author: decodeCatalogAuthorInput(decoded.author, fail),
+    };
+  }
+  if (type === "mergeAuthors") {
+    exactKeys(
+      decoded,
+      ["type", "sourceAuthorId", "targetAuthorId"],
+      "operation",
+      fail,
+    );
+    const sourceAuthorId = catalogDocumentId(
+      decoded.sourceAuthorId, "operation.sourceAuthorId", fail,
+    );
+    const targetAuthorId = catalogDocumentId(
+      decoded.targetAuthorId, "operation.targetAuthorId", fail,
+    );
+    if (sourceAuthorId === targetAuthorId) {
+      fail("operation author merge source and target must differ.");
+    }
+    return {type, sourceAuthorId, targetAuthorId};
+  }
   if (type === "createWork") {
     exactKeys(decoded, ["type", "workId", "visibility", "work", "books"], "operation", fail);
     return {
@@ -851,12 +950,13 @@ function decodeAdminCatalogExpected(
       `expected.catalog[${index}]`,
       fail,
     );
-    if (version.kind !== "work" && version.kind !== "edition" &&
+    if (version.kind !== "author" && version.kind !== "work" && version.kind !== "edition" &&
         version.kind !== "isbn" && version.kind !== "external-id" &&
         version.kind !== "title-index") {
       fail(`expected.catalog[${index}].kind is unsupported.`);
     }
-    const kind = version.kind === "work" ? "work" as const :
+    const kind = version.kind === "author" ? "author" as const :
+      version.kind === "work" ? "work" as const :
       version.kind === "edition" ? "edition" as const :
         version.kind === "isbn" ? "isbn" as const :
           version.kind === "external-id" ? "external-id" as const :
@@ -870,15 +970,18 @@ function decodeAdminCatalogExpected(
       ),
     };
   });
-  if (!Array.isArray(decoded.books) || decoded.books.length > 100) {
-    fail("expected.books must contain at most 100 link versions.");
+  if (!Array.isArray(decoded.books) || decoded.books.length > 200) {
+    fail("expected.books must contain at most 200 link versions.");
   }
   const methods = ["isbn", "external-id", "catalog-choice", "migration", "admin"];
   const books = decoded.books.map((entry, index) => {
     const book = record(entry, `expected.books[${index}]`, fail);
     exactKeys(
       book,
-      ["uid", "bookId", "workId", "editionId", "matchMethod", "linkedAt", "decisionIsbn13"],
+      [
+        "uid", "bookId", "workId", "editionId", "matchMethod", "linkedAt",
+        "decisionIsbn13", "decisionAuthorIds",
+      ],
       `expected.books[${index}]`,
       fail,
     );
@@ -901,6 +1004,14 @@ function decodeAdminCatalogExpected(
         book.decisionIsbn13,
         `expected.books[${index}].decisionIsbn13`,
         fail,
+      ),
+      decisionAuthorIds: book.decisionAuthorIds === null ? null : boundedStringArray(
+        book.decisionAuthorIds,
+        `expected.books[${index}].decisionAuthorIds`,
+        fail,
+        20,
+        100,
+        2000,
       ),
     };
   });

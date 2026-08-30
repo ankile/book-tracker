@@ -10,6 +10,8 @@
     AdminCatalogOperation,
     AdminCatalogPreviewResponse,
     AdminCatalogScanResponse,
+    CatalogAuthorInput,
+    CatalogAuthorKind,
     CatalogEditionInput,
     CatalogWorkInput,
     EditionFormat,
@@ -59,11 +61,19 @@
   let workVisibility = $state<WorkVisibility>('internal');
   let canonicalTitle = $state('');
   let alternateTitles = $state('');
-  let authorNames = $state('');
+  let workAuthorIds = $state('');
   let workCoverUrl = $state('');
   let subjects = $state('');
   let fiction = $state<'unknown' | 'fiction' | 'nonfiction'>('unknown');
   let bookTargets = $state('');
+
+  let authorId = $state('');
+  let authorCanonicalName = $state('');
+  let authorAlternateNames = $state('');
+  let authorSortName = $state('');
+  let authorKind = $state<CatalogAuthorKind>('person');
+  let mergeSourceAuthorId = $state('');
+  let mergeTargetAuthorId = $state('');
 
   let linkTargetWorkId = $state('');
   let linkTargetEditionId = $state('');
@@ -74,7 +84,6 @@
   let editionWorkId = $state('');
   let editionIsbn = $state('');
   let editionTitle = $state('');
-  let editionAuthors = $state('');
   let editionPublisher = $state('');
   let editionPublishedDate = $state('');
   let editionLanguage = $state('');
@@ -89,9 +98,11 @@
 
   const draftFingerprint = $derived(JSON.stringify([
     operationType, workId, workVisibility, canonicalTitle, alternateTitles,
-    authorNames, workCoverUrl, subjects, fiction, bookTargets,
+    workAuthorIds, workCoverUrl, subjects, fiction, bookTargets,
+    authorId, authorCanonicalName, authorAlternateNames, authorSortName,
+    authorKind, mergeSourceAuthorId, mergeTargetAuthorId,
     linkTargetWorkId, linkTargetEditionId, mergeSources, mergeTarget,
-    editionId, editionWorkId, editionIsbn, editionTitle, editionAuthors,
+    editionId, editionWorkId, editionIsbn, editionTitle,
     editionPublisher, editionPublishedDate, editionLanguage,
     editionTranslators, editionFormat, editionPageCount, editionCoverUrl,
     editionExternalIds, repointIsbn, repointEditionId,
@@ -108,6 +119,9 @@
   });
 
   const unmatchedBooks = $derived(scan?.books.filter((book) => book.workId === null) ?? []);
+  const catalogAuthorNameById = $derived(new Map(
+    (scan?.authors ?? []).map((author) => [author.authorId, author.canonicalName]),
+  ));
   const selectedWork = $derived(scan?.works.find((work) => work.workId === selectedWorkId) ?? null);
   const selectedEditions = $derived(
     scan?.editions.filter((edition) => edition.workId === selectedWorkId) ?? [],
@@ -157,6 +171,10 @@
     return values.join('\n');
   }
 
+  function catalogAuthorNames(ids: readonly string[]): string {
+    return ids.map((id) => catalogAuthorNameById.get(id) ?? `[Missing ${id}]`).join(', ');
+  }
+
   function nullableFiction(): boolean | null {
     return fiction === 'unknown' ? null : fiction === 'fiction';
   }
@@ -169,16 +187,30 @@
 
   function workInput(): CatalogWorkInput {
     const title = canonicalTitle.trim();
-    const authors = parseAdminStringList(authorNames);
+    const authorIds = parseAdminStringList(workAuthorIds);
     if (title === '') throw new TypeError('Canonical title is required.');
-    if (authors.length === 0) throw new TypeError('At least one canonical author is required.');
+    if (authorIds.length === 0) throw new TypeError('At least one catalog author ID is required.');
     return {
       canonicalTitle: title,
       alternateTitles: parseAdminStringList(alternateTitles),
-      authorNames: authors,
+      authorIds,
       coverUrl: workCoverUrl.trim(),
       subjects: parseAdminStringList(subjects),
       fiction: nullableFiction(),
+    };
+  }
+
+  function authorInput(): CatalogAuthorInput {
+    const canonicalName = authorCanonicalName.trim();
+    const sortName = authorSortName.trim();
+    if (canonicalName === '' || sortName === '') {
+      throw new TypeError('Canonical and sort names are required.');
+    }
+    return {
+      canonicalName,
+      alternateNames: parseAdminStringList(authorAlternateNames),
+      sortName,
+      kind: authorKind,
     };
   }
 
@@ -187,9 +219,7 @@
     const normalizedIsbn = rawIsbn === '' ? null : normalizeIsbn(rawIsbn);
     if (rawIsbn !== '' && normalizedIsbn === null) throw new TypeError('Edition ISBN must have a valid checksum.');
     const title = editionTitle.trim();
-    const authors = parseAdminStringList(editionAuthors);
     if (title === '') throw new TypeError('Edition title is required.');
-    if (authors.length === 0) throw new TypeError('At least one edition author is required.');
     const pageCount = editionPageCount.trim() === '' ? null : Number(editionPageCount);
     if (pageCount !== null && (!Number.isSafeInteger(pageCount) || pageCount <= 0)) {
       throw new TypeError('Suggested page count must be a positive whole number or blank.');
@@ -197,7 +227,6 @@
     return {
       isbn13: normalizedIsbn,
       title,
-      authorNames: authors,
       publisher: editionPublisher.trim(),
       publishedDate: editionPublishedDate.trim(),
       language: editionLanguage.trim(),
@@ -210,6 +239,20 @@
   }
 
   function buildOperation(): AdminCatalogOperation {
+    if (operationType === 'upsertAuthor') {
+      return {
+        type: operationType,
+        authorId: requireId(authorId, 'Author ID'),
+        author: authorInput(),
+      };
+    }
+    if (operationType === 'mergeAuthors') {
+      return {
+        type: operationType,
+        sourceAuthorId: requireId(mergeSourceAuthorId, 'Source author ID'),
+        targetAuthorId: requireId(mergeTargetAuthorId, 'Target author ID'),
+      };
+    }
     if (operationType === 'createWork') {
       return {
         type: operationType,
@@ -419,7 +462,7 @@
     workVisibility = selectedWork.visibility;
     canonicalTitle = selectedWork.canonicalTitle;
     alternateTitles = lines(selectedWork.alternateTitles);
-    authorNames = lines(selectedWork.authorNames);
+    workAuthorIds = lines(selectedWork.authorIds);
     workCoverUrl = selectedWork.coverUrl;
     subjects = lines(selectedWork.subjects);
     fiction = selectedWork.fiction === null ? 'unknown' : selectedWork.fiction ? 'fiction' : 'nonfiction';
@@ -434,7 +477,6 @@
     editionWorkId = edition.workId;
     editionIsbn = edition.isbn13 ?? '';
     editionTitle = edition.title;
-    editionAuthors = lines(edition.authorNames);
     editionPublisher = edition.publisher;
     editionPublishedDate = edition.publishedDate;
     editionLanguage = edition.language;
@@ -443,6 +485,18 @@
     editionPageCount = edition.suggestedPageCount?.toString() ?? '';
     editionCoverUrl = edition.coverUrl;
     editionExternalIds = lines(Object.entries(edition.externalIds).map(([provider, idValue]) => `${provider}=${idValue}`));
+    document.getElementById('operation-heading')?.scrollIntoView({behavior: 'smooth'});
+  }
+
+  function editCatalogAuthor(id: string): void {
+    const author = scan?.authors.find((row) => row.authorId === id);
+    if (author === undefined || author.status !== 'active') return;
+    operationType = 'upsertAuthor';
+    authorId = author.authorId;
+    authorCanonicalName = author.canonicalName;
+    authorAlternateNames = lines(author.alternateNames);
+    authorSortName = author.sortName;
+    authorKind = author.kind;
     document.getElementById('operation-heading')?.scrollIntoView({behavior: 'smooth'});
   }
 </script>
@@ -463,6 +517,26 @@
   {#if loading && scan === null}
     <p class="loading">Loading bounded catalog scan…</p>
   {:else if scan}
+    <section class="card" aria-labelledby="catalog-authors-heading">
+      <h2 id="catalog-authors-heading">Catalog authors <span>{scan.authors.length}/{scan.limits.catalogAuthors}</span></h2>
+      <p>Works reference these entities by ID. Editing a canonical author updates every catalog display without rewriting personal books.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Author</th><th>Kind</th><th>Status</th><th>Works</th><th>Warnings</th><th></th></tr></thead>
+          <tbody>
+            {#each scan.authors as author (author.authorId)}
+              <tr>
+                <td><strong>{author.canonicalName}</strong><small>{author.sortName} · {author.authorId}</small></td>
+                <td>{author.kind}</td><td>{author.status}</td><td>{author.workCount}</td>
+                <td>{author.warnings.length === 0 ? '—' : author.warnings.join(' · ')}</td>
+                <td><button type="button" disabled={author.status !== 'active'} onclick={() => editCatalogAuthor(author.authorId)}>Edit</button></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" aria-labelledby="works-heading">
       <h2 id="works-heading">Works <span>{scan.works.length}/{scan.limits.works}</span></h2>
       <div class="table-scroll">
@@ -471,7 +545,7 @@
           <tbody>
             {#each scan.works as work (work.workId)}
               <tr>
-                <td><strong>{work.canonicalTitle}</strong><small>{work.authorNames.join(', ')} · {work.workId}</small></td>
+                <td><strong>{work.canonicalTitle}</strong><small>{catalogAuthorNames(work.authorIds)} · {work.workId}</small></td>
                 <td>{work.status}</td><td>{work.visibility}</td><td>{work.editionCount}</td><td>{work.linkedBookCount}</td>
                 <td>{work.warnings.length === 0 ? '—' : work.warnings.join(' · ')}</td>
                 <td><button type="button" onclick={() => inspectWork(work.workId)}>Inspect</button></td>
@@ -548,7 +622,7 @@
       {#if selectedWork}
         <div class="detail-heading">
           {#if selectedWork.coverUrl}<img src={selectedWork.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
-          <div><h3>{selectedWork.canonicalTitle}</h3><p>{selectedWork.authorNames.join(', ')}</p><code>{selectedWork.workId}</code></div>
+          <div><h3>{selectedWork.canonicalTitle}</h3><p>{catalogAuthorNames(selectedWork.authorIds)}</p><code>{selectedWork.workId}</code></div>
           <button type="button" onclick={editSelectedWork}>Edit this work</button>
         </div>
         <dl class="facts">
@@ -578,17 +652,31 @@
     <p>Every action is previewed without writes. Apply repeats the stale-state checks and asks for explicit confirmation.</p>
     <label for="operation-type">Operation</label>
     <select id="operation-type" bind:value={operationType}>
+      <option value="upsertAuthor">Create or edit author</option><option value="mergeAuthors">Merge authors</option>
       <option value="createWork">Create work</option><option value="linkBooks">Link or unlink books</option>
       <option value="mergeWorks">Merge works</option><option value="editWork">Edit work</option>
       <option value="upsertEdition">Create or edit edition</option><option value="repointIsbn">Repoint ISBN</option>
     </select>
 
-    {#if operationType === 'createWork' || operationType === 'editWork'}
+    {#if operationType === 'upsertAuthor'}
+      <div class="form-grid">
+        <label>Author ID<input bind:value={authorId} autocomplete="off" /></label>
+        <label>Kind<select bind:value={authorKind}><option value="person">Person</option><option value="entity">Entity</option><option value="placeholder">Placeholder</option></select></label>
+        <label>Canonical name<input bind:value={authorCanonicalName} /></label>
+        <label>Sort name<input bind:value={authorSortName} /></label>
+        <label class="wide">Alternate names, one per line<textarea bind:value={authorAlternateNames}></textarea></label>
+      </div>
+    {:else if operationType === 'mergeAuthors'}
+      <div class="form-grid">
+        <label>Source author ID<input bind:value={mergeSourceAuthorId} /></label>
+        <label>Canonical target author ID<input bind:value={mergeTargetAuthorId} /></label>
+      </div>
+    {:else if operationType === 'createWork' || operationType === 'editWork'}
       <div class="form-grid">
         <label>Work ID<input bind:value={workId} autocomplete="off" /></label>
         <label>Visibility<select bind:value={workVisibility}><option value="internal">Internal</option><option value="searchable">Searchable</option></select></label>
         <label class="wide">Canonical title<input bind:value={canonicalTitle} /></label>
-        <label>Authors, one per line<textarea bind:value={authorNames}></textarea></label>
+        <label>Catalog author IDs, one per line<textarea bind:value={workAuthorIds}></textarea></label>
         <label>Alternate titles, one per line<textarea bind:value={alternateTitles}></textarea></label>
         <label>Cover URL<input type="url" bind:value={workCoverUrl} /></label>
         <label>Subjects, one per line<textarea bind:value={subjects}></textarea></label>
@@ -610,7 +698,6 @@
       <div class="form-grid">
         <label>Edition ID<input bind:value={editionId} /></label><label>Work ID<input bind:value={editionWorkId} /></label>
         <label class="wide">Edition title<input bind:value={editionTitle} /></label>
-        <label>Authors, one per line<textarea bind:value={editionAuthors}></textarea></label>
         <label>Translators, one per line<textarea bind:value={editionTranslators}></textarea></label>
         <label>ISBN<input bind:value={editionIsbn} inputmode="numeric" /></label><label>Suggested pages<input bind:value={editionPageCount} inputmode="numeric" /></label>
         <label>Publisher<input bind:value={editionPublisher} /></label><label>Published date<input bind:value={editionPublishedDate} /></label>

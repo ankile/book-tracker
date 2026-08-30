@@ -97,16 +97,17 @@ test('resolveChip matches loaded authors by name, else mints a new person chip w
   );
 });
 
-test('resolveChip matches a renamed author by its creation-time id', () => {
-  // Doc created as "J.R.R. Tolkien", later renamed: id stays, name changes.
+test('resolveChip matches a shared author by an alternate catalog name', () => {
   const authors = [
-    { id: 'j.r.r. tolkien', name: 'John Ronald Reuel Tolkien', nameLower: 'john ronald reuel tolkien', kind: 'person' },
+    {
+      id: 'catalog-tolkien', name: 'John Ronald Reuel Tolkien',
+      nameLower: 'john ronald reuel tolkien', alternateNames: ['J.R.R. Tolkien'],
+      kind: 'person',
+    },
   ];
-  // Typing the pre-rename name must resolve to the renamed doc, not mint a
-  // colliding "new" author that would revert the rename.
   assert.deepEqual(
     resolveChip('J.R.R. Tolkien', authors),
-    { id: 'j.r.r. tolkien', name: 'John Ronald Reuel Tolkien' },
+    { id: 'catalog-tolkien', name: 'John Ronald Reuel Tolkien' },
   );
 });
 

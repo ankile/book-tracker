@@ -16,17 +16,20 @@ import {
   AdminCatalogApplyRequest,
   AdminCatalogExpected,
   AdminCatalogOperation,
+  CatalogAuthorInput,
   CatalogEditionInput,
   CatalogWorkInput,
 } from "./decoders";
 import {externalIndexId, normalizeCatalogText, normalizeCatalogTitle} from "./catalog";
 
 const MAX_WORKS = 200;
+const MAX_CATALOG_AUTHORS = 500;
 const MAX_EDITIONS = 500;
 const BOOK_PAGE_SIZE = 100;
 const MAX_ISBN_INDEXES = 500;
 const MAX_EXTERNAL_ID_INDEXES = 500;
-const MAX_AUTHORS_PER_BOOK = 20;
+const MAX_AUTHORS_PER_WORK = 20;
+const MAX_AUTHORS_PER_PERSONAL_BOOK = 6;
 const MAX_TOUCHED_DOCUMENTS = 200;
 const MAX_LINKED_EDITION_BOOKS = 100;
 const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
@@ -41,9 +44,17 @@ type MatchMethod = "isbn" | "external-id" | "catalog-choice" |
 
 interface WorkData extends CatalogWorkInput {
   titleKeys: string[];
-  authorNamesLower: string[];
   visibility: Visibility;
   status: WorkStatus;
+  mergedInto?: string;
+  mergedFrom: string[];
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+interface AuthorData extends CatalogAuthorInput {
+  nameKeys: string[];
+  status: "active" | "merged";
   mergedInto?: string;
   mergedFrom: string[];
   createdAt: Timestamp;
@@ -64,14 +75,14 @@ interface LinkState {
 }
 
 interface CatalogVersion {
-  kind: "work" | "edition" | "isbn" | "external-id" | "title-index";
+  kind: "author" | "work" | "edition" | "isbn" | "external-id" | "title-index";
   id: string;
   exists: boolean;
   updatedAt: number | null;
 }
 
 interface PlannedChange {
-  kind: "work" | "edition" | "isbn" | "external-id" | "book" | "title-index";
+  kind: "author" | "work" | "edition" | "isbn" | "external-id" | "book" | "title-index";
   id: string;
   action: "create" | "update" | "delete";
   before: Record<string, unknown> | null;
@@ -160,8 +171,8 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
     throw new Error(`Invalid work ${snapshot.ref.path}.`);
   }
   assertStoredKeys(data, [
-    "canonicalTitle", "alternateTitles", "titleKeys", "authorNames",
-    "authorNamesLower", "coverUrl", "subjects", "fiction", "visibility",
+    "canonicalTitle", "alternateTitles", "titleKeys", "authorIds",
+    "coverUrl", "subjects", "fiction", "visibility",
     "status", "mergedInto", "mergedFrom", "createdAt", "updatedAt",
   ], snapshot.ref.path);
   const mergedInto = data.mergedInto;
@@ -172,12 +183,42 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
     canonicalTitle: data.canonicalTitle,
     alternateTitles: strings(data.alternateTitles, `${snapshot.ref.path}.alternateTitles`),
     titleKeys: strings(data.titleKeys, `${snapshot.ref.path}.titleKeys`),
-    authorNames: strings(data.authorNames, `${snapshot.ref.path}.authorNames`),
-    authorNamesLower: strings(data.authorNamesLower, `${snapshot.ref.path}.authorNamesLower`),
+    authorIds: strings(data.authorIds, `${snapshot.ref.path}.authorIds`),
     coverUrl: data.coverUrl,
     subjects: strings(data.subjects, `${snapshot.ref.path}.subjects`),
     fiction: data.fiction,
     visibility: data.visibility,
+    status: data.status,
+    ...(mergedInto === undefined ? {} : {mergedInto}),
+    mergedFrom: strings(data.mergedFrom ?? [], `${snapshot.ref.path}.mergedFrom`),
+    createdAt: assertTimestamp(data.createdAt, `${snapshot.ref.path}.createdAt`),
+    updatedAt: assertTimestamp(data.updatedAt, `${snapshot.ref.path}.updatedAt`),
+  };
+}
+
+function authorFrom(snapshot: DocumentSnapshot): AuthorData {
+  if (!snapshot.exists) failedPrecondition("Catalog author does not exist.", "catalog-invariant");
+  const data = snapshot.data();
+  if (data === undefined || typeof data.canonicalName !== "string" ||
+      typeof data.sortName !== "string" ||
+      !["person", "entity", "placeholder"].includes(data.kind) ||
+      (data.status !== "active" && data.status !== "merged")) {
+    throw new Error(`Invalid catalog author ${snapshot.ref.path}.`);
+  }
+  assertStoredKeys(data, [
+    "canonicalName", "alternateNames", "nameKeys", "sortName", "kind",
+    "status", "mergedInto", "mergedFrom", "createdAt", "updatedAt",
+  ], snapshot.ref.path);
+  const mergedInto = data.mergedInto;
+  if (mergedInto !== undefined && typeof mergedInto !== "string") {
+    throw new Error(`Invalid catalog author redirect ${snapshot.ref.path}.`);
+  }
+  return {
+    canonicalName: data.canonicalName,
+    alternateNames: strings(data.alternateNames, `${snapshot.ref.path}.alternateNames`),
+    nameKeys: strings(data.nameKeys, `${snapshot.ref.path}.nameKeys`),
+    sortName: data.sortName,
+    kind: data.kind,
     status: data.status,
     ...(mergedInto === undefined ? {} : {mergedInto}),
     mergedFrom: strings(data.mergedFrom ?? [], `${snapshot.ref.path}.mergedFrom`),
@@ -200,7 +241,7 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
     throw new Error(`Invalid edition ${snapshot.ref.path}.`);
   }
   assertStoredKeys(data, [
-    "workId", "isbn13", "title", "authorNames", "publisher",
+    "workId", "isbn13", "title", "publisher",
     "publishedDate", "language", "translatorNames", "format",
     "suggestedPageCount", "coverUrl", "externalIds", "createdAt", "updatedAt",
   ], snapshot.ref.path);
@@ -208,7 +249,6 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
     workId: data.workId,
     isbn13: data.isbn13,
     title: data.title,
-    authorNames: strings(data.authorNames, `${snapshot.ref.path}.authorNames`),
     publisher: data.publisher,
     publishedDate: data.publishedDate,
     language: data.language,
@@ -236,8 +276,38 @@ function workInputData(
   return {
     ...work,
     titleKeys,
-    authorNamesLower: work.authorNames.map(normalizeCatalogText),
     visibility,
+    status: "active",
+    mergedFrom: existing?.mergedFrom ?? [],
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+function authorInputData(
+  author: CatalogAuthorInput,
+  now: Timestamp,
+  existing?: AuthorData,
+): AuthorData {
+  const canonicalKey = normalizeCatalogText(author.canonicalName);
+  const alternateByKey = new Map<string, string>();
+  const candidates = existing !== undefined &&
+    normalizeCatalogText(existing.canonicalName) !== canonicalKey ?
+    [...author.alternateNames, existing.canonicalName] : author.alternateNames;
+  for (const name of candidates) {
+    const key = normalizeCatalogText(name);
+    if (key !== canonicalKey && !alternateByKey.has(key)) alternateByKey.set(key, name);
+  }
+  const alternateNames = [...alternateByKey.values()];
+  if (alternateNames.length > 20) {
+    failedPrecondition("A catalog author may have at most 20 alternate names.", "catalog-invariant");
+  }
+  return {
+    ...author,
+    alternateNames,
+    nameKeys: [...new Set(
+      [author.canonicalName, ...alternateNames].map(normalizeCatalogText),
+    )],
     status: "active",
     mergedFrom: existing?.mergedFrom ?? [],
     createdAt: existing?.createdAt ?? now,
@@ -271,7 +341,7 @@ function wireWork(work: WorkData): Record<string, unknown> {
   return {
     canonicalTitle: work.canonicalTitle,
     alternateTitles: work.alternateTitles,
-    authorNames: work.authorNames,
+    authorIds: work.authorIds,
     coverUrl: work.coverUrl,
     subjects: work.subjects,
     fiction: work.fiction,
@@ -283,12 +353,25 @@ function wireWork(work: WorkData): Record<string, unknown> {
   };
 }
 
+function wireAuthor(author: AuthorData): Record<string, unknown> {
+  return {
+    canonicalName: author.canonicalName,
+    alternateNames: author.alternateNames,
+    nameKeys: author.nameKeys,
+    sortName: author.sortName,
+    kind: author.kind,
+    status: author.status,
+    mergedInto: author.mergedInto ?? null,
+    mergedFrom: author.mergedFrom,
+    updatedAt: author.updatedAt.toMillis(),
+  };
+}
+
 function wireEdition(edition: EditionData): Record<string, unknown> {
   return {
     workId: edition.workId,
     isbn13: edition.isbn13,
     title: edition.title,
-    authorNames: edition.authorNames,
     publisher: edition.publisher,
     publishedDate: edition.publishedDate,
     language: edition.language,
@@ -408,9 +491,16 @@ function bookVersion(
   snapshot: DocumentSnapshot,
   target: AdminBookTarget,
   decisionIsbn13: string | null = null,
+  decisionAuthorIds: string[] | null = null,
 ) {
   if (!snapshot.exists) failedPrecondition("Personal book no longer exists.", "catalog-invariant");
-  return {uid: target.uid, bookId: target.bookId, ...linkFrom(snapshot), decisionIsbn13};
+  return {
+    uid: target.uid,
+    bookId: target.bookId,
+    ...linkFrom(snapshot),
+    decisionIsbn13,
+    decisionAuthorIds,
+  };
 }
 
 async function validateLinkOwners(
@@ -495,6 +585,30 @@ async function activeWork(
     failedPrecondition("Operation target must be an active work.", "catalog-invariant");
   }
   return {snapshot, work};
+}
+
+async function activeAuthor(
+  reader: PlanReader,
+  db: Firestore,
+  authorId: string,
+): Promise<{snapshot: DocumentSnapshot; author: AuthorData}> {
+  const snapshot = await one(reader, db.collection("catalogAuthors").doc(authorId));
+  const author = authorFrom(snapshot);
+  if (author.status !== "active") {
+    failedPrecondition("Operation target must be an active catalog author.", "catalog-invariant");
+  }
+  return {snapshot, author};
+}
+
+async function validateWorkAuthors(
+  reader: PlanReader,
+  db: Firestore,
+  authorIds: readonly string[],
+): Promise<CatalogVersion[]> {
+  const authors = await Promise.all(authorIds.map((authorId) =>
+    activeAuthor(reader, db, authorId),
+  ));
+  return authors.map(({snapshot}) => versionOf("author", snapshot));
 }
 
 async function titleIndexChanges(
@@ -717,7 +831,148 @@ async function planOperation(
   let books: AdminCatalogExpected["books"] = [];
   const changes: PlannedChange[] = [];
 
-  if (operation.type === "createWork") {
+  if (operation.type === "upsertAuthor") {
+    const ref = db.collection("catalogAuthors").doc(operation.authorId);
+    const snapshot = await one(reader, ref);
+    catalog.push(versionOf("author", snapshot));
+    const current = snapshot.exists ? authorFrom(snapshot) : undefined;
+    if (current?.status === "merged") {
+      failedPrecondition("Merged catalog authors cannot be edited.", "catalog-invariant");
+    }
+    if (current === undefined) {
+      await ensureCollectionCapacity(
+        reader,
+        db.collection("catalogAuthors"),
+        MAX_CATALOG_AUTHORS,
+        1,
+        "authors",
+      );
+    }
+    const next = authorInputData(operation.author, now, current);
+    const nameMatches = await many(reader, db.collection("catalogAuthors")
+      .where("nameKeys", "array-contains-any", next.nameKeys)
+      .limit(MAX_CATALOG_AUTHORS + 1));
+    if (nameMatches.size > MAX_CATALOG_AUTHORS) operationTooLarge();
+    for (const match of nameMatches.docs) {
+      if (match.id === operation.authorId) continue;
+      const matchingAuthor = authorFrom(match);
+      if (matchingAuthor.status === "merged" &&
+          matchingAuthor.mergedInto === operation.authorId) continue;
+      failedPrecondition(
+        "Another catalog author already owns one of these names.",
+        "catalog-invariant",
+      );
+    }
+    changes.push(change(
+      "author",
+      ref,
+      current === undefined ? "create" : "update",
+      current === undefined ? null : wireAuthor(current),
+      wireAuthor(next),
+      {type: current === undefined ? "create" : "set", data: {...next}},
+    ));
+  } else if (operation.type === "mergeAuthors") {
+    const source = await activeAuthor(reader, db, operation.sourceAuthorId);
+    const target = await activeAuthor(reader, db, operation.targetAuthorId);
+    catalog.push(
+      versionOf("author", source.snapshot),
+      versionOf("author", target.snapshot),
+    );
+    const absorbed = [...new Set([source.snapshot.id, ...source.author.mergedFrom])];
+    const mergedFrom = [...new Set([...target.author.mergedFrom, ...absorbed])];
+    if (mergedFrom.length > 29 || mergedFrom.includes(target.snapshot.id)) {
+      failedPrecondition("A canonical author may have at most 29 aliases.", "catalog-invariant");
+    }
+    const aliases = await Promise.all(absorbed.map((authorId) =>
+      one(reader, db.collection("catalogAuthors").doc(authorId)),
+    ));
+    for (const alias of aliases) {
+      const old = authorFrom(alias);
+      catalog.push(versionOf("author", alias));
+      const next: AuthorData = {
+        ...old,
+        status: "merged",
+        mergedInto: target.snapshot.id,
+        mergedFrom: [],
+        updatedAt: now,
+      };
+      changes.push(change(
+        "author", alias.ref, "update", wireAuthor(old), wireAuthor(next),
+        {type: "set", data: {...next}},
+      ));
+    }
+    const aliasCandidates = [
+      ...target.author.alternateNames,
+      source.author.canonicalName,
+      ...source.author.alternateNames,
+    ];
+    const canonicalKey = normalizeCatalogText(target.author.canonicalName);
+    const aliasesByKey = new Map<string, string>();
+    for (const name of aliasCandidates) {
+      const key = normalizeCatalogText(name);
+      if (key !== canonicalKey && !aliasesByKey.has(key)) aliasesByKey.set(key, name);
+    }
+    const nextTarget = authorInputData({
+      canonicalName: target.author.canonicalName,
+      alternateNames: [...aliasesByKey.values()],
+      sortName: target.author.sortName,
+      kind: target.author.kind,
+    }, now, {...target.author, mergedFrom});
+    nextTarget.mergedFrom = mergedFrom;
+    if (nextTarget.alternateNames.length > 20) {
+      failedPrecondition("Merged author aliases exceed the catalog limit.", "catalog-invariant");
+    }
+    changes.push(change(
+      "author",
+      target.snapshot.ref,
+      "update",
+      wireAuthor(target.author),
+      wireAuthor(nextTarget),
+      {type: "set", data: {...nextTarget}},
+    ));
+    const affectedWorks = new Map<string, DocumentSnapshot>();
+    for (const authorId of absorbed) {
+      const rows = await many(reader, db.collection("works")
+        .where("authorIds", "array-contains", authorId)
+        .limit(MAX_WORKS + 1));
+      if (rows.size > MAX_WORKS) operationTooLarge();
+      for (const snapshot of rows.docs) affectedWorks.set(snapshot.id, snapshot);
+    }
+    for (const snapshot of affectedWorks.values()) {
+      const old = workFrom(snapshot);
+      catalog.push(versionOf("work", snapshot));
+      const next = {
+        ...old,
+        authorIds: [...new Set(old.authorIds.map((authorId) =>
+          absorbed.includes(authorId) ? target.snapshot.id : authorId,
+        ))],
+        updatedAt: now,
+      };
+      changes.push(change(
+        "work", snapshot.ref, "update", wireWork(old), wireWork(next),
+        {type: "set", data: next},
+      ));
+    }
+    const affectedBooks = await many(reader, db.collectionGroup("books")
+      .where("authorIds", "array-contains-any", absorbed)
+      .limit(MAX_TOUCHED_DOCUMENTS + 1));
+    if (affectedBooks.size > MAX_TOUCHED_DOCUMENTS) operationTooLarge();
+    books = affectedBooks.docs.map((snapshot) => {
+      const path = snapshot.ref.path.split("/");
+      if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
+        failedPrecondition("Catalog author is referenced outside a personal book.", "catalog-invariant");
+      }
+      const ids = strings(snapshot.get("authorIds"), `${snapshot.ref.path}.authorIds`);
+      const nextIds = [...new Set(ids.map((authorId) =>
+        absorbed.includes(authorId) ? target.snapshot.id : authorId,
+      ))];
+      changes.push(change(
+        "book", snapshot.ref, "update", {authorIds: ids}, {authorIds: nextIds},
+        {type: "set", data: {authorIds: nextIds}},
+      ));
+      return bookVersion(snapshot, {uid: path[1], bookId: path[3]}, null, ids);
+    });
+  } else if (operation.type === "createWork") {
     const ref = db.collection("works").doc(operation.workId);
     const snapshot = await one(reader, ref);
     catalog.push(versionOf("work", snapshot));
@@ -725,6 +980,7 @@ async function planOperation(
     await ensureCollectionCapacity(
       reader, db.collection("works"), MAX_WORKS, 1, "works",
     );
+    catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
     if (operation.visibility === "searchable" && operation.books.length > 0) {
       const selected = await Promise.all(operation.books.map(({uid, bookId}) =>
         one(reader, db.doc(`users/${uid}/books/${bookId}`)),
@@ -774,6 +1030,7 @@ async function planOperation(
   } else if (operation.type === "editWork") {
     const current = await activeWork(reader, db, operation.workId);
     catalog.push(versionOf("work", current.snapshot));
+    catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
     if (current.work.visibility === "internal" && operation.visibility === "searchable") {
       const ids = [current.snapshot.id, ...current.work.mergedFrom];
       const linked = await many(reader, db.collectionGroup("books")
@@ -854,7 +1111,7 @@ async function planOperation(
     const nextTarget = workInputData({
       canonicalTitle: target.work.canonicalTitle,
       alternateTitles,
-      authorNames: target.work.authorNames,
+      authorIds: target.work.authorIds,
       coverUrl: target.work.coverUrl,
       subjects: target.work.subjects,
       fiction: target.work.fiction,
@@ -1205,6 +1462,7 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
   let bookQuery = db.collectionGroup("books").orderBy(FieldPath.documentId());
   if (bookCursor !== null) bookQuery = bookQuery.startAfter(db.doc(bookCursor));
   const [
+    catalogAuthorRows,
     workRows,
     editionRows,
     bookRows,
@@ -1212,12 +1470,14 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     externalRows,
   ] =
     await Promise.all([
+      db.collection("catalogAuthors").limit(MAX_CATALOG_AUTHORS + 1).get(),
       db.collection("works").limit(MAX_WORKS + 1).get(),
       db.collection("editions").limit(MAX_EDITIONS + 1).get(),
       bookQuery.limit(BOOK_PAGE_SIZE + 1).get(),
       db.collection("isbnIndex").limit(MAX_ISBN_INDEXES + 1).get(),
       db.collection("externalIdIndex").limit(MAX_EXTERNAL_ID_INDEXES + 1).get(),
     ]);
+  ensureBound(catalogAuthorRows, MAX_CATALOG_AUTHORS, "catalog authors");
   ensureBound(workRows, MAX_WORKS, "works");
   ensureBound(editionRows, MAX_EDITIONS, "editions");
   ensureBound(isbnRows, MAX_ISBN_INDEXES, "ISBN indexes");
@@ -1226,6 +1486,9 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
   const nextBookCursor = bookRows.size > BOOK_PAGE_SIZE ?
     bookPage[bookPage.length - 1]?.ref.path ?? null : null;
 
+  const catalogAuthorById = new Map(catalogAuthorRows.docs.map((snapshot) =>
+    [snapshot.id, authorFrom(snapshot)],
+  ));
   const workById = new Map(workRows.docs.map((snapshot) =>
     [snapshot.id, workFrom(snapshot)],
   ));
@@ -1245,6 +1508,22 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     if (work.mergedInto === undefined) return null;
     return workById.get(work.mergedInto)?.status === "active" ? work.mergedInto : null;
   };
+  const resolvedCatalogAuthorId = (authorId: string): string | null => {
+    const author = catalogAuthorById.get(authorId);
+    if (author === undefined) return null;
+    if (author.status === "active") return authorId;
+    if (author.mergedInto === undefined) return null;
+    return catalogAuthorById.get(author.mergedInto)?.status === "active" ?
+      author.mergedInto : null;
+  };
+  const catalogAuthorNames = (work: WorkData): string[] =>
+    [...new Set(work.authorIds.flatMap((authorId) => {
+      const resolvedId = resolvedCatalogAuthorId(authorId);
+      if (resolvedId === null) return [];
+      const author = catalogAuthorById.get(resolvedId);
+      return author === undefined || author.kind === "placeholder" ? [] :
+        [author.canonicalName];
+    }))];
   const validSegment = (value: unknown): value is string =>
     typeof value === "string" && value !== "" && !value.includes("/") &&
     Buffer.byteLength(value, "utf8") <= 1500;
@@ -1260,60 +1539,26 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
   ).map(({id}) => id));
 
   const authorProblems = new Set<string>();
-  const authorRefs = new Map<string, DocumentReference>();
   for (const snapshot of bookPage) {
-    const path = snapshot.ref.path.split("/");
-    if (path.length !== 4 || !validSegment(path[1])) continue;
     const ids = snapshot.get("authorIds");
     if (ids === undefined) continue;
-    if (!Array.isArray(ids) || ids.length > MAX_AUTHORS_PER_BOOK ||
-        ids.some((id) => !validSegment(id))) {
+    if (!Array.isArray(ids) || ids.length > MAX_AUTHORS_PER_PERSONAL_BOOK ||
+        new Set(ids).size !== ids.length || ids.some((id) => !validSegment(id))) {
       authorProblems.add(snapshot.ref.path);
       continue;
     }
     for (const id of ids) {
-      const ref = db.doc(`users/${path[1]}/authors/${id}`);
-      authorRefs.set(ref.path, ref);
+      if (resolvedCatalogAuthorId(id) === null) authorProblems.add(snapshot.ref.path);
     }
   }
-  const firstAuthors = authorRefs.size === 0 ? [] :
-    await db.getAll(...authorRefs.values());
-  const authors = new Map<string, {name: string; kind: string; targetId: string | null}>();
-  const targetRefs = new Map<string, DocumentReference>();
-  for (const snapshot of firstAuthors) {
-    const path = snapshot.ref.path.split("/");
-    const name = snapshot.get("name");
-    const kind = snapshot.get("kind");
-    const retirement = snapshot.get("retirement");
-    if (!snapshot.exists || path.length !== 4 || typeof name !== "string" ||
-        typeof kind !== "string") continue;
-    const targetId = retirement?.reason === "merged" &&
-      validSegment(retirement.targetId) ? retirement.targetId : null;
-    authors.set(`${path[1]}\0${snapshot.id}`, {name, kind, targetId});
-    if (targetId !== null) {
-      const ref = db.doc(`users/${path[1]}/authors/${targetId}`);
-      targetRefs.set(ref.path, ref);
-    }
-  }
-  const targetAuthors = targetRefs.size === 0 ? [] : await db.getAll(...targetRefs.values());
-  for (const snapshot of targetAuthors) {
-    const path = snapshot.ref.path.split("/");
-    const name = snapshot.get("name");
-    const kind = snapshot.get("kind");
-    if (snapshot.exists && path.length === 4 && typeof name === "string" &&
-        typeof kind === "string") {
-      authors.set(`${path[1]}\0${snapshot.id}`, {name, kind, targetId: null});
-    }
-  }
-  const authorNames = (snapshot: DocumentSnapshot, uid: string): string[] => {
+  const authorNames = (snapshot: DocumentSnapshot): string[] => {
     const ids = snapshot.get("authorIds");
     if (Array.isArray(ids)) return [...new Set(ids.flatMap((id) => {
       if (typeof id !== "string") return [];
-      const first = authors.get(`${uid}\0${id}`);
-      const resolved = first?.targetId === null || first === undefined ? first :
-        authors.get(`${uid}\0${first.targetId}`);
+      const resolvedId = resolvedCatalogAuthorId(id);
+      const resolved = resolvedId === null ? undefined : catalogAuthorById.get(resolvedId);
       if (resolved === undefined) authorProblems.add(snapshot.ref.path);
-      return resolved === undefined || resolved.kind === "placeholder" ? [] : [resolved.name];
+      return resolved === undefined || resolved.kind === "placeholder" ? [] : [resolved.canonicalName];
     }))];
     const legacy = snapshot.get("authors");
     if (Array.isArray(legacy)) return legacy.flatMap((entry) =>
@@ -1367,7 +1612,7 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     const title = typeof rawTitle === "string" ? rawTitle : "(malformed title)";
     const pageCount = typeof rawPageCount === "number" && Number.isFinite(rawPageCount) ?
       rawPageCount : 0;
-    const names = authorNames(snapshot, uid);
+    const names = authorNames(snapshot);
     let anomaly: string | null = !liveUsers.has(uid) ? "orphaned data" :
       malformedLink ? "malformed catalog link" :
         malformedBibliography ? "malformed bibliography" :
@@ -1424,7 +1669,9 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     const normalizedAuthors = new Set(book.authorNames.map(normalizeCatalogText));
     const candidates = [...workById].filter(([, work]) =>
       work.status === "active" && work.titleKeys.includes(key) &&
-      work.authorNames.some((name) => normalizedAuthors.has(normalizeCatalogText(name))),
+      catalogAuthorNames(work).some((name) =>
+        normalizedAuthors.has(normalizeCatalogText(name)),
+      ),
     );
     if (candidates.length > 0) findings.push({
       code: "unmatched-title-author-candidate",
@@ -1441,7 +1688,7 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
         tokenAgreement(key, titleKey),
       ));
       const authorScore = Math.max(0, ...book.authorNames.flatMap((bookAuthor) =>
-        work.authorNames.map((workAuthor) => tokenAgreement(bookAuthor, workAuthor)),
+        catalogAuthorNames(work).map((workAuthor) => tokenAgreement(bookAuthor, workAuthor)),
       ));
       const score = titleScore * 0.75 + authorScore * 0.25;
       return titleScore >= 0.5 && authorScore >= 0.5 && score >= 0.6 ? [{id, score}] : [];
@@ -1503,6 +1750,7 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     }
   }
   const workWarnings = new Map<string, string[]>();
+  const catalogAuthorWorkCounts = new Map<string, number>();
   for (const [id, work] of workById) {
     const warnings: string[] = [];
     if (work.status === "merged" &&
@@ -1511,6 +1759,17 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     }
     if (work.status === "active" && work.mergedFrom.length > 29) {
       warnings.push("too many aliases");
+    }
+    for (const authorId of work.authorIds) {
+      const resolvedId = resolvedCatalogAuthorId(authorId);
+      if (resolvedId === null) warnings.push(`broken author reference ${authorId}`);
+      else {
+        catalogAuthorWorkCounts.set(
+          resolvedId,
+          (catalogAuthorWorkCounts.get(resolvedId) ?? 0) + 1,
+        );
+        if (resolvedId !== authorId) warnings.push(`stale author alias ${authorId}`);
+      }
     }
     workWarnings.set(id, warnings);
     for (const warning of warnings) findings.push({
@@ -1522,10 +1781,50 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
       books: [],
     });
   }
+  const catalogAuthorWarnings = new Map<string, string[]>();
+  const activeAuthorNameOwners = new Map<string, string[]>();
+  for (const [id, author] of catalogAuthorById) {
+    const warnings: string[] = [];
+    if (author.status === "merged" &&
+        (author.mergedInto === undefined ||
+         catalogAuthorById.get(author.mergedInto)?.status !== "active")) {
+      warnings.push("broken redirect");
+    }
+    if (author.status === "active" && author.mergedFrom.length > 29) {
+      warnings.push("too many aliases");
+    }
+    const expectedNameKeys = [...new Set(
+      [author.canonicalName, ...author.alternateNames].map(normalizeCatalogText),
+    )];
+    if (JSON.stringify(author.nameKeys) !== JSON.stringify(expectedNameKeys)) {
+      warnings.push("name index mismatch");
+    }
+    if (author.status === "active") {
+      for (const key of author.nameKeys) {
+        activeAuthorNameOwners.set(key, [...(activeAuthorNameOwners.get(key) ?? []), id]);
+      }
+    }
+    catalogAuthorWarnings.set(id, warnings);
+  }
+  for (const [nameKey, authorIds] of activeAuthorNameOwners) {
+    if (authorIds.length < 2) continue;
+    findings.push({
+      code: "duplicate-author-name",
+      severity: "error",
+      message: `Active catalog authors share normalized name ${nameKey}.`,
+      workIds: [],
+      editionIds: [],
+      books: [],
+    });
+    for (const authorId of authorIds) {
+      catalogAuthorWarnings.get(authorId)?.push(`duplicate name ${nameKey}`);
+    }
+  }
   const identities = new Map<string, string[]>();
   for (const [id, work] of workById) {
     if (work.status !== "active") continue;
-    const authorsKey = [...work.authorNamesLower].sort().join("\0");
+    const authorsKey = work.authorIds.map((authorId) => resolvedCatalogAuthorId(authorId) ?? authorId)
+      .sort().join("\0");
     for (const titleKey of work.titleKeys) {
       const key = `${titleKey}\0${authorsKey}`;
       identities.set(key, [...(identities.get(key) ?? []), id]);
@@ -1548,6 +1847,12 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     });
   }
   return {
+    authors: [...catalogAuthorById].map(([authorId, author]) => ({
+      authorId,
+      ...wireAuthor(author),
+      workCount: catalogAuthorWorkCounts.get(authorId) ?? 0,
+      warnings: catalogAuthorWarnings.get(authorId) ?? [],
+    })),
     works: [...workById].map(([workId, work]) => ({
       workId,
       ...wireWork(work),
@@ -1566,12 +1871,13 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
       (finding) => finding.books.length > 0,
     ),
     limits: {
+      catalogAuthors: MAX_CATALOG_AUTHORS,
       works: MAX_WORKS,
       editions: MAX_EDITIONS,
       books: BOOK_PAGE_SIZE,
       isbnIndexes: MAX_ISBN_INDEXES,
       externalIdIndexes: MAX_EXTERNAL_ID_INDEXES,
-      authors: MAX_AUTHORS_PER_BOOK,
+      authorsPerWork: MAX_AUTHORS_PER_WORK,
     },
   };
 }

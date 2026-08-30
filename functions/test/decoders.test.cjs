@@ -66,7 +66,7 @@ test("catalog request decoders are exact and bounded", () => {
     work: {
       canonicalTitle: "The Book",
       alternateTitles: [],
-      authorNames: ["Ada Lovelace"],
+      authorIds: ["ada-lovelace"],
       coverUrl: "https://example.test/work.jpg",
       subjects: [],
       fiction: null,
@@ -74,7 +74,6 @@ test("catalog request decoders are exact and bounded", () => {
     edition: {
       isbn13: "9780000000002",
       title: "The Book",
-      authorNames: ["Ada Lovelace"],
       publisher: "Publisher",
       publishedDate: "2026",
       language: "en",
@@ -100,7 +99,7 @@ test("catalog request decoders are exact and bounded", () => {
   for (const broken of [
     {...request, work: {...request.work, canonicalTitle: "!!!"}},
     {...request, edition: {...request.edition, title: "!!!"}},
-    {...request, work: {...request.work, authorNames: []}},
+    {...request, work: {...request.work, authorIds: []}},
     {...request, edition: {...request.edition, authorNames: []}},
     {...request, edition: {...request.edition, authorNames: ["Grace Hopper"]}},
     {...request, promoteInternalCollision: true},
@@ -111,18 +110,17 @@ test("catalog request decoders are exact and bounded", () => {
   ]) {
     assert.throws(() => decoders.decodeCatalogCreateRequest(broken));
   }
-  assert.deepEqual(decoders.decodeCatalogCreateRequest({
-    ...request,
-    work: {...request.work, authorNames: ["Søren Kierkegaard", "Ada Lovelace"]},
-    edition: {...request.edition, authorNames: ["Ada Lovelace", "Soren Kierkegaard"]},
-  }).edition.authorNames, ["Ada Lovelace", "Soren Kierkegaard"]);
+  assert.deepEqual(decoders.decodeEnsureCatalogAuthorsRequest({authors: [{
+    canonicalName: "Ada Lovelace", sortName: "Lovelace", kind: "person",
+  }]}), {authors: [{canonicalName: "Ada Lovelace", sortName: "Lovelace", kind: "person"}]});
+  assert.throws(() => decoders.decodeEnsureCatalogAuthorsRequest({authors: []}));
   assert.throws(
     () => decoders.decodeWorkReadersRequest({workId: "works/catalog"}),
     /one Firestore document id/,
   );
 });
 
-test("admin catalog decoders admit only the six bounded tagged operations", () => {
+test("admin catalog decoders admit only the bounded tagged operations", () => {
   assert.deepEqual(decoders.decodeAdminCatalogScanRequest({}), {bookCursor: null});
   assert.deepEqual(decoders.decodeAdminCatalogScanRequest({
     bookCursor: "users/reader/books/book-one",
@@ -139,7 +137,7 @@ test("admin catalog decoders admit only the six bounded tagged operations", () =
   const work = {
     canonicalTitle: "Catalog Work",
     alternateTitles: [],
-    authorNames: ["Ada Author"],
+    authorIds: ["ada-author"],
     coverUrl: "",
     subjects: [],
     fiction: null,
@@ -147,7 +145,6 @@ test("admin catalog decoders admit only the six bounded tagged operations", () =
   const edition = {
     isbn13: null,
     title: "Catalog Work",
-    authorNames: ["Ada Author"],
     publisher: "",
     publishedDate: "",
     language: "en",
@@ -158,6 +155,11 @@ test("admin catalog decoders admit only the six bounded tagged operations", () =
     externalIds: {},
   };
   const operations = [
+    {
+      type: "upsertAuthor", authorId: "ada-author",
+      author: {canonicalName: "Ada Author", alternateNames: [], sortName: "Author", kind: "person"},
+    },
+    {type: "mergeAuthors", sourceAuthorId: "source-author", targetAuthorId: "target-author"},
     {
       type: "createWork", workId: "new-work", visibility: "internal", work,
       books: [{uid: "owner", bookId: "book"}],
@@ -194,7 +196,7 @@ test("admin catalog decoders admit only the six bounded tagged operations", () =
     }],
     books: [{
       uid: "owner", bookId: "book", workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null,
+      matchMethod: null, linkedAt: null, decisionIsbn13: null, decisionAuthorIds: null,
     }],
   };
   assert.deepEqual(decoders.decodeAdminCatalogApplyRequest({
@@ -202,6 +204,21 @@ test("admin catalog decoders admit only the six bounded tagged operations", () =
     operation: operations[1],
     expected,
   }), {operationId, operation: operations[1], expected});
+  const bookVersion = expected.books[0];
+  assert.doesNotThrow(() => decoders.decodeAdminCatalogApplyRequest({
+    operationId,
+    operation: operations[1],
+    expected: {...expected, books: Array.from({length: 200}, (_, index) => ({
+      ...bookVersion, bookId: `book-${index}`,
+    }))},
+  }));
+  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
+    operationId,
+    operation: operations[1],
+    expected: {...expected, books: Array.from({length: 201}, (_, index) => ({
+      ...bookVersion, bookId: `book-${index}`,
+    }))},
+  }), /at most 200/);
   assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
     operationId,
     operation: operations[1],

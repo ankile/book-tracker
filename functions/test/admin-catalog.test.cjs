@@ -80,6 +80,10 @@ function installCatalogStore(t) {
         const actual = rows.get(reference.path)?.[field];
         if (operator === "==") return actual === value;
         if (operator === "in") return value.includes(actual);
+        if (operator === "array-contains") return Array.isArray(actual) && actual.includes(value);
+        if (operator === "array-contains-any") {
+          return Array.isArray(actual) && value.some((candidate) => actual.includes(candidate));
+        }
         assert.fail(`unsupported query operator ${operator}`);
       }))
       .slice(0, query.maximum)
@@ -141,6 +145,12 @@ function installCatalogStore(t) {
     },
   }));
   write(ref(`users/${adminUid}`), {uid: adminUid});
+  const now = Timestamp.fromMillis(1000);
+  write(ref("catalogAuthors/ada-author"), {
+    canonicalName: "Ada Author", alternateNames: [], nameKeys: ["ada author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
   return {rows, ref, write};
 }
 
@@ -150,8 +160,7 @@ function activeWork(title, overrides = {}) {
     canonicalTitle: title,
     alternateTitles: [],
     titleKeys: [title.toLowerCase().replace(/^the /, "")],
-    authorNames: ["Ada Author"],
-    authorNamesLower: ["ada author"],
+    authorIds: ["ada-author"],
     coverUrl: "",
     subjects: [],
     fiction: true,
@@ -170,7 +179,6 @@ function edition(workId, overrides = {}) {
     workId,
     isbn13: null,
     title: "Edition Title",
-    authorNames: ["Ada Author"],
     publisher: "",
     publishedDate: "",
     language: "en",
@@ -194,7 +202,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
     work: {
       canonicalTitle: "The New Work",
       alternateTitles: [],
-      authorNames: ["Ada Author"],
+      authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -208,6 +216,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
   assert.equal(store.rows.has("works/new-work"), false);
   assert.equal(preview.touchedDocuments, 3);
   assert.deepEqual(preview.expected.catalog.map(({kind, exists}) => [kind, exists]), [
+    ["author", true],
     ["title-index", false],
     ["work", false],
   ]);
@@ -248,7 +257,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
     work: {
       canonicalTitle: "Over Capacity",
       alternateTitles: [],
-      authorNames: ["Ada Author"],
+      authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -268,7 +277,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
     work: {
       canonicalTitle: "Repaired Work",
       alternateTitles: [],
-      authorNames: ["Ada Author"],
+      authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -361,7 +370,7 @@ test("searchable promotion requires consent provenance and rejects private work 
     work: {
       canonicalTitle: "Private Derived Work",
       alternateTitles: [],
-      authorNames: ["Ada Author"],
+      authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -391,7 +400,7 @@ test("searchable promotion requires consent provenance and rejects private work 
     work: {
       canonicalTitle: "Internal Work",
       alternateTitles: [],
-      authorNames: ["Ada Author"],
+      authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -445,7 +454,6 @@ test("moving an edition atomically relinks its books and identifier indexes", as
     edition: {
       isbn13: "9780000000002",
       title: "Edition Title",
-      authorNames: ["Ada Author"],
       publisher: "",
       publishedDate: "",
       language: "en",
@@ -491,7 +499,7 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
     editionId: "shared-edition",
     workId: "new-work",
     edition: {
-      isbn13: "9780000000002", title: "Edition Title", authorNames: ["Ada Author"],
+      isbn13: "9780000000002", title: "Edition Title",
       publisher: "", publishedDate: "", language: "en", translatorNames: [],
       format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
     },

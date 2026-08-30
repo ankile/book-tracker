@@ -1,5 +1,6 @@
 import type { Book } from '../interfaces/book.ts';
 import type {
+  CatalogAuthorSummary,
   CatalogEditionSummary,
   CatalogSearchRequest,
   CatalogSearchResponse,
@@ -88,19 +89,37 @@ function editionFormat(value: unknown, context: string): CatalogEditionSummary['
   return value;
 }
 
+function decodeAuthorSummary(value: unknown, context: string): CatalogAuthorSummary {
+  const data = record(value, context);
+  exactKeys(data, ['authorId', 'canonicalName', 'sortName', 'kind'], context);
+  if (data.kind !== 'person' && data.kind !== 'entity' && data.kind !== 'placeholder') {
+    throw new TypeError(`${context}.kind: expected a supported catalog author kind`);
+  }
+  return {
+    authorId: nonEmptyString(data.authorId, `${context}.authorId`),
+    canonicalName: nonEmptyString(data.canonicalName, `${context}.canonicalName`),
+    sortName: nonEmptyString(data.sortName, `${context}.sortName`),
+    kind: data.kind,
+  };
+}
+
 function decodeWorkSummary(value: unknown, context: string): CatalogWorkSummary {
   const data = record(value, context);
   exactKeys(
     data,
-    ['workId', 'canonicalTitle', 'alternateTitles', 'authorNames', 'coverUrl', 'mergedFrom'],
+    ['workId', 'canonicalTitle', 'alternateTitles', 'authors', 'coverUrl', 'subjects', 'fiction', 'mergedFrom'],
     context,
   );
   return {
     workId: nonEmptyString(data.workId, `${context}.workId`),
     canonicalTitle: nonEmptyString(data.canonicalTitle, `${context}.canonicalTitle`),
     alternateTitles: strings(data.alternateTitles, `${context}.alternateTitles`),
-    authorNames: strings(data.authorNames, `${context}.authorNames`),
+    authors: Array.isArray(data.authors)
+      ? data.authors.map((author, index) => decodeAuthorSummary(author, `${context}.authors[${index}]`))
+      : (() => { throw new TypeError(`${context}.authors: expected an array`); })(),
     coverUrl: string(data.coverUrl, `${context}.coverUrl`),
+    subjects: strings(data.subjects, `${context}.subjects`),
+    fiction: data.fiction === null ? null : boolean(data.fiction, `${context}.fiction`),
     mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
   };
 }
@@ -108,7 +127,7 @@ function decodeWorkSummary(value: unknown, context: string): CatalogWorkSummary 
 function decodeEditionSummary(value: unknown, context: string): CatalogEditionSummary {
   const data = record(value, context);
   exactKeys(data, [
-    'editionId', 'workId', 'isbn13', 'title', 'authorNames', 'publisher',
+    'editionId', 'workId', 'isbn13', 'title', 'publisher',
     'publishedDate', 'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
   ], context);
   const suggestedPageCount = nullableNumber(data.suggestedPageCount, `${context}.suggestedPageCount`);
@@ -120,7 +139,6 @@ function decodeEditionSummary(value: unknown, context: string): CatalogEditionSu
     workId: nonEmptyString(data.workId, `${context}.workId`),
     isbn13: nullableString(data.isbn13, `${context}.isbn13`),
     title: nonEmptyString(data.title, `${context}.title`),
-    authorNames: strings(data.authorNames, `${context}.authorNames`),
     publisher: string(data.publisher, `${context}.publisher`),
     publishedDate: string(data.publishedDate, `${context}.publishedDate`),
     language: string(data.language, `${context}.language`),

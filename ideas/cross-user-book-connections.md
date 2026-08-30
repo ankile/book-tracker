@@ -1,6 +1,6 @@
 # Cross-user book connections
 
-Status: implemented and fully validated on `codex/cross-user-book-connections`; not deployed. The design and implementation were reviewed against the repository by Codex, Claude Code, Claude Fable, and independent security/privacy and integrity/migration audit agents on 2026-08-29. The complete unit, Firestore/Auth/Functions emulator, browser, build, artifact, bundle, and dependency-audit validation pipeline passes.
+Status: implemented and release-validated on `codex/cross-user-book-connections`; not deployed. The original work design was reviewed against the repository by Codex, Claude Code, Claude Fable, and independent security/privacy and integrity/migration audit agents on 2026-08-29/30. The shared-author revision incorporates every actionable audit finding; both independent re-audits are clean.
 
 ## Goal
 
@@ -18,7 +18,7 @@ The shared connection must not replace a user's own book record. Each user keeps
 - Forcing users to accept catalog metadata or another reader's page count.
 - Blocking duplicate user records. A user may add a work again for a reread.
 - Exposing private libraries or raw session documents to other clients.
-- Requiring an online catalog call before an offline book can be saved.
+- Requiring an online catalog call when every selected author already exists in the cached shared catalog. Creating a genuinely new shared author does require the author callable to succeed.
 - Modeling the contents of anthologies, omnibuses, or box sets. The collection may be a catalog work, but it will not link to each contained work in the first version.
 
 ## Current constraints
@@ -26,7 +26,7 @@ The shared connection must not replace a user's own book record. Each user keeps
 - Personal books live at `users/{uid}/books/{bookId}` and Firestore Rules allow only the owner to read them.
 - Reading events live below each personal book in its `updates` subcollection.
 - A personal book already stores user-owned `title`, `isbn`, and `pageCount` fields. It also stores aggregate `pagesRead` and `timeRead` values.
-- Authors are normalized only within a user account. Author IDs cannot identify the same author across users.
+- Legacy authors are normalized only within a user account. The migration must consolidate those IDs before the shared catalog becomes the live source.
 - The client writes through Firestore's offline queue. A new shared-catalog feature must preserve that behavior.
 - Public profiles expose aggregate reading statistics, not the titles and dates of individual books.
 - Cached clients overwrite profile documents as a whole. New sharing consent must not be stored as a field that an old client can silently remove or recreate.
@@ -35,9 +35,12 @@ The shared connection must not replace a user's own book record. Each user keeps
 
 ## Main design decision
 
-Use three layers of identity:
+Use four layers of identity:
 
 ```text
+Catalog author
+  A shared person, entity, or placeholder referenced by works and personal books.
+
 Work
   The intellectual work, such as The Unbearable Lightness of Being.
 
@@ -52,6 +55,29 @@ The catalog answers which work and edition a record refers to. The personal book
 
 ## Proposed data model
 
+### `catalogAuthors/{authorId}`
+
+```ts
+interface CatalogAuthor {
+  canonicalName: string;
+  alternateNames: string[];
+  nameKeys: string[];
+  sortName: string;
+  kind: 'person' | 'entity' | 'placeholder';
+  status: 'active' | 'merged';
+  mergedInto?: string;
+  mergedFrom: string[];
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+```
+
+Authors are one verified-account-readable, server-owned catalog. Both works and personal books reference these IDs. There is no live per-user author shadow. A bounded `catalog-ensureauthors` callable resolves exact normalized names and aliases, returns existing canonical IDs, and creates only missing rows. Ordinary users cannot rename or merge authors. Admin merges compress redirects and rewrite every affected work and personal book in the same previewed operation.
+
+The author callable meters normalized names rather than calls: at most 60 requested names per account, with a 500-per-hour global breaker charged only for names that are actually missing. Creation transactionally refuses to take the shared catalog above its 500-row operating capacity. Exact names already in the catalog cannot consume the global creation breaker.
+
+The product does not treat the fact that a user reads a particular author as sensitive. This permits shared autocomplete and migration of author identity from every resolvable library. It does not relax the separate consent requirement for publishing a work or exposing reading dates and speed.
+
 ### `works/{workId}`
 
 ```ts
@@ -59,8 +85,7 @@ interface Work {
   canonicalTitle: string;
   alternateTitles: string[];
   titleKeys: string[];
-  authorNames: string[];
-  authorNamesLower: string[];
+  authorIds: string[];
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
@@ -73,7 +98,9 @@ interface Work {
 }
 ```
 
-`alternateTitles` includes translated titles and known title variants. `titleKeys` holds normalized canonical and alternate titles produced by one deterministic normalizer. Author names are plain global catalog metadata in the first version. A global author entity would add complexity without helping the first work-matching flow.
+`alternateTitles` includes translated titles and known title variants. `titleKeys` holds normalized canonical and alternate titles produced by one deterministic normalizer. `authorIds` always resolve through `catalogAuthors`; a work never stores canonical author names as independent strings.
+
+Work-level inherited metadata includes the canonical title, authors, fallback cover, subjects or tags, and fiction/non-fiction classification. These describe the intellectual work and provide defaults when a user selects a match.
 
 `visibility` separates internal curation from user-facing discovery. An internal work may connect private records and appear to administrators. A linked owner sees only their personal book fields and a neutral link marker until promotion. Catalog search never returns the internal work. A searchable work may appear in suggestions. A user who explicitly creates or selects a shared catalog work accepts that bibliographic disclosure. An administrator may promote an internal work after external verification and the consent rule defined below.
 
@@ -101,7 +128,6 @@ interface Edition {
   workId: string;
   isbn13: string | null;
   title: string;
-  authorNames: string[];
   publisher: string;
   publishedDate: string;
   language: string;
@@ -115,7 +141,7 @@ interface Edition {
 }
 ```
 
-An edition's page count is a suggestion. It never overwrites a personal book after linking. Language, translators, and abridged or revised status explain legitimate differences between editions and help prevent bad comparisons.
+An edition's page count is a suggestion. It never overwrites a personal book after linking. The edition also owns its edition-specific title and cover, plus publisher, date, language, translators, format, ISBN, and external identifiers. Language, translators, and abridged or revised status explain legitimate differences between editions and help prevent bad comparisons. Authors, subjects, and fiction classification inherit from the work rather than being duplicated on each edition.
 
 Editions are top-level documents rather than work subcollections. Moving an edition changes its `workId` without changing `editionId`, so personal books do not acquire dangling edition links during a work merge or correction. The invariant is that the edition's resolved `workId` equals the personal book's resolved `workId`.
 
@@ -155,13 +181,15 @@ The existing personal fields stay unchanged:
 - `timeRead`
 - metadata fields
 
+When a catalog suggestion is selected, the form fills only fields the user has not already chosen. It prefers edition title, page count, cover, publisher, and publication date; falls back to the work title and cover; and fills authors, subjects, and fiction classification from the work. These are one-time defaults. Later catalog edits never overwrite a personal book's page count, cover, tags, fiction choice, or other metadata. A Work may retain up to 20 authors, but a personal shadow inherits at most the first six because that is the safe Firestore Rules budget for an atomic link plus page correction; the UI states when it truncated the inherited list.
+
 ## Catalog ownership and correction
 
-Clients may get an active, searchable catalog work or one of its editions by known ID. They may not list the catalog. Security Rules enforce visibility on direct gets. Search goes through a bounded, quota-protected callable and returns only active, searchable works. Open sign-up means a signed-in stranger must not be able to enumerate the union of users' libraries.
+Clients may get an active, searchable catalog work or one of its editions by known ID. They may not list works or editions. Security Rules enforce visibility on direct gets. Search goes through a bounded, quota-protected callable and returns only active, searchable works. Verified, live accounts may list shared authors because author-reading privacy is explicitly out of scope. Open sign-up still means a stranger must not be able to enumerate the union of users' works or libraries. Personal books admit at most six unique author IDs so Rules can verify every referenced shared document within Firestore's access and expression budgets, including a simultaneous page-count correction and Work/Edition link. One-hop merged aliases remain valid for cached offline writes and are canonicalized on the next metadata edit; deleted legacy per-user IDs are rejected.
 
 Client link writes may target only active, searchable works and editions whose `workId` matches. Administrators may link private records to internal works through Admin SDK callables. A personal book linked to an internal work renders from its own fields with a neutral `Linked` marker because the browser cannot read the internal catalog document.
 
-A callable owns catalog creation, ISBN mappings, work merges, and edition changes. This prevents ordinary book edits from rewriting shared metadata. Linking a personal book reveals that its bibliographic work exists in the shared catalog, so the UI must state that plainly. Migration must not seed catalog works solely from a private user's library without consent. It may seed the operator's library, opted-in libraries, and external bibliographic records.
+A callable owns catalog creation, ISBN mappings, work merges, and edition changes. This prevents ordinary book edits from rewriting shared metadata. The narrow author-resolution callable may create a missing author but cannot edit or merge one. Linking a personal book reveals that its bibliographic work exists in the shared catalog, so the UI must state that plainly. Migration must not seed catalog works solely from a private user's library without consent. It may seed the operator's library, opted-in libraries, and external bibliographic records. Author identity may be seeded from any resolvable personal book under the relaxed author privacy decision.
 
 The user must be able to change or remove a personal book's link. A bad link should be repairable without editing progress or sessions.
 
@@ -204,7 +232,7 @@ After selection:
 - Show the selected work as a removable link below the form.
 - Do not change an existing personal book's page count when catalog metadata changes.
 
-If catalog lookup is unavailable, save an unlinked personal book through the existing offline path. Offer `Find matching work` after reconnection.
+If catalog lookup is unavailable, save an unlinked personal book through the existing offline path. Offer `Find matching work` after reconnection. Existing cached shared authors remain offline-capable. A genuinely new author is resolved before the optimistic write starts; if the browser is offline or the callable refuses the request, keep the modal and draft open and queue no partial book.
 
 Normalize any valid ISBN during `prepareBookWrite`, even when the user did not press the current `Look up` button. Preserve a non-empty invalid value for the existing `/isbns` repair flow, but never use it for catalog identity. Catalog matching uses only a checksum-valid normalized ISBN-13.
 
@@ -229,9 +257,9 @@ interface CatalogSearchResult {
 }
 ```
 
-Exact ISBN lookup reads `isbnIndex/{isbn13}`. Exact title matching uses `titleKeys`; prefix search uses a bounded range query over `workTitleIndex.titleKey`. The function scores that small candidate set with the supplied authors and returns only active, searchable works. One `normalizeTitle` implementation defines punctuation, whitespace, diacritics, and supported leading-article handling. The client, function, and migration must share it or use agreement fixtures that fail when their copies diverge. Do not scan every personal book or expose personal-book metadata through search.
+Exact ISBN lookup reads `isbnIndex/{isbn13}`. Exact title matching uses `titleKeys`; prefix search uses a bounded range query over `workTitleIndex.titleKey`. The function scores that small candidate set with the supplied authors and returns only active, searchable works. A title-and-author result selects the Work only and never assigns an arbitrary Edition; Edition metadata is inherited automatically only from exact identifier evidence. One `normalizeTitle` implementation defines punctuation, whitespace, diacritics, and supported leading-article handling. The client, function, and migration must share it or use agreement fixtures that fail when their copies diverge. Do not scan every personal book or expose personal-book metadata through search.
 
-Protect catalog search with the repository's existing callable quota mechanism, a fixed instance cap, the functions runtime service account, strict request decoding, and a bounded result count. Do not return reader counts from search unless those counts include only users who opted in.
+Protect catalog search with the repository's existing callable quota mechanism, a fixed instance cap, the functions runtime service account, strict request decoding, and a bounded result count. The implemented boundary is 60 searches per account per hour and a 100-title-search-per-hour global spend breaker. Exact ISBN and external-ID hits return before the global breaker; only the bounded title-index path consumes it. Cache author hydration within one request so repeated candidates and response construction read each shared author only once. Do not return reader counts from search unless those counts include only users who opted in.
 
 At the current scale, Firestore is enough. Revisit a dedicated search service only when prefix queries and alternate-title indexes stop returning good candidates or the catalog grows large enough that reads become material.
 
@@ -367,23 +395,26 @@ The purpose of this tool is to keep catalog identity healthy across the complete
 
 Do not return current page, finished status, pages read, time read, timers, reading dates, session counts, profile visibility, or raw update rows. Those fields do not help catalog matching.
 
-Books under deleted or phantom users appear as anomalies and are excluded from automatic candidate operations. Author resolution follows user-scoped merge redirects and removes placeholder authors such as `Various Authors` from identity scoring.
+Books under deleted or phantom users appear as anomalies and are excluded from automatic work-candidate operations. Author resolution follows shared catalog redirects and removes placeholder authors such as `Various Authors` from work identity scoring.
 
 ### Admin view
 
 Use one page with sections rather than four separate screens:
 
-1. `Works` lists active and merged works with edition count, linked personal-book count, visibility, and audit warnings.
-2. `Unmatched books` lists unlinked personal books across users, with exact and likely candidate works.
-3. `Review findings` groups deterministic scan results such as duplicate ISBN mappings, suspected duplicate works, broken links, edition mismatches, and conflicting titles or authors.
-4. `Work detail` edits one selected work, its editions, aliases, visibility, and links. It also shows the personal books currently attached to that work.
+1. `Authors` lists active and merged shared authors, alternate spellings, work counts, and audit warnings.
+2. `Works` lists active and merged works with edition count, linked personal-book count, visibility, and audit warnings.
+3. `Unmatched books` lists unlinked personal books across users, with exact and likely candidate works.
+4. `Review findings` groups deterministic scan results such as duplicate authors, ISBN mappings, suspected duplicate works, broken links, edition mismatches, and conflicting titles or authors.
+5. `Work detail` edits one selected work, its editions, aliases, visibility, and links. It also shows the personal books currently attached to that work.
 
 One bounded `admin-catalogscan` endpoint computes the sections on demand at the current scale. The first release scans at most 200 works and 500 each of editions, ISBN indexes, and external-ID indexes. Create/upsert transactions refuse to cross those capacities; repair edits, merges, repoints, and unlinking remain available at capacity. Raise the caps only together with paginated or materialized review state. Do not create a persistent review queue until scans become slow enough to justify synchronization work.
 
 ### Admin actions
 
-Use six tagged operation types:
+Use eight tagged operation types:
 
+- `upsertAuthor` creates or edits a shared author, preserves a prior canonical name as an alias on rename, and rejects a normalized name already owned by another active author.
+- `mergeAuthors` compresses shared author aliases and rewrites all affected works and personal books.
 - `createWork` creates an internal or searchable work from selected unmatched books.
 - `linkBooks` sets a target work and optional edition, moves or splits records by choosing a different target, or unlinks by choosing null.
 - `mergeWorks` compresses source aliases into one active target and rejects a result with more than 29 merged IDs.
@@ -393,7 +424,7 @@ Use six tagged operation types:
 
 Link and repair operations change only catalog-link fields on personal books. They never rewrite the user's title, authors, ISBN, page count, progress, timestamps that drive reading-list order, or reading sessions. If a personal metadata correction is ever needed, design it as a separate explicit operation with its own preview and consent policy.
 
-The first version keeps canonical author names on works. The admin UI may group normalized names to reveal likely spelling variants across works, but an edit changes only the selected work unless the administrator selects other works explicitly. Do not rewrite user-scoped author documents. Add global catalog-author entities only if repeated author corrections, author pages, or author merges justify that extra identity layer.
+Works reference shared author IDs. The admin UI owns canonical-name changes, alternate spellings, kind and sort-name corrections, and merges. A merge retains one-hop redirects and rewrites all affected works and personal books before retiring the source. Personal author documents are migration-only legacy state and are removed once no personal book references them.
 
 An internal work becomes searchable only through an explicit promotion action. External verification proves the bibliographic metadata but does not prove consent to disclose that a reader in this app chose the book. Promotion is allowed only when the work has a linked record from the operator or from a library with current live sharing consent. A historical ISBN, external-ID, catalog-choice, migration, or admin link is not durable disclosure consent. Otherwise obtain consent first.
 
@@ -426,7 +457,7 @@ Keep admin functions in `functions/src/admin.ts` so every endpoint inherits the 
 - `admin-catalogpreview`
 - `admin-catalogapply`
 
-The final Firebase export names follow the repository's grouped export convention. All three use `ADMIN_MAX_INSTANCES`, currently 2, so read-heavy scans can queue behind one another. Add every endpoint to the exact function-export, runtime identity, instance-cap, secret-binding, and audit tests. Mutation decoders use the six-operation tagged union rather than accepting arbitrary Firestore patches or paths.
+The final Firebase export names follow the repository's grouped export convention. All three use `ADMIN_MAX_INSTANCES`, currently 2, so read-heavy scans can queue behind one another. Add every endpoint to the exact function-export, runtime identity, instance-cap, secret-binding, and audit tests. Mutation decoders use the eight-operation tagged union rather than accepting arbitrary Firestore patches or paths.
 
 ## Migration
 
@@ -436,13 +467,15 @@ Use deterministic IDs for migration-created works and editions, based on a revie
 
 Suggested passes:
 
-1. Build candidate groups using valid ISBNs.
-2. Add normalized title and resolved author-name matches. Follow author merge redirects and exclude retired placeholder authors such as `Various Authors` from identity evidence.
-3. Add reviewed alternate-title and translation mappings.
-4. Print ambiguous groups without linking them.
-5. Create works, editions, and ISBN index entries from the operator's library, opted-in libraries, and external bibliographic records. Do not seed unique catalog entries solely from private users.
-6. Add `workId`, `editionId`, and migration provenance to unambiguous personal books when the matching work already exists. Add explicit null link fields to every unmatched personal book. Linking a private record does not make its reader visible.
-7. Run the database audit and a second migration dry run.
+1. Resolve every legacy personal-author redirect and create deterministic shared author rows, including placeholders used by personal books.
+2. Build candidate work groups using valid ISBNs.
+3. Add normalized title and resolved non-placeholder author matches.
+4. Add reviewed alternate-title and translation mappings.
+5. Print ambiguous groups without linking them.
+6. Create works, editions, and ISBN index entries from the operator's library, opted-in libraries, and external bibliographic records. Do not seed unique works solely from private users.
+7. Rewrite resolvable personal-book `authorIds` to shared IDs, including explicit reviewed spelling corrections. Every reviewed group must carry positional `authorKinds`; decoding keeps each name and kind paired through normalized deduplication and sorting, so an entity or placeholder never silently becomes a person. Author-kind conflicts, personal shadows over six authors, and work identities over 20 authors remain unlinked and retain their legacy rows for review. Add `workId`, `editionId`, and migration provenance to unambiguous personal books when the matching work already exists, and explicit null link fields to every unmatched personal book. Linking a private record does not make its reader visible.
+8. Delete legacy personal-author documents only after a transaction confirms every book under that user has shared IDs and no legacy author field.
+9. Run the database audit and a second migration dry run.
 
 The 18 known cross-user works should become explicit migration fixtures or acceptance assertions. These include spelling and translation cases such as:
 
@@ -461,6 +494,7 @@ Run the initial migration, audit, and repair pass before building `/admin/catalo
 ### Phase 1: catalog foundation
 
 - Add work, edition, and catalog-link interfaces and decoders.
+- Add shared author interfaces, redirects, strict decoding, and the bounded author-resolution callable.
 - Add catalog collections, Rules, indexes, and callable request decoders. Deploy the `books.workId` indexes before dependent functions.
 - Add both `COLLECTION` and `COLLECTION_GROUP` ascending scopes to the `books.workId` field override so owner queries and cross-user queries both retain an index.
 - Extend the page-count clamp allowlist and add catalog reference checks without crossing Firestore's rules document-access limit.
@@ -468,6 +502,7 @@ Run the initial migration, audit, and repair pass before building `/admin/catalo
 - Implement exact ISBN lookup and bounded searchable-title suggestions. Ordinary accounts may only select an existing searchable work; catalog creation stays server-owned and administrator-only.
 - Extend the add and edit modal with catalog selection.
 - Preserve offline saving with nullable catalog links.
+- Preserve offline saving for books that use cached shared authors; explain that a new shared author needs a connection.
 - Add a way to relink and unlink a personal book.
 - Write link fields on edit only when the user changed them.
 
@@ -479,7 +514,7 @@ Run the initial migration, audit, and repair pass before building `/admin/catalo
 - Run the production migration, audit, and second dry run before starting the admin UI.
 - Add `/admin/catalog` with bounded work, unmatched-book, review, and detail views.
 - Refactor `adminCallable` to require a decoder and optional recent-auth policy.
-- Add `catalogscan`, `catalogpreview`, and `catalogapply` with six tagged mutation types and a 200-document transaction cap.
+- Add `catalogscan`, `catalogpreview`, and `catalogapply` with eight tagged mutation types and a 200-document transaction cap.
 - Require recent authentication for admin catalog mutations and record recovery audit details in the mutation transaction.
 - Extend the database audit with catalog and redirect invariants.
 - Confirm the 18 known overlaps resolve as expected.
@@ -626,7 +661,7 @@ Run the initial migration, audit, and repair pass before building `/admin/catalo
 - Client-writable catalog links allow a user to choose the wrong work. This is a data-quality problem, not a cross-user read permission. Keep catalog metadata server-owned and add repair tools.
 - Exact reading dates reveal more than current public profiles. Separate opt-in consent is worth the extra UI and Rules work.
 - Page-based speed remains imperfect across typography and formats. Show active time and calendar span beside it, and avoid a single fastest-reader leaderboard.
-- Catalog existence can disclose that somebody introduced a rare title. Prevent enumeration, state this consequence when linking, and do not seed unique works from private libraries without consent.
+- Catalog work existence can disclose that somebody introduced a rare title. Prevent work enumeration, state this consequence when linking, and do not seed unique works from private libraries without consent. Shared author enumeration is accepted by product policy.
 - A work can accumulate more merge aliases than one Firestore `in` query accepts. Reject merges above 29 aliases so every reader and admin query stays within one `in` query.
 - The admin catalog can inspect bibliographic fields from private books. Keep its response narrower than the existing Admin SDK access, audit every mutation, and do not turn it into a reading-history browser.
 - Reversible audit details add storage and may contain private book titles. Restrict them to the administrator, bound their size, and retain them only for the defined recovery window.
@@ -644,6 +679,6 @@ Run the initial migration, audit, and repair pass before building `/admin/catalo
 
 The implementation uses authenticated work pages, exact day-level dates only after explicit consent, hidden ISBNs on reader rows, one explicitly selected owned public profile, administrator-only catalog creation/edits/merges, separate personal-book records for rereads, a 15-minute recent-authentication window for admin mutations, and explicit promotion of internal works. Authentication controls access to the page but is not treated as secrecy because sign-up remains open.
 
-The admin console scans personal books in bounded pages, suggests exact ISBN/title and likely matches, and supports create, edit, link/unlink, merge, move-edition, and repoint-ISBN operations through preview/apply transactions. It can edit canonical author-name metadata on a work; a separate global author entity remains out of scope. Invalid low-level catalog shapes are release-blocking `db-audit.ts` findings and require an operator repair rather than an arbitrary document editor in the browser.
+The admin console scans personal books in bounded pages, suggests exact ISBN/title and likely matches, and supports author create/edit/merge plus work create/edit/link/unlink/merge, edition moves, and ISBN repoints through preview/apply transactions. Invalid low-level catalog shapes are release-blocking `db-audit.ts` findings and require an operator repair rather than an arbitrary document editor in the browser.
 
-The migration may seed public metadata only from the operator's live books or from a currently consented user's book. It rechecks the source book, live account, exact sharing setting, and owned public profile inside the same transaction that creates public catalog documents, so consent revocation or book deletion wins the race.
+The migration may seed public work and edition metadata only from the operator's live books or from a currently consented user's book. It rechecks the source book, live account, exact sharing setting, and owned public profile inside the same transaction that creates those public catalog documents, so consent revocation or book deletion wins the race. Shared authors may be consolidated from every resolvable personal book. Their source book and legacy author versions are pinned transactionally, all personal books are rewritten to catalog author IDs, and legacy per-user author documents are deleted only after an atomic read proves none remain referenced.

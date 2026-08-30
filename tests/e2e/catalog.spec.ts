@@ -12,6 +12,10 @@ function sharedWorkOwnerId(workId: string, uid: string): string {
   return createHash('sha256').update(`${workId}\0${uid}`).digest('hex');
 }
 
+function catalogAuthorId(nameKey: string): string {
+  return `author_${createHash('sha256').update(`author\0${nameKey}`).digest('hex').slice(0, 24)}`;
+}
+
 async function waitForDocument(
   db: ReturnType<typeof getFirestore>,
   path: string,
@@ -32,6 +36,19 @@ async function assertDocumentRemainsAbsent(
     expect((await db.doc(path).get()).exists).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+}
+
+async function waitForBookByTitle(
+  db: ReturnType<typeof getFirestore>,
+  uid: string,
+  title: string,
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const books = await db.collection(`users/${uid}/books`).where('title', '==', title).get();
+    if (books.size === 1) return books.docs[0];
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`users/${uid}/books did not gain exactly one ${title} row.`);
 }
 
 function requireLocalEmulators(): void {
@@ -139,7 +156,11 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
   const revokedUsername = `revoked-${suffix}`.slice(0, 30);
   const adminEmail = `catalog-admin-${suffix}@example.test`;
   const workId = `left-hand-${suffix}`;
+  const leGuinAuthorId = `le-guin-${suffix}`;
+  const dahlAuthorId = `dahl-${suffix}`;
   const editionId = `left-hand-edition-${suffix}`;
+  const newAuthorName = `Unique Shared Author ${suffix.slice(0, 8)}`;
+  const newAuthorKey = newAuthorName.toLowerCase();
   const isbn = '9780441478125';
   const app = initializeApp({projectId: PROJECT_ID}, `catalog-e2e-${suffix}`);
   const auth = getAuth(app);
@@ -161,26 +182,28 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       readerRef.set({uid: readerUid, email: readerEmail}),
       db.doc(`users/${revokedUid}`).set({uid: revokedUid, email: `${revokedUid}@example.test`}),
       db.doc(`users/${ADMIN_UID}`).set({uid: ADMIN_UID, email: adminEmail}),
-      normalRef.collection('authors').doc(`le-guin-${suffix}`).set({
-        name: 'Ursula K. Le Guin', nameLower: 'ursula k. le guin', kind: 'person',
-        givenName: 'Ursula K.', familyName: 'Le Guin', updatedAt: now,
+      db.doc(`catalogAuthors/${leGuinAuthorId}`).set({
+        canonicalName: 'Ursula K. Le Guin', alternateNames: [], nameKeys: ['ursula k le guin'],
+        sortName: 'Le Guin', kind: 'person', status: 'active', mergedFrom: [],
+        createdAt: now, updatedAt: now,
       }),
-      normalRef.collection('authors').doc(`dahl-${suffix}`).set({
-        name: 'Roald Dahl', nameLower: 'roald dahl', kind: 'person',
-        givenName: 'Roald', familyName: 'Dahl', updatedAt: now,
+      db.doc(`catalogAuthors/${dahlAuthorId}`).set({
+        canonicalName: 'Roald Dahl', alternateNames: [], nameKeys: ['roald dahl'],
+        sortName: 'Dahl', kind: 'person', status: 'active', mergedFrom: [],
+        createdAt: now, updatedAt: now,
       }),
       db.doc(`works/${workId}`).set({
         canonicalTitle: 'The Left Hand of Darkness', alternateTitles: [],
-        titleKeys: ['left hand of darkness'], authorNames: ['Ursula K. Le Guin'],
-        authorNamesLower: ['ursula k le guin'], coverUrl: '', subjects: ['Science fiction'],
+        titleKeys: ['left hand of darkness'], authorIds: [leGuinAuthorId],
+        coverUrl: 'https://example.test/work-cover.jpg', subjects: ['Science fiction'],
         fiction: true, visibility: 'searchable', status: 'active', mergedFrom: [],
         createdAt: now, updatedAt: now,
       }),
       db.doc(`editions/${editionId}`).set({
         workId, isbn13: isbn, title: 'The Left Hand of Darkness',
-        authorNames: ['Ursula K. Le Guin'], publisher: 'Ace', publishedDate: '1987',
+        publisher: 'Ace', publishedDate: '1987',
         language: 'en', translatorNames: [], format: 'full', suggestedPageCount: 304,
-        coverUrl: '', externalIds: {}, createdAt: now, updatedAt: now,
+        coverUrl: 'https://example.test/edition-cover.jpg', externalIds: {}, createdAt: now, updatedAt: now,
       }),
       db.doc(`isbnIndex/${isbn}`).set({workId, editionId}),
       db.doc(`workTitleIndex/${workId}-title`).set({
@@ -199,7 +222,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       }),
     ]);
     await readerBookRef.set({
-      owner: readerRef, authorIds: [], title: 'Personal Left Hand', activeTimer: null,
+      owner: readerRef, authorIds: [leGuinAuthorId], title: 'Personal Left Hand', activeTimer: null,
       currentPage: 304, currentPageUpdateId: null, pageCount: 304, finished: true,
       pagesRead: 304, timeRead: 240, isbn, coverUrl: '', publisher: 'Ace', publishedDate: '1987',
       subjects: [], fiction: true, workId, editionId, matchMethod: 'migration', linkedAt: now,
@@ -210,7 +233,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       pagesRead: 304, timeRead: 240, createdAt: now, updatedAt: now,
     });
     await normalRef.collection('books').doc(`unmatched-${suffix}`).set({
-      owner: normalRef, authorIds: [], title: 'Needs catalog review', activeTimer: null,
+      owner: normalRef, authorIds: [dahlAuthorId], title: 'Needs catalog review', activeTimer: null,
       currentPage: 0, currentPageUpdateId: null, pageCount: 99, finished: false,
       pagesRead: 0, timeRead: 0, isbn: '', coverUrl: '', publisher: '', publishedDate: '',
       subjects: [], fiction: null, workId: null, editionId: null, matchMethod: null, linkedAt: null,
@@ -253,6 +276,12 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       const catalog = page.getByLabel('Shared book catalog');
       await expect(catalog.getByText('The Left Hand of Darkness', {exact: true}).first()).toBeVisible();
       await expect(catalog.getByRole('button', {name: 'Remove link'})).toBeVisible();
+      await expect(page.getByAltText('Cover of The Left Hand of Darkness')).toHaveAttribute(
+        'src',
+        'https://example.test/edition-cover.jpg',
+      );
+      await expect(page.getByText('Fiction', {exact: true})).toBeVisible();
+      await expect(page.getByText('Science fiction', {exact: true})).toBeVisible();
       await page.getByRole('button', {name: 'Add book', exact: true}).click();
       await expect(page.getByRole('dialog', {name: 'Add new book'})).toHaveCount(0);
       await openNewBook(page);
@@ -377,6 +406,40 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.getByRole('button', {name: 'Add book', exact: true}).click();
       await page.goto('/');
       await expect(page.getByText('Matilda', {exact: true})).toBeVisible();
+
+      await openNewBook(page);
+      await page.getByLabel('Author', {exact: true}).fill(newAuthorName);
+      await page.getByLabel('Author', {exact: true}).press('Enter');
+      await page.getByLabel('Book title', {exact: true}).fill('A Newly Shared Author Test');
+      await page.getByLabel("Your edition's page count", {exact: true}).fill('123');
+      await context.setOffline(true);
+      await page.getByRole('button', {name: 'Add book', exact: true}).click();
+      await expect(page.getByRole('dialog', {name: 'Add new book'})).toBeVisible();
+      await expect(page.getByText('Connect to create a new shared author, then try again.')).toBeVisible();
+      expect((await db.collection(`users/${normalUid}/books`)
+        .where('title', '==', 'A Newly Shared Author Test').get()).empty).toBe(true);
+
+      await context.setOffline(false);
+      await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(true);
+      await db.doc(`users/${normalUid}/functionQuotas/catalogEnsureAuthors`).set({
+        windowStartedAt: Timestamp.now(),
+        count: 60,
+      });
+      await page.getByRole('button', {name: 'Add book', exact: true}).click();
+      await expect(page.getByRole('dialog', {name: 'Add new book'})).toBeVisible();
+      await expect(page.getByText(/Catalog request limit reached/)).toBeVisible();
+      expect((await db.collection(`users/${normalUid}/books`)
+        .where('title', '==', 'A Newly Shared Author Test').get()).empty).toBe(true);
+
+      await db.doc(`users/${normalUid}/functionQuotas/catalogEnsureAuthors`).delete();
+      await page.getByRole('button', {name: 'Add book', exact: true}).click();
+      await expect(page.getByRole('dialog', {name: 'Add new book'})).toHaveCount(0);
+      const expectedAuthorId = catalogAuthorId(newAuthorKey);
+      await waitForDocument(db, `catalogAuthors/${expectedAuthorId}`, true);
+      const createdAuthor = await db.doc(`catalogAuthors/${expectedAuthorId}`).get();
+      expect(createdAuthor.get('canonicalName')).toBe(newAuthorName);
+      const createdBook = await waitForBookByTitle(db, normalUid, 'A Newly Shared Author Test');
+      expect(createdBook.get('authorIds')).toEqual([expectedAuthorId]);
     } finally {
       await context.close();
     }
@@ -444,7 +507,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       const operationSelect = page.getByLabel('Operation', {exact: true});
       for (const option of [
         'Create work', 'Link or unlink books', 'Merge works', 'Edit work',
-        'Create or edit edition', 'Repoint ISBN',
+        'Create or edit edition', 'Repoint ISBN', 'Create or edit author', 'Merge authors',
       ]) {
         await operationSelect.selectOption({label: option});
         await expect(page.getByRole('button', {name: 'Preview without applying'})).toBeVisible();

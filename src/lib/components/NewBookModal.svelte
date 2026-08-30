@@ -34,6 +34,7 @@
     fillMissingItems,
     fillMissingPageCount,
     fillMissingText,
+    MAX_BOOK_AUTHORS,
     prepareBookWrite,
   } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
@@ -112,6 +113,8 @@
   let isLookingUp = $state(false);
   let lookupError = $state("");
   let bookWrite = $state({ accepted: false });
+  let resolvingAuthors = $state(false);
+  let authorResolutionRequest = 0;
   const unresolvedAuthorCount = $derived(authorChips.filter(
     (chip) => chip.id !== null && 'unresolved' in chip,
   ).length);
@@ -159,12 +162,14 @@
   });
 
   // Chips seed separately from the plain fields: resolving authorIds
-  // needs the author docs, and the seed must run exactly once per opened
+  // needs the shared author catalog, and the seed must run exactly once per opened
   // book so a later authors snapshot can't wipe in-progress edits.
   // Plain variable, not $state — bookkeeping the effect must not track.
   let seededBookId: string | null | undefined;
   $effect(() => {
     if (!open) {
+      authorResolutionRequest += 1;
+      resolvingAuthors = false;
       bookWrite.accepted = false;
       seededBookId = undefined;
       authorChips = [];
@@ -264,18 +269,24 @@
     selectedCatalogResult = result;
     catalogChoiceTouched = touched;
     automaticSelectionIsbn13 = touched ? null : normalizeIsbn(isbn);
-    title = fillMissingText(title, result.work.canonicalTitle);
+    title = fillMissingText(title, result.edition?.title || result.work.canonicalTitle);
+    const inheritingAuthors = authorChips.length === 0;
     authorChips = fillMissingItems(
       authorChips,
-      result.work.authorNames.map((name) => resolveChip(name, authorList)),
+      result.work.authors
+        .slice(0, MAX_BOOK_AUTHORS)
+        .map((author) => resolveChip(author.canonicalName, authorList)),
     );
+    if (inheritingAuthors && result.work.authors.length > MAX_BOOK_AUTHORS) {
+      catalogMessage = `This work has ${result.work.authors.length} catalog authors. The first ${MAX_BOOK_AUTHORS} were copied to your personal book.`;
+    }
     pageCount = fillMissingPageCount(pageCount, [result.edition?.suggestedPageCount ?? undefined]);
     metadata = {
       coverUrl: fillMissingText(metadata.coverUrl, result.edition?.coverUrl || result.work.coverUrl),
       publisher: fillMissingText(metadata.publisher, result.edition?.publisher ?? ''),
       publishedDate: fillMissingText(metadata.publishedDate, result.edition?.publishedDate ?? ''),
-      subjects: fillMissingItems(metadata.subjects, []),
-      fiction: metadata.fiction,
+      subjects: fillMissingItems(metadata.subjects, result.work.subjects),
+      fiction: metadata.fiction ?? result.work.fiction,
     };
   }
 
@@ -287,13 +298,14 @@
     catalogMessage = 'This personal book will be saved without a shared-work link.';
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
+    if (resolvingAuthors) return;
     lookupError = "";
     if (!authorsLoaded) {
       lookupError = 'Authors loading.';
       return;
     }
-    const prepared = prepareBookWrite({
+    let prepared = prepareBookWrite({
       userId,
       book,
       authorChips,
@@ -309,6 +321,44 @@
     if (!prepared.valid) {
       lookupError = prepared.message;
       return;
+    }
+    if (authorChips.some((chip) => chip.id === null)) {
+      if (!online) {
+        lookupError = 'Connect to create a new shared author, then try again.';
+        return;
+      }
+      const request = ++authorResolutionRequest;
+      resolvingAuthors = true;
+      try {
+        const resolved = await Database.resolveBookAuthors(authorChips);
+        if (!open || request !== authorResolutionRequest) return;
+        authorChips = resolved;
+      } catch (error) {
+        if (request !== authorResolutionRequest) return;
+        lookupError = error instanceof Error
+          ? error.message
+          : 'Could not create the shared author. Try again.';
+        return;
+      } finally {
+        if (request === authorResolutionRequest) resolvingAuthors = false;
+      }
+      prepared = prepareBookWrite({
+        userId,
+        book,
+        authorChips,
+        title,
+        pageCount,
+        currentPage,
+        isbn,
+        metadata: $state.snapshot(metadata),
+        catalogSelection: $state.snapshot(catalogSelection),
+        catalogSelectionTouched: catalogChoiceTouched,
+        catalogSelectionIsbn13: automaticSelectionIsbn13,
+      });
+      if (!prepared.valid) {
+        lookupError = prepared.message;
+        return;
+      }
     }
     // The SDK has accepted the mutation into its offline queue once the
     // wrapped method returns its promise. Close now; waiting for that promise
@@ -383,7 +433,9 @@
       title = fillMissingText(title, primary.title);
       authorChips = fillMissingItems(
         authorChips,
-        primary.authorNames.map((name) => resolveChip(name, authorList)),
+        primary.authorNames
+          .slice(0, MAX_BOOK_AUTHORS)
+          .map((name) => resolveChip(name, authorList)),
       );
 
       pageCount = fillMissingPageCount(pageCount, [
@@ -603,10 +655,10 @@
   onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
-  primaryDisabled={!authorsLoaded || bookWrite.accepted}
+  primaryDisabled={!authorsLoaded || resolvingAuthors || bookWrite.accepted}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />
+    <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" disabled={resolvingAuthors} />
   </Input>
 
   {#if unresolvedAuthorCount > 0}
@@ -624,6 +676,7 @@
       <select
         class="form-select detail-kind"
         aria-label={`Kind of new author ${chip.name}`}
+        disabled={resolvingAuthors}
         bind:value={chip.kind}>
         {#each AUTHOR_KINDS as kind (kind)}
           <option value={kind}>{kind}</option>
@@ -635,6 +688,7 @@
           class="form-control"
           placeholder="First name(s)"
           aria-label={`First name(s) of ${chip.name}`}
+          disabled={resolvingAuthors}
           bind:value={chip.givenName} />
         <input
           type="text"
@@ -642,6 +696,7 @@
           placeholder="Last name"
           aria-label={`Last name of ${chip.name}`}
           required
+          disabled={resolvingAuthors}
           bind:value={chip.familyName} />
       {:else}
         <input
@@ -650,6 +705,7 @@
           placeholder="Name"
           aria-label={`Name of ${chip.name}`}
           required
+          disabled={resolvingAuthors}
           bind:value={chip.name} />
       {/if}
     </div>

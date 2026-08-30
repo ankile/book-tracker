@@ -34,6 +34,7 @@ test("preserves the deployed function export names", () => {
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.catalog).sort(), [
+    "ensureauthors",
     "search",
     "workreaders",
   ]);
@@ -60,6 +61,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
+    functions.catalog.ensureauthors,
     functions.catalog.search,
     functions.catalog.workreaders,
     functions.telemetry.reportissue,
@@ -718,6 +720,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "admin.catalogscan": functions.admin.catalogscan,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
     "catalog.search": functions.catalog.search,
+    "catalog.ensureauthors": functions.catalog.ensureauthors,
     "catalog.workreaders": functions.catalog.workreaders,
     "telemetry.reportissue": functions.telemetry.reportissue,
     "toggl.savetoken": functions.toggl.savetoken,
@@ -797,6 +800,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.admin.catalogpreview": 2,
     "functions.admin.catalogscan": 2,
     "functions.booksapi.lookupisbn": 10,
+    "functions.catalog.ensureauthors": 10,
     "functions.catalog.search": 10,
     "functions.catalog.workreaders": 10,
     "functions.telemetry.reportissue": 10,

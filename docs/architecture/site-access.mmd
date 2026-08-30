@@ -20,7 +20,7 @@ flowchart LR
     current["<b>Currently Reading</b> · <code>/</code><br/>Owner book, progress, session, and timer writes"]:::owner
     finished["<b>Finished</b> · <code>/finished</code><br/>Owner book, progress, and session writes"]:::owner
     me["<b>My site</b> · <code>/me</code><br/>Profile, sharing consent, integrations, and books"]:::owner
-    authors["<b>Authors</b> · <code>/authors</code><br/>Owner author and book-reference writes"]:::owner
+    authors["<b>Authors</b> · <code>/authors</code><br/>Signed-in shared-catalog read<br/>owner book-reference writes"]:::owner
     isbns["<b>Book metadata</b> · <code>/isbns</code><br/>Owner metadata edits through the book dialog"]:::owner
     work["<b>Shared work</b> · <code>/books/[workId]</code><br/>Read-only callable projection of bibliography<br/>and explicitly opted-in reader summaries"]:::owner
   end
@@ -30,7 +30,7 @@ flowchart LR
   subgraph adminpages[Privileged routes]
     direction TB
     admin["<b>Admin overview</b> · <code>/admin</code><br/>Fixed UID + verified email<br/>read-only overview; server view audit"]:::privileged
-    admincatalog["<b>Catalog curation</b> · <code>/admin/catalog</code><br/>Bounded scan and preview; recently authenticated<br/>apply of six allowlisted operations"]:::privileged
+    admincatalog["<b>Catalog curation</b> · <code>/admin/catalog</code><br/>Bounded scan and preview; recently authenticated<br/>apply of eight allowlisted operations"]:::privileged
   end
 
   login["<b>Authentication gate</b><br/>Private URL renders login/register,<br/>then resumes after authentication"]:::security

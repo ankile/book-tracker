@@ -6,7 +6,7 @@
 //
 // Ambiguous cases are printed and left unlinked. Operators can resolve an
 // exact reviewed set with an optional JSON manifest whose groups contain:
-//   { id, bookPaths, canonicalTitle, alternateTitles?, authorNames }
+//   { id, bookPaths, canonicalTitle, alternateTitles?, authorNames, authorKinds }
 // Book paths are exact users/{uid}/books/{bookId} paths; there is no fuzzy
 // exception mechanism.
 //
@@ -16,7 +16,7 @@
 //   node migrate-cross-user-works.ts [reviewed.json] --prod --apply  # prod apply (typed confirm)
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { Timestamp, type DocumentReference, type Firestore } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp, type DocumentReference, type Firestore } from 'firebase-admin/firestore'
 import { connect, parseFlags } from './migrate-lib.ts'
 import {
   deterministicCatalogId,
@@ -27,12 +27,12 @@ import {
   type MigrationBook,
   type MigrationCandidate,
   type MigrationGroup,
+  type CrossUserCatalogPlan,
   type ReviewedWorkGroup,
 } from './cross-user-work-migration.ts'
 import {
-  catalogAuthorsEqual,
   catalogTitleKeys,
-  normalizeCatalogAuthorNames,
+  normalizeCatalogAuthorName,
   normalizeCatalogTitle,
 } from './src/lib/utils/catalog.ts'
 import {
@@ -47,6 +47,7 @@ import {
 
 type CatalogDoc = Record<string, unknown>
 type ExistingCatalog = {
+  authors: Map<string, CatalogDoc>
   works: Map<string, CatalogDoc>
   editions: Map<string, CatalogDoc>
   isbnIndex: Map<string, CatalogDoc>
@@ -86,12 +87,22 @@ const reviewedGroups = flags.rest.length === 0
   : decodeReviewedManifest(JSON.parse(readFileSync(flags.rest[0], 'utf8')))
 const { db } = await connect({ ...flags, confirmWrite: flags.apply })
 const tag = flags.apply ? 'SET' : 'DRY'
+const existing = await loadCatalog(db)
 
 const users = await db.collection('users').listDocuments()
 const profiles = await db.collection('profiles').get()
 const profilesByUsername = new Map(profiles.docs.map((profile) => [profile.id, profile.data()]))
 const books: MigrationBook[] = []
 const authors = new Map<string, MigrationAuthor>()
+for (const [authorId, data] of existing.authors) {
+  authors.set(authorId, {
+    id: authorId,
+    name: data.canonicalName,
+    kind: data.kind,
+    familyName: data.sortName,
+    retirement: data.status === 'merged' ? {reason: 'merged', targetId: data.mergedInto} : null,
+  })
+}
 
 function snapshotVersion(path: string, value: {updateTime?: Timestamp}): number {
   const version = value.updateTime?.toMillis()
@@ -156,6 +167,7 @@ for (const userRef of users) {
       id: `${userRef.id}:${author.id}`,
       name: data.name,
       kind: data.kind,
+      familyName: data.familyName,
       retirement: data.retirement && typeof data.retirement === 'object'
         ? {
             ...(data.retirement as Record<string, unknown>),
@@ -177,7 +189,7 @@ for (const userRef of users) {
       uid: userRef.id,
       bookId: book.id,
       authorIds: Array.isArray(data.authorIds)
-        ? data.authorIds.map((id: unknown) => typeof id === 'string' ? `${userRef.id}:${id}` : id)
+        ? data.authorIds.map((id: unknown) => typeof id === 'string' && !existing.authors.has(id) ? `${userRef.id}:${id}` : id)
         : data.authorIds,
       eligibleSeed,
       sharingEligible: optedIn,
@@ -188,36 +200,80 @@ for (const userRef of users) {
   }
 }
 
-const existing = await loadCatalog(db)
 const plan = planCrossUserCatalog(books, authors, reviewedGroups)
-const overlapGroups = plan.groups.filter((group) => new Set(group.candidates.map((candidate) => candidate.book.uid)).size > 1)
-if (expectedOverlapGroups !== null && overlapGroups.length !== expectedOverlapGroups) {
-  throw new Error(`expected ${expectedOverlapGroups} cross-user overlap groups, planner found ${overlapGroups.length}`)
-}
-if (expectedOverlapGroups !== null) console.log(`ACCEPT ${overlapGroups.length} cross-user overlap groups`)
 const ambiguities: MigrationAmbiguity[] = [...plan.ambiguities]
 const blocked = new Set(ambiguities.flatMap((ambiguity) => ambiguity.bookPaths))
 const targets = new Map<string, CatalogTarget>()
 
 for (const group of plan.groups) {
+  if (group.candidates.some((candidate) => blocked.has(candidate.book.path))) continue
   const target = chooseCatalogTarget(group, existing, ambiguities)
   if (target !== null) targets.set(group.key, target)
 }
 for (const ambiguity of ambiguities) for (const path of ambiguity.bookPaths) blocked.add(path)
+const overlapGroups = plan.groups.filter((group) =>
+  targets.has(group.key) &&
+  !group.candidates.some((candidate) => blocked.has(candidate.book.path)) &&
+  new Set(group.candidates.map((candidate) => candidate.book.uid)).size > 1,
+)
+if (expectedOverlapGroups !== null && overlapGroups.length !== expectedOverlapGroups) {
+  throw new Error(`expected ${expectedOverlapGroups} migratable cross-user overlap groups, planner found ${overlapGroups.length}`)
+}
+if (expectedOverlapGroups !== null) console.log(`ACCEPT ${overlapGroups.length} cross-user overlap groups`)
 
 const createSets: CreateSpec[][] = []
+const authorSpecs = plan.authors.filter((author) => !existing.authors.has(author.authorId)).map((author) => {
+  const directSource = plan.candidates.find((candidate) => candidate.personalAuthors.some(
+    (candidateAuthor) => (candidateAuthor.catalogId ?? deterministicCatalogId(
+      'author', normalizeCatalogAuthorName(candidateAuthor.name),
+    )) === author.authorId,
+  ))
+  // A reviewed manifest may correct every source spelling. In that case the
+  // canonical author name is intentionally absent from the personal author
+  // rows, so pin creation to one book in the reviewed group instead.
+  const source = directSource ?? plan.groups.find((group) =>
+    group.authorIds.includes(author.authorId),
+  )?.candidates[0]
+  if (!source) throw new Error(`planner omitted a source for catalog author ${author.authorId}`)
+  return catalogAuthorCreateSpec(db, author, migrationSource(source.book))
+})
+let catalogWrites = 0
+
+for (const spec of authorSpecs) {
+  const existingSnapshot = await spec.ref.get()
+  if (!existingSnapshot.exists) {
+    catalogWrites += 1
+    console.log(`${tag}  create ${spec.ref.path}`)
+  } else {
+    assertStableFields(spec.ref.path, existingSnapshot.data() ?? {}, spec.data, spec.stableKeys)
+  }
+  if (flags.apply && !existingSnapshot.exists) {
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(spec.ref)
+      if (current.exists) {
+        assertStableFields(spec.ref.path, current.data() ?? {}, spec.data, spec.stableKeys)
+        return
+      }
+      if (!spec.seedSources) throw new Error(`${spec.ref.path} has no identity source`)
+      await assertMigrationSourceVersions(transaction, db, spec.seedSources)
+      transaction.create(spec.ref, spec.data)
+    })
+  }
+}
+
 for (const group of plan.groups) {
   const target = targets.get(group.key)
   if (!target) continue
   const specs = [
-    ...(target.createWork ? workCreateSpecs(db, group, target.workId) : []),
+    ...(target.createWork ? [
+      ...workCreateSpecs(db, group, target.workId),
+    ] : []),
     ...editionCreateSpecs(db, group, target, existing),
   ]
   if (specs.length > 0) createSets.push([...new Map(specs.map((spec) => [spec.ref.path, spec])).values()])
 }
 
 const uniqueCreates = new Map(createSets.flat().map((spec) => [spec.ref.path, spec]))
-let catalogWrites = 0
 for (const spec of uniqueCreates.values()) {
   const existingSnapshot = await spec.ref.get()
   if (!existingSnapshot.exists) {
@@ -263,28 +319,32 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
   if (!candidate) throw new Error(`planner omitted ${book.path}`)
   const group = plan.groups.find((item) => item.candidates.some((itemCandidate) => itemCandidate.book.path === book.path))
   const target = group && !blocked.has(book.path) ? targets.get(group.key) : undefined
-  const desired = target ? linkedPatch(candidate, target) : nullPatch()
+  const desiredLink = target ? linkedPatch(candidate, target) : nullPatch()
   const state = linkState(book)
+  let linkPatch: CatalogDoc = {}
   if (state === 'invalid') {
     ambiguities.push({ type: 'invalid-existing-link', bookPaths: [book.path], detail: 'Catalog link fields are partial or malformed' })
-    continue
-  }
-  if (state === 'linked') {
+  } else if (state === 'linked') {
     if (book.sharingEligible === true && typeof book.workId === 'string') {
       addSharedWorkOwnerSpec(projectionSpecs, db, book.workId, migrationSource(book))
     }
-    if (!sameLink(book, desired)) {
+    if (!sameLink(book, desiredLink)) {
       ambiguities.push({ type: 'existing-link-conflict', bookPaths: [book.path], detail: 'Migration will not replace an existing catalog link' })
       bookConflicts += 1
     }
-    continue
+  } else if (!sameLink(book, desiredLink)) {
+    linkPatch = desiredLink
   }
-  if (sameLink(book, desired)) continue
-  if (book.sharingEligible === true && typeof desired.workId === 'string') {
-    addSharedWorkOwnerSpec(projectionSpecs, db, desired.workId, migrationSource(book))
+  if (state !== 'linked' && book.sharingEligible === true && typeof desiredLink.workId === 'string') {
+    addSharedWorkOwnerSpec(projectionSpecs, db, desiredLink.workId, migrationSource(book))
   }
+  const authorPatch = candidate.authorProblems.length === 0 && !sameAuthorship(book, candidate)
+    ? {authorIds: candidate.personalAuthorIds, author: FieldValue.delete(), authors: FieldValue.delete()}
+    : {}
+  const desired = {...linkPatch, ...authorPatch}
+  if (Object.keys(desired).length === 0) continue
   bookWrites += 1
-  console.log(`${tag}  update ${book.path} catalog link -> ${desired.workId ?? 'null'}`)
+  console.log(`${tag}  update ${book.path}${Object.keys(linkPatch).length > 0 ? ` catalog link -> ${desiredLink.workId ?? 'null'}` : ''}${Object.keys(authorPatch).length > 0 ? ' shared authors' : ''}`)
   if (flags.apply) {
     const ref = db.doc(book.path)
     await db.runTransaction(async (transaction) => {
@@ -293,6 +353,39 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
       if (!current.exists) throw new Error(`${book.path} disappeared during migration`)
       if (!sameInitialLink(current.data() ?? {}, book)) throw new Error(`${book.path} catalog link changed during migration`)
       transaction.update(ref, desired)
+    })
+  }
+}
+
+let legacyAuthorDeletes = 0
+for (const userRef of users) {
+  const plannedBooks = plan.candidates.filter((candidate) => candidate.book.uid === userRef.id)
+  const localAuthors = await userRef.collection('authors').get()
+  if (localAuthors.empty) continue
+  if (plannedBooks.some((candidate) => candidate.authorProblems.length > 0)) {
+    console.log(`REVIEW legacy-author-cleanup-blocked ${userRef.path} :: unresolved personal author reference`)
+    continue
+  }
+  legacyAuthorDeletes += localAuthors.size
+  console.log(`${tag}  delete ${localAuthors.size} legacy author documents under ${userRef.path}`)
+  if (flags.apply) {
+    await db.runTransaction(async (transaction) => {
+      const [currentBooks, currentAuthors] = await Promise.all([
+        transaction.get(userRef.collection('books')),
+        transaction.get(userRef.collection('authors')),
+      ])
+      if (currentBooks.size + currentAuthors.size > 450) {
+        throw new Error(`${userRef.path} is too large for atomic legacy-author cleanup`)
+      }
+      const localIds = new Set(currentAuthors.docs.map((snapshot) => snapshot.id))
+      for (const snapshot of currentBooks.docs) {
+        const data = snapshot.data()
+        if (data.author !== undefined || data.authors !== undefined ||
+            !Array.isArray(data.authorIds) || data.authorIds.some((id) => localIds.has(id))) {
+          throw new Error(`${snapshot.ref.path} still references the legacy author collection`)
+        }
+      }
+      for (const snapshot of currentAuthors.docs) transaction.delete(snapshot.ref)
     })
   }
 }
@@ -326,6 +419,7 @@ for (const ambiguity of ambiguities.sort((left, right) => left.type.localeCompar
 }
 console.log(`${catalogWrites} catalog documents ${flags.apply ? 'created' : '(dry run, nothing written)'}`)
 console.log(`${bookWrites} personal books ${flags.apply ? 'updated' : '(dry run, nothing written)'}`)
+console.log(`${legacyAuthorDeletes} legacy author documents ${flags.apply ? 'deleted' : '(dry run, nothing deleted)'}`)
 console.log(`${ambiguities.length} reviewed ambiguities; ${bookConflicts} existing-link conflicts`)
 
 function decodeReviewedManifest(value: unknown): ReviewedWorkGroup[] {
@@ -338,6 +432,21 @@ function decodeReviewedManifest(value: unknown): ReviewedWorkGroup[] {
     if (typeof group.id !== 'string' || typeof group.canonicalTitle !== 'string') throw new Error(`review group ${index} needs string id and canonicalTitle`)
     if (!Array.isArray(group.bookPaths) || !group.bookPaths.every((path) => typeof path === 'string')) throw new Error(`review group ${index}.bookPaths must be strings`)
     if (!Array.isArray(group.authorNames) || !group.authorNames.every((name) => typeof name === 'string')) throw new Error(`review group ${index}.authorNames must be strings`)
+    if (!Array.isArray(group.authorKinds) || group.authorKinds.length !== group.authorNames.length ||
+        !group.authorKinds.every((kind) => kind === 'person' || kind === 'entity' || kind === 'placeholder')) {
+      throw new Error(`review group ${index}.authorKinds must match authorNames and use person, entity, or placeholder`)
+    }
+    const reviewedKinds = new Map<string, string>()
+    for (const [authorIndex, name] of group.authorNames.entries()) {
+      const key = normalizeCatalogAuthorName(name)
+      if (!key) throw new Error(`review group ${index}.authorNames must be non-empty`)
+      const kind = group.authorKinds[authorIndex] as string
+      const existingKind = reviewedKinds.get(key)
+      if (existingKind && existingKind !== kind) {
+        throw new Error(`review group ${index} gives one author conflicting kinds`)
+      }
+      reviewedKinds.set(key, kind)
+    }
     if (group.alternateTitles !== undefined && (!Array.isArray(group.alternateTitles) || !group.alternateTitles.every((title) => typeof title === 'string'))) {
       throw new Error(`review group ${index}.alternateTitles must be strings`)
     }
@@ -347,18 +456,21 @@ function decodeReviewedManifest(value: unknown): ReviewedWorkGroup[] {
       canonicalTitle: group.canonicalTitle,
       alternateTitles: group.alternateTitles as string[] | undefined,
       authorNames: group.authorNames as string[],
+      authorKinds: group.authorKinds as ReviewedWorkGroup['authorKinds'],
     }
   })
 }
 
 async function loadCatalog(db: Firestore): Promise<ExistingCatalog> {
-  const [works, editions, isbnIndex, titleIndex] = await Promise.all([
+  const [authors, works, editions, isbnIndex, titleIndex] = await Promise.all([
+    db.collection('catalogAuthors').get(),
     db.collection('works').get(),
     db.collection('editions').get(),
     db.collection('isbnIndex').get(),
     db.collection('workTitleIndex').get(),
   ])
   return {
+    authors: new Map(authors.docs.map((doc) => [doc.id, doc.data()])),
     works: new Map(works.docs.map((doc) => [doc.id, doc.data()])),
     editions: new Map(editions.docs.map((doc) => [doc.id, doc.data()])),
     isbnIndex: new Map(isbnIndex.docs.map((doc) => [doc.id, doc.data()])),
@@ -392,7 +504,8 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
     const work = existing.works.get(workId) ?? {}
     const workTitleKeys = Array.isArray(work.titleKeys) ? work.titleKeys : []
     const textMatches = group.candidates.some((candidate) => workTitleKeys.includes(candidate.titleKey))
-    const authorMatches = catalogAuthorsEqual(group.authorNames, Array.isArray(work.authorNames) ? work.authorNames.filter((name): name is string => typeof name === 'string') : [])
+    const authorMatches = JSON.stringify([...group.authorIds].sort()) ===
+      JSON.stringify(Array.isArray(work.authorIds) ? work.authorIds.filter((id): id is string => typeof id === 'string').sort() : [])
     if (!textMatches || !authorMatches) {
       ambiguities.push({ type: 'existing-isbn-text-conflict', bookPaths: group.candidates.map((candidate) => candidate.book.path), detail: `ISBN points to ${workId}, whose title/authors disagree` })
       return null
@@ -401,7 +514,8 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
     const textTargets = [...existing.works.entries()].filter(([, work]) =>
       work.status === 'active' &&
       group.candidates.some((candidate) => (Array.isArray(work.titleKeys) ? work.titleKeys : []).includes(candidate.titleKey)) &&
-      catalogAuthorsEqual(group.authorNames, Array.isArray(work.authorNames) ? work.authorNames.filter((name): name is string => typeof name === 'string') : [])
+      JSON.stringify([...group.authorIds].sort()) ===
+        JSON.stringify(Array.isArray(work.authorIds) ? work.authorIds.filter((id): id is string => typeof id === 'string').sort() : [])
     )
     if (textTargets.length > 1) {
       ambiguities.push({ type: 'existing-title-conflict', bookPaths: group.candidates.map((candidate) => candidate.book.path), detail: `Title/authors match multiple works: ${textTargets.map(([id]) => id).join(', ')}` })
@@ -446,8 +560,7 @@ function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): 
     canonicalTitle: group.canonicalTitle,
     alternateTitles: group.alternateTitles,
     titleKeys,
-    authorNames: group.authorNames,
-    authorNamesLower: normalizeCatalogAuthorNames(group.authorNames),
+    authorIds: group.authorIds,
     coverUrl: catalogCoverUrl(preferred.book.coverUrl),
     subjects: Array.isArray(preferred.book.subjects) ? preferred.book.subjects.filter((subject): subject is string => typeof subject === 'string') : [],
     fiction: typeof preferred.book.fiction === 'boolean' ? preferred.book.fiction : null,
@@ -477,6 +590,31 @@ function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): 
   return specs
 }
 
+function catalogAuthorCreateSpec(
+  db: Firestore,
+  author: CrossUserCatalogPlan['authors'][number],
+  seedSource: MigrationSeedSource,
+): CreateSpec {
+  const now = Timestamp.now()
+  const data: CatalogDoc = {
+    canonicalName: author.canonicalName,
+    alternateNames: author.alternateNames,
+    nameKeys: author.nameKeys,
+    sortName: author.sortName,
+    kind: author.kind,
+    status: 'active',
+    mergedFrom: [],
+    createdAt: now,
+    updatedAt: now,
+  }
+  return {
+    ref: db.collection('catalogAuthors').doc(author.authorId),
+    data,
+    stableKeys: Object.keys(data).filter((key) => key !== 'createdAt' && key !== 'updatedAt'),
+    seedSources: [seedSource],
+  }
+}
+
 function editionCreateSpecs(db: Firestore, group: MigrationGroup, target: CatalogTarget, existing: ExistingCatalog): CreateSpec[] {
   const specs: CreateSpec[] = []
   const seedSources = migrationGroupSeedSources(group)
@@ -492,7 +630,6 @@ function editionCreateSpecs(db: Firestore, group: MigrationGroup, target: Catalo
         workId: target.workId,
         isbn13: isbn,
         title: candidate.title,
-        authorNames: group.authorNames,
         publisher: typeof candidate.book.publisher === 'string' ? candidate.book.publisher : '',
         publishedDate: typeof candidate.book.publishedDate === 'string' ? candidate.book.publishedDate : '',
         language: '',
@@ -609,4 +746,15 @@ function sameInitialLink(current: CatalogDoc, initial: CatalogDoc): boolean {
     if (left instanceof Timestamp && right instanceof Timestamp ? !left.isEqual(right) : left !== right) return false
   }
   return true
+}
+
+function sameAuthorship(book: MigrationBook, candidate: MigrationCandidate): boolean {
+  if ('author' in book || 'authors' in book || !Array.isArray(book.authorIds)) return false
+  const currentIds = book.authorIds.map((id) => {
+    if (typeof id !== 'string') return null
+    const separator = id.indexOf(':')
+    return separator === -1 ? id : id.slice(separator + 1)
+  })
+  return currentIds.every((id): id is string => id !== null) &&
+    JSON.stringify(currentIds) === JSON.stringify(candidate.personalAuthorIds)
 }

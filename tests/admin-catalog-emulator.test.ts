@@ -18,10 +18,10 @@ function requireLocalEmulators(): void {
   assert.match(process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '', /^(?:127\.0\.0\.1|localhost):9099$/);
 }
 
-const workInput = (title: string) => ({
+const workInput = (title: string, authorId: string) => ({
   canonicalTitle: title,
   alternateTitles: [],
-  authorNames: ['Catalog Test Author'],
+  authorIds: [authorId],
   coverUrl: '',
   subjects: [],
   fiction: true,
@@ -30,7 +30,6 @@ const workInput = (title: string) => ({
 const editionInput = (title: string, isbn13: string | null, externalIds = {}) => ({
   isbn13,
   title,
-  authorNames: ['Catalog Test Author'],
   publisher: 'Test Press',
   publishedDate: '2026',
   language: 'en',
@@ -101,6 +100,9 @@ test('all admin catalog operations use real callable transactions and preserve p
   }
 
   const targetWorkId = `target-${suffix}`;
+  const catalogAuthorId = `author-${suffix}`;
+  const catalogAuthorAliasId = `author-alias-${suffix}`;
+  const catalogAuthorOtherId = `author-other-${suffix}`;
   const sourceWorkId = `source-${suffix}`;
   const targetEditionId = `target-edition-${suffix}`;
   const sourceEditionId = `source-edition-${suffix}`;
@@ -114,11 +116,67 @@ test('all admin catalog operations use real callable transactions and preserve p
   const isbnF = '9780306406157';
   const isbnG = '9780975229804';
 
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: catalogAuthorId,
+    author: {
+      canonicalName: 'Catalog Test Author', alternateNames: [],
+      sortName: 'Author', kind: 'person',
+    },
+  });
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: catalogAuthorOtherId,
+    author: {
+      canonicalName: 'Other Catalog Author', alternateNames: [],
+      sortName: 'Author', kind: 'person',
+    },
+  });
+  await assert.rejects(
+    preview({
+      type: 'upsertAuthor',
+      authorId: `duplicate-author-${suffix}`,
+      author: {
+        canonicalName: 'Catalog Test Author', alternateNames: [],
+        sortName: 'Author', kind: 'person',
+      },
+    }),
+    (error: unknown) => (error as {status?: string}).status === 'FAILED_PRECONDITION',
+  );
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: catalogAuthorAliasId,
+    author: {
+      canonicalName: 'C. T. Author', alternateNames: [],
+      sortName: 'Author', kind: 'person',
+    },
+  });
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: catalogAuthorOtherId,
+    author: {
+      canonicalName: 'Other Catalog Writer',
+      alternateNames: ['Other-Catalog-Author'],
+      sortName: 'Writer', kind: 'person',
+    },
+  });
+  const renamedOther = (await db.doc(`catalogAuthors/${catalogAuthorOtherId}`).get()).data()!;
+  assert.deepEqual(renamedOther.alternateNames, ['Other-Catalog-Author']);
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: catalogAuthorOtherId,
+    author: {
+      canonicalName: 'Other Catalog Writer',
+      alternateNames: renamedOther.alternateNames,
+      sortName: 'Writer', kind: 'person',
+    },
+  });
+
   const createTarget: AdminCatalogOperation = {
     type: 'createWork',
     workId: targetWorkId,
     visibility: 'searchable',
-    work: workInput(`Target Work ${suffix}`),
+    work: workInput(`Target Work ${suffix}`, catalogAuthorId),
     books: [],
   };
   await previewAndApply(createTarget);
@@ -126,7 +184,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     type: 'createWork',
     workId: sourceWorkId,
     visibility: 'internal',
-    work: workInput(`Source Work ${suffix}`),
+    work: workInput(`Source Work ${suffix}`, catalogAuthorAliasId),
     books: [],
   });
   assert.equal((await db.doc(`works/${targetWorkId}`).get()).get('status'), 'active');
@@ -157,11 +215,73 @@ test('all admin catalog operations use real callable transactions and preserve p
     timeRead: 95,
     activeTimer: {startedAt: Timestamp.fromMillis(1_700_000_001_000)},
     privateNote: 'must survive an admin catalog link',
+    authorIds: [catalogAuthorAliasId],
     workId: null,
     editionId: null,
     matchMethod: null,
     linkedAt: null,
     updatedAt: personalUpdatedAt,
+  });
+  const mergeAuthorOperation: AdminCatalogOperation = {
+    type: 'mergeAuthors',
+    sourceAuthorId: catalogAuthorAliasId,
+    targetAuthorId: catalogAuthorId,
+  };
+  const staleAuthorPreview = await preview(mergeAuthorOperation);
+  await personalRef.update({authorIds: [catalogAuthorAliasId, catalogAuthorOtherId]});
+  await assert.rejects(
+    callable('admin-catalogapply', {
+      operationId: staleAuthorPreview.operationId,
+      operation: mergeAuthorOperation,
+      expected: staleAuthorPreview.expected,
+    }),
+    (error: unknown) => {
+      const callableError = error as {status?: string; details?: {reason?: string}};
+      return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
+    },
+  );
+  await personalRef.update({authorIds: [catalogAuthorAliasId]});
+  await previewAndApply(mergeAuthorOperation);
+  assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorId]);
+  assert.deepEqual((await db.doc(`works/${sourceWorkId}`).get()).get('authorIds'), [catalogAuthorId]);
+  assert.equal((await db.doc(`catalogAuthors/${catalogAuthorAliasId}`).get()).get('mergedInto'), catalogAuthorId);
+
+  const punctuationTargetId = `punctuation-target-${suffix}`;
+  const punctuationSourceId = `punctuation-source-${suffix}`;
+  const punctuationNow = Timestamp.now();
+  const directAuthor = (canonicalName: string) => ({
+    canonicalName,
+    alternateNames: [],
+    nameKeys: ['j r r tolkien'],
+    sortName: 'Tolkien',
+    kind: 'person',
+    status: 'active',
+    mergedFrom: [],
+    createdAt: punctuationNow,
+    updatedAt: punctuationNow,
+  });
+  await Promise.all([
+    db.doc(`catalogAuthors/${punctuationTargetId}`).set(directAuthor('J R R Tolkien')),
+    db.doc(`catalogAuthors/${punctuationSourceId}`).set(directAuthor('J.R.R. Tolkien')),
+  ]);
+  await previewAndApply({
+    type: 'mergeAuthors',
+    sourceAuthorId: punctuationSourceId,
+    targetAuthorId: punctuationTargetId,
+  });
+  assert.deepEqual(
+    (await db.doc(`catalogAuthors/${punctuationTargetId}`).get()).get('alternateNames'),
+    [],
+  );
+  await previewAndApply({
+    type: 'upsertAuthor',
+    authorId: punctuationTargetId,
+    author: {
+      canonicalName: 'J R R Tolkien',
+      alternateNames: [],
+      sortName: 'Tolkien',
+      kind: 'person',
+    },
   });
   const linkOperation: AdminCatalogOperation = {
     type: 'linkBooks',
@@ -327,7 +447,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     type: 'editWork',
     workId: targetWorkId,
     visibility: 'searchable',
-    work: {...workInput(`Target Work ${suffix}`), alternateTitles: ['The Target Alias']},
+    work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['The Target Alias']},
   };
   const edit = await previewAndApply(editOperation);
   const replay = await callable<{operationId: string; applied: true; touchedDocuments: number}>(
@@ -397,6 +517,27 @@ test('all admin catalog operations use real callable transactions and preserve p
   const attackerUid = `attacker-${suffix}`;
   const scanNow = Timestamp.now();
   const attackerWrites: Array<{path: string; data: Record<string, unknown>}> = [];
+  const overLimitBookId = `too-many-authors-${suffix}`;
+  const overLimitAuthorIds = Array.from({length: 7}, (_, index) => `scan-author-${index}-${suffix}`);
+  for (const authorId of overLimitAuthorIds) {
+    attackerWrites.push({
+      path: `catalogAuthors/${authorId}`,
+      data: {
+        canonicalName: authorId, alternateNames: [], nameKeys: [authorId],
+        sortName: authorId, kind: 'person', status: 'active', mergedFrom: [],
+        createdAt: scanNow, updatedAt: scanNow,
+      },
+    });
+  }
+  attackerWrites.push({
+    path: `users/${personalUid}/books/${overLimitBookId}`,
+    data: {
+      title: 'Seven-author personal shadow', authorIds: overLimitAuthorIds,
+      isbn: '', pageCount: 100, publisher: '', publishedDate: '', coverUrl: '',
+      workId: null, editionId: null, matchMethod: null, linkedAt: null,
+      createdAt: scanNow, updatedAt: scanNow,
+    },
+  });
   for (let index = 0; index < 600; index += 1) {
     attackerWrites.push({
       path: `users/${attackerUid}/books/attack-${String(index).padStart(4, '0')}`,
@@ -466,6 +607,10 @@ test('all admin catalog operations use real callable transactions and preserve p
     finding.code, finding.workIds, finding.editionIds, finding.books,
   ]));
   assert.equal(new Set(findingSignatures).size, findingSignatures.length);
+  assert.equal(pages.some((page) => page.findings.some((finding) =>
+    finding.code === 'book-link-anomaly' &&
+    finding.books.some((book) => book.uid === personalUid && book.bookId === overLimitBookId),
+  )), true);
   assert.equal(pages.reduce((total, page) => total +
     (page.works.find((work) => work.workId === targetWorkId)?.linkedBookCount ?? 0), 0), 6);
 
@@ -473,9 +618,8 @@ test('all admin catalog operations use real callable transactions and preserve p
   const largeSourceId = `large-source-${suffix}`;
   const now = Timestamp.now();
   const directWork = (title: string) => ({
-    ...workInput(title),
+    ...workInput(title, catalogAuthorId),
     titleKeys: [title.toLocaleLowerCase('en-US')],
-    authorNamesLower: ['catalog test author'],
     visibility: 'internal',
     status: 'active',
     mergedFrom: [],
@@ -508,7 +652,7 @@ test('all admin catalog operations use real callable transactions and preserve p
 
   const postDeleteOperation: AdminCatalogOperation = {
     type: 'editWork', workId: targetWorkId, visibility: 'searchable',
-    work: {...workInput(`Target Work ${suffix}`), alternateTitles: ['Post-delete denial']},
+    work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['Post-delete denial']},
   };
   const postDeletePreview = await preview(postDeleteOperation);
   await db.doc(`users/${ADMIN_UID}`).update({deletedAt: Timestamp.now()});

@@ -1,6 +1,4 @@
-// A users/{uid}/authors doc. The id is deterministic (authorIdFor) at
-// creation only and opaque afterward — rename edits the name fields in
-// place, so id need not match the current name.
+// The client projection of a shared catalogAuthors/{authorId} document.
 export type AuthorKind = 'person' | 'entity' | 'placeholder';
 
 export type AuthorRetirement =
@@ -11,6 +9,8 @@ interface AuthorBase {
   id: string;
   name: string;
   nameLower: string;
+  alternateNames?: string[];
+  sortName?: string;
   retirement?: AuthorRetirement;
 }
 

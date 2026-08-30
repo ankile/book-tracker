@@ -12,6 +12,15 @@ const catalog = require("../lib/catalog");
 const {sharedWorkOwnerId} = require("../lib/catalogProjection");
 const db = getFirestore();
 const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
+const activeAuthor = (canonicalName) => ({
+  canonicalName,
+  alternateNames: [],
+  nameKeys: [canonicalName.toLowerCase()],
+  sortName: canonicalName,
+  kind: "person",
+  status: "active",
+  mergedFrom: [],
+});
 
 test("the Functions title normalizer agrees with the shared client fixture", () => {
   const fixtures = JSON.parse(readFileSync(join(
@@ -165,6 +174,12 @@ test("catalog callables reject anonymous and malformed requests before Firestore
     (error) => error.code === "unauthenticated",
   );
   await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "Author", sortName: "Author", kind: "person",
+    }]}, {auth: undefined}),
+    (error) => error.code === "unauthenticated",
+  );
+  await assert.rejects(
     deployed.catalog.search.run({title: "Book", uid: "other"}, authContext),
     (error) => error.code === "invalid-argument",
   );
@@ -192,14 +207,201 @@ test("catalog search has a separate bounded hourly quota", async (t) => {
   );
 });
 
+test("title search has a global hourly spend breaker", async (t) => {
+  const paths = [];
+  t.mock.method(db, "doc", (path) => ({path}));
+  t.mock.method(db, "runTransaction", async (handler) => handler({
+    get: async (reference) => {
+      paths.push(reference.path);
+      return {
+        data: () => reference.path === "functionGlobalQuotas/catalogSearch" ? {
+          windowStartedAt: Timestamp.now(), count: 100,
+        } : undefined,
+      };
+    },
+    set: () => undefined,
+    update: () => undefined,
+  }));
+  await assert.rejects(
+    deployed.catalog.search.run({title: "Book", authorNames: ["Author"]}, authContext),
+    (error) => error.code === "resource-exhausted",
+  );
+  assert.deepEqual(paths, [
+    "users/owner/functionQuotas/catalogSearch",
+    "functionGlobalQuotas/catalogSearch",
+  ]);
+});
+
+test("shared author resolution rejects deleted accounts before quotas or catalog reads", async (t) => {
+  let catalogTouched = false;
+  t.mock.method(db, "collection", (name) => {
+    if (name === "users") {
+      return {doc: () => ({get: async () => ({exists: true, get: () => Timestamp.now()})})};
+    }
+    catalogTouched = true;
+    return {};
+  });
+  await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "Author", sortName: "Author", kind: "person",
+    }]}, authContext),
+    (error) => error.code === "failed-precondition",
+  );
+  assert.equal(catalogTouched, false);
+});
+
+test("ordinary users resolve existing shared authors and create only missing catalog rows", async (t) => {
+  const rows = new Map([["catalogAuthors/le-guin", {
+    ...activeAuthor("Ursula K. Le Guin"), nameKeys: ["ursula k le guin"],
+  }]]);
+  const ref = (path) => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snap = (reference) => ({
+    exists: rows.has(reference.path), id: reference.id, ref: reference,
+    data: () => rows.get(reference.path),
+    get: (field) => rows.get(reference.path)?.[field],
+  });
+  let transactionCount = 0;
+  const quotaWrites = [];
+  t.mock.method(db, "doc", (path) => ref(path));
+  t.mock.method(db, "collection", (name) => {
+    if (name === "users") {
+      return {doc: () => ({get: async () => ({exists: true, get: () => undefined})})};
+    }
+    assert.equal(name, "catalogAuthors");
+    const query = {
+      where: (field, operator, keys) => {
+        assert.deepEqual([field, operator], ["nameKeys", "array-contains-any"]);
+        query.keys = keys;
+        return query;
+      },
+      limit: () => {
+        query.capacity = true;
+        return query;
+      },
+      doc: (id) => ref(`catalogAuthors/${id}`),
+    };
+    return query;
+  });
+  t.mock.method(db, "runTransaction", async (handler) => {
+    transactionCount += 1;
+    if (transactionCount === 1) {
+      return handler({
+        get: async () => ({data: () => undefined}),
+        set: (reference, data) => quotaWrites.push({path: reference.path, data}),
+      });
+    }
+    return handler({
+      get: async (value) => {
+        if (value.keys !== undefined) {
+          return {
+            docs: [...rows.keys()].map((path) => snap(ref(path))).filter((snapshot) =>
+              snapshot.data().nameKeys.some((key) => value.keys.includes(key)),
+            ),
+          };
+        }
+        if (value.capacity === true) return {size: rows.size};
+        return snap(value);
+      },
+      getAll: async (...references) => references.map(snap),
+      set: (reference, data) => quotaWrites.push({path: reference.path, data}),
+      update: (reference, data) => quotaWrites.push({path: reference.path, data}),
+      create: (reference, data) => {
+        assert.equal(rows.has(reference.path), false);
+        rows.set(reference.path, data);
+      },
+    });
+  });
+  const result = await deployed.catalog.ensureauthors.run({authors: [
+    {canonicalName: "Ursula K. Le Guin", sortName: "Le Guin", kind: "person"},
+    {canonicalName: "Octavia E. Butler", sortName: "Butler", kind: "person"},
+  ]}, authContext);
+  assert.equal(result.authorIds[0], "le-guin");
+  assert.match(result.authorIds[1], /^author_[a-f0-9]{24}$/);
+  const created = rows.get(`catalogAuthors/${result.authorIds[1]}`);
+  assert.equal(created.canonicalName, "Octavia E. Butler");
+  assert.deepEqual(created.nameKeys, ["octavia e butler"]);
+  assert.equal(created.status, "active");
+  assert.deepEqual(quotaWrites.map(({path, data}) => ({path, count: data.count})), [
+    {path: "users/owner/functionQuotas/catalogEnsureAuthors", count: 2},
+    {path: "functionGlobalQuotas/catalogEnsureAuthors", count: 1},
+  ]);
+});
+
+function installMissingAuthorBoundaryStore(t, {catalogSize, globalCount}) {
+  const ref = (path) => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snapshot = (reference, data) => ({
+    exists: data !== undefined,
+    id: reference.id,
+    ref: reference,
+    data: () => data,
+    get: (field) => data?.[field],
+  });
+  let transactions = 0;
+  t.mock.method(db, "doc", ref);
+  t.mock.method(db, "collection", (name) => {
+    if (name === "users") {
+      return {doc: () => ({get: async () => ({exists: true, get: () => undefined})})};
+    }
+    assert.equal(name, "catalogAuthors");
+    return {
+      where: () => ({kind: "matching"}),
+      limit: () => ({kind: "capacity"}),
+      doc: (id) => ref(`catalogAuthors/${id ?? "auto"}`),
+    };
+  });
+  t.mock.method(db, "runTransaction", async (handler) => {
+    transactions += 1;
+    if (transactions === 1) {
+      return handler({
+        get: async () => ({data: () => undefined}),
+        set: () => undefined,
+      });
+    }
+    return handler({
+      get: async (value) => {
+        if (value.kind === "matching") return {docs: []};
+        if (value.kind === "capacity") return {size: catalogSize};
+        assert.equal(value.path, "functionGlobalQuotas/catalogEnsureAuthors");
+        return snapshot(value, globalCount === null ? undefined : {
+          windowStartedAt: Timestamp.now(), count: globalCount,
+        });
+      },
+      getAll: async (...references) => references.map((reference) => snapshot(reference, undefined)),
+      set: () => undefined,
+      update: () => undefined,
+      create: () => undefined,
+    });
+  });
+}
+
+test("shared author creation refuses the hard catalog capacity", async (t) => {
+  installMissingAuthorBoundaryStore(t, {catalogSize: 500, globalCount: 0});
+  await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "New Author", sortName: "Author", kind: "person",
+    }]}, authContext),
+    (error) => error.code === "resource-exhausted" && /catalog is full/.test(error.message),
+  );
+});
+
+test("shared author creation refuses the global missing-name breaker", async (t) => {
+  installMissingAuthorBoundaryStore(t, {catalogSize: 0, globalCount: 500});
+  await assert.rejects(
+    deployed.catalog.ensureauthors.run({authors: [{
+      canonicalName: "New Author", sortName: "Author", kind: "person",
+    }]}, authContext),
+    (error) => error.code === "resource-exhausted" && /temporarily busy/.test(error.message),
+  );
+});
+
 test("an exact title with the wrong author is not returned", async (t) => {
   const whereCalls = [];
+  let authorReads = 0;
   const work = {
     canonicalTitle: "The Shared Title",
     alternateTitles: [],
     titleKeys: ["shared title"],
-    authorNames: ["Correct Author"],
-    authorNamesLower: ["correct author"],
+    authorIds: ["correct-author"],
     coverUrl: "",
     subjects: [],
     fiction: null,
@@ -237,13 +439,27 @@ test("an exact title with the wrong author is not returned", async (t) => {
     if (name === "works") {
       return {doc: (id) => ({get: async () => snap(`works/${id}`, work)})};
     }
+    if (name === "catalogAuthors") {
+      return {doc: (id) => ({get: async () => {
+        authorReads += 1;
+        return snap(`catalogAuthors/${id}`, activeAuthor("Correct Author"));
+      }})};
+    }
     assert.fail(`unexpected collection ${name}`);
   });
   assert.deepEqual(await deployed.catalog.search.run({
     title: "The Shared Title",
     authorNames: ["Wrong Author"],
   }, authContext), {results: []});
+  const exactWork = await deployed.catalog.search.run({
+    title: "The Shared Title",
+    authorNames: ["Correct Author"],
+  }, authContext);
+  assert.equal(exactWork.results[0].workId, "work");
+  assert.equal(exactWork.results[0].editionId, null);
+  assert.equal(exactWork.results[0].edition, null);
   assert.deepEqual(whereCalls[0], ["visibility", "==", "searchable"]);
+  assert.equal(authorReads, 2);
 });
 
 test("ordinary catalog creation is not deployed", async (t) => {
@@ -261,8 +477,7 @@ test("ordinary catalog creation is not deployed", async (t) => {
       canonicalTitle: "Private source title",
       alternateTitles: [],
       titleKeys: ["private source title"],
-      authorNames: ["Private Author"],
-      authorNamesLower: ["private author"],
+      authorIds: ["private-author"],
       coverUrl: "",
       subjects: [],
       fiction: null,
@@ -274,7 +489,6 @@ test("ordinary catalog creation is not deployed", async (t) => {
       workId: "internal-work",
       isbn13: "9780000000002",
       title: "Private source title",
-      authorNames: ["Private Author"],
       publisher: "",
       publishedDate: "",
       language: "",
@@ -284,6 +498,7 @@ test("ordinary catalog creation is not deployed", async (t) => {
       coverUrl: "",
       externalIds: {},
     }],
+    ["catalogAuthors/private-author", activeAuthor("Private Author")],
   ]);
   const snapshot = (reference) => ({
     exists: rows.has(reference.path),
@@ -311,7 +526,7 @@ test("ordinary catalog creation is not deployed", async (t) => {
     work: {
       canonicalTitle: "Caller title",
       alternateTitles: [],
-      authorNames: ["Caller Author"],
+      authorIds: ["private-author"],
       coverUrl: "",
       subjects: [],
       fiction: null,
@@ -319,7 +534,6 @@ test("ordinary catalog creation is not deployed", async (t) => {
     edition: {
       isbn13: "9780000000002",
       title: "Caller title",
-      authorNames: ["Caller Author"],
       publisher: "",
       publishedDate: "",
       language: "",
@@ -348,6 +562,7 @@ test("ordinary users cannot reserve catalog external IDs", async (t) => {
   assert.equal(deployed.catalog.create, undefined);
   const references = new Map();
   const rows = new Map();
+  rows.set("catalogAuthors/ada-lovelace", activeAuthor("Ada Lovelace"));
   const ref = (path) => {
     if (!references.has(path)) {
       references.set(path, {path, id: path.slice(path.lastIndexOf("/") + 1)});
@@ -383,7 +598,7 @@ test("ordinary users cannot reserve catalog external IDs", async (t) => {
     work: {
       canonicalTitle: "The Book",
       alternateTitles: [],
-      authorNames: ["Ada Lovelace"],
+      authorIds: ["ada-lovelace"],
       coverUrl: "",
       subjects: [],
       fiction: true,
@@ -391,7 +606,6 @@ test("ordinary users cannot reserve catalog external IDs", async (t) => {
     edition: {
       isbn13: null,
       title: "The Book",
-      authorNames: ["Ada Lovelace"],
       publisher: "",
       publishedDate: "",
       language: "en",
@@ -427,8 +641,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
     canonicalTitle: "The Book",
     alternateTitles: [],
     titleKeys: ["book"],
-    authorNames: ["Ada Lovelace"],
-    authorNamesLower: ["ada lovelace"],
+    authorIds: ["ada-lovelace"],
     coverUrl: "https://example.test/work.jpg",
     subjects: ["Private implementation detail"],
     fiction: true,
@@ -440,7 +653,6 @@ test("work readers resolve aliases and return only consented redacted summaries"
     workId: "canonical-work",
     isbn13: "9780000000002",
     title: "The Book",
-    authorNames: ["Ada Lovelace"],
     publisher: "Publisher",
     publishedDate: "2026",
     language: "en",
@@ -568,6 +780,12 @@ test("work readers resolve aliases and return only consented redacted summaries"
               mergedFrom: [],
             } : undefined),
     })};
+    if (name === "catalogAuthors") return {doc: (id) => ({
+      get: async () => snap(
+        `catalogAuthors/${id}`,
+        id === "ada-lovelace" ? activeAuthor("Ada Lovelace") : undefined,
+      ),
+    })};
     if (name === "editions") return {
       where: (field, operator, value) => {
         assert.deepEqual([field, operator, value], ["workId", "==", "canonical-work"]);
@@ -621,12 +839,19 @@ test("work readers resolve aliases and return only consented redacted summaries"
     workId: "canonical-work",
     canonicalTitle: "The Book",
     alternateTitles: [],
-    authorNames: ["Ada Lovelace"],
+    authors: [{
+      authorId: "ada-lovelace",
+      canonicalName: "Ada Lovelace",
+      sortName: "Ada Lovelace",
+      kind: "person",
+    }],
     coverUrl: "https://example.test/work.jpg",
+    subjects: ["Private implementation detail"],
+    fiction: true,
     mergedFrom: ["old-work"],
   });
   assert.deepEqual(Object.keys(result.editions[0]).sort(), [
-    "authorNames", "coverUrl", "editionId", "format", "isbn13", "language",
+    "coverUrl", "editionId", "format", "isbn13", "language",
     "publishedDate", "publisher", "suggestedPageCount", "title",
     "translatorNames", "workId",
   ]);

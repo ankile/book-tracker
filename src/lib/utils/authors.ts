@@ -32,6 +32,7 @@ export interface ResolvableAuthor {
   id: string;
   name: string;
   nameLower: string;
+  alternateNames?: readonly string[];
   retirement?: AuthorRetirement;
 }
 
@@ -345,8 +346,10 @@ function normalizeAuthorName(name: string): string {
 function matchingAuthor<T extends ResolvableAuthor>(normalized: string, authors: readonly T[]): T | undefined {
   const lower = normalized.toLowerCase();
   const byName = authors.find((author) => author.nameLower === lower);
-  const byId = authors.find((author) => author.id === authorIdFor(normalized));
-  return byName ?? byId;
+  const byAlternateName = authors.find((author) =>
+    author.alternateNames?.some((name) => name.toLowerCase() === lower),
+  );
+  return byName ?? byAlternateName;
 }
 
 function newPersonChip(normalized: string): AuthorChip {

@@ -38,21 +38,25 @@ export function applyQuota(
   limit: number,
   windowMs: number,
   now: Timestamp,
+  amount = 1,
 ): QuotaDecision {
+  if (!Number.isInteger(amount) || amount <= 0 || amount > limit) {
+    throw new RangeError("Quota amount must be a positive integer no greater than its limit.");
+  }
   const windowStartedAt = data?.windowStartedAt;
   const count = data?.count;
   if (!(windowStartedAt instanceof Timestamp) ||
       typeof count !== "number" || !Number.isInteger(count) || count < 0 ||
       windowStartedAt.toMillis() <= now.toMillis() - windowMs) {
-    tx.set(quotaRef, {windowStartedAt: now, count: 1});
+    tx.set(quotaRef, {windowStartedAt: now, count: amount});
     return {granted: true};
   }
-  if (count >= limit) {
-    const firstRefusal = count === limit;
-    if (firstRefusal) tx.update(quotaRef, {count: count + 1});
+  if (count + amount > limit) {
+    const firstRefusal = count <= limit;
+    if (firstRefusal) tx.update(quotaRef, {count: limit + 1});
     return {granted: false, firstRefusal};
   }
-  tx.update(quotaRef, {count: count + 1});
+  tx.update(quotaRef, {count: count + amount});
   return {granted: true};
 }
 
@@ -61,11 +65,12 @@ export async function consumeQuota(
   path: string,
   limit: number,
   windowMs: number,
+  amount = 1,
 ): Promise<QuotaDecision> {
   const quotaRef = db.doc(path);
   const now = Timestamp.now();
   return db.runTransaction(async (tx): Promise<QuotaDecision> => {
     const snap = await tx.get(quotaRef);
-    return applyQuota(tx, quotaRef, snap.data(), limit, windowMs, now);
+    return applyQuota(tx, quotaRef, snap.data(), limit, windowMs, now, amount);
   });
 }

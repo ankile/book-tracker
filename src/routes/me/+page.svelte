@@ -1409,7 +1409,7 @@
       <StatCard label="Books Read" value={stats.finishedBooks} href="/finished"
         subtext={stats.firstFinishedAt && stats.lastFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
       <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
-      <StatCard label="Authors" value={authorList === undefined ? '…' : selectableAuthors(authorList).length} subtext="Rename, merge, sort names" href="/authors" />
+      <StatCard label="Catalog Authors" value={authorList === undefined ? '…' : selectableAuthors(authorList).length} subtext="Browse shared names" href="/authors" />
       <StatCard label="Needs an ISBN" value={allBooks === undefined ? '…' : isbnProblems}
         subtext="Missing or mistyped, so no cover or genre" href="/isbns" />
       <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}

@@ -11,7 +11,6 @@
 import { parseFlags, connect } from './migrate-lib.ts';
 import { createHash } from 'node:crypto';
 import { isFinished } from './src/lib/utils/finished.ts';
-import { AUTHOR_KINDS, joinPersonName } from './src/lib/utils/authors.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
 import { Timestamp } from 'firebase-admin/firestore';
@@ -23,7 +22,6 @@ import {
 } from './src/lib/utils/catalog.ts';
 import { normalizeIsbn } from './src/lib/utils/isbn.ts';
 import {
-  authorShapeViolations,
   bookShapeViolations,
   profileOwnerRecordViolations,
   profileShapeViolations,
@@ -48,6 +46,7 @@ const users = await db.collection('users').listDocuments();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
 const profileOwners = await db.collection('profileOwners').get();
+const catalogAuthors = await db.collection('catalogAuthors').get();
 const works = await db.collection('works').get();
 const editions = await db.collection('editions').get();
 const isbnIndexes = await db.collection('isbnIndex').get();
@@ -58,6 +57,7 @@ const existingUsers = new Set(userProfiles.docs.map((d) => d.id));
 const userProfilesById = new Map(userProfiles.docs.map((d) => [d.id, d.data()]));
 
 const worksById = new Map(works.docs.map((doc) => [doc.id, doc.data()]));
+const catalogAuthorsById = new Map(catalogAuthors.docs.map((doc) => [doc.id, doc.data()]));
 const editionsById = new Map(editions.docs.map((doc) => [doc.id, doc.data()]));
 const isbnIndexesById = new Map(isbnIndexes.docs.map((doc) => [doc.id, doc.data()]));
 const externalIdIndexesById = new Map(externalIdIndexes.docs.map((doc) => [doc.id, doc.data()]));
@@ -96,11 +96,94 @@ const resolveCatalogWork = (id: string): {id: string | null; hops: number; cycle
   }
 };
 
+const resolveCatalogAuthor = (id: string): {id: string | null; hops: number; cycle: boolean} => {
+  const visited = new Set<string>();
+  let current = id;
+  let hops = 0;
+  while (true) {
+    if (visited.has(current)) return {id: null, hops, cycle: true};
+    visited.add(current);
+    const author = catalogAuthorsById.get(current);
+    if (author === undefined) return {id: null, hops, cycle: false};
+    if (author.status !== 'merged') return {id: current, hops, cycle: false};
+    if (typeof author.mergedInto !== 'string') return {id: null, hops, cycle: false};
+    current = author.mergedInto;
+    hops += 1;
+  }
+};
+
+for (const authorDoc of catalogAuthors.docs) {
+  const author = authorDoc.data();
+  const path = authorDoc.ref.path;
+  const required = [
+    'canonicalName', 'alternateNames', 'nameKeys', 'sortName', 'kind',
+    'status', 'createdAt', 'updatedAt',
+  ];
+  for (const field of required) {
+    if (author[field] === undefined) found(`catalog.author.missing.${field}`, path);
+  }
+  const allowed = new Set([...required, 'mergedInto', 'mergedFrom']);
+  for (const field of Object.keys(author)) {
+    if (!allowed.has(field)) found('catalog.author.unexpected-field', path, field);
+  }
+  if (typeof author.canonicalName !== 'string' || author.canonicalName.trim() === '' ||
+      typeof author.sortName !== 'string' || author.sortName.trim() === '') {
+    found('catalog.author.bad-name', path);
+  }
+  if (!['person', 'entity', 'placeholder'].includes(author.kind)) {
+    found('catalog.author.bad-kind', path, String(author.kind));
+  }
+  if (!['active', 'merged'].includes(author.status)) {
+    found('catalog.author.bad-status', path, String(author.status));
+  }
+  if (!Array.isArray(author.alternateNames) ||
+      author.alternateNames.some((name) => typeof name !== 'string')) {
+    found('catalog.author.bad-alternate-names', path);
+  }
+  if (typeof author.canonicalName === 'string' && Array.isArray(author.alternateNames) &&
+      author.alternateNames.every((name) => typeof name === 'string')) {
+    const expected = [...new Set(
+      [author.canonicalName, ...author.alternateNames].map(normalizeCatalogAuthorName),
+    )];
+    if (JSON.stringify(author.nameKeys) !== JSON.stringify(expected)) {
+      found('catalog.author.name-keys-mismatch', path, JSON.stringify(author.nameKeys));
+    }
+  }
+  if (!(author.createdAt instanceof Timestamp) || !(author.updatedAt instanceof Timestamp)) {
+    found('catalog.author.bad-timestamps', path);
+  }
+  const resolution = resolveCatalogAuthor(authorDoc.id);
+  if (resolution.cycle) found('catalog.author.merge-cycle', path);
+  if (author.status === 'merged') {
+    if (typeof author.mergedInto !== 'string' ||
+        catalogAuthorsById.get(author.mergedInto)?.status !== 'active') {
+      found('catalog.author.merge-target-missing', path, String(author.mergedInto));
+    } else if (resolution.hops !== 1) {
+      found('catalog.author.merge-not-one-hop', path, String(resolution.hops));
+    }
+  } else if (author.mergedInto !== undefined) {
+    found('catalog.author.active-has-merged-into', path, String(author.mergedInto));
+  }
+  if (author.status === 'active') {
+    if (!Array.isArray(author.mergedFrom) || author.mergedFrom.length > 29 ||
+        new Set(author.mergedFrom).size !== author.mergedFrom.length) {
+      found('catalog.author.bad-merged-from', path, JSON.stringify(author.mergedFrom));
+    } else {
+      for (const sourceId of author.mergedFrom) {
+        const source = typeof sourceId === 'string' ? catalogAuthorsById.get(sourceId) : undefined;
+        if (source?.status !== 'merged' || source.mergedInto !== authorDoc.id) {
+          found('catalog.author.merged-from-mismatch', path, String(sourceId));
+        }
+      }
+    }
+  }
+}
+
 for (const workDoc of works.docs) {
   const work = workDoc.data();
   const path = workDoc.ref.path;
   const required = [
-    'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorNames', 'authorNamesLower',
+    'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds',
     'coverUrl', 'subjects', 'fiction', 'visibility', 'status', 'createdAt', 'updatedAt',
   ];
   for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
@@ -119,10 +202,16 @@ for (const workDoc of works.docs) {
   if (!Array.isArray(work.alternateTitles) || work.alternateTitles.some((title) => typeof title !== 'string')) {
     found('catalog.work.bad-alternate-titles', path, JSON.stringify(work.alternateTitles));
   }
-  if (!Array.isArray(work.authorNames) || work.authorNames.some((name) => typeof name !== 'string')) {
-    found('catalog.work.bad-authors', path, JSON.stringify(work.authorNames));
-  } else if (JSON.stringify(work.authorNamesLower) !== JSON.stringify(work.authorNames.map(normalizeCatalogAuthorName))) {
-    found('catalog.work.author-index-mismatch', path, JSON.stringify(work.authorNamesLower));
+  if (!Array.isArray(work.authorIds) || work.authorIds.length === 0 ||
+      work.authorIds.length > 20 || new Set(work.authorIds).size !== work.authorIds.length ||
+      work.authorIds.some((id) => typeof id !== 'string')) {
+    found('catalog.work.bad-authors', path, JSON.stringify(work.authorIds));
+  } else {
+    for (const authorId of work.authorIds) {
+      const resolution = resolveCatalogAuthor(authorId);
+      if (resolution.id === null) found('catalog.work.author-unresolved', path, authorId);
+      else if (resolution.hops !== 0) found('catalog.work.author-not-canonical', path, authorId);
+    }
   }
   if (!Array.isArray(work.subjects) || work.subjects.length > 25 ||
       work.subjects.some((subject) => typeof subject !== 'string')) {
@@ -169,7 +258,7 @@ for (const editionDoc of editions.docs) {
   const edition = editionDoc.data();
   const path = editionDoc.ref.path;
   const allowedEditionFields = new Set([
-    'workId', 'isbn13', 'title', 'authorNames', 'publisher', 'publishedDate',
+    'workId', 'isbn13', 'title', 'publisher', 'publishedDate',
     'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
     'externalIds', 'createdAt', 'updatedAt',
   ]);
@@ -184,10 +273,6 @@ for (const editionDoc of editions.docs) {
   }
   if (typeof edition.title !== 'string' || edition.title.trim() === '') {
     found('catalog.edition.bad-title', path, JSON.stringify(edition.title));
-  }
-  if (!Array.isArray(edition.authorNames) || edition.authorNames.length === 0 ||
-      edition.authorNames.some((name) => typeof name !== 'string')) {
-    found('catalog.edition.bad-authors', path, JSON.stringify(edition.authorNames));
   }
   for (const field of ['publisher', 'publishedDate', 'language']) {
     if (typeof edition[field] !== 'string') {
@@ -430,12 +515,10 @@ for (const record of profileOwners.docs) {
   }
 }
 
-// Info-level author bookkeeping (summary lines, not findings): orphaned
-// author docs are a legitimate steady state — deleting or editing a book
-// never garbage-collects its authors, and an orphan is still useful for
-// autocomplete — but the counts make drift visible in audit diffs.
-let authorDocCount = 0;
-let authorOrphanCount = 0;
+// Author/catalog bookkeeping. Shared authors may legitimately be unreferenced
+// because they remain useful for autocomplete. Personal author documents are
+// legacy state and are findings below; the counts make migration drift visible.
+let legacyAuthorDocCount = 0;
 let catalogLinkedBookCount = 0;
 let bookSharingSettingCount = 0;
 const eligibleSharingUsers = new Set<string>();
@@ -478,94 +561,13 @@ for (const user of users) {
     found(finding.cls, lifecycle.ref.path, finding.detail);
   }
 
-  // Author entity checks: doc shape only. Ids are deterministic at
-  // creation but OPAQUE afterward (rename edits name/nameLower in place),
-  // so id === authorIdFor(name) is deliberately NOT an invariant.
+  // Personal author subcollections are retired. Any remaining document is
+  // a migration straggler because every book now points at catalogAuthors.
   const authorDocs = await user.collection('authors').get();
-  const authorDocIds = new Set(authorDocs.docs.map((d) => d.id));
-  const mergedTargets = new Map<string, string>();
-  authorDocCount += authorDocs.size;
+  legacyAuthorDocCount += authorDocs.size;
   for (const authorDoc of authorDocs.docs) {
-    const a = authorDoc.data();
-    const ap = authorDoc.ref.path;
-    for (const violation of authorShapeViolations(a)) found('authordoc.rules-shape', ap, violation);
-    if (typeof a.name !== 'string' || a.name.trim() === '') {
-      found('authordoc.bad-name', ap, JSON.stringify(a.name));
-    } else if (a.nameLower !== a.name.toLowerCase()) {
-      found('authordoc.namelower-mismatch', ap, `${a.nameLower} != ${a.name.toLowerCase()}`);
-    }
-    if (!AUTHOR_KINDS.includes(a.kind)) found('authordoc.bad-kind', ap, String(a.kind));
-    // Persons carry explicit name parts; the stored name is exactly their
-    // join, so display, sorting, and abbreviation can never disagree.
-    if (a.kind === 'person') {
-      if (typeof a.familyName !== 'string' || a.familyName.trim() === '') {
-        found('authordoc.missing-familyname', ap, a.name);
-      } else {
-        if (a.givenName !== undefined && (typeof a.givenName !== 'string' || a.givenName.trim() === '')) {
-          found('authordoc.bad-givenname', ap, JSON.stringify(a.givenName));
-        }
-        const joined = joinPersonName({ givenName: a.givenName ?? '', familyName: a.familyName });
-        if (a.name !== joined) found('authordoc.name-parts-mismatch', ap, `${a.name} != ${joined}`);
-      }
-    } else if (a.givenName !== undefined || a.familyName !== undefined) {
-      found('authordoc.parts-on-nonperson', ap, a.name);
-    }
-    if (a.retirement !== undefined) {
-      const retirement = a.retirement;
-      if (typeof retirement !== 'object' || retirement === null || Array.isArray(retirement)) {
-        found('authordoc.bad-retirement', ap, JSON.stringify(retirement));
-      } else if (
-        retirement.reason === 'deleted' &&
-        Object.keys(retirement).length === 1
-      ) {
-        // A soft-deleted doc remains as a safe resolution target for a
-        // stale/offline book write.
-      } else if (
-        retirement.reason === 'merged' &&
-        typeof retirement.targetId === 'string' &&
-        retirement.targetId !== authorDoc.id &&
-        Object.keys(retirement).length === 2
-      ) {
-        mergedTargets.set(authorDoc.id, retirement.targetId);
-      } else {
-        found('authordoc.bad-retirement', ap, JSON.stringify(retirement));
-      }
-    }
+    found('catalog.author.legacy-personal-doc', authorDoc.ref.path);
   }
-
-  for (const [sourceId, targetId] of mergedTargets) {
-    if (!authorDocIds.has(targetId)) {
-      found('authordoc.merge-target-missing', `${user.path}/authors/${sourceId}`, targetId);
-      continue;
-    }
-    const visited = new Set<string>();
-    let current = sourceId;
-    while (mergedTargets.has(current)) {
-      if (visited.has(current)) {
-        found('authordoc.merge-cycle', `${user.path}/authors/${sourceId}`, [...visited, current].join(' -> '));
-        break;
-      }
-      visited.add(current);
-      const next = mergedTargets.get(current);
-      if (next === undefined) throw new Error('Known merged author has no target.');
-      current = next;
-    }
-  }
-
-  const canonicalAuthorId = (id: string): string => {
-    const visited = new Set<string>();
-    let current = id;
-    while (mergedTargets.has(current)) {
-      if (visited.has(current)) return id;
-      visited.add(current);
-      const target = mergedTargets.get(current);
-      if (target === undefined || !authorDocIds.has(target)) return id;
-      current = target;
-    }
-    return current;
-  };
-
-  const referencedAuthorIds = new Set<string>();
 
   for (const book of books.docs) {
     const b = book.data();
@@ -646,9 +648,10 @@ for (const user of users) {
         found('book.authorids-bad-shape', p, JSON.stringify(b.authorIds));
       } else {
         for (const id of b.authorIds) {
-          referencedAuthorIds.add(id);
-          referencedAuthorIds.add(canonicalAuthorId(id));
-          if (!authorDocIds.has(id)) found('book.author-doc-missing', p, id);
+          const resolution = resolveCatalogAuthor(id);
+          if (resolution.id === null) found('catalog.book.author-unresolved', p, id);
+          // A one-hop merged alias is a supported cached/offline reference.
+          // The next metadata edit resolves it to the active author.
         }
       }
     }
@@ -661,10 +664,7 @@ for (const user of users) {
       const which = ['author', 'authors'].filter((f) => b[f] !== undefined).join('+');
       found('book.legacy-author-field', p, which);
       if (Array.isArray(b.authors)) {
-        for (const a of b.authors) {
-          referencedAuthorIds.add(a.id);
-          referencedAuthorIds.add(canonicalAuthorId(a.id));
-        }
+        for (const a of b.authors) if (typeof a?.id !== 'string') found('book.legacy-author-id-bad', p);
       }
     }
 
@@ -690,9 +690,6 @@ for (const user of users) {
     }
   }
 
-  for (const authorDoc of authorDocs.docs) {
-    if (!referencedAuthorIds.has(authorDoc.id)) authorOrphanCount += 1;
-  }
 }
 
 const projectedPairs = new Set<string>();
@@ -751,8 +748,8 @@ for (const cls of Object.keys(counts).sort()) console.log(`${cls}: ${counts[cls]
 console.log(`user-documents: ${userProfiles.size}`);
 console.log(`user-refs: ${users.length}`);
 console.log(`phantom-users: ${users.filter((user) => !existingUsers.has(user.id)).length}`);
-console.log(`author-docs: ${authorDocCount}`);
-console.log(`author-orphans: ${authorOrphanCount}`);
+console.log(`catalog-authors: ${catalogAuthors.size}`);
+console.log(`legacy-personal-author-docs: ${legacyAuthorDocCount}`);
 console.log(`public-profiles: ${publicProfiles.size}`);
 console.log(`profile-discoveries: ${profileDiscoveries.size}`);
 console.log(`profile-owners: ${profileOwners.size}`);

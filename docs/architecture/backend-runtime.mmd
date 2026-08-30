@@ -40,8 +40,8 @@ flowchart TB
   subgraph catalogpath[Shared work catalog]
     direction LR
     catalogbrowser["<b>Signed-in reader</b><br/>Add/edit dialog or work page"]:::source
-    catalogfunctions["<b>Catalog callables · Gen 1</b><br/>catalog-search · catalog-workreaders<br/>verified users · bounded quotas"]:::function
-    catalogdata[("<b>Shared catalog</b><br/><code>works</code> · <code>editions</code><br/>ISBN, external-ID, and title indexes")]:::data
+    catalogfunctions["<b>Catalog callables · Gen 1</b><br/>catalog-search · catalog-ensureauthors<br/>catalog-workreaders · verified users · quotas"]:::function
+    catalogdata[("<b>Shared catalog</b><br/><code>catalogAuthors</code> · <code>works</code> · <code>editions</code><br/>ISBN, external-ID, and title indexes")]:::data
     ownerprojection[("<b>Server-only owner projection</b><br/><code>sharedWorkOwners</code><br/>work ID + UID only")]:::data
     privatebooks[("<b>Live private reader data</b><br/>Personal books and updates<br/>sharing setting + owned public profile")]:::data
     catalogresponse["<b>Redacted response</b><br/>Searchable bibliography or<br/>opted-in summary rows without UID"]:::security

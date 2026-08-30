@@ -30,12 +30,12 @@ flowchart LR
     finished["<b>Finished</b><br/><code>/finished</code><br/>Search · sort · year filter · totals"]:::page
     me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · integrations"]:::page
 
-    authors["<b>Authors</b><br/><code>/authors</code><br/>Rename · classify · merge · delete"]:::page
+    authors["<b>Authors</b><br/><code>/authors</code><br/>Shared catalog · personal book counts"]:::page
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
     work["<b>Shared work</b><br/><code>/books/[workId]</code><br/>Editions · opted-in readers · rereads"]:::public
     admin["<b>Admin overview</b><br/><code>/admin</code><br/>Account activity · recent issues"]:::admin
-    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Works · unmatched books · findings"]:::admin
+    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Authors · works · unmatched books · findings"]:::admin
   end
 
   subgraph actions[Dialogs and page-local writes]
@@ -43,9 +43,8 @@ flowchart LR
     bookaction["<b>Add or edit book</b><br/>Metadata lookup · catalog suggestions<br/>link, unlink, reread · delete"]:::action
     sessionaction["<b>Progress and sessions</b><br/>Set page · log, edit, or delete session"]:::action
     timeraction["<b>Reading timers</b><br/>Local or Toggl start/stop<br/>offline queue and stalled recovery"]:::action
-    authoraction["<b>Author editor</b><br/>Rename · kind · merge · soft delete"]:::action
     profileaction["<b>Profile settings</b><br/>Create · rename · publish · discovery<br/>book sharing · links · delete"]:::action
-    catalogaction["<b>Curate catalog</b><br/>Preview then apply create · link · merge<br/>work, edition, and ISBN corrections"]:::action
+    catalogaction["<b>Curate catalog</b><br/>Preview then apply author/work create and merge<br/>links, editions, and ISBN corrections"]:::action
     togglaction["<b>Toggl settings</b><br/>Connect · replace · disconnect token"]:::action
   end
 
@@ -72,7 +71,6 @@ flowchart LR
   current -.-> sessionaction
   finished -.-> sessionaction
   current -.-> timeraction
-  authors -.-> authoraction
   me -.-> profileaction
   me -.-> togglaction
   admincatalog -.-> catalogaction

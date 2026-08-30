@@ -216,20 +216,24 @@ stragglers, and do not remove it from the repository.
 
 #### Cross-user work catalog rollout
 
-The catalog migration is additive. Personal `pageCount` stays authoritative;
+The catalog migration adds shared works and consolidates authors. Personal `pageCount` stays authoritative;
 an edition's `suggestedPageCount` is only a hint, so acknowledgements/front
 matter choices never force users onto one total. Every personal book receives
 all four catalog-link fields. Unmatched or ambiguous books get explicit nulls;
 linked books get a work, optional edition, provenance, and link timestamp. The
-migration never changes the personal book's `updatedAt` and never rewrites its
-title, authors, ISBN, or page count.
+migration never changes the personal book's `updatedAt`, title, ISBN, or page
+count. It does rewrite `authorIds` from per-user IDs to shared catalog IDs and
+removes the legacy `author` and `authors` fields.
 
 Automatic catalog creation is deliberately narrower than linking. The
 operator's books and books whose owner has a valid
 `users/<uid>/settings/bookSharing` opt-in may seed searchable works. Private
 books and books below deleted or missing user documents may match an existing
-work but cannot create one. Placeholder/deleted authors are excluded and merged
-personal-author records resolve to their live target before matching.
+work but cannot create one. Author identity has a separate policy: the fact
+that a user reads a particular author is not treated as private, so every
+resolvable personal author may seed `catalogAuthors`. Placeholder authors stay
+available to personal books but are excluded from work matching; deleted
+authors are omitted and merge redirects resolve to their live target.
 
 Matching is conservative: normalized ISBN-13 first, then exact normalized title
 plus the complete resolved non-placeholder author set. Title-only and fuzzy
@@ -243,11 +247,16 @@ corrections use an optional reviewed JSON manifest:
     "bookPaths": ["users/<uid>/books/<bookId>"],
     "canonicalTitle": "Canonical title",
     "alternateTitles": ["Reviewed translation"],
-    "authorNames": ["Canonical Author"]
+    "authorNames": ["Canonical Author"],
+    "authorKinds": ["person"]
   }]
 }
 ```
 
+`authorKinds` is required for every reviewed group. It is positional and must
+match `authorNames`; the decoder keeps each name and kind paired while
+normalizing, deduplicating, and sorting authors, and rejects conflicting kinds
+for the same normalized name.
 The exact paths make review decisions reproducible; the migration does not
 turn them into general fuzzy rules. Keep the reviewed file with the rollout
 record and checksum it. A missing path, duplicate assignment, ISBN/title-author
@@ -257,11 +266,14 @@ explicitly resolved or recorded as an accepted unlinked case.
 
 Deploy and run in this order:
 
-1. Deploy the additive catalog rules; the `books.workId` and `books.editionId`
+1. Deploy the new Functions first, including `catalog-ensureauthors`; the
+   `books.workId` and `books.editionId`
    collection-group indexes; and the searchable `workTitleIndex.visibility +
    titleKey` and stable `sharedWorkOwners.workId + __name__` composite indexes.
    Wait for every index to report ready. Do not
-   expose the catalog UI yet.
+   expose the catalog UI yet. Schedule a short author-migration maintenance
+   window because old clients read per-user authors while new clients read the
+   shared catalog.
 2. Build and test Functions, then deploy the three sharing-projection triggers
    and the catalog callables. They must understand both absent legacy links and
    explicit null links. Wait for the triggers to become healthy before clients
@@ -271,11 +283,15 @@ Deploy and run in this order:
    apply reports zero shared catalog/projection documents and zero personal books, and diff the
    audit. `catalog.*` and `book-sharing.*` findings are release blockers unless
    individually understood.
-4. Repeat the dry-run against production, review every create/link/null and
-   `REVIEW` line, take the immediate pre-write snapshot, apply, audit, and apply
-   once more for the required zero-write pass.
-5. Only after the audit is clean, deploy Hosting with the work pages, catalog
-   suggestion flow, sharing control, and admin catalog curation UI.
+4. Start the maintenance window. Repeat the dry-run against production, review
+   every author/create/link/null and `REVIEW` line, take the immediate pre-write
+   snapshot, and apply. Immediately deploy the final Rules, which deny all
+   access to `users/{uid}/authors`, together with Hosting, whose client reads
+   `catalogAuthors`.
+5. Re-run the migration after the final Rules are live. This catches any old
+   client write that landed before the cutoff. The second apply must report
+   zero catalog documents, zero personal books, and zero legacy author
+   documents. End maintenance only after the audit is clean.
 
 ```sh
 # Emulator rehearsal. Omit reviewed.json when there are no approved exceptions.
@@ -293,7 +309,7 @@ node db-audit.ts --prod > audit-catalog-post.txt
 node migrate-cross-user-works.ts reviewed.json --prod --apply
 ```
 
-Work, edition, and title-index IDs are deterministic. ISBN index rows are
+Author, work, edition, and title-index IDs created by migration are deterministic. ISBN index rows are
 create-only: an existing row must already name the same work and edition or the
 run stops/reports review; no migration may redirect it implicitly. Catalog
 documents for one proposed work are read and created in one transaction. Every
@@ -302,7 +318,10 @@ rechecks that source book, its live account, and—outside the operator
 library—its exact sharing setting and owned public profile, so a concurrent
 deletion or consent revocation prevents publication. Each personal book is
 re-read in its own link transaction so a concurrent
-owner/admin relink wins instead of being overwritten. The audit independently
+owner/admin relink wins instead of being overwritten. Author creation pins the
+source book and legacy author versions without requiring work-sharing consent.
+Personal-book author rewrites and legacy-author cleanup are concurrency checked;
+cleanup aborts if any book still holds a personal ID or legacy author field. The audit independently
 checks work redirect cycles and the one-hop limit, edition/work agreement, both
 directions of ISBN indexing, exact title-index coverage, merge provenance, link
 provenance, ISBN-backed personal links, and both directions of the
@@ -316,23 +335,25 @@ This section documents the procedure only. Do not add a production rollout-log
 entry until the production dry-run, snapshot, apply, zero-write rerun, and
 post-audit have actually happened.
 
-Development acceptance record (not a production run), 2026-08-29:
+Development acceptance record (not a production run), updated 2026-08-30:
 
 - The synthetic Firestore-emulator test exercised dry-run, apply, idempotence,
   exact ISBN linking across an opted-in and a private user, private-only null
-  backfill, preservation of every personal `updatedAt`, and refusal to replace
-  a conflicting pre-existing ISBN index.
+  backfill, shared-author creation and personal-reference rewriting, safe
+  legacy-author deletion, preservation of every personal `updatedAt`, and
+  refusal to replace a conflicting pre-existing ISBN index.
 - Snapshot `2026-08-29T20-52-54.729Z-prod.json` was restored only into a
   loopback Firestore emulator. Running
   `node migrate-cross-user-works.ts --expect-overlap-groups=18` accepted exactly
-  18 cross-user groups without committing their titles or paths. The apply
-  created 684 catalog documents and backfilled 221 books with the final
-  searchable-title and sharing-projection implementation. The current snapshot
-  had no valid sharing opt-ins, so it correctly created 0 projection rows. The
-  second apply reported 0 catalog documents and 0 personal books. The
-  post-apply audit reported 0 `catalog.*` and 0 `book-sharing.*` findings; its
-  10 findings were unchanged legacy `book.progress-source-null-baseline`
-  records outside this migration. One
+  18 cross-user groups without committing their titles or paths. The revised
+  apply created 848 catalog documents, including 164 consolidated shared
+  authors, backfilled all 221 books, and transactionally deleted 181 legacy
+  personal-author documents. The current snapshot had no valid sharing opt-ins,
+  so it correctly created 0 projection rows. The second apply reported 0
+  catalog documents, 0 personal books, and 0 legacy author documents. The
+  post-apply audit reported 0 `catalog.*`, 0 `catalog.author.*`, and 0
+  `book-sharing.*` findings; its 10 findings were unchanged legacy
+  `book.progress-source-null-baseline` records outside this migration. One
   `unresolved-book` review item remained because it had no resolved
   non-placeholder author; it was intentionally left with explicit null link
   fields for operator review. No production apply was run.

@@ -14,16 +14,25 @@ import {
 } from '../src/lib/utils/adminCatalog.ts';
 
 const work = {
-  workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorNames: ['Author'],
+  workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, visibility: 'internal', status: 'active',
   mergedInto: null, mergedFrom: [], updatedAt: 1000, editionCount: 1,
   linkedBookCount: 1, warnings: [],
 };
 const edition = {
   editionId: 'edition', workId: 'work', isbn13: '9780316769488', title: 'Book',
-  authorNames: ['Author'], publisher: '', publishedDate: '', language: '',
+  publisher: '', publishedDate: '', language: '',
   translatorNames: [], format: 'unknown', suggestedPageCount: 200, coverUrl: '',
   externalIds: {openlibrary: 'OL1M'}, updatedAt: 1000,
+};
+const author = {
+  authorId: 'author', canonicalName: 'Author', alternateNames: [], nameKeys: ['author'],
+  sortName: 'Author', kind: 'person', status: 'active', mergedInto: null,
+  mergedFrom: [], updatedAt: 1000, workCount: 1, warnings: [],
+};
+const limits = {
+  catalogAuthors: 500, works: 200, editions: 500, books: 100,
+  isbnIndexes: 500, externalIdIndexes: 500, authorsPerWork: 20,
 };
 const book = {
   uid: 'user', bookId: 'book', title: 'Personal title', authorNames: ['Author'],
@@ -34,12 +43,12 @@ const book = {
 
 test('admin catalog scan decoder accepts the bounded identity-only projection', () => {
   const decoded = decodeAdminCatalogScanResponse({
-    works: [work], editions: [edition], books: [book], nextBookCursor: null,
+    authors: [author], works: [work], editions: [edition], books: [book], nextBookCursor: null,
     bookCountsComplete: true, findings: [{
       code: 'title-conflict', severity: 'warning', message: 'Review title',
       workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'book'}],
     }],
-    limits: {works: 200, editions: 500, books: 100, isbnIndexes: 500, externalIdIndexes: 500, authors: 20},
+    limits,
   });
   assert.equal(decoded.works[0].canonicalTitle, 'Book');
   assert.equal(decoded.books[0].pageCount, 201);
@@ -50,9 +59,9 @@ test('admin catalog scan decoder accepts the bounded identity-only projection', 
 
 test('admin catalog scan decoder rejects extra personal and nested fields', () => {
   const response = {
-    works: [work], editions: [edition], books: [{...book, currentPage: 50}],
+    authors: [author], works: [work], editions: [edition], books: [{...book, currentPage: 50}],
     nextBookCursor: 'users/user/books/book', bookCountsComplete: false, findings: [],
-    limits: {works: 200, editions: 500, books: 100, isbnIndexes: 500, externalIdIndexes: 500, authors: 20},
+    limits,
   };
   assert.throws(() => decodeAdminCatalogScanResponse(response), /expected only/);
   assert.throws(() => decodeAdminCatalogScanResponse({
@@ -63,13 +72,13 @@ test('admin catalog scan decoder rejects extra personal and nested fields', () =
 test('admin catalog candidates prioritize exact identity evidence and prefill exact editions', () => {
   const unmatched = {...book, workId: null, editionId: null, matchMethod: null, linkedAt: null};
   const scan = decodeAdminCatalogScanResponse({
-    works: [work], editions: [edition], books: [unmatched], nextBookCursor: null,
+    authors: [author], works: [work], editions: [edition], books: [unmatched], nextBookCursor: null,
     bookCountsComplete: true,
     findings: [
       {code: 'likely-title-author-candidate', severity: 'warning', message: 'Likely', workIds: ['work'], editionIds: [], books: [{uid: 'user', bookId: 'book'}]},
       {code: 'unmatched-isbn-candidate', severity: 'warning', message: 'Exact', workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'book'}]},
     ],
-    limits: {works: 200, editions: 500, books: 100, isbnIndexes: 500, externalIdIndexes: 500, authors: 20},
+    limits,
   });
   assert.deepEqual(adminCatalogCandidatesForBook(scan, unmatched), [{
     workId: 'work', editionId: 'edition', label: 'Exact ISBN', title: 'Book',
@@ -81,7 +90,7 @@ test('admin preview and apply decoders retain exact before/after differences', (
     catalog: [{kind: 'work', id: 'work', exists: true, updatedAt: 1000}],
     books: [{
       uid: 'user', bookId: 'book', workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null,
+      matchMethod: null, linkedAt: null, decisionIsbn13: null, decisionAuthorIds: null,
     }],
   };
   const preview = decodeAdminCatalogPreviewResponse({

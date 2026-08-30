@@ -6,6 +6,7 @@ export type MigrationAuthor = {
   id: string
   name?: unknown
   kind?: unknown
+  familyName?: unknown
   retirement?: { reason?: unknown; targetId?: unknown; canonicalAuthorId?: unknown } | null
 }
 
@@ -41,6 +42,12 @@ export type ReviewedWorkGroup = {
   canonicalTitle: string
   alternateTitles?: string[]
   authorNames: string[]
+  authorKinds: Array<'person' | 'entity' | 'placeholder'>
+}
+
+type ReviewedAuthor = {
+  name: string
+  kind: 'person' | 'entity' | 'placeholder'
 }
 
 export type MigrationCandidate = {
@@ -48,6 +55,9 @@ export type MigrationCandidate = {
   title: string
   titleKey: string
   authorNames: string[]
+  personalAuthors: Array<{name: string; kind: 'person' | 'entity' | 'placeholder'; sortName: string; catalogId?: string}>
+  personalAuthorIds: string[]
+  authorProblems: string[]
   authorKey: string
   isbn13: string | null
   identityKey: string | null
@@ -62,11 +72,21 @@ export type MigrationGroup = {
   canonicalTitle: string
   alternateTitles: string[]
   authorNames: string[]
+  authorIds: string[]
   isbns: string[]
   seedIsbns: string[]
   workId: string
   editionIds: Record<string, string>
   reviewedGroupId: string | null
+}
+
+export type MigrationCatalogAuthor = {
+  authorId: string
+  canonicalName: string
+  alternateNames: string[]
+  nameKeys: string[]
+  sortName: string
+  kind: 'person' | 'entity' | 'placeholder'
 }
 
 export type MigrationAmbiguity = {
@@ -77,11 +97,15 @@ export type MigrationAmbiguity = {
 
 export type CrossUserCatalogPlan = {
   candidates: MigrationCandidate[]
+  authors: MigrationCatalogAuthor[]
   groups: MigrationGroup[]
   ambiguities: MigrationAmbiguity[]
 }
 
-export const deterministicCatalogId = (prefix: 'work' | 'edition' | 'title', key: string): string => {
+const MAX_PERSONAL_BOOK_AUTHORS = 6
+const MAX_WORK_AUTHORS = 20
+
+export const deterministicCatalogId = (prefix: 'author' | 'work' | 'edition' | 'title', key: string): string => {
   const digest = createHash('sha256').update(`${prefix}\0${key}`).digest('hex').slice(0, 24)
   return `${prefix}_${digest}`
 }
@@ -92,16 +116,44 @@ export const deterministicTitleIndexId = (workId: string, titleKey: string): str
 const stringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 
-const cleanNames = (names: string[]): string[] => {
+const cleanNames = (names: string[], includePlaceholders = false): string[] => {
   const byKey = new Map<string, string>()
   for (const name of names) {
     const trimmed = name.trim()
     const key = normalizeCatalogAuthorName(trimmed)
-    if (key && key !== 'various authors' && !byKey.has(key)) byKey.set(key, trimmed)
+    if (key && (includePlaceholders || key !== 'various authors') && !byKey.has(key)) byKey.set(key, trimmed)
   }
   return [...byKey.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([, name]) => name)
+}
+
+const cleanReviewedAuthors = (group: ReviewedWorkGroup): { authors: ReviewedAuthor[]; problem: string | null } => {
+  if (!Array.isArray(group.authorKinds) || group.authorKinds.length !== group.authorNames.length) {
+    return { authors: [], problem: 'authorKinds must match authorNames' }
+  }
+  const byKey = new Map<string, ReviewedAuthor>()
+  for (const [index, rawName] of group.authorNames.entries()) {
+    const name = rawName.trim()
+    const key = normalizeCatalogAuthorName(name)
+    const kind = group.authorKinds[index]
+    if (!key) return { authors: [], problem: `authorNames[${index}] must be non-empty` }
+    if (kind !== 'person' && kind !== 'entity' && kind !== 'placeholder') {
+      return { authors: [], problem: `authorKinds[${index}] is invalid` }
+    }
+    if (key === 'various authors') continue
+    const existing = byKey.get(key)
+    if (existing && existing.kind !== kind) {
+      return { authors: [], problem: `Conflicting kinds for reviewed author ${name}` }
+    }
+    if (!existing) byKey.set(key, { name, kind })
+  }
+  return {
+    authors: [...byKey.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, author]) => author),
+    problem: null,
+  }
 }
 
 const cleanTitles = (titles: string[]): string[] => {
@@ -126,17 +178,28 @@ const legacyAuthorNames = (book: MigrationBook): string[] => {
         return []
       })
     : []
-  return cleanNames([...embedded, ...(typeof book.author === 'string' ? [book.author] : [])])
+  return cleanNames([...embedded, ...(typeof book.author === 'string' ? [book.author] : [])], true)
 }
 
-export const resolveMigrationAuthors = (
+const resolvedPersonalAuthors = (
   book: MigrationBook,
-  authorsById: ReadonlyMap<string, MigrationAuthor>
-): { names: string[]; problems: string[] } => {
+  authorsById: ReadonlyMap<string, MigrationAuthor>,
+): { authors: MigrationCandidate['personalAuthors']; problems: string[] } => {
   const ids = stringList(book.authorIds)
-  if (ids.length === 0) return { names: legacyAuthorNames(book), problems: [] }
+  if (ids.length === 0) {
+    return {
+      authors: cleanNames([
+        ...legacyAuthorNames(book),
+        ...(typeof book.author === 'string' ? [book.author] : []),
+      ], true).map((name) => {
+        const kind = normalizeCatalogAuthorName(name) === 'various authors' ? 'placeholder' as const : 'person' as const
+        return {name, kind, sortName: name}
+      }),
+      problems: [],
+    }
+  }
 
-  const names: string[] = []
+  const resolved: MigrationCandidate['personalAuthors'] = []
   const problems: string[] = []
   for (const originalId of ids) {
     let id = originalId
@@ -154,9 +217,7 @@ export const resolveMigrationAuthors = (
       }
       const retirement = author.retirement
       if (retirement?.reason === 'merged') {
-        const targetId = typeof retirement.targetId === 'string'
-          ? retirement.targetId
-          : retirement.canonicalAuthorId
+        const targetId = typeof retirement.targetId === 'string' ? retirement.targetId : retirement.canonicalAuthorId
         if (typeof targetId !== 'string') {
           problems.push(`invalid-author-redirect:${id}`)
           break
@@ -164,16 +225,37 @@ export const resolveMigrationAuthors = (
         id = targetId
         continue
       }
-      if (retirement?.reason === 'deleted' || author.kind === 'placeholder') break
+      if (retirement?.reason === 'deleted') break
       if (typeof author.name !== 'string' || !author.name.trim()) {
         problems.push(`invalid-author-name:${id}`)
         break
       }
-      names.push(author.name)
+      const kind = author.kind === 'entity' || author.kind === 'placeholder' ? author.kind : 'person'
+      const name = author.name.trim().replace(/\s+/g, ' ')
+      const sortName = kind === 'person' && typeof author.familyName === 'string' && author.familyName.trim()
+        ? author.familyName.trim().replace(/\s+/g, ' ')
+        : name
+      resolved.push({name, kind, sortName, ...(id.includes(':') ? {} : {catalogId: id})})
       break
     }
   }
-  return { names: cleanNames(names), problems }
+  const byKey = new Map<string, MigrationCandidate['personalAuthors'][number]>()
+  for (const author of resolved) {
+    const key = normalizeCatalogAuthorName(author.name)
+    if (key && !byKey.has(key)) byKey.set(key, author)
+  }
+  return {authors: [...byKey.values()], problems}
+}
+
+export const resolveMigrationAuthors = (
+  book: MigrationBook,
+  authorsById: ReadonlyMap<string, MigrationAuthor>
+): { names: string[]; problems: string[] } => {
+  const resolved = resolvedPersonalAuthors(book, authorsById)
+  return {
+    names: cleanNames(resolved.authors.filter((author) => author.kind !== 'placeholder').map((author) => author.name)),
+    problems: resolved.problems,
+  }
 }
 
 const reviewedAssignments = (
@@ -191,6 +273,16 @@ const reviewedAssignments = (
       continue
     }
     ids.add(group.id)
+    const cleaned = cleanReviewedAuthors(group)
+    if (cleaned.problem) {
+      ambiguities.push({ type: 'invalid-reviewed-group', bookPaths: group.bookPaths, detail: cleaned.problem })
+      continue
+    }
+    const normalizedGroup: ReviewedWorkGroup = {
+      ...group,
+      authorNames: cleaned.authors.map((author) => author.name),
+      authorKinds: cleaned.authors.map((author) => author.kind),
+    }
     for (const path of group.bookPaths) {
       if (!knownPaths.has(path)) {
         ambiguities.push({ type: 'invalid-reviewed-group', bookPaths: [path], detail: `Reviewed path does not exist: ${path}` })
@@ -200,7 +292,7 @@ const reviewedAssignments = (
         ambiguities.push({ type: 'invalid-reviewed-group', bookPaths: [path], detail: `Book appears in more than one reviewed group: ${path}` })
         continue
       }
-      byPath.set(path, group)
+      byPath.set(path, normalizedGroup)
     }
   }
   return { byPath, ambiguities }
@@ -214,7 +306,8 @@ const makeCandidate = (
   const title = typeof book.title === 'string' ? book.title.trim() : ''
   const titleKey = normalizeCatalogTitle(title)
   const resolvedAuthors = resolveMigrationAuthors(book, authorsById)
-  const authorNames = reviewed ? cleanNames(reviewed.authorNames) : resolvedAuthors.names
+  const personal = resolvedPersonalAuthors(book, authorsById)
+  const authorNames = reviewed ? reviewed.authorNames : resolvedAuthors.names
   const authorKey = authorNames.map(normalizeCatalogAuthorName).sort().join('|')
   const reviewedGroupId = reviewed?.id ?? null
   const identityKey = reviewedGroupId
@@ -222,12 +315,23 @@ const makeCandidate = (
     : titleKey && authorKey
       ? `title:${titleKey}\0authors:${authorKey}`
       : null
-  const problems = [...resolvedAuthors.problems]
+  const problems = [...new Set([...resolvedAuthors.problems, ...personal.problems])]
   if (!titleKey) problems.push('missing-title')
   if (!authorKey && !reviewedGroupId) problems.push('missing-resolved-author')
   const isbn13 = normalizeIsbn(typeof book.isbn === 'string' ? book.isbn : '')
   if (typeof book.isbn === 'string' && book.isbn.trim() && !isbn13) problems.push('invalid-isbn')
-  return { book, title, titleKey, authorNames, authorKey, isbn13, identityKey, reviewedGroupId, problems }
+  const personalAuthorIds = personal.authors.map((author) =>
+    author.catalogId ?? deterministicCatalogId('author', normalizeCatalogAuthorName(author.name)),
+  )
+  if (personalAuthorIds.length > MAX_PERSONAL_BOOK_AUTHORS) {
+    personal.problems.push('too-many-personal-authors')
+    problems.push('too-many-personal-authors')
+  }
+  return {
+    book, title, titleKey, authorNames, personalAuthors: personal.authors, personalAuthorIds,
+    authorProblems: personal.problems,
+    authorKey, isbn13, identityKey, reviewedGroupId, problems,
+  }
 }
 
 const preferredCandidate = (candidates: MigrationCandidate[]): MigrationCandidate =>
@@ -281,7 +385,7 @@ export const planCrossUserCatalog = (
     byIdentity.set(candidate.identityKey, bucket)
   }
 
-  const reviewedById = new Map(reviewedGroups.map((group) => [group.id, group]))
+  const reviewedById = new Map([...reviewed.byPath.values()].map((group) => [group.id, group]))
   const groups: MigrationGroup[] = []
   for (const [key, groupCandidates] of [...byIdentity.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const eligibleCandidates = groupCandidates.filter((candidate) => candidate.book.eligibleSeed)
@@ -292,7 +396,44 @@ export const planCrossUserCatalog = (
       ...(reviewedGroup?.alternateTitles ?? []),
       ...eligibleCandidates.map((candidate) => candidate.title),
     ]).filter((title) => normalizeCatalogTitle(title) !== normalizeCatalogTitle(canonicalTitle))
-    const authorNames = reviewedGroup ? cleanNames(reviewedGroup.authorNames) : preferred.authorNames
+    const authorNames = reviewedGroup ? reviewedGroup.authorNames : preferred.authorNames
+    const authorIds = authorNames.map((name) => {
+      const key = normalizeCatalogAuthorName(name)
+      const existingId = candidates.flatMap((candidate) => candidate.personalAuthors)
+        .find((author) => normalizeCatalogAuthorName(author.name) === key)?.catalogId
+      return existingId ?? deterministicCatalogId('author', key)
+    })
+    if (authorIds.length > MAX_WORK_AUTHORS) {
+      const paths = groupCandidates.map((candidate) => candidate.book.path).sort()
+      for (const path of paths) blocked.add(path)
+      ambiguities.push({
+        type: 'too-many-work-authors',
+        bookPaths: paths,
+        detail: `Work identity has ${authorIds.length} authors; the catalog limit is ${MAX_WORK_AUTHORS}`,
+      })
+      continue
+    }
+    if (reviewedGroup) {
+      if (authorIds.length > MAX_PERSONAL_BOOK_AUTHORS) {
+        const paths = groupCandidates.map((candidate) => candidate.book.path).sort()
+        for (const candidate of groupCandidates) {
+          blocked.add(candidate.book.path)
+          if (!candidate.authorProblems.includes('too-many-personal-authors')) {
+            candidate.authorProblems.push('too-many-personal-authors')
+          }
+          if (!candidate.problems.includes('too-many-personal-authors')) {
+            candidate.problems.push('too-many-personal-authors')
+          }
+        }
+        ambiguities.push({
+          type: 'too-many-personal-authors',
+          bookPaths: paths,
+          detail: `Reviewed authorship has ${authorIds.length} authors; personal books allow ${MAX_PERSONAL_BOOK_AUTHORS}`,
+        })
+      } else {
+        for (const candidate of groupCandidates) candidate.personalAuthorIds = [...authorIds]
+      }
+    }
     const isbns = [...new Set(groupCandidates.flatMap((candidate) => (candidate.isbn13 ? [candidate.isbn13] : [])))].sort()
     const seedIsbns = [...new Set(eligibleCandidates.flatMap(
       (candidate) => candidate.isbn13 ? [candidate.isbn13] : [],
@@ -308,6 +449,7 @@ export const planCrossUserCatalog = (
       canonicalTitle,
       alternateTitles,
       authorNames,
+      authorIds,
       isbns,
       seedIsbns,
       workId,
@@ -316,8 +458,77 @@ export const planCrossUserCatalog = (
     })
   }
 
+  const authorVariants = new Map<string, MigrationCandidate['personalAuthors']>()
+  for (const candidate of candidates) {
+    if (candidate.reviewedGroupId !== null) continue
+    for (const author of candidate.personalAuthors) {
+      const key = normalizeCatalogAuthorName(author.name)
+      const variants = authorVariants.get(key) ?? []
+      if (!variants.some((variant) => variant.name === author.name && variant.kind === author.kind && variant.sortName === author.sortName && variant.catalogId === author.catalogId)) {
+        variants.push(author)
+      }
+      authorVariants.set(key, variants)
+    }
+  }
+  for (const group of groups) {
+    const reviewedGroup = group.reviewedGroupId === null ? undefined : reviewedById.get(group.reviewedGroupId)
+    for (const [authorIndex, name] of group.authorNames.entries()) {
+      const key = normalizeCatalogAuthorName(name)
+      const existing = authorVariants.get(key) ?? []
+      const exactSources = group.candidates.flatMap((candidate) => candidate.personalAuthors)
+        .filter((author) => normalizeCatalogAuthorName(author.name) === key)
+      const provenance = exactSources[0] ?? existing[0]
+      const reviewedKind = reviewedGroup?.authorKinds[authorIndex]
+      const canonical = {
+        name,
+        kind: reviewedKind ?? provenance?.kind ?? 'person' as const,
+        sortName: provenance?.sortName ?? name,
+        ...(provenance?.catalogId === undefined ? {} : {catalogId: provenance.catalogId}),
+      }
+      const variants = [canonical, ...exactSources, ...existing].filter((variant, index, all) =>
+        all.findIndex((candidate) => candidate.name === variant.name &&
+          candidate.kind === variant.kind && candidate.sortName === variant.sortName &&
+          candidate.catalogId === variant.catalogId) === index,
+      )
+      authorVariants.set(key, variants)
+    }
+  }
+  const catalogAuthors = [...authorVariants].sort(([left], [right]) =>
+    left.localeCompare(right),
+  ).flatMap(([key, variants]) => {
+    const canonical = variants[0]
+    const kinds = new Set(variants.map((variant) => variant.kind))
+    if (kinds.size > 1) {
+      const affected = candidates.filter((candidate) =>
+        candidate.personalAuthors.some((author) => normalizeCatalogAuthorName(author.name) === key) ||
+        groups.some((group) => group.candidates.includes(candidate) &&
+          group.authorNames.some((name) => normalizeCatalogAuthorName(name) === key)),
+      )
+      const problem = `author-kind-conflict:${key}`
+      for (const candidate of affected) {
+        if (!candidate.authorProblems.includes(problem)) candidate.authorProblems.push(problem)
+        if (!candidate.problems.includes(problem)) candidate.problems.push(problem)
+      }
+      ambiguities.push({
+        type: 'author-kind-conflict',
+        bookPaths: affected.map((candidate) => candidate.book.path).sort(),
+        detail: `${canonical.name} is classified as ${[...kinds].sort().join(' and ')}`,
+      })
+      return []
+    }
+    return [{
+      authorId: variants.find((variant) => variant.catalogId !== undefined)?.catalogId ?? deterministicCatalogId('author', key),
+      canonicalName: canonical.name,
+      alternateNames: [...new Set(variants.slice(1).map((variant) => variant.name))],
+      nameKeys: [key],
+      sortName: canonical.sortName,
+      kind: canonical.kind,
+    }]
+  })
+
   return {
     candidates,
+    authors: catalogAuthors,
     groups,
     ambiguities: ambiguities.sort((left, right) => left.type.localeCompare(right.type) || left.bookPaths.join().localeCompare(right.bookPaths.join())),
   }

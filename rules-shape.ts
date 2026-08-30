@@ -91,7 +91,17 @@ function unknownKeys(data: Record<string, unknown>, allowed: readonly string[]):
 export function bookShapeViolations(book: Record<string, unknown>, ownerPath: string): string[] {
   const v: string[] = unknownKeys(book, BOOK_FIELDS);
   if ('updatedAt' in book && !isTimestamp(book.updatedAt)) v.push('updatedAt.not-timestamp');
-  if ('authorIds' in book) v.push(...stringListViolations('authorIds', book.authorIds, 50, 5000));
+  if ('authorIds' in book) {
+    v.push(...stringListViolations('authorIds', book.authorIds, 6, 5000));
+    if (Array.isArray(book.authorIds) &&
+        book.authorIds.some((authorId) => typeof authorId !== 'string')) {
+      v.push('authorIds.not-strings');
+    }
+    if (Array.isArray(book.authorIds) &&
+        new Set(book.authorIds).size !== book.authorIds.length) {
+      v.push('authorIds.duplicates');
+    }
+  }
   if ('coverUrl' in book) v.push(...cappedString('coverUrl', book.coverUrl, 2048));
   if ('publisher' in book) v.push(...cappedString('publisher', book.publisher, 500));
   if ('publishedDate' in book) v.push(...cappedString('publishedDate', book.publishedDate, 64));

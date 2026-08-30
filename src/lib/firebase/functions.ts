@@ -9,6 +9,8 @@ import type {
   AdminCatalogScanRequest,
   CatalogSearchRequest,
   CatalogSearchResponse,
+  EnsureCatalogAuthorsRequest,
+  EnsureCatalogAuthorsResponse,
   WorkReadersRequest,
   WorkReadersResponse,
 } from '../interfaces/catalog.ts';
@@ -119,6 +121,7 @@ export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolume
 export const reportIssue = httpsCallable<IssueReport, { recorded: true }>(fns, 'telemetry-reportissue');
 
 const catalogSearchCallable = httpsCallable<CatalogSearchRequest, unknown>(fns, 'catalog-search');
+const ensureCatalogAuthorsCallable = httpsCallable<EnsureCatalogAuthorsRequest, EnsureCatalogAuthorsResponse>(fns, 'catalog-ensureauthors');
 const workReadersCallable = httpsCallable<WorkReadersRequest, unknown>(fns, 'catalog-workreaders');
 const adminCatalogScanCallable = httpsCallable<AdminCatalogScanRequest, unknown>(fns, 'admin-catalogscan');
 const adminCatalogPreviewCallable = httpsCallable<AdminCatalogPreviewRequest, unknown>(fns, 'admin-catalogpreview');
@@ -126,6 +129,12 @@ const adminCatalogApplyCallable = httpsCallable<AdminCatalogApplyRequest, unknow
 
 export async function catalogSearch(request: CatalogSearchRequest): Promise<CatalogSearchResponse> {
   return decodeCatalogSearchResponse((await catalogSearchCallable(request)).data);
+}
+
+export async function ensureCatalogAuthors(
+  request: EnsureCatalogAuthorsRequest,
+): Promise<EnsureCatalogAuthorsResponse> {
+  return (await ensureCatalogAuthorsCallable(request)).data;
 }
 
 export async function workReaders(request: WorkReadersRequest): Promise<WorkReadersResponse> {
