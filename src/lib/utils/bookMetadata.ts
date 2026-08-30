@@ -3,8 +3,9 @@ import type { BookLookupResult, BookMetadata } from '../interfaces/metadata.ts';
 // ISBN-derived book metadata: the field set, its empty defaults, and the
 // parser for Open Library `api/books?jscmd=data` records. Shared by the
 // add/edit modal's Look up button and migrate-enrich-books.ts so the two
-// write identical shapes. The fields are advisory display data — owners
-// have blanket write on book docs, so nothing may ever trust them.
+// write identical shapes. The fields are advisory display data. Rules
+// allowlist and validate them, but authorization must never trust catalog
+// metadata to describe an owner's permissions.
 //
 // Defaults follow the normalize convention: always present, empty when
 // unknown. `fiction: null` is the explicit unknown — Open Library subjects

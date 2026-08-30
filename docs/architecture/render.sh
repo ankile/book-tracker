@@ -42,6 +42,16 @@ render_diagram system-context 1600
 render_diagram app-architecture 2200
 render_diagram backend-runtime 2000
 render_diagram site-functionality 1800
-render_diagram site-access 1800
+
+node docs/architecture/site-access.mjs
+"${CHROME_BIN}" \
+  --headless=new \
+  --disable-gpu \
+  --hide-scrollbars \
+  --force-device-scale-factor=2 \
+  --window-size=1600,1200 \
+  --screenshot="${REPO_ROOT}/docs/architecture/site-access.png" \
+  "file://${REPO_ROOT}/docs/architecture/site-access.svg" \
+  >/dev/null 2>&1
 
 node docs/architecture/verify.mjs

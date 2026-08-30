@@ -4,6 +4,10 @@ import test from 'node:test';
 
 const readmeUrl = new URL('../README.md', import.meta.url);
 const migrationsUrl = new URL('../MIGRATIONS.md', import.meta.url);
+const packageUrl = new URL('../package.json', import.meta.url);
+const functionsPackageUrl = new URL('../functions/package.json', import.meta.url);
+const firebaseRcUrl = new URL('../.firebaserc', import.meta.url);
+const functionsIndexUrl = new URL('../functions/src/index.ts', import.meta.url);
 const progressMigrationUrl = new URL('../migrate-reading-progress-sources.ts', import.meta.url);
 
 function section(source: string, start: string, end: string): string {
@@ -18,111 +22,158 @@ function assertOrdered(source: string, values: string[]): void {
   let previousIndex = -1;
   for (const value of values) {
     const index = source.indexOf(value, previousIndex + 1);
-    assert.notEqual(index, -1, `missing deployment step: ${value}`);
-    assert.ok(index > previousIndex, `deployment step is out of order: ${value}`);
+    assert.notEqual(index, -1, `missing documented step: ${value}`);
+    assert.ok(index > previousIndex, `documented step is out of order: ${value}`);
     previousIndex = index;
   }
 }
 
-test('the README deploys compatible Hosting before the progress-source backfill', async () => {
-  const readme = await readFile(readmeUrl, 'utf8');
-  const deployment = section(readme, '### Deploy Everything', '### Deploy Hosting and Profile Renderer');
+async function deployedFunctionNames(indexSource: string): Promise<string[]> {
+  const namespaceMatches = [...indexSource.matchAll(
+    /exports\.([A-Za-z0-9_]+)\s*=\s*require\("\.\/([^"/]+)"\)/g,
+  )];
+  const namespaces = new Set(namespaceMatches.map((match) => match[1]));
+  const names = [...indexSource.matchAll(/exports\.([A-Za-z0-9_]+)\s*=/g)]
+    .map((match) => match[1])
+    .filter((name) => !namespaces.has(name));
 
-  assert.match(deployment, /\[timer-claim rollout\]\(MIGRATIONS\.md#timer-claim-rollout\)/);
-  assertOrdered(deployment, [
-    'firebase deploy --only firestore',
-    'firebase deploy --only functions',
-    'let old in-flight invocations drain',
-    'node migrate-timer-claims.ts --prod',
-    'node db-snapshot.ts --prod',
-    'node migrate-timer-claims.ts --prod --apply',
-    'node migrate-timer-claims.ts --prod --apply',
-    'node db-audit.ts --prod',
-    'firebase deploy --only functions:publicweb,hosting',
-    '7-day old-bundle overlap window',
-    'node migrate-reading-progress-sources.ts --prod',
-    'node db-snapshot.ts --prod',
-    'node migrate-reading-progress-sources.ts --prod --apply',
-    'node migrate-reading-progress-sources.ts --prod --apply',
-    'node db-audit.ts --prod',
-  ]);
-  assert.equal(
-    deployment.match(/node migrate-timer-claims\.ts --prod --apply/g)?.length,
-    2,
-    'the rollout must apply twice to prove idempotency',
-  );
-  assert.equal(
-    deployment.match(/node migrate-reading-progress-sources\.ts --prod --apply/g)?.length,
-    2,
-    'the progress migration must apply twice to prove idempotency',
-  );
-});
+  for (const [, namespace, moduleName] of namespaceMatches) {
+    const moduleSource = await readFile(
+      new URL(`../functions/src/${moduleName}.ts`, import.meta.url),
+      'utf8',
+    );
+    for (const match of moduleSource.matchAll(/exports\.([A-Za-z0-9_]+)\s*=/g)) {
+      names.push(`${namespace}-${match[1]}`);
+    }
+  }
+  return names;
+}
 
-test('profile renderer deployment stays coupled to Hosting and follows its rules', async () => {
-  const [readme, migrations] = await Promise.all([
+test('public operational docs omit deployment and operator identifiers', async () => {
+  const [readme, migrations, firebaseRc, functionsIndex] = await Promise.all([
     readFile(readmeUrl, 'utf8'),
     readFile(migrationsUrl, 'utf8'),
+    readFile(firebaseRcUrl, 'utf8'),
+    readFile(functionsIndexUrl, 'utf8'),
   ]);
-  const deployment = section(
-    readme,
-    '### Deploy Hosting and Profile Renderer',
-    '### Deploy to Preview Channel',
+  const publicDocs = `${readme}\n${migrations}`;
+  const projects = Object.values(
+    (JSON.parse(firebaseRc) as { projects?: Record<string, string> }).projects ?? {},
   );
+  const functionNames = await deployedFunctionNames(functionsIndex);
 
-  assert.match(deployment, /There is intentionally no Hosting-only release path/i);
+  for (const identifier of [...projects, ...functionNames]) {
+    assert.ok(!publicDocs.includes(identifier), `public docs expose backend identifier ${identifier}`);
+  }
+  assert.doesNotMatch(publicDocs, /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  assert.doesNotMatch(publicDocs, /\bgcloud\s+/i);
+  assert.doesNotMatch(publicDocs, /--account(?:=|\s)/i);
+  assert.doesNotMatch(publicDocs, /\b(?:maxInstances|minInstances|serviceAccountEmail)\b/);
+  assert.doesNotMatch(publicDocs, /FUNCTIONS_CONFIG_EXPORT|runtime config export/i);
+});
+
+test('the README documents the current routine release without completed migrations', async () => {
+  const readme = await readFile(readmeUrl, 'utf8');
+  const deployment = section(readme, '## Deployment', '## Project layout');
+
   assertOrdered(deployment, [
+    'npm run validate',
     'npm run build',
-    'git add public functions/assets && git commit',
-    'firebase deploy --only functions:publicweb,hosting',
+    'node docs/architecture/verify.mjs',
+    'Commit the source and generated artifacts',
+    'firebase-tools@15.24.0',
   ]);
-  assert.match(readme, /profileDiscovery\/<username>/);
-  assert.match(readme, /public profile without a marker:[^\n]*`200` with `noindex,follow`/i);
-  assert.match(migrations, /Deploy the additive `profileDiscovery` Firestore rules before exposing the UI/i);
-  assert.match(migrations, /Do not deploy Hosting alone/i);
+  assert.match(deployment, /Hosting and the public profile renderer are coupled/i);
+  assert.match(deployment, /Do not release Hosting\s+by\s+itself/i);
+  assert.doesNotMatch(deployment, /migrate-timer-claims|migrate-reading-progress-sources/i);
+  assert.doesNotMatch(deployment, /7-day|old-bundle overlap|let old in-flight invocations drain/i);
+  assert.doesNotMatch(deployment, /functions:config:export|--force/i);
 });
 
-test('the general migration order links to the timer-claim exception', async () => {
+test('local setup is emulator-first and refuses repository reinitialization', async () => {
+  const readme = await readFile(readmeUrl, 'utf8');
+  const setup = section(readme, '## Set up the repository', '## Testing');
+
+  assert.match(setup, /Do not run\s+`firebase init`/i);
+  assertOrdered(setup, [
+    'npm --prefix functions run serve',
+    'VITE_EMULATOR=1 npm run dev',
+    'Plain `npm run dev` does not enable the emulators',
+  ]);
+});
+
+test('book metadata docs describe field-specific live precedence and validated writes', async () => {
+  const readme = await readFile(readmeUrl, 'utf8');
+  const metadata = section(readme, '## Book metadata', '## Requirements');
+
+  assert.match(metadata, /Metadata precedence is field-specific/i);
+  assert.match(metadata, /Cover \| Metered catalog \| Open catalog, then national catalog/);
+  assert.match(metadata, /Publisher and publication date \| Open catalog \| Metered catalog, then national catalog/);
+  assert.match(metadata, /Firestore Rules allowlist the book\s+fields, validate their types and sizes/i);
+  assert.doesNotMatch(metadata, /blanket write access/i);
+});
+
+test('migration docs mark one-time rollouts complete and prescribe idempotency', async () => {
   const migrations = await readFile(migrationsUrl, 'utf8');
-  assert.match(migrations, /\[timer-claim rollout\]\(#timer-claim-rollout\)/);
-  assert.match(migrations, /#### Timer-claim rollout/);
-  assert.match(migrations, /#### Reading-progress-source rollout/);
-  assert.match(
-    migrations,
-    /single operator-user[\s\S]*no multi-user overlap window[\s\S]*proceed the same day/i,
+
+  assert.match(migrations, /migrate-timer-claims\.ts[^\n]*Completed historical rollout[^\n]*Do not rerun during deployment/i);
+  assert.match(migrations, /migrate-reading-progress-sources\.ts[^\n]*Completed historical rollout/i);
+  assert.match(migrations, /proposed waiting period was superseded[^\n]*completed in the same release window/i);
+  assert.match(migrations, /strict-TypeScript[\s\S]*?rollouts are complete/i);
+  assert.equal(
+    migrations.match(/node <migration>\.ts --prod --apply/g)?.length,
+    2,
+    'the production procedure must prove an idempotent second apply',
   );
-  assert.match(
-    migrations,
-    /Session edit\/delete rewind is deliberately disabled on un-backfilled books[\s\S]*window artifact/i,
-  );
+  assertOrdered(migrations, [
+    'node <migration>.ts --prod',
+    'node db-snapshot.ts --prod',
+    'node <migration>.ts --prod --apply',
+    'node db-audit.ts --prod',
+  ]);
 });
 
-test('the strict-TypeScript rollback runbook preserves compatible release stages', async () => {
-  const migrations = await readFile(new URL('../MIGRATIONS.md', import.meta.url), 'utf8');
-  const rollback = migrations.slice(
-    migrations.indexOf('#### Strict-TypeScript release record and rollback boundary'),
-    migrations.indexOf('### 4. Production run'),
+test('README lists every package script', async () => {
+  const [readme, rootPackage, functionsPackage] = await Promise.all([
+    readFile(readmeUrl, 'utf8'),
+    readFile(packageUrl, 'utf8'),
+    readFile(functionsPackageUrl, 'utf8'),
+  ]);
+  const rootScripts = Object.keys(
+    (JSON.parse(rootPackage) as { scripts: Record<string, string> }).scripts,
+  );
+  const functionsScripts = Object.keys(
+    (JSON.parse(functionsPackage) as { scripts: Record<string, string> }).scripts,
   );
 
-  assert.match(rollback, /repository has no GitHub Actions[\s\S]*Merge only:[\s\S]*revert the merge commit/i);
-  assert.match(rollback, /New rules only:[\s\S]*firestore:rules[\s\S]*Do not deploy `--only firestore`/i);
-  assert.match(
-    rollback,
-    /After new Functions are deployed:[\s\S]*Rollback is unsupported[\s\S]*outcome-unknown[\s\S]*Waiting for invocations to drain does not resolve/i,
-  );
-  assert.match(
-    rollback,
-    /After timer migration, before new Hosting:[\s\S]*Rollback is unsupported[\s\S]*no enforced gate[\s\S]*purpose-built repair migration/i,
-  );
-  assert.match(rollback, /After new Hosting has ever been exposed:[\s\S]*do \*\*not\*\* roll back Hosting,[\s\S]*fix forward/i);
-  assert.match(rollback, /Never roll back Functions alone[\s\S]*Never roll back Hosting alone/i);
-  assert.match(rollback, /Do not use `db-restore\.ts`\s+for an ordinary release[\s\S]*non-atomic[\s\S]*does not delete/i);
-  assert.match(
-    rollback,
-    /local snapshot is only a targeted recovery aid[\s\S]*without a shared read[\s\S]*does not currently provide enforced write quiescence/i,
-  );
+  for (const script of rootScripts) {
+    const command = script === 'test' ? '`npm test`' : `\`npm run ${script}\``;
+    assert.ok(readme.includes(command), `README omits root script ${script}`);
+  }
+  for (const script of functionsScripts) {
+    const command = script === 'test'
+      ? '`npm --prefix functions test`'
+      : script === 'start'
+        ? '`npm --prefix functions start`'
+        : `\`npm --prefix functions run ${script}\``;
+    assert.ok(readme.includes(command), `README omits Functions script ${script}`);
+  }
 });
 
-test('the progress migration traverses phantom users and logs the applied transaction patch', async () => {
+test('every Firebase CLI invocation in the public README pins one version', async () => {
+  const readme = await readFile(readmeUrl, 'utf8');
+  const invocations = readme
+    .replace(/\\\n\s*/g, ' ')
+    .split('\n')
+    .filter((line) => /^\s*(npm exec|npx|firebase)\b/.test(line) && /\bfirebase\s+/.test(line));
+
+  assert.ok(invocations.length >= 1, 'expected a documented Firebase CLI invocation');
+  for (const line of invocations) {
+    assert.match(line, /firebase-tools@15\.24\.0/, `unpinned Firebase CLI: ${line.trim()}`);
+  }
+});
+
+test('the progress migration traverses phantom users and logs its transaction patch', async () => {
   const migration = await readFile(progressMigrationUrl, 'utf8');
   assert.match(migration, /collection\('users'\)\.listDocuments\(\)/);
 
@@ -130,35 +181,4 @@ test('the progress migration traverses phantom users and logs the applied transa
   const appliedLog = migration.indexOf('appliedPatch.currentPageUpdateId', transaction);
   assert.notEqual(transaction, -1, 'apply mode must return the patch chosen inside the transaction');
   assert.ok(appliedLog > transaction, 'apply mode must log the transaction-applied patch');
-});
-
-test('every Firebase CLI invocation in the runbook pins the same firebase-tools version', async () => {
-  const readme = await readFile(readmeUrl, 'utf8');
-  // Multi-line commands (`\` continuations) are one invocation.
-  const invocations = readme.replace(/\\\n\s*/g, ' ').split('\n').filter((line) =>
-    /^\s*(npm exec|npx|firebase)\b/.test(line) && /\bfirebase (deploy|login|hosting:|functions:|emulators:)/.test(line));
-  assert.ok(invocations.length >= 8, 'expected the README to document CLI invocations');
-  for (const line of invocations) {
-    assert.match(line, /firebase-tools@15\.24\.0/, `unpinned Firebase CLI: ${line.trim()}`);
-  }
-  const unpinnedCommands = readme.split('\n').filter((line) => /^\s*npx -y firebase-tools/.test(line));
-  assert.deepEqual(unpinnedCommands, [], 'the CLI holds the deploy credential; never resolve it to latest');
-});
-
-test('every gcloud command in the runbooks names the project and the account', async () => {
-  const [readme, migrations] = await Promise.all([
-    readFile(readmeUrl, 'utf8'),
-    readFile(migrationsUrl, 'utf8'),
-  ]);
-  const commands = `${readme}\n${migrations}`
-    .replace(/\\\n\s*/g, ' ')
-    .split('\n')
-    .filter((line) =>
-      /(^|[`(\s])gcloud\s+(run|firestore|iam|functions|secrets|storage|logging|monitoring|projects|builds|artifacts|auth|pubsub|billing|services|config)\s+[a-z-]+/.test(line)
-      && !/^\s*(#|>)/.test(line.replace(/^[\s`(]+/, '')));
-  assert.ok(commands.length >= 3, 'expected the runbooks to document gcloud commands');
-  for (const line of commands) {
-    assert.match(line, /--project book-tracker-d8f24/, `gcloud without --project (the workstation default is another project): ${line.trim()}`);
-    assert.match(line, /--account=lars\.ankile@gmail\.com/, `gcloud without --account: ${line.trim()}`);
-  }
 });

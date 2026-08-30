@@ -10,7 +10,6 @@ const diagramStems = [
   'app-architecture',
   'backend-runtime',
   'site-functionality',
-  'site-access',
 ];
 
 function filesBelow(directory) {
@@ -53,23 +52,53 @@ function deployedFunctions() {
   return [...names].sort();
 }
 
-const architectureReadme = readFileSync(join(architectureDir, 'README.md'), 'utf8');
-const backendDiagram = readFileSync(join(architectureDir, 'backend-runtime.mmd'), 'utf8');
 const navigationDiagram = readFileSync(join(architectureDir, 'site-functionality.mmd'), 'utf8');
-const accessDiagram = readFileSync(join(architectureDir, 'site-access.mmd'), 'utf8');
+const accessSourcePath = join(architectureDir, 'site-access.mjs');
+const accessSource = readFileSync(accessSourcePath, 'utf8');
 const routes = applicationRoutes();
 const functions = deployedFunctions();
 
 for (const route of routes) {
-  const marker = route === '/' ? '<code>/</code>' : route;
-  assert(navigationDiagram.includes(marker), `site-functionality.mmd is missing route ${route}`);
-  assert(accessDiagram.includes(marker), `site-access.mmd is missing route ${route}`);
+  const navigationMarker = route === '/' ? '<code>/</code>' : route;
+  const accessMarker = `path: '${route}'`;
+  assert(navigationDiagram.includes(navigationMarker), `site-functionality.mmd is missing route ${route}`);
+  assert(accessSource.includes(accessMarker), `site-access.mjs is missing route ${route}`);
 }
 
-for (const functionName of functions) {
-  assert(backendDiagram.includes(functionName), `backend-runtime.mmd is missing function ${functionName}`);
-  assert(architectureReadme.includes(functionName), `README.md is missing function ${functionName}`);
+const publicSourcePaths = [
+  join(architectureDir, 'README.md'),
+  ...diagramStems.map((stem) => join(architectureDir, `${stem}.mmd`)),
+  accessSourcePath,
+];
+const projectConfig = JSON.parse(readFileSync(join(repositoryRoot, '.firebaserc'), 'utf8'));
+const projectIdentifiers = Object.values(projectConfig.projects ?? {});
+const implementationIdentifiers = [...functions, ...projectIdentifiers];
+const forbiddenPatterns = [
+  { description: 'absolute web URL', pattern: /https?:\/\//i },
+  { description: 'email or service-account address', pattern: /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i },
+  { description: 'IP address', pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/ },
+  { description: 'localhost port', pattern: /\blocalhost:\d+\b/i },
+  { description: 'cloud region identifier', pattern: /\b[a-z]+-[a-z]+\d\b/ },
+  { description: 'secret-like uppercase identifier', pattern: /\b[A-Z][A-Z0-9_]{5,}\b/ },
+  { description: 'backend resource placeholder', pattern: /\{(?:uid|userId|bookId|queueId)\}/ },
+];
+
+function assertSanitizedText(path, extraPatterns = []) {
+  const source = readFileSync(path, 'utf8');
+  const disclosureScanSource = source
+    .replaceAll('http://www.w3.org/2000/svg', '')
+    .replaceAll('http://www.w3.org/1999/xhtml', '')
+    .replaceAll('http://www.w3.org/1999/xlink', '');
+  const sourceName = relative(repositoryRoot, path);
+  for (const identifier of implementationIdentifiers) {
+    assert(!disclosureScanSource.includes(identifier), `${sourceName} exposes implementation identifier ${identifier}`);
+  }
+  for (const { description, pattern } of [...forbiddenPatterns, ...extraPatterns]) {
+    assert(!pattern.test(disclosureScanSource), `${sourceName} contains a ${description}`);
+  }
 }
+
+for (const sourcePath of publicSourcePaths) assertSanitizedText(sourcePath);
 
 const sharedInputs = [
   join(architectureDir, 'mermaid-config.json'),
@@ -96,6 +125,26 @@ for (const stem of diagramStems) {
   }
 }
 
+const accessSvgPath = join(architectureDir, 'site-access.svg');
+const accessPngPath = join(architectureDir, 'site-access.png');
+assert(existsSync(accessSvgPath), 'site-access.svg has not been rendered');
+assert(existsSync(accessPngPath), 'site-access.png has not been rendered');
+assert(statSync(accessSvgPath).mtimeMs >= statSync(accessSourcePath).mtimeMs, 'site-access.svg is older than its source');
+assert(statSync(accessPngPath).mtimeMs >= statSync(accessSvgPath).mtimeMs, 'site-access.png is older than its SVG');
+const accessSvg = readFileSync(accessSvgPath, 'utf8');
+assert(accessSvg.includes('<title id="title">'), 'site-access.svg is missing an accessible title');
+assert(accessSvg.includes('<desc id="description">'), 'site-access.svg is missing an accessible description');
+
+const renderedSvgPaths = [
+  ...diagramStems.map((stem) => join(architectureDir, `${stem}.svg`)),
+  accessSvgPath,
+];
+const artifactPatterns = [
+  { description: 'active SVG content', pattern: /<(?:script|iframe|object|embed)\b|javascript:|\bon[a-z]+\s*=/i },
+  { description: 'local filesystem reference', pattern: /file:\/\/|\/Users\/|[A-Z]:\\/i },
+];
+for (const svgPath of renderedSvgPaths) assertSanitizedText(svgPath, artifactPatterns);
+
 console.log(
-  `Architecture docs verified: ${routes.length} routes, ${functions.length} deployed functions, ${diagramStems.length} rendered diagrams.`,
+  `Architecture docs verified: ${routes.length} routes and ${diagramStems.length + 1} sanitized rendered diagrams.`,
 );

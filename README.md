@@ -1,821 +1,309 @@
 # The Stupid-Simple Book Tracker
 
-> The solution is located at [book.ankile.com](https://book.ankile.com).
+[Book Tracker](https://book.ankile.com) is a responsive web app for tracking
+books, reading progress, reading sessions, and reading statistics. It supports
+offline work and optional public profiles.
 
-This responsive single-page app allows one to keep track of what one's reading, as well as give some indication as to how long books will take to complete.
+New to the codebase? Start with the [architecture and site map](docs/architecture/README.md).
+
+Any change to the architecture, routes, access model, data flows, or external
+integrations must update the relevant map source and regenerate its image
+artifacts in the same change. Keep every public map sanitized according to the
+[architecture guide](docs/architecture/README.md#public-sanitization-rules).
+
+## Architecture maps
+
+These are the sanitized public views. The architecture guide contains the
+editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
+
+### System context
+
+![Book Tracker system context](docs/architecture/system-context.svg)
+
+### Application architecture
+
+![Book Tracker application architecture](docs/architecture/app-architecture.svg)
+
+### Backend responsibilities and data flows
+
+![Book Tracker backend responsibilities and data flows](docs/architecture/backend-runtime.svg)
+
+### Pages and navigation
+
+![Book Tracker pages and navigation](docs/architecture/site-functionality.svg)
+
+### Route access and writes
+
+![Book Tracker route access and write matrix](docs/architecture/site-access.svg)
 
 ## Screenshots
 
-### Currently Reading
-![Currently Reading Page](static/screenshots/currently_reading.png)
+### Currently reading
 
-### Profile & Reading Activity
-![Profile Page with Statistics and Reading Heatmap](static/screenshots/my_page.png)
+![Currently Reading page](static/screenshots/currently_reading.png)
 
-## Features
+### Profile and reading activity
 
-### Core Functionality
-- **Book Management**: Add, edit, and delete books from your library
-- **Reading Progress**: Track current page and mark books as finished
-- **Reading Sessions**: Log reading sessions with time spent and pages read
-- **Session Management**: View, edit, and delete individual reading sessions
+![Profile page with statistics and reading heatmap](static/screenshots/my_page.png)
 
-### Statistics & Analytics
-- **Profile Dashboard**: Comprehensive reading statistics including:
-  - Total books read and currently reading
-  - Total time spent reading and pages read
-  - Books per year average
-  - Average time per finished book
-  - Year-by-year breakdown with longest books
+## What the app does
 
-- **Reading Heatmap**: GitHub-style activity visualization showing:
-  - Daily reading activity (pages read per day)
-  - Customizable 3 AM day boundary (late-night sessions count as previous day)
-  - Year selector (view specific years or last 12 months)
-  - Current reading streak and longest streak tracking
-  - Detailed tooltips with session information
+- Adds, edits, and removes books from a personal library.
+- Tracks page progress, finished books, and reading sessions.
+- Starts and stops reading timers, including an optional time-tracking
+  integration.
+- Shows yearly statistics, reading streaks, a daily activity heatmap, and
+  per-book reading speed.
+- Supports author cleanup, merging, and classification within an account.
+- Finds books whose ISBN data needs repair.
+- Publishes an optional reading profile with a separate search-discovery
+  setting.
+- Provides a restricted, read-only operational overview.
 
-### Book Metadata
-- **ISBN Lookup**: One button fills title, author, page count, cover, genres and
-  a fiction/non-fiction flag from the book's ISBN
-- **Book Covers**: Shown on the reading and finished lists, hot-linked from the
-  source catalogue (no image storage)
-- **Metadata Repair**: `/isbns` lists books whose ISBN is missing or mistyped —
-  the only cases the automatic enrichment cannot fix
-
-### Organization & Filtering
-- **Finished Books Page**: Browse completed books with:
-  - Sort options: recently finished, title (A-Z), length, or time spent
-  - Filter by year
-  - Summary statistics for filtered view
-
-- **Currently Reading**: View all books in progress
+The route catalog and access matrix live in the
+[architecture guide](docs/architecture/README.md#route-catalog).
 
 ## Book metadata
 
-Covers, genres and the fiction/non-fiction flag are all derived from a book's
-ISBN. Four sources are consulted in a fixed order, each filling only the fields
-the previous ones left empty (`mergeMetadata` in `src/lib/utils/googleBooks.ts`).
-An earlier source always wins — the order encodes which source is most
-trustworthy for a given field, not which one answered first.
+The add and edit dialog can look up an ISBN through three catalog sources. The
+requests are independent, so one unavailable source does not discard useful
+responses from the others.
 
-| # | Source | Why it is at this position | Parser |
-|---|---|---|---|
-| 1 | **Open Library** | Richest subject lists and stable, hot-linkable cover URLs. Free, no key. | `utils/bookMetadata.ts` |
-| 2 | **Google Books** | BISAC top-level categories ("Business & Economics", "Science") settle fiction/non-fiction where Open Library's free-form subjects cannot. Needs an API key. | `utils/googleBooks.ts` |
-| 3 | **Nasjonalbiblioteket** | The only source that reliably knows Norwegian editions. MODS genres ("Romaner", "Skuespill", the explicit `notfiction` marker) classify them. Free, no key. | `utils/nasjonalbiblioteket.ts` |
-| 4 | **Goodreads** | Last resort, **backfill only** — see the caveat below. | `utils/goodreads.ts` |
+Metadata precedence is field-specific:
 
-Books store the result in `coverUrl`, `publisher`, `publishedDate`, `subjects`
-and `fiction` (`null` when genuinely unknown). The fields are advisory display
-data: Firestore rules give owners blanket write access to their own book
-documents, so nothing may ever depend on them being accurate.
+| Field | Preferred source | Fallbacks |
+|---|---|---|
+| Cover | Metered catalog | Open catalog, then national catalog |
+| Fiction classification | Metered catalog | National catalog, then open catalog |
+| Publisher and publication date | Open catalog | Metered catalog, then national catalog |
+| Subjects | Open catalog | Metered catalog, then national catalog |
 
-### In the app
+The lookup also fills empty title, author, and page-count inputs. It does not
+silently replace values the user already entered.
 
-The **Look up** button in the add/edit book modal queries sources 1-3 live.
-Sources 1 and 3 are called straight from the browser; Google Books goes through
-the `booksapi-lookupisbn` callable, because it proxies a metered API key and must
-not be reachable unauthenticated. A failure of any single source degrades to
-"one fewer source" rather than discarding the others' results.
+Stored metadata is advisory display data. Firestore Rules allowlist the book
+fields, validate their types and sizes, and restrict writes to the owner.
+Application authorization must never depend on catalog metadata being correct.
 
-Goodreads is **not** in the app and should not be added: it sends no CORS
-headers, so a browser cannot call it at all.
+Historical enrichment scripts are gap-fill migrations. They use a deliberate
+source order and must follow the review, snapshot, rehearsal, and audit process
+in [MIGRATIONS.md](MIGRATIONS.md). The Goodreads script is a manual historical
+fallback only. It is not part of the live app or a scheduled workflow.
 
-Client telemetry takes the same route. Warn/error events (`firestore.*`,
-`toggl.sync_stuck`) go through the `telemetry-reportissue` callable, which
-requires a signed-in caller, allowlists the event, bounds every field, pins
-the uid and allows twenty reports per user per hour
-(`users/{uid}/functionQuotas/issueReports`, Admin-SDK-only); excess is
-refused with `resource-exhausted` and one `telemetry.quota_exceeded`
-warning per user per window in the function log. Reports made while offline
-are dropped, not queued. No client can write `logEvents` directly, and
-failed sign-ins are not recorded anywhere (SEC-001, SEC-029, SEC-038). The
-admin overview reads each account's rows with its own capped query (ten per
-account, 25 for rows whose uid is null — index `logEvents(uid, createdAt)`,
-which must exist before `admin-overview` is deployed), so no account's
-volume can push another's out of the feed while at most 200 accounts have
-rows in the window: the feed as a whole is cut at 200 rows shared
-round-robin between accounts, so the cut cannot re-couple them below that
-count, and above it every account is reduced to its newest row and the
-tail of the account list is dropped. The page says how many accounts hit
-the cap, how many rows the cut hid, how many accounts the cut dropped
-entirely, and how many reads failed — an empty feed after a failed read is
-shown as unreadable, never as all clear.
+Books without a valid ISBN appear on `/isbns` and can be repaired through the
+normal edit dialog.
 
-### Backfilling existing books
+## Requirements
 
-One migration per source, run in numeric order and following the
-[MIGRATIONS.md](MIGRATIONS.md) loop. Each is gap-fill only and idempotent, and
-each caches its lookups (`ol-cache.json`, `gb-cache.json`, `nb-cache.json`,
-`gr-cache.json`, all gitignored) so re-runs and the prod pass cost no requests.
-Cache files are runtime-validated before any migration connects or writes. If a
-cache is truncated or hand-edited into an invalid shape, the script stops with
-the offending field; repair that entry or delete the cache to refetch it.
+- Node.js 22.18 or newer. `.nvmrc` pins the repository version.
+- npm.
+- Firebase CLI only for emulator and deployment work. Commands in this
+  repository pin the CLI version.
 
-```bash
-node migrate-enrich-books.ts --prod --apply      # 1. Open Library
-node migrate-enrich-google.ts --prod --apply     # 2. Google Books (needs GOOGLE_BOOKS_KEY)
-node migrate-enrich-nb.ts --prod --apply         # 3. Nasjonalbiblioteket
-node migrate-enrich-goodreads.ts --prod --apply  # 4. Goodreads
-```
-
-Order matters: running a later pass first lets it claim fields an earlier,
-more trustworthy source should own.
-
-The Google Books key comes from the same secret the Cloud Function reads:
-
-```bash
-export GOOGLE_BOOKS_KEY=$(gcloud secrets versions access latest --project book-tracker-d8f24 --account=lars.ankile@gmail.com \
-  --secret=FUNCTIONS_CONFIG_EXPORT --project book-tracker-d8f24 \
-  --account=lars.ankile@gmail.com \
-  | python3 -c "import json,sys;print(json.load(sys.stdin)['booksapi']['key'])")
-```
-
-### The Goodreads caveat
-
-Goodreads retired its public API in December 2020 and its Terms of Service
-disallow automated access. `migrate-enrich-goodreads.ts` is therefore a
-deliberate, hand-run exception rather than infrastructure, and it is written to
-stay one:
-
-- it runs only over books the three open sources left empty (a few dozen
-  requests across the whole library), never on a schedule;
-- it requests `/book/isbn/<isbn>`, which `robots.txt` permits — **not**
-  `/search`, which `robots.txt` disallows;
-- it reads schema.org JSON-LD, which is machine-intended and far more stable
-  than the surrounding markup;
-- it identifies itself, waits 5s between requests, and aborts on the first
-  403/429 instead of retrying into a ban.
-
-If it ever needs to run at volume, or on a schedule, or over books that are not
-the owner's own, that is the point to stop and buy the data instead —
-[Bokbasen](https://www.bokbasen.no/hjelp/fa-tilgang-til-metadata) is the
-authoritative commercial source for Norwegian titles.
-
-### What automation cannot fix
-
-A book with no ISBN, or a mistyped one, has nothing to look up. Those are listed
-at `/isbns`, grouped by problem, and repaired through the normal edit modal. The
-Me-page "Needs an ISBN" card links there and shows the count.
-
-## Version 2.0 - Major Upgrade 🎉
-
-Version 2.0 brings a complete modernization of the tech stack:
-
-- **Svelte 5** with runes syntax (`$state`, `$derived`, `$effect`, `$props`)
-- **SvelteKit 2** with file-based routing
-- **Vite 7** build system (replacing Rollup)
-- **Firebase 12** with modular SDK
-- **TypeScript 5**
-- **Bootstrap 5** for styling
-
-## Prerequisites
-
-- Node.js 22.18+ (pinned to Node.js 22.23.1 in `.nvmrc`)
-- npm (comes with Node.js)
-- Firebase CLI when deploying (the commands below use a pinned temporary copy)
-
-## Installation & Setup
-
-### 1. Clone the repository
+## Set up the repository
 
 ```bash
 git clone <repository-url>
 cd book-tracker
+npm ci
+npm --prefix functions ci
 ```
 
-### 2. Install dependencies
+The repository already contains its Firebase configuration. Do not run
+`firebase init` in this checkout. It can replace tracked rules, indexes, and
+deployment settings.
 
-```bash
-# Install root dependencies (for the web app)
-npm install
+## Local development
 
-# Install Firebase Functions dependencies
-npm --prefix functions install
-```
+Use the emulators for application development. This exercises Authentication,
+Firestore, and Functions without sending application data or metered requests
+to deployed services.
 
-### 3. Firebase Configuration
-
-If this is your first time setting up the project:
-
-```bash
-# Login to Firebase
-npm exec --yes --package firebase-tools@15.24.0 -- firebase login --reauth
-
-# Initialize Firebase (if not already done)
-npm exec --yes --package firebase-tools@15.24.0 -- firebase init
-```
-
-The project is already configured to use the Firebase project `book-tracker-d8f24` (see `.firebaserc`).
-
-## Local Development
-
-### Running the Development Server
-
-Start the development server with HMR (Hot Module Replacement):
-
-```bash
-npm run dev
-```
-
-This will:
-- Start Vite development server with HMR
-- Start a local server on **http://localhost:5173**
-- Enable automatic browser refresh on file changes
-
-### Building for Production
-
-```bash
-npm run build
-```
-
-This creates an optimized production build in the `public/` directory using SvelteKit's static adapter.
-
-### Preview Production Build Locally
-
-```bash
-npm run preview
-```
-
-This serves the built app locally to test the production build before deploying.
-
-### Public Profile Search Indexing
-
-Profile pages are rendered as complete HTML by the `publicweb` HTTPS Function;
-they do not need to be generated as one static file per username. Firebase
-Hosting sends `/profiles/**` and `/sitemap.xml` to that Function, while the
-Svelte app still hydrates the profile page for interactive visitors.
-
-Publishing is for verified accounts whose `users/{uid}` document still
-exists: the rules refuse profile and discovery-marker writes from an
-unverified token (sign-up is open and unverified, and the app has no
-verification flow yet — the owner's flag was set out of band, see the
-account-deletion runbook) and from an account deleted in Auth (its ID token
-stays valid for up to an hour). Each account holds one profile, recorded in
-`profileOwners/{uid}`, which the client moves in the same batch as every
-profile create, rename and delete; a profile delete also removes its own
-discovery marker, so a freed username never inherits a stale marker. Names
-the site uses for itself (`admin`, `api`, `profiles`, `sitemap`, …) are
-reserved, and `profiles.updatedAt` is server-pinned because the shared
-sitemap publishes it as `<lastmod>` (SEC-032/033/035/036/062).
-
-Search discovery is a separate, explicit opt-in from public sharing. A profile
-owner first enables **Public profile**, then enables **Appear in search
-engines**. The second switch creates `profileDiscovery/<username>` with the
-same owner uid. The server applies these states:
-
-- public profile plus matching discovery marker: `200`, indexable metadata,
-  canonical URL, and inclusion in `/sitemap.xml`;
-- public profile without a marker: `200` with `noindex,follow`;
-- private or missing profile: indistinguishable `404` HTML with
-  `noindex,nofollow`;
-- a stale marker whose profile is missing, private, or owned by a different uid:
-  excluded from the sitemap and reported by `db-audit.ts`;
-- `/profiles/<username>.json`: the same visibility rule as the HTML, no `uid`
-  on the wire, `public, max-age=60, s-maxage=300`. The Svelte app reads it for
-  every profile except the viewer's own, because the `profiles/{username}`
-  document is readable only by its owner (SEC-019). Under `vite dev` nothing
-  serves this path, so other people's profiles resolve only against a deployed
-  or emulated Hosting stack.
-
-The Function memoises finished `200` responses per instance for 60 s and
-refuses uncached work with a `503` once 300 misses land in a minute, so a
-flood of distinct paths is bounded even when it bypasses the CDN. `404`s are
-memoised in a separate pool, so repeats stay free but a flood of them cannot
-evict real profiles, and while the budget is exhausted a memoised profile (or
-the sitemap) is served stale (up to 5 min old) rather than refused; a profile
-the origin has since seen as private is not revived. A sitemap scan that
-fails, runs past its 25 s deadline with nothing read, or is cut short before
-its first batch answers `503` `Retry-After: 300`, and that refusal is
-memoised for five minutes so a Firestore fault costs one scan per instance
-per five minutes, not one per request (SEC-090); a scan that runs out of
-time mid-way keeps what it has read and answers a partial sitemap, held for
-the same five minutes. Once the pinned complete sitemap is more than an hour
-old, a failing scan replaces it with the refusal rather than serving the
-stale list. A profile flipped private can therefore stay served for up to 60 s
-(function; 300 s while the origin is being flooded) + 300 s (shared CDN) +
-60 s (browser); there is no purge path. The sitemap is memoised for an
-hour in its own slot (so a flood of strangers' profiles cannot force a
-rescan), covers at most the 1000 oldest discovery markers, and can lag a
-privacy change by up to 1 h + 240 s + 300 s; it never lists a private
-profile that the origin has re-read.
-
-`npm run build` creates both `public/index.html` and
-`functions/assets/profile-shell.html`. They deliberately contain the same
-hashed JS/CSS references. Treat the Hosting release and `publicweb` revision as
-one coupled artifact; the build and artifact tests fail if those shells drift.
-
-### Testing Functions Locally
-
-To test Firebase Functions locally using emulators:
+Start the emulators:
 
 ```bash
 npm --prefix functions run serve
-# in another shell, route the web client to all three emulators
+```
+
+In another terminal, route the browser client to them:
+
+```bash
 VITE_EMULATOR=1 npm run dev
 ```
 
-The command starts Authentication, Firestore, and Functions together so an
-emulated function can never fall through to production Firestore. Toggl calls
-use deterministic local responses whenever `FUNCTIONS_EMULATOR=true`; copied
-production tokens are never sent to Toggl, and start, stop, token, and queue
-flows still exercise their real Firestore state transitions. The metered Google
-Books proxy also returns a local miss instead of consuming its production key.
-Book and author documents are field-allowlisted and byte-capped by the
-rules (a document is tens of KB at most — `size()` counts UTF-16 units,
-so a cap is up to 3× that in bytes for CJK text — not the 1 MiB Firestore
-allows: storage that PITR and 98 daily backups multiply, and that a delete
-event carries in full into Pub/Sub; SEC-039/071). Progress and timer
-updates skip the field allowlist but still type the fields they may
-touch, so a document with an unknown field from before the rule stays
-readable; the next edit sheds the field. The pre-migration `author`/
-`authors` fields are not admitted (no live document has them). Connecting Toggl (`savetoken`)
-requires a verified account and is metered at five attempts per user per
-hour (`functionQuotas/togglToken`, SEC-024).
-The Toggl API token itself lives in the `secrets` Firestore database
-(`togglTokens/{uid}`, SEC-004) — a separate database because Firestore
-IAM has no collection scoping. Client rules there deny everything
-(`firestore-secrets.rules`); `users/{uid}.toggl` carries only the status
-mirror `{workspaceId, projectId, connectedAt}` that the Me page and the
-queue-create gate read; sign-out terminates the client and drops the
-local IndexedDB mirror; and the internet-facing `publicweb-runtime@`
-identity is excluded from the secrets database by an IAM condition on
-its read role (SEC-097: `resource.name` limited to the default
-database), so a renderer compromise cannot reach a credential. The
-secrets database is deliberately outside `db-snapshot.ts` and the backup
-schedule: a credential is re-issuable, never restored.
-`migrate-toggl-tokens.ts` moved (and `--rotate` rotated) the pre-SEC-004
-tokens.
-Queued Toggl work is claimed under a server-owned ten-per-hour user quota;
-an over-quota `create` row is stamped with the end of the window
-(`deferredUntil`) and left pending — the trigger never throws for overflow,
-so Eventarc does not redeliver it, and the client sweep may re-arm it only
-once the window has ended; a row deferred in 24 consecutive windows becomes
-terminal. A correlated stop row is never deferred (it holds the account's
-single timer lock, and at most one exists). The only queue row a client can
-create is the atomic offline-stop row coupled to a real timer clear, and
-the trigger counts each row once against a second server-owned counter
-(sixty rows per user per hour, `functionQuotas/togglQueueRows`) that closes
-that create rule when full (SEC-002). Successful queue rows are deleted,
-while terminal and deferred rows receive a 90-day TTL; malformed rows
-consume quota before they are rejected, and a malformed quota document is
-repaired into a fresh window and logged rather than retried.
-Before Firebase starts, `serve` stages the checked-in dummy
-`functions/.secret.emulator` as the ignored `.secret.local`; Firebase resolves
-bound secrets before handler guards run, so this prevents an emulator startup
-from consulting Secret Manager. Never put credentials in `.secret.emulator`.
-If a different `.secret.local` already exists, `serve` fails without changing
-it; move that file aside before starting the emulators. Do not bypass `serve`
-with a raw `firebase emulators:start` command.
+Open `http://localhost:5173`.
 
-### Run the complete validation suite
+Plain `npm run dev` does not enable the emulators. It uses the Firebase
+configuration bundled with the application and should be used only by someone
+who understands and is authorized to access that environment.
+
+### Build and preview
+
+```bash
+npm run build
+npm run preview
+```
+
+The static build goes to `public/`. The build also creates the matching HTML
+shell used for public profile rendering. Treat both outputs as one release
+artifact.
+
+## Testing
+
+Run the default test suite:
+
+```bash
+npm test
+```
+
+Run the release validation suite before a deployment:
 
 ```bash
 npm run validate
 ```
 
-This runs Svelte diagnostics, PWA tests, Functions linting and compilation,
-the production web build, a bundle-size budget, and production-dependency
-security audits for both workspaces.
+`validate` runs type and framework checks, unit tests, rules and emulator
+tests, PWA tests, Functions tests, a production build, artifact checks, bundle
+budgets, and dependency audits. The root audit excludes development-only
+packages; the Functions audit checks its complete package tree.
 
-The multi-tab authentication regression uses a real browser against isolated
-Auth and Firestore emulators. Install its browser once, then run it separately:
+Root package commands:
 
-```bash
-npx playwright install chromium
-npm run test:e2e
-```
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Start the Vite development server |
+| `npm run build` | Production build and renderer-shell synchronization |
+| `npm run preview` | Preview the production build locally |
+| `npm test` | Default checks and automated test suite |
+| `npm run validate` | Release validation, build, artifact and bundle checks, and audits |
+| `npm run check` | Svelte and TypeScript checks for the app, Node tools, and service worker |
+| `npm run check:app` | SvelteKit synchronization and Svelte checks |
+| `npm run check:node` | Type-check repository Node tools |
+| `npm run check:service-worker` | Type-check the service worker |
+| `npm run check:watch` | Watch-mode Svelte checks |
+| `npm run test:unit` | Application and migration unit tests |
+| `npm run test:rules` | Firestore Rules and integration tests against local emulators |
+| `npm run test:functions` | Functions lint, build, and tests |
+| `npm run test:pwa` | Service-worker and PWA behavior tests |
+| `npm run test:artifacts` | Generated build and renderer artifact checks |
+| `npm run test:bundle` | JavaScript and CSS bundle budgets |
+| `npm run test:e2e` | Browser tests against local emulators |
+| `npm run test:e2e:browser` | Run Playwright against an already running test environment |
+| `node docs/architecture/verify.mjs` | Route coverage, image freshness, and map sanitization |
+
+Functions package commands:
+
+| Command | Purpose |
+|---|---|
+| `npm --prefix functions test` | Lint, build, and test backend code |
+| `npm --prefix functions run lint` | Lint backend TypeScript |
+| `npm --prefix functions run clean` | Remove compiled backend output |
+| `npm --prefix functions run build` | Compile backend TypeScript |
+| `npm --prefix functions run serve` | Build and start the local emulator suite |
+| `npm --prefix functions run shell` | Alias for the emulator workflow |
+| `npm --prefix functions start` | Alias for the emulator workflow |
+| `npm --prefix functions run deploy` | Deploy backend services with the pinned CLI |
+| `npm --prefix functions run logs` | Read backend logs with the pinned CLI |
+
+`npm test` intentionally omits the browser end-to-end suite, artifact checks,
+and bundle budgets. `npm run validate` adds artifact and bundle checks. Run
+`npm run test:e2e` separately when a change affects a complete browser flow.
 
 ## Deployment
 
-### Prerequisites for Deployment
+Deployment requires authorized operator access and the private operational
+runbooks. This public README documents the safe release boundary, not project
+identifiers, service identities, secret names, quotas, incident commands, or
+recovery credentials.
 
-1. Make sure you're logged into Firebase:
-   ```bash
-   npm exec --yes --package firebase-tools@15.24.0 -- firebase login --reauth
-   ```
+For a routine release:
 
-2. Verify you're deploying to the correct project:
-   ```bash
-   npm exec --yes --package firebase-tools@15.24.0 -- firebase use default
-   # Should show: book-tracker-d8f24
-   ```
-
-3. Before the first Functions deployment from this version, migrate the
-   existing Runtime Config to Secret Manager:
-
-   ```bash
-   npm exec --yes --package firebase-tools@15.24.0 -- \
-     firebase functions:config:export \
-     --project book-tracker-d8f24 \
-     --secret FUNCTIONS_CONFIG_EXPORT \
-     --force
-   ```
-
-   This preserves the existing `booksapi` URL and API key without printing or
-   copying the secret into the repository.
-
-#### Runtime identities
-
-Functions do not run as the project-default (Editor) service accounts.
-`functions/src/runtime.ts` names two dedicated accounts that must exist in
-IAM before a deploy: `publicweb-runtime@` (`roles/datastore.viewer` — the
-one function strangers reach can only read Firestore, nothing else) and
-`functions-runtime@` (`roles/datastore.user`, `roles/firebaseauth.viewer`,
-`roles/eventarc.eventReceiver`, `roles/run.invoker` on the two
-Eventarc-fed services, and `secretmanager.secretAccessor` on
-`FUNCTIONS_CONFIG_EXPORT`). `datastore.viewer` is read access to the whole
-database (Firestore IAM cannot scope to collections), so the reduction is
-"read-only, nothing else", not "public data only". Only a project Owner
-deploys today: the CLI needs `iam.serviceAccounts.actAs` on both runtime
-accounts *and* (a pre-flight check in firebase-tools) on the App Engine
-default account, plus `cloudfunctions.*` — and because the Hosting rewrite
-is pinned, every Hosting deploy is also a functions deploy. The
-`firebase-adminsdk` key cannot deploy anything (no `actAs`, no
-`cloudfunctions.*`); there is no headless deploy path. `triggers.test.cjs` fails if any exported function lacks one of these
-identities, and the two Firestore-triggered gen2 services are
-`ALLOW_INTERNAL_ONLY`. A new function that needs another Google API gets
-its role added to the matching account — never `roles/editor`.
-
-The Hosting rewrite for `/profiles/**` and `/sitemap.xml` uses `pinTag`,
-so `book.ankile.com` is served by the Cloud Run revision that was tagged at
-the last **Hosting** deploy, not by whatever `publicweb` revision is latest.
-Any change to `publicweb`'s identity or roles therefore needs a Hosting
-deploy to re-pin (`firebase deploy --only functions:publicweb,hosting`),
-and the post-deploy check must go through `https://book.ankile.com/profiles/…`
-and `/sitemap.xml`, not the `*.run.app` origin — the origin always runs the
-latest revision and passed while the pinned one was returning 500
-(2026-08-27, see MIGRATIONS). Hosting leaves every previously pinned
-revision tagged and publicly reachable at its `fh-<tag>---…run.app` URL;
-after a deploy, drop stale tags and delete retired revisions
-(`gcloud run services update-traffic publicweb --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com --remove-tags …`,
-then `gcloud run revisions delete <revision> --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com`)
-so only revisions on the current identity stay addressable. That cleanup also means **never roll back through the
-console** — neither Hosting nor any gen-2 Cloud Run service: every earlier
-Hosting release's rewrite points at a tag that no longer exists, and
-superseded revisions are deleted after each deploy, so a rollback breaks the
-public pages (or, for the Eventarc services, fails deliveries silently for
-24 h before they are dropped). Recover from a bad release with a fresh
-`firebase deploy` of the affected targets instead. `firebase login` must be
-`login --reauth` after any Google-account grant change: plain `login`
-trusts a stale cached credential.
-
-Detection (2026-08-28): two content-matching uptime checks through
-`book.ankile.com` (`/profiles/lars` every 5 min, `/sitemap.xml` every
-15 min — it must list `lars`) and alert policies for their failure,
-`publicweb` 5xx (designed 503s separately, once a day at most),
-`PERMISSION_DENIED` at ERROR in any gen-1 or gen-2 function, gen-1 function
-errors, `publicweb.sitemap.truncated`/`.skip`, `admin-overview` denials,
-(`publicweb.sitemap.failed` at ERROR marks a refused sitemap — one line
-per five minutes of 503s because the refusal is memoised; the sitemap uptime
-check is the signal that fires, since it fails on any sitemap 503),
-`telemetry.quota_exceeded` at WARN (one line per user per hour: that
-account sent twenty issue reports — a broken client or a deliberate flood;
-no policy yet),
-and Pub/Sub undelivered messages on the two Eventarc subscriptions (nine
-policies) — all to the owner's email channel. The uptime and Pub/Sub policies have no
-notification rate limit; the log-match ones notify at most hourly (the
-designed-503 one daily). The sitemap check alone costs up to 2 instances ×
-24 scans × 1000 reads ≈ 48k Firestore reads/day at the marker cap while
-scans complete; a scan cut short by its 20 s budget is retried every five
-minutes instead (≈ 576k reads/day worst case). Deploys: build, **commit the artifacts**, then deploy — the Hosting
-predeploy re-verifies the committed build and fails on drift; the functions
-predeploy runs `npm ci` first. Always use the pinned CLI (`npm exec
---package firebase-tools@15.24.0`), never `npx -y firebase-tools`.
-
-### Deploy Everything
-
-The first strict-TypeScript release must follow the authoritative
-[timer-claim rollout](MIGRATIONS.md#timer-claim-rollout). Do not use an
-all-at-once `firebase deploy`: every user needs a lifecycle document before the
-claim-aware web client is exposed. Before deploying, complete the
-[release record and rollback gates](MIGRATIONS.md#strict-typescript-release-record-and-rollback-boundary).
-After the new Hosting bundle has been exposed, keep the current schema contract
-and fix forward; cached old and new bundles make a blind full-stack rollback
-unsafe. With the current release artifacts, the fix-forward boundary begins
-when the new Functions are deployed: the queue worker can already produce an
-ambiguous remote Toggl outcome that the pre-release stack cannot reconcile.
+1. Start from a clean branch and install locked dependencies with `npm ci` in
+   both package roots.
+2. Run `npm run validate` and any relevant browser end-to-end tests.
+3. Run `npm run build` and `node docs/architecture/verify.mjs`.
+4. Review the generated web and profile-renderer artifacts together.
+5. Commit the source and generated artifacts before deployment.
+6. Deploy the configured targets with the pinned CLI and follow the private
+   verification and rollback runbooks.
 
 ```bash
-# 1. Reject uncorrelated legacy timer writes.
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore
-# (`--only firestore` covers both databases: `firestore.rules` to
-# (default) and the deny-all `firestore-secrets.rules` to `secrets`.)
-
-# 2. Deploy the claim-aware callables.
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
-# Before migrating, let old in-flight invocations drain.
-
-# 3. Review, snapshot, apply, and prove the timer migration is idempotent.
-node migrate-timer-claims.ts --prod
-node db-snapshot.ts --prod
-node migrate-timer-claims.ts --prod --apply
-node migrate-timer-claims.ts --prod --apply
-node db-audit.ts --prod
-
-# 4. Expose the claim-aware, progress-source-compatible client and its matching profile renderer.
-npm run build
-git add public functions/assets && git commit -m "Build artifacts"
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
-
-# 5. Wait the documented 7-day old-bundle overlap window before backfilling progress ownership.
-node migrate-reading-progress-sources.ts --prod
-node db-snapshot.ts --prod
-node migrate-reading-progress-sources.ts --prod --apply
-node migrate-reading-progress-sources.ts --prod --apply
-node db-audit.ts --prod
+npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
 ```
 
-Review every migration line, then take each snapshot immediately before that
-migration's first apply. The second applies must report zero users and zero
-books. The pre-Hosting audit must contain no `timer-lifecycle.*` findings. In
-the final audit, investigate every `book.progress-source-null-baseline` as a
-possible missing history row; all other `book.progress-source-*` findings must
-be absent. Record each accepted nonzero baseline in the rollout log.
-After this one-time rollout has completed
-successfully, routine full deployments can use the standard `firebase deploy`
-command, but must run `npm run build` first so Hosting and `publicweb` receive
-the same generated shell.
+Hosting and the public profile renderer are coupled. Do not release Hosting by
+itself. A routine release must not rerun database migrations, legacy
+configuration exports, or completed rollout steps.
 
-### Deploy Hosting and Profile Renderer
+For any data-shape change, use [MIGRATIONS.md](MIGRATIONS.md) and the migration
+script's own header. Production migration timing and emergency procedures stay
+in private operator documentation.
 
-There is intentionally no Hosting-only release path. Even a frontend-only
-build changes the generated SvelteKit shell identifier, and the profile
-Function embeds that shell. Deploy both targets from one build:
+## Project layout
 
-```bash
-# Build the web app
-npm run build
-
-# Commit the generated artifacts: the Hosting predeploy rebuilds pinned to
-# HEAD's version and refuses to ship anything the commit does not match.
-git add public functions/assets && git commit -m "Build artifacts"
-
-# Deploy the matching renderer revision and Hosting release together
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions:publicweb,hosting
-```
-
-`--force` is not part of any routine deploy. The CLI asks for it once when
-a function first gains a failure policy; used habitually it also silences
-the prompts that protect you — deleting any function missing from source,
-proceeding through unsafe trigger migrations — and on 2026-08-28 it
-silently created a 1-day image cleanup policy on `gcf-artifacts`. Every
-`gcloud` command in this repository's runbooks needs
-`--project book-tracker-d8f24 --account=lars.ankile@gmail.com`: the
-workstation's default `gcloud` project is a different one.
-
-### Deploy to Preview Channel
-
-There are no preview channels. Firebase Auth accepts only the four
-production `authorizedDomains` (SEC-021) — and `hosting:channel:deploy`
-would add the channel host to that list by default; a channel release also
-deploys `publicweb` to production (the rewrite is pinned) and leaves a
-publicly reachable `fh-<tag>---…run.app` origin that outlives the channel
-(SEC-020/SEC-022). Test signed-out behaviour with `npm run preview` or the
-emulators, and signed-in behaviour against the emulator suite.
-
-### Abusive traffic and runaway spend
-
-There is no automatic spend guard: the 50 NOK/month budget is an email
-that arrives hours after the fact. Before 2026-08-28 the worst case from
-one attacker was on the order of $165/hour; with the instance caps it is
-≈ $1,700/day at 1 Gbps, 90 % of it Hosting egress of the 93 KB profile
-JSON, which nothing caps (Firestore write floods through the rules and
-anonymous calls to the gen-1 callables — billed before the handler
-rejects the caller, now capped at 10 instances — are the rest). The
-`spend:` alert policies watch egress, Firestore reads/writes/storage,
-gen-1 executions and log ingest with ~100× headroom over real traffic and
-fire within ten minutes. When one fires, stop the bleeding in this order,
-from the workstation, with the pinned CLI and `--project` on every gcloud:
-
-1. Egress or public pages:
-   `npm exec --yes --package firebase-tools@15.24.0 -- firebase hosting:disable -f --project book-tracker-d8f24`
-   (the CDN keeps serving cached profile JSON for up to 5 min; redeploy
-   Hosting to restore). Origin-only floods: remove
-   `allUsers` from `publicweb`'s `roles/run.invoker`
-   (`gcloud run services remove-iam-policy-binding publicweb --region europe-west1 --project book-tracker-d8f24 --account=lars.ankile@gmail.com --member=allUsers --role=roles/run.invoker`).
-2. Firestore writes or storage: deploy the committed deny-all ruleset —
-   `cp firestore.rules.lockdown firestore.rules && npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only firestore:rules --project book-tracker-d8f24 && git checkout -- firestore.rules`
-   — and redeploy the real rules to restore. Signed-in users lose access
-   while it is in force; nothing is deleted.
-3. Callable floods: remove `allUsers` from the six gen-1 callables'
-   `roles/cloudfunctions.invoker` (they are also capped at 10 instances,
-   `admin-overview` at 2).
-4. Never unlink billing: Blaze → Spark disables Cloud Functions and
-   deletes deployments.
-
-Nothing in this list deletes data. Long-term guard (SEC-025): a Monitoring
-Pub/Sub channel → a `spendguard` function that applies steps 2 and 3
-automatically.
-
-### Abusive or compromised accounts
-
-Deleting an account is the wrong first move: a Firebase ID token stays
-valid for up to an hour after the user is deleted, the rules only require
-a signed-in identity to create public profiles, and once the account is
-gone no client can ever delete what that identity created (only the Admin
-SDK can). Self-service deletion is disabled in Auth
-(`client.permissions.disabledUserDeletion`), so every deletion is an
-operator action, in this order:
-
-1. Disable the account (Firebase console → Authentication → Disable, or
-   `getAuth().updateUser(uid, {disabled: true})`).
-2. Revoke its sessions: `getAuth().revokeRefreshTokens(uid)`.
-3. Wait at least one hour for the last ID token to expire.
-4. Only then delete the account — one at a time with `deleteUser(uid)`.
-   `deleteUsers([...])` (bulk) does **not** fire the deletion trigger, so
-   `deleteUserDocument` would never run and the public profiles would stay
-   live. Deletion is a **soft delete** (SEC-006): `deleteUserDocument`
-   stamps `deletedAt` on `users/{uid}` and on the account's profiles and
-   removes nothing but the account's search-index markers and its stored
-   Toggl credential — books, sessions, authors, queue rows, quotas and
-   the ownership record stay as they were, the username stays reserved, a
-   `profileDiscovery` marker (an opt-in pointer, not content) is deleted
-   only while it still names the deleted uid, and the credential
-   (`secrets:togglTokens/{uid}`, SEC-004: a live credential is not data
-   to retain for an account that can never use it) is deleted with it,
-   leaving the status mirror. Everything that serves strangers or acts for
-   the account treats the tombstone as absence: the profile page, its JSON
-   twin and the sitemap answer as for a missing name; the Toggl callables
-   and queue worker refuse the tombstone itself, before any credential
-   read; the rules refuse the identity's profile writes for the
-   hour its ID token outlives the account; the admin overview labels the
-   row "account deleted".
-5. Check `/sitemap.xml` and `profiles` for documents whose `uid` no longer
-   exists in Auth **and** carry no `deletedAt` (`node db-audit.ts --prod`
-   reports them as `profile.tombstone-missing`; the admin overview labels
-   an untombstoned orphan "auth user deleted").
-6. Retention: tombstoned data is kept until an operator decides otherwise.
-   The only path that removes it is `migrate-purge-deleted-accounts.ts`
-   (one uid per run, dry-run by default, refuses a live account) under the
-   migration playbook — snapshot first, it is the one migration the
-   database cannot undo.
-
-An account can also lose `/admin` access by changing its email — the
-verified flag resets and the app has no verification flow yet; re-verify
-with `getAuth().updateUser(uid, {emailVerified: true})` after confirming
-the address out of band.
-
-### Deploy Functions Only
-
-To deploy backend-only Firebase Functions changes that do not touch
-`publicweb`, `src/app.html`, client assets, or the shell sync script:
-
-```bash
-# The predeploy hooks will automatically lint and build
-npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy --only functions
-```
-
-Or use the npm script:
-
-```bash
-npm --prefix functions run deploy
-```
-
-If `publicweb` or any web-shell input changed, use **Deploy Hosting and Profile
-Renderer** instead. Deploying either half alone can return HTML whose hashed
-assets do not exist in that Hosting release.
-
-### View Deployment Logs
-
-```bash
-# View function logs
-npm exec --yes --package firebase-tools@15.24.0 -- firebase functions:log
-
-# Or use the npm script
-npm --prefix functions run logs
-```
-
-## Project Structure
-
-```
+```text
 book-tracker/
-├── src/                    # Svelte source files
-│   ├── app.html           # SvelteKit HTML template
-│   ├── routes/            # SvelteKit file-based routes
-│   │   ├── +layout.svelte # Root layout (auth guard)
-│   │   ├── +page.svelte   # Home page (reading books)
-│   │   ├── finished/      # Finished books page
-│   │   └── me/            # User profile page
-│   └── lib/               # Shared components and utilities
-│       ├── components/    # Svelte 5 components
-│       ├── firebase/      # Firebase configuration and utilities
-│       ├── interfaces/    # TypeScript interfaces
-│       └── utils/         # Utility functions
-├── static/                # Static assets (favicon, manifest, etc.)
-├── public/                # Build output (generated by SvelteKit)
-├── functions/             # Firebase Cloud Functions
-│   └── src/              # Function source code
-├── svelte.config.ts      # SvelteKit configuration
-├── vite.config.ts        # Vite bundler configuration
-├── package.json          # Root dependencies
-└── firebase.json         # Firebase configuration
+├── src/
+│   ├── lib/                 UI, stores, Firebase access, types, and utilities
+│   └── routes/              SvelteKit pages
+├── static/                  Static assets and screenshots
+├── functions/
+│   ├── src/                 Backend services and event handlers
+│   └── test/                Functions tests
+├── tests/                   App, rules, migration, PWA, and artifact tests
+├── docs/architecture/       Sanitized map sources and rendered images
+├── migrate-*.ts             One-time and maintenance migration tools
+├── db-audit.ts              Read-only data consistency audit
+├── db-snapshot.ts           Snapshot tool used before migrations
+├── MIGRATIONS.md            Public-safe migration procedure and status ledger
+├── firestore.rules          Application data permissions
+├── firestore-secrets.rules  Restricted credential-store permissions
+└── firebase.json            Emulator and deployment configuration
 ```
 
-## Technology Stack
+## Technology
 
-### Frontend
-- **Svelte 5.56.6** - Reactive UI framework with runes
-- **SvelteKit 2.70.1** - Application framework with routing
-- **Vite 7.3.6** - Fast build tool with HMR
-- **TypeScript 5.9.3** - Type-safe JavaScript
-- **Bootstrap 5.3.8** - CSS framework
+- Svelte 5 and SvelteKit 2
+- Vite 7 and TypeScript 5
+- Bootstrap 5
+- Firebase Authentication, Firestore, Functions, and Hosting
+- Node.js 22 for backend services and repository tools
 
-### Backend
-- **Firebase 12.16.0** - Authentication and Firestore database
-- **Firebase Functions 7.3.0** on Node.js 22 - Serverless cloud functions
+## Development notes
 
-## Development Guide
-
-### Svelte 5 Runes
-
-This project uses Svelte 5's new runes syntax:
-
-```javascript
-// Reactive state
-let count = $state(0);
-
-// Derived state
-let doubled = $derived(count * 2);
-
-// Side effects
-$effect(() => {
-  console.log(`Count is ${count}`);
-});
-
-// Component props
-let { title, onclick } = $props();
-```
-
-### SvelteKit Routing
-
-Routes are defined by the file structure in `src/routes/`:
-
-- `/` - Home page (reading books)
-- `/finished` - Finished books page
-- `/me` - User profile page
-
-### Firebase Integration
-
-The app uses Firebase v12 modular SDK:
-
-```javascript
-import { getAuth, signInWithEmailAndPassword } from 'firebase/auth';
-import { getFirestore, collection, query, where } from 'firebase/firestore';
-```
+- Pages use SvelteKit file-based routing under `src/routes`.
+- New components use Svelte 5 runes.
+- Browser writes preserve offline behavior through Firestore's local cache.
+- Navigation guards improve the user experience, but Rules and backend
+  authorization are the security boundaries.
+- Generated artifacts must match their source and committed revision.
+- Changes to routes, architecture, access, data flows, or integrations must
+  update and regenerate the maps.
 
 ## Troubleshooting
 
-### Node.js Version Issues
-
-This project requires Node.js 22.18+. If you're running a different version, consider using a Node version manager like `nvm`:
+If the Node version is wrong:
 
 ```bash
-nvm install 22
-nvm use 22
-```
-
-### Dependency Installation Fails
-
-Confirm `node --version` satisfies `package.json`; with `nvm`, run:
-
-```bash
-nvm install
 nvm use
 ```
 
-## Available Scripts
+If dependencies are inconsistent, reinstall from the lockfiles:
 
-### Root Directory
+```bash
+npm ci
+npm --prefix functions ci
+```
 
-- `npm run dev` - Start Vite development server (http://localhost:5173)
-- `npm run build` - Build for production using SvelteKit
-- `npm run preview` - Preview production build locally
-- `npm test` - Run web checks, PWA tests, and Functions tests
-- `npm run validate` - Run the complete build, test, and audit suite
-- `npm run check` - Run Svelte type checking
-- `npm run check:watch` - Run type checking in watch mode
+If an emulator command fails because a port is already in use, stop the other
+emulator process and rerun the command. Do not switch to deployed services as a
+shortcut.
 
-### Functions Directory
+## Release history
 
-- `npm run build` - Compile TypeScript functions
-- `npm run serve` - Start Firebase emulators for local testing
-- `npm run deploy` - Deploy functions to Firebase
-- `npm run logs` - View function logs
-- `npm run lint` - Lint function code
-
-## Migration Notes (v1.0 → v2.0)
-
-If you're upgrading from version 1.0:
-
-1. **Build system changed**: Rollup → Vite (much faster builds)
-2. **Routing changed**: svelte-routing → SvelteKit file-based routing
-3. **Firebase SDK changed**: v8 compat API → v12 modular API
-4. **Component syntax changed**: Svelte 3 → Svelte 5 runes
-5. **Event handlers changed**: `on:click` → `onclick`
-6. **Bootstrap upgraded**: v4 → v5
-7. **Port changed**: 3000 → 5173 (Vite default)
+Version 2 is the current application line. Earlier framework-upgrade notes are
+historical and no longer part of setup or deployment. Database rollout status
+is recorded in [MIGRATIONS.md](MIGRATIONS.md).
 
 ## License
 

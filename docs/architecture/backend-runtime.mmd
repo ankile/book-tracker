@@ -1,106 +1,75 @@
 ---
-title: Backend request and event paths
+title: Backend responsibilities and data flows
 ---
 flowchart TB
-  accTitle: Book Tracker backend request and event paths
-  accDescr: Seven independent rows show public profile delivery, Google Books lookup, telemetry and administration, online Toggl calls, offline Toggl queue synchronization, authentication lifecycle cleanup, and book session cleanup. Every deployed function appears by its deployed name.
+  accTitle: Book Tracker backend responsibilities and data flows
+  accDescr: High-level request and event paths show how published profiles, book information, issue reporting, restricted operations, optional time tracking, offline recovery, and lifecycle cleanup move through the backend without exposing deployment details.
 
   classDef source fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef mediation fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
-  classDef function fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
+  classDef service fill:#edf4f6,stroke:#497789,color:#173d4a,stroke-width:2px;
   classDef data fill:#eaf7ef,stroke:#2e7d55,color:#17482f,stroke-width:2px;
   classDef external fill:#f7f3ed,stroke:#9b7b52,color:#4c3926,stroke-width:2px;
-  classDef security fill:#fff1f0,stroke:#b42318,color:#651c15,stroke-width:2px;
   classDef note fill:#ffffff,stroke:#8b9691,color:#40504d,stroke-width:1px,stroke-dasharray:4 3;
 
-  subgraph publicpath[Public profiles and search]
+  subgraph publicpath[Published profiles]
     direction LR
-    webrequest["<b>Visitor or crawler</b><br/><code>/profiles/**</code><br/><code>/sitemap.xml</code>"]:::source
-    webhosting["<b>Hosting rewrite</b><br/>Pinned Cloud Run revision"]:::mediation
-    publicweb["<b>publicweb · Gen 2</b><br/>Public HTTP · max 2 instances<br/><code>publicweb-runtime</code>"]:::function
-    profiledata[("<b>Profile documents</b><br/><code>profiles/{username}</code><br/><code>profileDiscovery/{username}</code>")]:::data
-    webresponse["<b>Response</b><br/>Public: HTML, JSON, or sitemap<br/>Private/missing: indistinguishable 404"]:::source
-    webrequest --> webhosting --> publicweb
-    publicweb -->|"Admin SDK · read-only IAM"| profiledata
-    profiledata --> webresponse
+    webrequest["<b>Visitor or indexer</b><br/>Published profile request"]:::source
+    webdelivery["<b>Web delivery layer</b><br/>Routes dynamic profile traffic"]:::mediation
+    publicrenderer["<b>Profile renderer</b><br/>Checks publication state<br/>and builds a public response"]:::service
+    publicprojection[("<b>Published profile projection</b><br/>Only fields intended for sharing")]:::data
+    webresponse["<b>Public response</b><br/>Page, data projection, or not found"]:::source
+    webrequest --> webdelivery --> publicrenderer --> publicprojection --> webresponse
   end
 
-  subgraph metadatapath[Metered ISBN metadata]
+  subgraph metadatapath[Book information]
     direction LR
-    bookdialog["<b>Add or edit book</b><br/>Firebase ID token"]:::source
-    booksapi["<b>booksapi-lookupisbn · Gen 1</b><br/>Handler requires signed-in user<br/>60 lookups per user per hour"]:::function
-    booksquota[("<b>Quota</b><br/><code>users/{uid}/functionQuotas</code>")]:::data
-    secret["<b>Secret Manager</b><br/><code>FUNCTIONS_CONFIG_EXPORT</code>"]:::security
-    google["<b>Google Books API</b><br/>ISBN metadata"]:::external
-    bookdialog --> booksapi --> google
-    booksapi -->|"consume quota"| booksquota
-    secret -. "API key" .-> booksapi
+    bookdialog["<b>Signed-in reader</b><br/>Adds or edits a book"]:::source
+    metadataapi["<b>Book information service</b><br/>Authorizes and validates requests"]:::service
+    catalog["<b>External catalog service</b><br/>Book metadata"]:::external
+    bookresult[("<b>Normalized book information</b><br/>Safe fields returned to the app")]:::data
+    bookdialog --> metadataapi --> catalog --> bookresult
   end
 
-  subgraph operationspath[Client issue reports and operator overview]
+  subgraph operationspath[Issue reporting and restricted operations]
     direction LR
-    clientissue["<b>Signed-in browser</b><br/>Allowlisted warn/error event"]:::source
-    telemetry["<b>telemetry-reportissue · Gen 1</b><br/>20 reports per user per hour"]:::function
-    opsdata[("<b>Operations data</b><br/><code>logEvents</code> · issue quota<br/>server-owned TTL fields")]:::data
-    adminrequest["<b>Fixed verified operator</b>"]:::source
-    admin["<b>admin-overview · Gen 1</b><br/>UID + verified-email gate<br/>max 2 instances"]:::function
-    adminsources[("<b>Admin sources</b><br/>Auth users · private libraries<br/><code>logEvents</code>")]:::data
-    audit[("<b>Audit output</b><br/><code>adminAudit</code> · TTL")]:::data
-    clientissue --> telemetry --> opsdata
-    adminrequest --> admin --> adminsources
-    admin -->|"successful view"| audit
+    clientissue["<b>Signed-in app</b><br/>Bounded issue report"]:::source
+    issuereporter["<b>Issue reporting service</b><br/>Validates and attributes the report"]:::service
+    operations[("<b>Operations data</b><br/>Bounded reports and access records")]:::data
+    operator["<b>Authorized operator</b><br/>Requests an operational summary"]:::source
+    overview["<b>Restricted overview service</b><br/>Checks authorization<br/>and returns aggregates"]:::service
+    clientissue --> issuereporter --> operations
+    operator --> overview --> operations
   end
 
-  subgraph togglonline[Online Toggl configuration and timers]
+  subgraph timerpath[Optional time tracking]
     direction LR
-    onlinebrowser["<b>Signed-in browser</b><br/>Profile settings or book timer"]:::source
-    tokenfn["<b>Token callables · Gen 1</b><br/>toggl-savetoken<br/>toggl-cleartoken"]:::function
-    timerfn["<b>Timer callables · Gen 1</b><br/>toggl-start · toggl-stop<br/>toggl-clearstopping"]:::function
-    timerstate[("<b>Owner timer state</b><br/><code>users/{uid}</code> config<br/>book + <code>timerLifecycle/current</code>")]:::data
-    togglapi["<b>Toggl Track API v9</b><br/>Token validation and timers"]:::external
-    onlinebrowser --> tokenfn --> timerstate
-    onlinebrowser --> timerfn --> timerstate
-    tokenfn --> togglapi
-    timerfn --> togglapi
+    timerbrowser["<b>Signed-in reader</b><br/>Connects or uses a reading timer"]:::source
+    timerapi["<b>Integration service</b><br/>Authorizes requests and protects credentials"]:::service
+    timerstate[("<b>Private timer state</b><br/>Connection status and reading activity")]:::data
+    timerprovider["<b>External time-tracking service</b><br/>Reading activity"]:::external
+    timerbrowser --> timerapi --> timerstate
+    timerapi --> timerprovider
   end
 
-  subgraph toggloffline[Offline Toggl recovery]
+  subgraph offlinepath[Offline recovery]
     direction LR
-    offlinebrowser["<b>Browser goes offline</b><br/>Stop or finished timer"]:::source
-    localqueue["<b>Firestore IndexedDB</b><br/>Queued atomic client batch"]:::mediation
-    queuedoc[("<b>Firestore queue row</b><br/><code>users/{uid}/togglQueue/{queueId}</code><br/>Rules validate payload and timer claim")]:::data
-    queueevent["<b>Eventarc delivery</b><br/>Gen 2 · internal-only ingress"]:::mediation
-    syncqueue["<b>toggl-syncqueue · Gen 2</b><br/>Claim, quota, retry<br/>create or patch entry"]:::function
-    queuedtoggl["<b>Toggl Track API v9</b><br/>Create or patch time entry"]:::external
-    queueresult[("<b>Queue result</b><br/>Success deletes row<br/>terminal failure gets 90-day TTL")]:::data
-    offlinebrowser --> localqueue -->|"flushes after reconnect"| queuedoc
-    queuedoc --> queueevent --> syncqueue --> queuedtoggl
-    syncqueue --> queueresult
+    offlinebrowser["<b>Device goes offline</b><br/>Finishes a timer action"]:::source
+    localqueue["<b>Durable client queue</b><br/>Keeps bounded work until reconnect"]:::mediation
+    syncedwork[("<b>Validated deferred work</b><br/>Owner-scoped recovery state")]:::data
+    syncworker["<b>Synchronization worker</b><br/>Claims and processes work"]:::service
+    syncprovider["<b>External integration</b><br/>Receives the recovered activity"]:::external
+    offlinebrowser --> localqueue -->|"reconnect"| syncedwork --> syncworker --> syncprovider
   end
 
-  subgraph authpath[Authentication lifecycle]
+  subgraph lifecyclepath[Account and data lifecycle]
     direction LR
-    authevent["<b>Firebase Auth</b><br/>Account created or deleted"]:::source
-    createuser["<b>createUserDocument · Gen 1</b><br/>Auth onCreate · retry enabled"]:::function
-    deleteuser["<b>deleteUserDocument · Gen 1</b><br/>Auth onDelete · retry enabled"]:::function
-    userroot[("<b>Account root</b><br/><code>users/{uid}</code><br/>idle timer lifecycle on create")]:::data
-    deletedprofiles[("<b>Profiles and discovery markers</b><br/>Deleted page by page"]:::data
-    remains["<b>Manual cleanup still required</b><br/>Books · updates · authors · timer lifecycle<br/>and Toggl queue subcollections remain"]:::security
-    authevent -->|"create"| createuser --> userroot
-    authevent -->|"delete"| deleteuser
-    deleteuser -->|"delete root document only"| userroot
-    deleteuser -->|"delete"| deletedprofiles
-    deleteuser -. "Firestore does not cascade" .-> remains
+    lifecycleevent["<b>Managed lifecycle event</b><br/>Account or application data changes"]:::mediation
+    cleanupworker["<b>Lifecycle worker</b><br/>Applies cleanup and retention policy"]:::service
+    relateddata[("<b>Related application data</b><br/>Updated or retired consistently")]:::data
+    lifecycleevent --> cleanupworker --> relateddata
   end
 
-  subgraph bookcleanup[Book deletion cleanup]
-    direction LR
-    deletebook["<b>Owner deletes a book</b><br/>Validated client write"]:::source
-    bookdoc[("<b>Deleted document</b><br/><code>users/{uid}/books/{bookId}</code>")]:::data
-    bookevent["<b>Eventarc delivery</b><br/>Gen 2 · internal-only ingress"]:::mediation
-    cascade["<b>deletebookupdates · Gen 2</b><br/>Retry enabled · max 5 instances"]:::function
-    updates[("<b>Recursive cleanup</b><br/><code>books/{bookId}/updates/**</code>")]:::data
-    deletebook --> bookdoc --> bookevent --> cascade --> updates
-  end
+  observability["<b>Shared operational behavior</b><br/>Backend components emit bounded health and issue signals.<br/>Operational controls watch availability and failed background work."]:::note
 
-  observability["<b>Shared runtime behavior</b><br/>All functions write errors and warnings to Cloud Logging.<br/>Uptime checks and alert policies watch public HTTP, function errors, and Eventarc delivery."]:::note
+  publicpath ~~~ metadatapath ~~~ operationspath ~~~ timerpath ~~~ offlinepath ~~~ lifecyclepath ~~~ observability
