@@ -243,6 +243,34 @@ test('publishing needs a verified account whose users document still exists', as
   windowDelete.delete(doc(tombwin, 'profileOwners', 'tombwin'));
   await assertFails(windowDelete.commit());
   await assertFails(deleteDoc(doc(tombwin, 'profiles', 'tombwin-reader')));
+
+  // The delete rule's own clause, isolated: a tombstoned profile on a
+  // LIVE account (drift no path produces; the audit reports it as
+  // profile.tombstone-orphan) is still not the owner's to delete. With
+  // only the cases above, dropping that clause left the suite green.
+  // And a positive control with the same fixture shape and no tombstone
+  // anywhere, so the denials here come from the tombstones and not from
+  // the fixture.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const admin = context.firestore();
+    await setDoc(doc(admin, 'users', 'tombprof'), { uid: 'tombprof', email: 'p@example.test' });
+    await setDoc(doc(admin, 'profiles', 'tombprof-reader'), { ...profile('tombprof'), deletedAt: Timestamp.now() });
+    await setDoc(doc(admin, 'profileOwners', 'tombprof'), { username: 'tombprof-reader' });
+    await setDoc(doc(admin, 'users', 'tombctl'), { uid: 'tombctl', email: 'c@example.test' });
+    await setDoc(doc(admin, 'profiles', 'tombctl-reader'), profile('tombctl'));
+    await setDoc(doc(admin, 'profileOwners', 'tombctl'), { username: 'tombctl-reader' });
+  });
+  const tombprof = verified('tombprof');
+  const orphanDelete = writeBatch(tombprof);
+  orphanDelete.delete(doc(tombprof, 'profiles', 'tombprof-reader'));
+  orphanDelete.delete(doc(tombprof, 'profileOwners', 'tombprof'));
+  await assertFails(orphanDelete.commit());
+  await assertFails(deleteDoc(doc(tombprof, 'profiles', 'tombprof-reader')));
+  const tombctl = verified('tombctl');
+  const controlDelete = writeBatch(tombctl);
+  controlDelete.delete(doc(tombctl, 'profiles', 'tombctl-reader'));
+  controlDelete.delete(doc(tombctl, 'profileOwners', 'tombctl'));
+  await assertSucceeds(controlDelete.commit());
 });
 
 test('one profile per account: a second needs the first gone in the same batch', async () => {

@@ -1,9 +1,12 @@
 // Physical purge of ONE tombstoned account (SEC-006). Account deletion is
 // a soft delete: deleteUserDocument stamps deletedAt on users/{uid} and
-// on the account's profiles and removes nothing. This script is the only
-// path that removes the data, and it is an operator decision per account,
-// never scheduled: one uid per run, dry-run by default, and it refuses a
-// document that is not tombstoned.
+// on the account's profiles and removes nothing but the account's
+// discovery markers. This script is the only path that removes the data,
+// and it is an operator decision per account, never scheduled: one uid
+// per run, dry-run by default, and it refuses a document that is not
+// tombstoned and an account that still exists in Auth (a tombstone is
+// only ever written by the deletion trigger; one on a live account is
+// drift, and purging it would destroy a working account's data).
 //
 // What goes, in this order: every profile of the uid together with its
 // discovery marker (only while the marker still names this uid — a freed
@@ -19,6 +22,7 @@
 //   node migrate-purge-deleted-accounts.ts <uid> --apply          # emulator apply
 //   node migrate-purge-deleted-accounts.ts <uid> --prod           # prod dry-run
 //   node migrate-purge-deleted-accounts.ts <uid> --prod --apply   # prod apply (typed confirm)
+import { getAuth } from 'firebase-admin/auth';
 import type { DocumentReference } from 'firebase-admin/firestore';
 import { parseFlags, connect, batcher } from './migrate-lib.ts';
 
@@ -28,6 +32,17 @@ const [uid] = flags.rest;
 const { db } = await connect({ ...flags, confirmWrite: flags.apply });
 const writes = batcher(db, { apply: flags.apply });
 const tag = flags.apply ? 'DELETE' : 'DRY';
+
+// Auth first: the account must be gone there. getUser throws
+// auth/user-not-found for a deleted (or never-created) uid; any other
+// outcome, including a network error, stops the run.
+try {
+  await getAuth().getUser(uid);
+  throw new Error(`${uid} still exists in Auth; refusing to purge a live account`);
+} catch (error) {
+  if (!(error instanceof Error && 'code' in error && error.code === 'auth/user-not-found')) throw error;
+}
+console.log(`${uid} is not in Auth`);
 
 const userRef = db.collection('users').doc(uid);
 const user = await userRef.get();

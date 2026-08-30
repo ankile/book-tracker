@@ -23,6 +23,12 @@ const { getFirestore, Timestamp, FieldValue } = functionsRequire('firebase-admin
 const { initializeApp } = functionsRequire('firebase-admin/app') as {
   initializeApp: (options: { projectId: string }, name: string) => unknown;
 };
+const { getAuth } = functionsRequire('firebase-admin/auth') as {
+  getAuth: (app?: unknown) => {
+    createUser: (user: { uid: string; email: string }) => Promise<unknown>;
+    deleteUser: (uid: string) => Promise<void>;
+  };
+};
 const { logger } = functionsRequire('firebase-functions') as {
   logger: { warn: (...args: unknown[]) => void };
 };
@@ -172,6 +178,46 @@ test('deleting an account tombstones its document and profile and removes nothin
   assert.deepEqual(skipped, []);
 });
 
+// The trigger pages profiles by document id, 100 at a time, behind a
+// cursor — a limit-only page would never advance, since the tombstone does
+// not change the query. The unit test pins the query shape against a
+// mock; this runs the real cursor against the emulator, so a paging bug
+// that a mock cannot see (an infinite loop, a skipped page) shows here.
+test('a 101-profile account is tombstoned page by page and only its own markers go', async () => {
+  const uid = `many-${run}`;
+  const squatter = `squat-${run}`;
+  const usernames = Array.from({ length: 101 }, (_, i) => `many-${run}-${String(i).padStart(3, '0')}`);
+  const batch = db.batch();
+  batch.set(db.doc(`users/${uid}`), { uid, email: `${uid}@example.test` });
+  for (const username of usernames) {
+    batch.set(db.doc(`profiles/${username}`), profileFor(uid));
+    batch.set(db.doc(`profileDiscovery/${username}`), { uid, createdAt: Timestamp.now() });
+  }
+  // A marker that names another account under one of this account's
+  // profile names: drift the rules make unlikely, but the marker rule's
+  // promise is that a marker is only ever removed by the uid it names.
+  const reclaimed = `many-${run}-rc`;
+  batch.set(db.doc(`profiles/${reclaimed}`), profileFor(uid));
+  batch.set(db.doc(`profileDiscovery/${reclaimed}`), { uid: squatter, createdAt: Timestamp.now() });
+  await batch.commit();
+
+  await deployed.deleteUserDocument.run({ uid });
+
+  const profiles = await db.collection('profiles').where('uid', '==', uid).get();
+  assert.equal(profiles.size, 102);
+  for (const profile of profiles.docs) {
+    assert.ok(profile.get('deletedAt') instanceof Timestamp, `${profile.id} must be tombstoned`);
+  }
+  for (const username of usernames) {
+    assert.equal((await db.doc(`profileDiscovery/${username}`).get()).exists, false, `${username} marker must go`);
+  }
+  assert.equal((await db.doc(`profileDiscovery/${reclaimed}`).get()).get('uid'), squatter);
+  // The namespace is shared across the emulator session: a marker that
+  // names a uid with no matching profile would be a sitemap skip for
+  // every later test, so it goes here.
+  await db.doc(`profileDiscovery/${reclaimed}`).delete();
+});
+
 // The purge script is the only path that removes an account's data. It
 // runs against its own project namespace (migrate-lib pins the real
 // project id; the emulator keys data by project), one uid per run, and
@@ -184,16 +230,37 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   await seedAccount(target, gone, gone);
   await seedAccount(target, kept, kept);
   const keptBefore = await dumpAccount(target, kept, kept);
+  const auth = getAuth(purgeApp);
+  await auth.createUser({ uid: gone, email: `${gone}@example.test` });
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const script = fileURLToPath(new URL('../migrate-purge-deleted-accounts.ts', import.meta.url));
   const purge = (uid: string, ...flags: string[]) => spawnSync('node', [script, uid, ...flags], {
-    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    cwd: root,
     encoding: 'utf8',
     env: { ...process.env, FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST },
   });
+  const audit = () => {
+    const result = spawnSync('node', [fileURLToPath(new URL('../db-audit.ts', import.meta.url))], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
 
-  // Live account: refused, even with --apply, and it changed nothing.
+  // Live account, still in Auth: refused, even with --apply, before it
+  // looks at Firestore at all, and it changed nothing.
   const goneBefore = await dumpAccount(target, gone, gone);
   assert.ok(goneBefore.size > 0);
+  const inAuth = purge(gone, '--apply');
+  assert.notEqual(inAuth.status, 0);
+  assert.match(inAuth.stderr, /still exists in Auth/);
+  assert.deepEqual(await dumpAccount(target, gone, gone), goneBefore);
+
+  // Gone from Auth but not tombstoned (the trigger has not run, or
+  // never will — deleteUsers() in bulk does not fire it): refused too.
+  await auth.deleteUser(gone);
   const refused = purge(gone, '--apply');
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /not tombstoned/);
@@ -203,9 +270,26 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   await target.doc(`profiles/${gone}`).set({ deletedAt: FieldValue.serverTimestamp() }, { merge: true });
   const tombstoned = await dumpAccount(target, gone, gone);
 
+  // A tombstone on an account that exists in Auth is drift (only the
+  // deletion trigger writes one), and purging it would destroy a working
+  // account: refused, before anything is read.
+  await auth.createUser({ uid: gone, email: `${gone}@example.test` });
+  const drift = purge(gone, '--apply');
+  assert.notEqual(drift.status, 0);
+  assert.match(drift.stderr, /still exists in Auth/);
+  assert.deepEqual(await dumpAccount(target, gone, gone), tombstoned);
+  await auth.deleteUser(gone);
+
+  // No trigger ran in this namespace, so the marker is still there on a
+  // tombstoned profile — the half-done state the audit must report (the
+  // tombstone leaves `public` true, so no older check catches it).
+  assert.match(audit(), new RegExp(`^profile-discovery\\.profile-tombstoned profileDiscovery/${gone}$`, 'm'));
+  assert.match(audit(), /^deleted-accounts: [1-9]/m);
+
   const dry = purge(gone);
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /TARGET: emulator/);
+  assert.match(dry.stdout, new RegExp(`^${gone} is not in Auth$`, 'm'));
   assert.match(dry.stdout, new RegExp(`DRY profileDiscovery/${gone}`));
   assert.match(dry.stdout, new RegExp(`DRY profiles/${gone}`));
   assert.match(dry.stdout, new RegExp(`DRY profileOwners/${gone}`));
@@ -227,4 +311,19 @@ test('the purge script refuses a live account, dry-runs, and removes exactly one
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /is absent/);
   assert.match(again.stdout, /0 public documents and a 0-document tree deleted/);
+  assert.doesNotMatch(audit(), new RegExp(`profileDiscovery/${gone}`));
+
+  // A purge interrupted after the root document went (root-last makes
+  // that the only possible partial state): the re-run finds the orphaned
+  // subcollections under the missing root, removes them, and reports it.
+  await target.doc(`users/${gone}/books/orphan`).set({ title: 'Orphan' });
+  await target.doc(`users/${gone}/books/orphan/updates/u1`).set({ pagesRead: 1 });
+  const cleaned = purge(gone, '--apply');
+  assert.equal(cleaned.status, 0, cleaned.stderr);
+  assert.match(cleaned.stdout, /is absent/);
+  assert.match(cleaned.stdout, /tree: 2 documents/);
+  assert.match(cleaned.stdout, /0 public documents and a 2-document tree deleted/);
+  assert.equal((await dumpAccount(target, gone, gone)).size, 0);
+  assert.deepEqual(await target.collection('users').doc(gone).listCollections(), []);
+  assert.deepEqual(await dumpAccount(target, kept, kept), keptBefore);
 });

@@ -612,9 +612,11 @@ operator action, in this order:
    `deleteUserDocument` would never run and the public profiles would stay
    live. Deletion is a **soft delete** (SEC-006): `deleteUserDocument`
    stamps `deletedAt` on `users/{uid}` and on the account's profiles and
-   removes nothing — books, sessions, authors, queue rows, quotas, the
-   ownership record and the discovery marker stay as they were, and the
-   username stays reserved. Everything that serves strangers or acts for
+   removes nothing but the account's search-index markers — books,
+   sessions, authors, queue rows, quotas and the ownership record stay as
+   they were, the username stays reserved, and a `profileDiscovery` marker
+   (an opt-in pointer, not content) is deleted only while it still names
+   the deleted uid. Everything that serves strangers or acts for
    the account treats the tombstone as absence: the profile page, its JSON
    twin and the sitemap answer as for a missing name; the Toggl callables
    and queue worker refuse the account (its stored token is retained but

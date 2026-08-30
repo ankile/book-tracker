@@ -69,6 +69,12 @@ for (const discovery of profileDiscoveries.docs) {
     if (profile.public !== true) {
       found('profile-discovery.profile-private', path);
     }
+    // Deletion prunes the account's markers (SEC-006 follow-up); one left
+    // on a tombstoned profile is the trigger's job half done, and the
+    // tombstone leaves `public` true, so the check above cannot see it.
+    if (profile.deletedAt !== undefined) {
+      found('profile-discovery.profile-tombstoned', path);
+    }
   }
 }
 
