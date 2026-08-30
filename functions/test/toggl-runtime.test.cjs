@@ -1524,6 +1524,36 @@ test("cleartoken removes the stored Toggl credential and nothing else", async (t
   assert.equal(secret.writes.length, 1);
 });
 
+// The deletion race (SEC-004 review F4): the tombstone check at the top
+// of savetoken and the credential write are two outbound Toggl calls
+// apart. A deletion that lands in that window must not strand a live
+// credential: savetoken re-reads the user document after writing and
+// undoes itself.
+test("savetoken written during account deletion removes its own credential", async (t) => {
+  let reads = 0;
+  const secret = installTogglSecret(t, undefined);
+  const userRef = {
+    get: async () => {
+      reads += 1;
+      // Live at the pre-flight check, tombstoned at the post-write re-check.
+      return {exists: true, data: () => (reads >= 2 ? {deletedAt: Timestamp.fromMillis(1)} : {})};
+    },
+    update: async () => assert.fail("no status mirror may be written for a deleted account"),
+  };
+  installTokenQuota(t, userRef);
+  t.mock.method(global, "fetch", async (url) => {
+    if (String(url).endsWith("/me")) return new Response("{}", {status: 200});
+    return new Response(JSON.stringify([{id: 7, workspace_id: 6, name: "Reading"}]), {status: 200});
+  });
+  await assert.rejects(
+    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
+    (error) => error.code === "failed-precondition" && /account has been deleted/.test(error.message),
+  );
+  // The credential was written and then removed by the compensation.
+  assert.deepEqual(secret.writes.map((w) => w.type), ["set", "delete"]);
+  assert.equal(secret.stored, undefined);
+});
+
 // A deleted account is tombstoned, never removed (SEC-006). The deletion
 // trigger deletes its credential from the secrets store, but the refusal
 // below must not depend on that: for the hour the ID token outlives the

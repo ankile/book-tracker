@@ -96,6 +96,21 @@ test('the token migration moves a legacy credential server-side, idempotently, w
   assert.doesNotMatch(postAudit, new RegExp(`toggl-secret\\S* secrets:togglTokens/${legacy}`));
   assert.doesNotMatch(postAudit, new RegExp(`user\\.toggl-status\\S* users/${legacy}`));
 
+  // An interrupted --rotate apply (secret stored, mirror not yet written)
+  // leaves a legacy user document whose token may already be dead at
+  // Toggl. The re-run must keep the stored secret untouched — never
+  // rotate or overwrite it — and only finish the mirror (review F4).
+  const interrupted = `interrupted-${run}`;
+  await db.doc(`users/${interrupted}`).set({ uid: interrupted, email: `${interrupted}@example.test`, toggl: { apiToken: 'dead-old-token', workspaceId: 5, projectId: 6 } });
+  await secrets.doc(`togglTokens/${interrupted}`).set({ apiToken: 'fresh-rotated-token', workspaceId: 5, projectId: 6, updatedAt: Timestamp.now() });
+  const resumed = migrate('--apply');
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, new RegExp(`^  secrets:togglTokens/${interrupted} already stored — keeping it, writing the mirror only$`, 'm'));
+  assert.equal((await secrets.doc(`togglTokens/${interrupted}`).get()).get('apiToken'), 'fresh-rotated-token');
+  const resumedMirror = (await db.doc(`users/${interrupted}`).get()).get('toggl') as Record<string, unknown>;
+  assert.deepEqual(Object.keys(resumedMirror).sort(), ['connectedAt', 'projectId', 'workspaceId']);
+  assert.ok(!resumed.stdout.includes('dead-old-token') && !resumed.stdout.includes('fresh-rotated-token'));
+
   // Idempotent: a re-run finds only migrated accounts and writes nothing.
   const again = migrate('--apply');
   assert.equal(again.status, 0, again.stderr);

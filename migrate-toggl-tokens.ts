@@ -76,9 +76,19 @@ for (const user of users.docs) {
   const tokenRef = secretsDb.collection('togglTokens').doc(user.id);
   console.log(`${tag} ${user.ref.path}.toggl (token ${apiToken.length} chars, workspace ${String(workspaceId)}, project ${String(projectId)}) -> secrets:${tokenRef.path}`);
   if (flags.apply) {
-    const stored = rotateFlag ? await rotate(apiToken) : apiToken;
-    // Credential first, mirror second — same order as toggl-savetoken.
-    await tokenRef.set({ apiToken: stored, workspaceId, projectId, updatedAt: FieldValue.serverTimestamp() });
+    // A legacy user document WITH an already-stored secret is a re-run of
+    // an interrupted apply: the stored secret may be the freshly rotated
+    // one and the legacy token in the user document may already be dead
+    // at Toggl. Never rotate the possibly-dead legacy token again and
+    // never overwrite the stored secret (review F4) — just finish the
+    // interrupted step, the mirror.
+    if ((await tokenRef.get()).exists) {
+      console.log(`  secrets:${tokenRef.path} already stored — keeping it, writing the mirror only`);
+    } else {
+      const stored = rotateFlag ? await rotate(apiToken) : apiToken;
+      // Credential first, mirror second — same order as toggl-savetoken.
+      await tokenRef.set({ apiToken: stored, workspaceId, projectId, updatedAt: FieldValue.serverTimestamp() });
+    }
     await user.ref.update({ toggl: { workspaceId, projectId, connectedAt: FieldValue.serverTimestamp() } });
   }
   migrated += 1;

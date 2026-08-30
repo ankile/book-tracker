@@ -103,13 +103,28 @@ if (import.meta.env.DEV && import.meta.env.VITE_EMULATOR) {
 // its mirror until it closes, which nothing here can change, so the
 // refusal is logged and the reload proceeds.
 export async function clearLocalData(): Promise<void> {
-  await terminate(db);
+  // Account-scoped sweep-dedup state (togglStuckReported:<uid>) lives in
+  // localStorage and must not survive a sign-out either (review F5).
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith('togglStuckReported:')) localStorage.removeItem(key);
+  }
   try {
+    await terminate(db);
     await clearIndexedDbPersistence(db);
   } catch (error) {
-    console.warn('IndexedDB cache not cleared (another tab holds it)', error);
+    // clearIndexedDbPersistence refuses while another tab holds the
+    // multi-tab persistence lease. That tab keeps the mirror until every
+    // tab is closed — a silent console.warn hid exactly the shared-device
+    // residual SEC-004 exists to close (review F1), so tell the user.
+    console.warn('local cache not cleared', error);
+    alert(
+      'Signed out, but the locally cached data could not be cleared — ' +
+      'another tab of this app is probably open. Close every tab of this ' +
+      'site to remove the cached data from this device.',
+    );
+  } finally {
+    location.replace('/');
   }
-  location.replace('/');
 }
 
 // The stalled-Toggl-sync sweep runs once per signed-in account per session,

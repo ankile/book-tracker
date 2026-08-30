@@ -185,7 +185,16 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   const credentialDeletes = [];
   t.mock.method(secretsDb, "doc", (path) => {
     assert.equal(path, "togglTokens/owner");
-    return {delete: async () => credentialDeletes.push(path)};
+    return {delete: async () => {
+      // Order pin (SEC-004 review F4): the tombstone must already be on
+      // the user document when the credential is deleted, so a
+      // concurrent savetoken's post-write re-check always sees it.
+      assert.ok(
+        userValue.deletedAt !== undefined,
+        "the tombstone must be set before the credential is deleted",
+      );
+      credentialDeletes.push(path);
+    }};
   });
   const queries = [];
   const pages = [];

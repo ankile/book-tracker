@@ -166,8 +166,14 @@ exports.deleteUserDocument = functions
   })
   .auth.user()
   .onDelete(async (user) => {
-    await deleteTogglCredential(user.uid);
+    // Tombstone FIRST, credential second: savetoken re-checks the
+    // tombstone after writing a credential and undoes itself, so any
+    // credential that lands after this delete step is written by a call
+    // that will see the already-set tombstone and remove it (review F4 —
+    // the reverse order left a race where a still-valid ID token could
+    // strand a live credential on a deleted account).
     await tombstoneUser(user.uid);
+    await deleteTogglCredential(user.uid);
     await tombstoneProfiles(user.uid);
     return null;
   });

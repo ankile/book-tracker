@@ -376,6 +376,20 @@ exports.savetoken = functions
       projectId: project.id,
       updatedAt: FieldValue.serverTimestamp(),
     });
+    // The tombstone check at the top and this write are seconds apart
+    // (two outbound Toggl calls in between), and a cross-database
+    // transaction does not exist: re-check after writing and undo, so an
+    // account deleted mid-call cannot keep a live credential. The
+    // deletion trigger sets the tombstone before its own credential
+    // delete, so one of the two paths always removes this write.
+    const recheck = await userRef.get();
+    if (recheck.data()?.deletedAt !== undefined) {
+      await togglTokenRef(uid).delete();
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "This account has been deleted.",
+      );
+    }
     // update, never a merge-set (see the existence check above).
     await userRef.update({
       toggl: {

@@ -60,11 +60,16 @@ export async function signUp(email: string, password: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  await firebaseSignOut(auth);
   // A shared device must not keep this account's Firestore mirror —
   // books, sessions, the user document — readable in IndexedDB after
   // sign-out (SEC-004; sign-out used to leave the whole cache behind).
-  // Dynamic import: db.ts imports this module.
-  const { clearLocalData } = await import('./db.ts');
-  await clearLocalData();
+  // The clear runs even if the Auth sign-out throws, and always ends in
+  // a reload, so a failure can never wedge a signed-out app with the
+  // cache intact (review F2). Dynamic import: db.ts imports this module.
+  try {
+    await firebaseSignOut(auth);
+  } finally {
+    const { clearLocalData } = await import('./db.ts');
+    await clearLocalData();
+  }
 }
