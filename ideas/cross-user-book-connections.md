@@ -1,6 +1,6 @@
 # Cross-user book connections
 
-Status: implemented and under final validation on `codex/cross-user-book-connections`; not deployed. The design and implementation were reviewed against the repository by Codex, Claude Code, Claude Fable, and independent audit agents on 2026-08-29.
+Status: implemented and fully validated on `codex/cross-user-book-connections`; not deployed. The design and implementation were reviewed against the repository by Codex, Claude Code, Claude Fable, and independent security/privacy and integrity/migration audit agents on 2026-08-29. The complete unit, Firestore/Auth/Functions emulator, browser, build, artifact, bundle, and dependency-audit validation pipeline passes.
 
 ## Goal
 

@@ -52,9 +52,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 303 -> 305 KiB for profile search opt-in: the owner-only
   // marker listener/decoder, two atomic write paths, and the Me-page switch
   // add 0.3 KiB compressed, with the remainder retained as explicit headroom.
+  // Total raised 305 -> 324 KiB for shared works: catalog suggestions and
+  // runtime decoders, the work/readers route, sharing controls, and the
+  // admin curation route add 15.1 KiB compressed, with explicit headroom.
   assert.ok(
-    totalBytes <= 305 * 1024,
-    `Expected at most 305 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 324 * 1024,
+    `Expected at most 324 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,
