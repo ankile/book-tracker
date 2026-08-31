@@ -1,10 +1,12 @@
 import * as functions from "firebase-functions/v1";
+import {logger} from "firebase-functions";
 import {
   DocumentReference,
   DocumentSnapshot,
   FieldPath,
   Firestore,
   Query,
+  QueryDocumentSnapshot,
   QuerySnapshot,
   Timestamp,
 } from "firebase-admin/firestore";
@@ -101,6 +103,10 @@ interface PlannedChange {
 interface Plan {
   expected: AdminCatalogExpected;
   changes: PlannedChange[];
+  // Set by mergeAuthors: after the atomic redirect commits, the apply pass
+  // canonicalizes every work and live-account book that still names an
+  // absorbed author (see canonicalizeMergedAuthorReferrers).
+  canonicalize: {absorbed: string[]; targetId: string} | null;
 }
 
 type Readable = DocumentReference | Query;
@@ -747,6 +753,7 @@ async function planOperation(
   const catalog: CatalogVersion[] = [];
   let books: AdminCatalogExpected["books"] = [];
   const changes: PlannedChange[] = [];
+  let canonicalize: Plan["canonicalize"] = null;
 
   if (operation.type === "upsertAuthor") {
     const ref = db.collection("catalogAuthors").doc(operation.authorId);
@@ -847,36 +854,14 @@ async function planOperation(
       wireAuthor(nextTarget),
       {type: "set", data: {...nextTarget}},
     ));
-    const affectedWorks = new Map<string, DocumentSnapshot>();
-    for (const authorId of absorbed) {
-      const rows = await many(reader, db.collection("works")
-        .where("authorIds", "array-contains", authorId)
-        .limit(MAX_WORKS + 1));
-      if (rows.size > MAX_WORKS) operationTooLarge();
-      for (const snapshot of rows.docs) affectedWorks.set(snapshot.id, snapshot);
-    }
-    for (const snapshot of affectedWorks.values()) {
-      const old = workFrom(snapshot);
-      catalog.push(versionOf("work", snapshot));
-      const next = {
-        ...old,
-        authorIds: [...new Set(old.authorIds.map((authorId) =>
-          absorbed.includes(authorId) ? target.snapshot.id : authorId,
-        ))],
-        updatedAt: now,
-      };
-      changes.push(change(
-        "work", snapshot.ref, "update", wireWork(old), wireWork(next),
-        {type: "set", data: next},
-      ));
-    }
-    // Personal books that reference an absorbed author are deliberately
-    // left alone: the alias stays behind as a one-hop merged record, and
-    // the client, the admin scan, and db-audit all resolve that redirect
-    // (merging flattens chains, so one hop always suffices). Rewriting
-    // them would make a merge scale with an author's readership — and
-    // fail for a popular author — and would mutate books inside
-    // tombstoned accounts, which every other path leaves frozen.
+    // The transaction touches only the author documents, so a merge never
+    // refuses on the size of the author's catalog or readership; the works
+    // and live-account books naming an absorbed id are canonicalized right
+    // after it commits, in pages (canonicalizeMergedAuthorReferrers).
+    // Until that sweep lands — seconds — and forever for books in
+    // tombstoned accounts (frozen), the alias resolves in one hop
+    // everywhere, so reading data is never wrong in the gap.
+    canonicalize = {absorbed, targetId: target.snapshot.id};
   } else if (operation.type === "createWork") {
     const ref = db.collection("works").doc(operation.workId);
     const snapshot = await one(reader, ref);
@@ -1191,6 +1176,7 @@ async function planOperation(
   return {
     expected: sortExpected({catalog, books}),
     changes: deduplicated,
+    canonicalize,
   };
 }
 
@@ -1222,6 +1208,83 @@ function expectedEqual(
   return JSON.stringify(sortExpected(left)) === JSON.stringify(sortExpected(right));
 }
 
+// A merge pays its whole cost up front: after the atomic author redirect
+// commits, every work and live-account book naming an absorbed id is
+// rewritten to the canonical id here, in id-ordered pages of batched
+// writes, so no per-transaction ceiling applies. This is a repair pass,
+// not a correctness requirement — every reader resolves the one-hop alias,
+// which also covers the seconds before this lands, a crash between pages
+// (the scan reports leftover aliases), and books in tombstoned accounts,
+// which stay frozen on the alias. Book updatedAt is never touched: it
+// drives the reading-list order.
+const CANONICALIZE_PAGE = 200;
+
+async function canonicalizeMergedAuthorReferrers(
+  db: Firestore,
+  {absorbed, targetId}: NonNullable<Plan["canonicalize"]>,
+): Promise<void> {
+  const rewrite = (value: unknown, path: string): string[] => {
+    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
+      throw new Error(`${path}.authorIds must be a string array.`);
+    }
+    return [...new Set(value.map((id) => (absorbed.includes(id) ? targetId : id)))];
+  };
+  let works = 0;
+  let liveBooks = 0;
+  let frozenBooks = 0;
+  for (const authorId of absorbed) {
+    for (const scope of ["works", "books"] as const) {
+      let cursor: QueryDocumentSnapshot | null = null;
+      for (;;) {
+        let query = (scope === "works" ? db.collection("works") : db.collectionGroup("books"))
+          .where("authorIds", "array-contains", authorId)
+          .orderBy(FieldPath.documentId())
+          .limit(CANONICALIZE_PAGE);
+        if (cursor !== null) query = query.startAfter(cursor);
+        const page = await query.get();
+        if (page.docs.length === 0) break;
+        let live = new Set<string>();
+        if (scope === "books") {
+          const owners = [...new Set(page.docs.map((snapshot) => {
+            const path = snapshot.ref.path.split("/");
+            if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
+              throw new Error(`Unexpected personal book path ${snapshot.ref.path}.`);
+            }
+            return path[1];
+          }))];
+          const users = await db.getAll(...owners.map((uid) => db.collection("users").doc(uid)));
+          live = new Set(users.filter((snapshot) =>
+            snapshot.exists && snapshot.get("deletedAt") === undefined,
+          ).map(({id}) => id));
+        }
+        const batch = db.batch();
+        for (const snapshot of page.docs) {
+          if (scope === "works") {
+            batch.update(snapshot.ref, {
+              authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
+              updatedAt: Timestamp.now(),
+            });
+            works += 1;
+          } else if (live.has(snapshot.ref.path.split("/")[1])) {
+            batch.update(snapshot.ref, {
+              authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
+            });
+            liveBooks += 1;
+          } else {
+            frozenBooks += 1;
+          }
+        }
+        await batch.commit();
+        cursor = page.docs[page.docs.length - 1];
+        if (page.docs.length < CANONICALIZE_PAGE) break;
+      }
+    }
+  }
+  logger.info("admin.catalog.merge_canonicalized", {
+    targetId, absorbed, works, liveBooks, frozenBooks,
+  });
+}
+
 export async function applyAdminCatalogOperation(
   db: Firestore,
   adminUid: string,
@@ -1229,7 +1292,8 @@ export async function applyAdminCatalogOperation(
 ) {
   const hash = operationHash(request.operation);
   const auditRef = db.collection("adminAudit").doc(request.operationId);
-  return db.runTransaction(async (transaction) => {
+  let canonicalize: Plan["canonicalize"] = null;
+  const result = await db.runTransaction(async (transaction) => {
     const existingAudit = await transaction.get(auditRef);
     if (existingAudit.exists) {
       if (existingAudit.get("operationHash") !== hash) {
@@ -1242,6 +1306,7 @@ export async function applyAdminCatalogOperation(
     };
     const now = Timestamp.now();
     const plan = await planOperation(reader, db, request.operation, now);
+    canonicalize = plan.canonicalize;
     if (!expectedEqual(plan.expected, request.expected)) {
       throw new functions.https.HttpsError(
         "aborted",
@@ -1261,7 +1326,7 @@ export async function applyAdminCatalogOperation(
         }
       }
     }
-    const result = {
+    const applied = {
       operationId: request.operationId,
       applied: true as const,
       touchedDocuments: plan.changes.length + 1,
@@ -1274,16 +1339,20 @@ export async function applyAdminCatalogOperation(
       uid: adminUid,
       at: now,
       expiresAt: Timestamp.fromMillis(now.toMillis() + AUDIT_RETENTION_MS),
-      touchedDocuments: result.touchedDocuments,
+      touchedDocuments: applied.touchedDocuments,
       beforeAfter: wireChanges(plan.changes),
-      result,
+      result: applied,
     };
     if (Buffer.byteLength(JSON.stringify(audit), "utf8") > MAX_AUDIT_BYTES) {
       operationTooLarge();
     }
     transaction.create(auditRef, audit);
-    return result;
+    return applied;
   });
+  // Only a fresh apply sweeps: an idempotent replay returned the audited
+  // result above without re-planning, and the first pass already ran it.
+  if (canonicalize !== null) await canonicalizeMergedAuthorReferrers(db, canonicalize);
+  return result;
 }
 
 function tokenAgreement(left: string, right: string): number {
@@ -1681,6 +1750,9 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     if (work.status !== "merged" && work.mergedFrom.length > 29) {
       warnings.push("too many aliases");
     }
+    // Merges canonicalize work references right after the redirect commits,
+    // so a surviving alias here means that sweep was interrupted; it still
+    // resolves, but the operator should know.
     for (const authorId of work.authorIds) {
       const resolvedId = resolvedCatalogAuthorId(authorId);
       if (resolvedId === null) warnings.push(`broken author reference ${authorId}`);

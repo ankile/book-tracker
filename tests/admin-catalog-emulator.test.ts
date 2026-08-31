@@ -245,10 +245,10 @@ test('all admin catalog operations use real callable transactions and preserve p
     sourceAuthorId: catalogAuthorAliasId,
     targetAuthorId: catalogAuthorId,
   };
-  // A concurrent edit to any catalog document the plan read (here the work
-  // carrying the absorbed author) must abort the apply as stale.
+  // A concurrent edit to a catalog document the plan read (the target
+  // author) must abort the apply as stale.
   const staleAuthorPreview = await preview(mergeAuthorOperation);
-  await db.doc(`works/${sourceWorkId}`).update({subjects: ['touched between preview and apply']});
+  await db.doc(`catalogAuthors/${catalogAuthorId}`).update({updatedAt: Timestamp.now()});
   await assert.rejects(
     callable('admin-catalogapply', {
       operationId: staleAuthorPreview.operationId,
@@ -260,14 +260,27 @@ test('all admin catalog operations use real callable transactions and preserve p
       return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
     },
   );
+  // A book in a tombstoned account stays frozen on the alias through the
+  // post-merge sweep; everything live is canonicalized.
+  const tombstonedUid = `tombstoned-${suffix}`;
+  const tombstonedBookRef = db.doc(`users/${tombstonedUid}/books/frozen`);
+  await db.doc(`users/${tombstonedUid}`).set({uid: tombstonedUid, deletedAt: Timestamp.now()});
+  await tombstonedBookRef.set({
+    owner: db.doc(`users/${tombstonedUid}`),
+    title: 'Frozen book',
+    authorIds: [catalogAuthorAliasId],
+    updatedAt: personalUpdatedAt,
+  });
   await previewAndApply(mergeAuthorOperation);
-  // The personal book is deliberately untouched: its alias id resolves
-  // through the merged record, so the merge never fans out into (possibly
-  // tombstoned) user libraries. Catalog works do get rewritten.
-  assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorAliasId]);
+  // The transaction is atomic on the author documents; the sweep that runs
+  // inside the same apply call canonicalizes the work and the live book
+  // (without touching the book's order-bearing updatedAt) and leaves the
+  // tombstoned account's book on the one-hop alias.
+  assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorId]);
   assert.equal((await personalRef.get()).get('updatedAt').toMillis(), personalUpdatedAt.toMillis());
   assert.deepEqual((await db.doc(`works/${sourceWorkId}`).get()).get('authorIds'), [catalogAuthorId]);
   assert.equal((await db.doc(`catalogAuthors/${catalogAuthorAliasId}`).get()).get('mergedInto'), catalogAuthorId);
+  assert.deepEqual((await tombstonedBookRef.get()).get('authorIds'), [catalogAuthorAliasId]);
 
   const punctuationTargetId = `punctuation-target-${suffix}`;
   const punctuationSourceId = `punctuation-source-${suffix}`;

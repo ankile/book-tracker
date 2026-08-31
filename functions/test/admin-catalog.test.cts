@@ -234,6 +234,20 @@ function installCatalogStore(t: TestContext): CatalogStore {
   t.mock.method(db, "collectionGroup", (name: string) => makeQuery(name, true));
   t.mock.method(db, "doc", (path: string) => ref(path));
   t.mock.method(db, "getAll", async (...references: Reference[]) => references.map(snapshot));
+  t.mock.method(db, "batch", () => {
+    const writes: Array<() => void> = [];
+    return {
+      update: (reference: Reference, data: Row) => {
+        writes.push(() => {
+          assert.equal(rows.has(reference.path), true, reference.path);
+          write(reference, data, true);
+        });
+      },
+      commit: async () => {
+        for (const apply of writes) apply();
+      },
+    };
+  });
   t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
     get: async (value: Query | Reference) => "_query" in value ? querySnapshot(value) : snapshot(value),
     create: (reference: Reference, data: Row) => {
@@ -348,6 +362,52 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
   assert.ok(Array.isArray(beforeAfter));
   assert.equal(beforeAfter.some((row: unknown) => isRow(row) && row.kind === "work"), true);
   assert.doesNotMatch(JSON.stringify(audit), /session|currentPage|activeTimer|pagesRead/);
+});
+
+// The merge transaction is atomic on the author documents only, so an
+// author on more works than one transaction could touch still merges; the
+// paged sweep that follows canonicalizes every work and live-account book,
+// while a tombstoned account's book stays frozen on the resolvable alias.
+test("merging an author on 198 works canonicalizes them all after the redirect", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("catalogAuthors/alias-author"), {
+    canonicalName: "A. Author", alternateNames: [], nameKeys: ["a author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  for (let position = 0; position < 198; position += 1) {
+    store.write(
+      store.ref(`works/work-${position}`),
+      activeWork(`Work ${position}`, {authorIds: ["alias-author", "ada-author"]}),
+    );
+  }
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/shadow"), {authorIds: ["alias-author"], updatedAt: now});
+  store.write(store.ref("users/gone"), {uid: "gone", deletedAt: now});
+  store.write(store.ref("users/gone/books/frozen"), {authorIds: ["alias-author"], updatedAt: now});
+  const operation = {
+    type: "mergeAuthors",
+    sourceAuthorId: "alias-author",
+    targetAuthorId: "ada-author",
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.equal(preview.touchedDocuments, 3);
+  assert.deepEqual(preview.expected.catalog.map(({kind, exists}) => [kind, exists]),
+    [["author", true], ["author", true]]);
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId,
+    operation,
+    expected: preview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("catalogAuthors/alias-author")?.mergedInto, "ada-author");
+  for (let position = 0; position < 198; position += 1) {
+    assert.deepEqual(store.rows.get(`works/work-${position}`)?.authorIds, ["ada-author"]);
+  }
+  assert.deepEqual(store.rows.get("users/reader/books/shadow")?.authorIds, ["ada-author"]);
+  // updatedAt drives the reading-list order; the sweep must not touch it.
+  assert.equal(store.rows.get("users/reader/books/shadow")?.updatedAt, now);
+  assert.deepEqual(store.rows.get("users/gone/books/frozen")?.authorIds, ["alias-author"]);
 });
 
 test("catalog creation stops at the scan capacity while repair edits remain available", async (t) => {

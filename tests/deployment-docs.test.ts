@@ -139,12 +139,17 @@ test('catalog queries have the required collection-group and pagination indexes'
     assert.equal(override.indexes.some((entry) =>
       entry.order === 'ASCENDING' && entry.queryScope === 'COLLECTION_GROUP'), true);
   }
-  // mergeAuthors leaves personal books untouched (they resolve through the
-  // merged alias), so no collection-group index on books.authorIds exists;
-  // an override reappearing here means a book fan-out query came back.
-  assert.equal(parsed.fieldOverrides.some((entry) =>
-    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds'), false,
-  'unexpected books.authorIds field override');
+  // The post-merge canonicalization sweep finds every personal book naming
+  // an absorbed author through a collection-group array-contains query.
+  // Firestore's automatic single-field indexes are collection-scoped only,
+  // and the emulator does not enforce indexes, so without this override the
+  // first production merge fails after its redirect commits.
+  const authorIds = parsed.fieldOverrides.find((entry) =>
+    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds');
+  assert.ok(authorIds, 'missing books.authorIds field override');
+  assert.equal(authorIds.indexes.some((entry) =>
+    entry.arrayConfig === 'CONTAINS' && entry.queryScope === 'COLLECTION_GROUP'), true,
+  'missing collection-group CONTAINS index for books.authorIds');
 
   assert.equal(parsed.indexes.some((index) =>
     index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&
