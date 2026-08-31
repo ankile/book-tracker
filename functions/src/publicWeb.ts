@@ -28,10 +28,11 @@ const PROFILE_ROUTE = /^\/profiles\/([^/]+)$/;
 const PROFILE_JSON_ROUTE = /^\/profiles\/([^/]+)\.json$/;
 
 // Profiles are public by definition, so both hits and misses may sit on the
-// Hosting CDN, and firebase.json carries the same value for /profiles/**.
-// The CDN is a convenience, not the ceiling: the function has four
-// directly reachable origin hostnames and every distinct query string or
-// percent-encoding is a fresh CDN key. The response cache below is what
+// Cloudflare edge in front of book.ankile.com; cloudflare/worker.ts stamps
+// the same Cache-Control value on /profiles/**. The edge cache is a
+// convenience, not the ceiling: the function's run.app origin is directly
+// reachable and every distinct query string or percent-encoding is a fresh
+// cache key. The response cache below is what
 // bounds the origin's work (SEC-019, SEC-020): a repeat path costs nothing
 // for RESPONSE_CACHE_TTL_MS, and a flood of *distinct* paths — the key
 // space is attacker-chosen — is capped by the per-instance miss budget,
@@ -187,8 +188,8 @@ export interface EncodedResponse {
 // payload either way.
 // SEC-007: every publicweb response carries the browser-hardening headers,
 // including error and JSON shapes, and including callers that hit the
-// run.app origin directly where Firebase Hosting's header config does not
-// apply. The CSP here only pins framing; the full policy travels as a
+// run.app origin directly, where the Pages worker's header policy
+// (cloudflare/worker.ts) does not apply. The CSP here only pins framing; the full policy travels as a
 // <meta> tag inside the profile shell (built by sync-profile-shell.ts from
 // public/index.html, where SvelteKit injects it with the script hashes).
 const SECURITY_HEADERS: Record<string, string> = {

@@ -26,9 +26,12 @@ const config: Config = {
 		...(verificationVersion === undefined
 			? {}
 			: { version: { name: verificationVersion } }),
-		// adapter-static for Firebase Hosting
+		// adapter-static: the build in public/ is uploaded to Cloudflare Pages
+		// by cloudflare/assemble.ts (which adds the worker) and its index.html
+		// is synchronized into the profile renderer's shell.
 		adapter: adapter({
-			// Output directory for Firebase
+			// Output directory (tracked artifacts: index.html, service-worker.js,
+			// _app/version.json; the immutable chunks are gitignored)
 			pages: 'public',
 			assets: 'public',
 			fallback: 'index.html',

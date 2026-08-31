@@ -12,7 +12,8 @@ export interface PagesEnv {
   ASSETS: {fetch(request: Request): Promise<Response>};
 }
 
-// firebase.json `**` block, verbatim.
+// The header policy Firebase Hosting used to add for every path (its former
+// `**` block); firebase.json now only describes the retired redirect site.
 export const BASE_HEADERS: Readonly<Record<string, string>> & {'Cache-Control': string} = {
   'Cache-Control': 'no-cache',
   'Referrer-Policy': 'no-referrer',
