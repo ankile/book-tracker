@@ -270,7 +270,7 @@ book-tracker/
 │   └── routes/              SvelteKit pages
 ├── static/                  Static assets served from the site root (keep them small)
 ├── docs/screenshots/        README screenshots, not deployed
-├── cloudflare/              Pages worker (routing, renderer proxy, header policy) and its assembly script
+├── cloudflare/              Pages worker (routing, renderer proxy, edge cache, header policy) and its assembly script
 ├── hosting-retired/         Redirect-only content for the retired Firebase Hosting site
 ├── functions/
 │   ├── src/                 Backend services and event handlers
