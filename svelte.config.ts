@@ -26,9 +26,12 @@ const config: Config = {
 		...(verificationVersion === undefined
 			? {}
 			: { version: { name: verificationVersion } }),
-		// adapter-static for Firebase Hosting
+		// adapter-static: the build in public/ is uploaded to Cloudflare Pages
+		// by cloudflare/assemble.ts (which adds the worker) and its index.html
+		// is synchronized into the profile renderer's shell.
 		adapter: adapter({
-			// Output directory for Firebase
+			// Output directory (tracked artifacts: index.html, service-worker.js,
+			// _app/version.json; the immutable chunks are gitignored)
 			pages: 'public',
 			assets: 'public',
 			fallback: 'index.html',
@@ -53,7 +56,11 @@ const config: Config = {
 					'self',
 					'sha256-/x7W7R75k8Roq0WaVRQX9blP4OufE5xbAdzklGxsgpw=',
 					'https://www.google.com/recaptcha/',
-					'https://www.gstatic.com/recaptcha/'
+					'https://www.gstatic.com/recaptcha/',
+					// Cloudflare Web Analytics beacon, injected at the edge into HTML
+					// served through book.ankile.com (owner decision 2026-08-31);
+					// cookieless, reports to cloudflareinsights.com below.
+					'https://static.cloudflareinsights.com'
 				],
 				// 41 style="" attributes in components and the profile snapshot's
 				// <style> block; style injection is a cosmetic vector, scripts are
@@ -76,6 +83,7 @@ const config: Config = {
 					'https://api.nb.no',
 					'https://openlibrary.org',
 					'https://www.google.com/recaptcha/',
+					'https://cloudflareinsights.com',
 					...emulatorConnectSrc
 				],
 				'frame-src': [

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { user } from '$lib/firebase/auth.ts';
   import { Database } from '$lib/firebase/db.ts';
+  import { loadProfileProgressively } from '$lib/utils/profileRead.ts';
   import { addError } from '$lib/stores/errors.ts';
   import { formatTime } from '$lib/utils/format.ts';
   import { joinPersonName } from '$lib/utils/authors.ts';
@@ -15,10 +15,7 @@
   const username = $derived(page.params.username ?? '');
 
   // undefined → loading, null → no such profile, or one this viewer may
-  // not see (deliberately indistinguishable). The fetch waits for the auth
-  // session to finish restoring: whether a private profile is readable
-  // depends on who is asking, and firing before the token is back would
-  // deny the owner their own page.
+  // not see (deliberately indistinguishable).
   let profile = $state<ProfileView | null | undefined>(undefined);
   const profileTitle = $derived(
     profile
@@ -27,26 +24,27 @@
   );
   let profileLoadFailed = $state(false);
   $effect(() => {
-    if ($user === undefined) return;
     const requestedUsername = username;
     let current = true;
     profile = undefined;
     profileLoadFailed = false;
-    Database.getProfile(requestedUsername).then(
+    // Public projection first (no auth wait), owner read only as a fallback.
+    loadProfileProgressively(
+      () => Database.getPublicProfile(requestedUsername),
+      () => Database.getProfile(requestedUsername),
       (data) => {
         if (current) profile = data;
       },
-      (error: unknown) => {
-        if (!current) return;
-        console.error(error);
-        profileLoadFailed = true;
-        addError(`Couldn't load @${requestedUsername}.`);
-      },
-    );
+    ).catch((error: unknown) => {
+      if (!current) return;
+      console.error(error);
+      profileLoadFailed = true;
+      addError(`Couldn't load @${requestedUsername}.`);
+    });
     return () => (current = false);
   });
 
-  // The Hosting function fills this slot with indexable HTML. app.html hides
+  // The profile renderer fills this slot with indexable HTML. app.html hides
   // it immediately when JavaScript is available, so people see this route's
   // loading state instead of a second profile design. It remains the complete
   // no-JavaScript response and is removed after the client resolves the page.

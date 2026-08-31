@@ -155,3 +155,6 @@ serviceAccountKey.json
 *-backup-*.yaml
 .env*
 !.env.example
+
+# Cloudflare Pages upload directory (cloudflare/assemble.ts)
+.pages-dist/

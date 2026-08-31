@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ProfileView } from '../src/lib/interfaces/profile.ts';
-import { assertProfileViewFor, resolveProfileView } from '../src/lib/utils/profileRead.ts';
+import { assertProfileViewFor, loadProfileProgressively, resolveProfileView } from '../src/lib/utils/profileRead.ts';
 
 const view = (username: string, isPublic: boolean): ProfileView => ({
   username,
@@ -105,5 +105,49 @@ test('a failing public read propagates instead of reading as not-found', async (
   await assert.rejects(
     resolveProfileView(false, async () => null, async () => { throw new Error('offline'); }),
     /offline/,
+  );
+});
+
+
+test('progressive load shows the public projection without touching the owner read', async () => {
+  const pub = view('lars', true);
+  let fallbackCalls = 0;
+  const emitted: (ProfileView | null)[] = [];
+  await loadProfileProgressively(
+    async () => pub,
+    async () => { fallbackCalls += 1; return null; },
+    (v) => emitted.push(v),
+  );
+  assert.deepEqual(emitted, [pub]);
+  assert.equal(fallbackCalls, 0);
+});
+
+test('progressive load falls back to the owner read when the projection is absent', async () => {
+  const own = view('lars', false);
+  const emitted: (ProfileView | null)[] = [];
+  await loadProfileProgressively(
+    async () => null,
+    async () => own,
+    (v) => emitted.push(v),
+  );
+  assert.deepEqual(emitted, [own]);
+});
+
+test('progressive load falls back when the projection errors, and re-throws a persistent failure', async () => {
+  const emitted: (ProfileView | null)[] = [];
+  await loadProfileProgressively(
+    async () => { throw new Error('projection 503'); },
+    async () => view('lars', true),
+    (v) => emitted.push(v),
+  );
+  assert.deepEqual(emitted.map((v) => v?.username), ['lars']);
+
+  await assert.rejects(
+    loadProfileProgressively(
+      async () => { throw new Error('projection 503'); },
+      async () => { throw new Error('owner read failed'); },
+      () => assert.fail('must not emit on total failure'),
+    ),
+    /owner read failed/,
   );
 });

@@ -561,7 +561,11 @@ class Database {
   // for their own profile, public or private, and gives the owner a fresh
   // copy instead of a cached one. No listener — a shared link is a snapshot
   // view.
-  static getProfile(username: string): Promise<ProfileView | null> {
+  static async getProfile(username: string): Promise<ProfileView | null> {
+    // The owner-vs-public decision reads auth.currentUser, so wait for the
+    // session to finish restoring — but only here, not on the public fast
+    // path (getPublicProfile), so a public profile still loads without it.
+    await auth.authStateReady();
     const viewer = auth.currentUser;
     const own = viewer === null ? undefined : ownProfileUsernames.get(viewer.uid);
     const mayOwn = viewer !== null && (own === undefined || own.has(username));
@@ -570,6 +574,12 @@ class Database {
       () => Database.getOwnProfile(username),
       () => fetchPublicProfile(username),
     );
+  }
+
+  // The public projection alone (no auth). Returns null for a missing or
+  // private profile; the caller falls back to getProfile for the owner read.
+  static getPublicProfile(username: string): Promise<ProfileView | null> {
+    return fetchPublicProfile(username);
   }
 
   static async getOwnProfile(username: string): Promise<ProfileView | null> {
@@ -687,10 +697,18 @@ class Database {
     await batch.commit();
   }
 
-  static enableProfileDiscovery({ userId, username }: ProfileDiscoveryWrite): Promise<void> {
-    return setDoc(doc(db, 'profileDiscovery', username), {
-      uid: userId,
-      createdAt: serverTimestamp(),
+  static async enableProfileDiscovery({ userId, username }: ProfileDiscoveryWrite): Promise<void> {
+    // Idempotent by design. Rules forbid updating a marker (allow update:
+    // false), and a setDoc over an existing document is an update, not a
+    // create — so a blind create is a permanent permission-denied whenever
+    // the marker already exists but a stale local cache showed it absent.
+    // The transaction reads the server copy, bypassing that cache, and
+    // creates only when the marker is genuinely missing.
+    await runTransaction(db, async (tx) => {
+      const ref = doc(db, 'profileDiscovery', username);
+      const existing = await tx.get(ref);
+      if (existing.exists()) return;
+      tx.set(ref, { uid: userId, createdAt: serverTimestamp() });
     });
   }
 

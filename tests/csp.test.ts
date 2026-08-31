@@ -52,18 +52,33 @@ test('the policy pins the injection-relevant directives', () => {
   assert.match(policy, /frame-src https:\/\/www\.google\.com\/recaptcha\//);
 });
 
+test('the Cloudflare Web Analytics beacon is allowed and nothing else third-party runs', () => {
+  const policy = metaPolicy(indexHtml);
+  const directive = (name: string) =>
+    policy.split(';').map((d) => d.trim()).find((d) => d.startsWith(`${name} `)) ?? '';
+  const scriptSrc = directive('script-src');
+  const connectSrc = directive('connect-src');
+  assert.ok(scriptSrc.includes('https://static.cloudflareinsights.com'), 'beacon script origin');
+  assert.ok(connectSrc.includes('https://cloudflareinsights.com'), 'beacon report origin');
+  // The only script hosts besides self and the inline hashes: reCAPTCHA and the beacon.
+  const hosts = scriptSrc.split(/\s+/).slice(1).filter((s) => s.startsWith('https://'));
+  assert.deepEqual(hosts.sort(), [
+    'https://static.cloudflareinsights.com',
+    'https://www.google.com/recaptcha/',
+    'https://www.gstatic.com/recaptcha/',
+  ]);
+});
+
 test('the profile shell serves the same policy as the SPA', () => {
   assert.equal(metaPolicy(shellHtml), metaPolicy(indexHtml));
 });
 
-test('the header-only directives live in firebase.json and publicweb', () => {
-  const config = JSON.parse(readFileSync('firebase.json', 'utf8'));
-  const star = config.hosting.headers.find((b: { source: string }) => b.source === '**');
-  const keys = Object.fromEntries(star.headers.map((h: { key: string; value: string }) => [h.key, h.value]));
-  assert.equal(keys['Content-Security-Policy'], "frame-ancestors 'none'");
-  assert.equal(keys['X-Frame-Options'], 'DENY');
-  assert.equal(keys['X-Content-Type-Options'], 'nosniff');
-  assert.match(keys['Permissions-Policy'], /camera=\(\)/);
+test('the header-only directives live in the Pages worker and publicweb', async () => {
+  const {BASE_HEADERS} = await import('../cloudflare/worker.ts');
+  assert.equal(BASE_HEADERS['Content-Security-Policy'], "frame-ancestors 'none'");
+  assert.equal(BASE_HEADERS['X-Frame-Options'], 'DENY');
+  assert.equal(BASE_HEADERS['X-Content-Type-Options'], 'nosniff');
+  assert.match(BASE_HEADERS['Permissions-Policy'], /camera=\(\)/);
   const publicWeb = readFileSync('functions/src/publicWeb.ts', 'utf8');
   assert.match(publicWeb, /"Content-Security-Policy": "frame-ancestors 'none'",\s*"X-Frame-Options": "DENY",\s*"X-Content-Type-Options": "nosniff",\s*"Referrer-Policy": "no-referrer",/);
   assert.match(publicWeb, /const headers = \{\.\.\.SECURITY_HEADERS, \.\.\.response\.headers\};/);
