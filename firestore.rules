@@ -29,7 +29,7 @@ service cloud.firestore {
                     && validBookProgressSourceTransition(userId, bookId)
                     && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                            'activeTimer', 'currentPage', 'currentPageUpdateId',
-                           'pagesRead', 'timeRead', 'finished', 'updatedAt'
+                           'pagesRead', 'timeRead', 'finished', 'finishedAt', 'updatedAt'
                          ])
                          && validBookProgressFields())
                         || (validBookShape()
@@ -157,7 +157,17 @@ service cloud.firestore {
       let book = request.resource.data;
       return book.get('updatedAt', request.time) is timestamp
              && book.get('pagesRead', 0) is number
-             && book.get('timeRead', 0) is number;
+             && book.get('timeRead', 0) is number
+             && validBookFinishedAt(book);
+    }
+
+    // finishedAt is the moment the book was marked finished: null (or
+    // absent, on documents written before it existed) while unfinished, a
+    // timestamp only on a finished book. The client stamps it in the same
+    // batch that flips finished; migrate-finished-at.ts backfilled the rest.
+    function validBookFinishedAt(book) {
+      return book.get('finishedAt', null) == null
+             || (book.finishedAt is timestamp && book.get('finished', false) == true);
     }
 
     // Field allowlist and byte caps for a book document (SEC-039). Lists
@@ -173,13 +183,14 @@ service cloud.firestore {
       let book = request.resource.data;
       return book.keys().hasOnly([
                'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
-               'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
+               'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
                'workId', 'editionId', 'matchMethod', 'linkedAt',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
              // Absent on the oldest documents; typed when present.
              && book.get('updatedAt', request.time) is timestamp
+             && validBookFinishedAt(book)
              // The shape cap stays at the pre-catalog 50 so a legacy book
              // the migration left with 7–50 per-user ids (REVIEW
              // too-many-personal-authors) can still have its title, page
@@ -457,7 +468,7 @@ service cloud.firestore {
       let timeRead = after.get('timeRead', 0);
       return after.diff(before).affectedKeys().hasOnly([
                'pagesRead', 'timeRead', 'currentPage', 'currentPageUpdateId',
-               'finished', 'updatedAt'
+               'finished', 'finishedAt', 'updatedAt'
              ])
              && pagesRead is int
              && pagesRead >= 0
@@ -485,7 +496,7 @@ service cloud.firestore {
     function validPageCountClampBook(before, after, entry) {
       return after.diff(before).affectedKeys().hasOnly([
                'authorIds', 'author', 'authors', 'title', 'pageCount',
-               'currentPage', 'currentPageUpdateId', 'finished', 'isbn',
+               'currentPage', 'currentPageUpdateId', 'finished', 'finishedAt', 'isbn',
                'coverUrl', 'publisher', 'publishedDate', 'subjects',
                'fiction', 'workId', 'editionId', 'matchMethod', 'linkedAt',
                'updatedAt'

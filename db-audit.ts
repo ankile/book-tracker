@@ -715,6 +715,11 @@ for (const user of users) {
     if (b.finished !== true && isFinished(b.currentPage, b.pageCount)) {
       found('book.unfinished-pages-equal', p, `${b.currentPage}/${b.pageCount}`);
     }
+    // finishedAt: stamped by the client when finished flips, backfilled by
+    // migrate-finished-at.ts; a finished book without it is migration drift.
+    if (b.finished === true && !(b.finishedAt instanceof Timestamp)) {
+      found('book.finished-without-finishedAt', p);
+    }
     if (Number.isFinite(b.currentPage) && Number.isFinite(b.pageCount) && b.currentPage > b.pageCount) {
       found('book.page-overrun', p, `${b.currentPage}/${b.pageCount}`);
     }

@@ -33,7 +33,7 @@ import { reportIssue } from './functions.ts';
 import { issueReportPayload, type IssueInput } from '../utils/issueReport.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
-import { isFinished } from '../utils/finished.ts';
+import { finishedAtPatch, isFinished } from '../utils/finished.ts';
 import {
   isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
@@ -315,6 +315,9 @@ interface AddBookInput extends BookInputBase {
 
 interface UpdateBookInput extends BookInputBase {
   bookId: string;
+  // The stored flag before this edit, so finishedAt is stamped only when
+  // the edit is what finishes the book (a shrunk page count can).
+  previouslyFinished: boolean;
   pageCountClampFrom: number | null;
   catalogLink?: CatalogSelection | null;
 }
@@ -785,6 +788,11 @@ class Database {
       currentPage,
       currentPageUpdateId: updateRef.id,
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(
+        isFinished(previousPage, pageCount),
+        isFinished(currentPage, pageCount),
+        Timestamp.now(),
+      ),
       updatedAt: Timestamp.now(),
     });
 
@@ -818,6 +826,11 @@ class Database {
       currentPage,
       currentPageUpdateId: sessionRef.id,
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(
+        isFinished(previousPage, pageCount),
+        isFinished(currentPage, pageCount),
+        Timestamp.now(),
+      ),
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
       updatedAt: Timestamp.now(),
@@ -842,6 +855,7 @@ class Database {
       currentPage,
       currentPageUpdateId: null,
       finished: isFinished(currentPage, pageCount),
+      finishedAt: isFinished(currentPage, pageCount) ? Timestamp.now() : null,
       owner: ownerRef,
       pageCount,
       pagesRead: 0,
@@ -859,7 +873,7 @@ class Database {
     return batch.commit();
   }
 
-  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, pageCountClampFrom, isbn, metadata, catalogLink }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, previouslyFinished, pageCountClampFrom, isbn, metadata, catalogLink }: UpdateBookInput): Promise<void> {
     const authorIds = storedAuthorIds(authorChips);
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
@@ -894,6 +908,7 @@ class Database {
         currentPageUpdateId: correctionId,
       }),
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(previouslyFinished, isFinished(currentPage, pageCount), Timestamp.now()),
       isbn,
       ...(catalogLink === undefined ? {} : catalogLinkFields(catalogLink)),
       ...metadata,

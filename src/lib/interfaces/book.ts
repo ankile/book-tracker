@@ -58,6 +58,8 @@ interface BookBase extends BookMetadata, CatalogLink {
   timeRead: number;
   title: string;
   finished: boolean;
+  // The moment the book was marked finished; null while unfinished.
+  finishedAt: Timestamp | null;
   isbn: string;
   owner: DocumentReference;
   createdAt: Timestamp;

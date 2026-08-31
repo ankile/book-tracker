@@ -183,6 +183,7 @@ current deployment instructions.
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
 | `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Implemented and emulator-rehearsed; production rollout pending |
+| `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Implemented; runs in the shared-catalog rollout window |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -222,7 +223,10 @@ deployed Rules compatible at every step, with the migration in the middle:
    exact reviewed manifest while the previous Rules are still deployed. The
    migration writes through the Admin SDK, so Rules do not constrain it.
    Do not use the app between the snapshot and step 3: the migration is
-   only atomic against data nothing else is writing. A
+   only atomic against data nothing else is writing. Run
+   `migrate-finished-at.ts` (dry run, then `--apply`) in the same window:
+   the new client stamps `finishedAt` on every book it finishes, and the
+   backfill gives every already-finished book its inferred date. A
    client still running the previous bundle keeps working during this step:
    it reads its retained per-user author documents, and a book it writes with
    a per-user author is picked up by the re-run in step 4;

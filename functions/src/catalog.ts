@@ -721,7 +721,12 @@ function readingEvents(snapshot: QuerySnapshot, uid: string, bookPath: string): 
 }
 
 export function summarizeReadingAttempt(
-  book: {finished: boolean; pageCount: number; editionId: string | null},
+  book: {
+    finished: boolean;
+    finishedAt: Timestamp | null;
+    pageCount: number;
+    editionId: string | null;
+  },
   events: readonly ReadingEvent[],
   timeZone: string,
 ): ReadingAttemptMetrics {
@@ -734,12 +739,14 @@ export function summarizeReadingAttempt(
   const reading = ordered.filter((event) => event.type === "reading");
   const firstProgress = ordered[0]?.createdAt ?? null;
   const firstRead = reading[0]?.createdAt ?? null;
-  // The finish date is the last forward progress, not the last row: a
-  // page-count correction months later is an update event with zero or
-  // negative pagesRead and must not move it (or inflate calendarDays).
+  // The book's own finishedAt stamp (written when finished flipped,
+  // backfilled by migrate-finished-at.ts) is the finish date. The fallback
+  // covers a finished book a pre-stamp client wrote: its last forward
+  // progress, not its last row — a page-count correction months later is
+  // an update event with zero or negative pagesRead.
   const progressed = ordered.filter((event) => event.pagesRead > 0);
-  const finishedAt = book.finished ?
-    (progressed.at(-1) ?? ordered.at(-1))?.createdAt ?? null : null;
+  const finishedAt = !book.finished ? null :
+    book.finishedAt ?? (progressed.at(-1) ?? ordered.at(-1))?.createdAt ?? null;
   const activeDayKeys = new Set(reading.map((event) => dayParts(event.createdAt, timeZone).key));
   let trackedMinutes = 0;
   let qualifiedMinutes = 0;
@@ -782,6 +789,7 @@ export function summarizeReadingAttempt(
 function personalBookIdentity(snapshot: DocumentSnapshot): {
   uid: string;
   finished: boolean;
+  finishedAt: Timestamp | null;
   pageCount: number;
   editionId: string | null;
 } {
@@ -794,13 +802,21 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
     throw new CatalogDataError(`Invalid personal book owner ${snapshot.ref.path}.`);
   }
   const finished = snapshot.get("finished");
+  const finishedAt = snapshot.get("finishedAt");
   const pageCount = snapshot.get("pageCount");
   const editionId = snapshot.get("editionId");
   if (typeof finished !== "boolean" || !Number.isSafeInteger(pageCount) || pageCount <= 0 ||
+      (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp)) ||
       (editionId !== null && editionId !== undefined && typeof editionId !== "string")) {
     throw new CatalogDataError(`Invalid personal book summary fields ${snapshot.ref.path}.`);
   }
-  return {uid: segments[1], finished, pageCount, editionId: editionId ?? null};
+  return {
+    uid: segments[1],
+    finished,
+    finishedAt: finishedAt ?? null,
+    pageCount,
+    editionId: editionId ?? null,
+  };
 }
 
 function safePersonalBookIdentity(

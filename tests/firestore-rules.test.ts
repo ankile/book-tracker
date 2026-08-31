@@ -903,6 +903,38 @@ test('book author references must exist while one-hop shared aliases remain usab
   ));
 });
 
+// finishedAt is null (or absent, pre-field) while unfinished and a
+// timestamp only once finished; the client stamps it in the batch that
+// flips finished and migrate-finished-at.ts backfilled the rest.
+test('finishedAt is a timestamp only on a finished book', async () => {
+  const uid = 'finished-at-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'done'), fullBook(adminDb, uid, {
+      currentPage: 100, pageCount: 100, finished: true,
+    }));
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'reading'), fullBook(adminDb, uid, {
+      currentPage: 10, pageCount: 100, finished: false,
+    }));
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'new-unfinished'), creatableBook({finishedAt: null})));
+  await assertFails(setDoc(doc(books, 'new-stamped'), creatableBook({finishedAt: Timestamp.now()})));
+  await assertSucceeds(updateDoc(doc(books, 'done'), {
+    title: 'Done and dated', finishedAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(doc(books, 'done'), {
+    title: 'Done and misdated', finishedAt: 'yesterday', updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(doc(books, 'reading'), {
+    title: 'Reading but dated', finishedAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(updateDoc(doc(books, 'reading'), {
+    title: 'Reading, explicitly undated', finishedAt: null, updatedAt: Timestamp.now(),
+  }));
+});
+
 // A legacy book the migration left with more than six per-user author ids
 // (REVIEW too-many-personal-authors) is not frozen: a metadata edit that
 // leaves authorIds untouched passes the 50-id shape cap, while any change

@@ -48,7 +48,13 @@ interface UpdatesQueryStub {
 }
 interface ReaderBookStub {
   snapshot: {ref: {path: string; collection(name: string): UpdatesQueryStub}};
-  identity: {uid: string; finished: boolean; pageCount: number; editionId: string | null};
+  identity: {
+    uid: string;
+    finished: boolean;
+    finishedAt: import("firebase-admin/firestore").Timestamp | null;
+    pageCount: number;
+    editionId: string | null;
+  };
   shared: {username: string; displayName: string; timeZone: string};
 }
 interface CreateResult {
@@ -64,7 +70,12 @@ interface CreateResult {
 interface CatalogModule {
   normalizeCatalogTitle(value: string): string;
   summarizeReadingAttempt(
-    book: {finished: boolean; pageCount: number; editionId: string | null},
+    book: {
+      finished: boolean;
+      finishedAt: import("firebase-admin/firestore").Timestamp | null;
+      pageCount: number;
+      editionId: string | null;
+    },
     events: readonly ReadingEventStub[],
     timeZone: string,
   ): Row;
@@ -114,7 +125,7 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
     timeRead,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, pageCount: 300, editionId: "edition"},
+    {finished: true, finishedAt: null, pageCount: 300, editionId: "edition"},
     [
       event("update", "2024-03-10T09:30:00.000Z", 0),
       event("reading", "2024-03-10T10:30:00.000Z", 30, 30),
@@ -147,7 +158,7 @@ test("reading summary dates preserve four-digit years below 1000", () => {
     timeRead: 60,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, pageCount: 100, editionId: null},
+    {finished: true, finishedAt: null, pageCount: 100, editionId: null},
     [event("0001-01-01T04:00:00.000Z", 50), event("0001-01-02T04:00:00.000Z", 50)],
     "UTC",
   );
@@ -160,6 +171,29 @@ test("reading summary dates preserve four-digit years below 1000", () => {
 // update event with zero or negative pagesRead, appended long after the
 // book was finished; it must not move the finish date or stretch the
 // calendar span.
+// The stamp written when the book was marked finished is the finish date;
+// the history only stands in for books a pre-stamp client finished.
+test("an explicit finishedAt stamp wins over the reading history", () => {
+  const reading = (createdAt: string): ReadingEventStub => ({
+    type: "reading",
+    createdAt: Timestamp.fromDate(new Date(createdAt)),
+    pagesRead: 100,
+    timeRead: 60,
+  });
+  const result = catalog.summarizeReadingAttempt(
+    {
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("2026-03-05T20:00:00.000Z")),
+      pageCount: 200,
+      editionId: null,
+    },
+    [reading("2026-03-01T10:00:00.000Z"), reading("2026-03-02T10:00:00.000Z")],
+    "UTC",
+  );
+  assert.equal(result.finishedAt, "2026-03-05");
+  assert.equal(result.calendarDays, 5);
+});
+
 test("a later page-count correction does not move the finish date", () => {
   const event = (type: "reading" | "update", createdAt: string, pagesRead: number): ReadingEventStub => ({
     type,
@@ -168,7 +202,7 @@ test("a later page-count correction does not move the finish date", () => {
     timeRead: type === "reading" ? 60 : 0,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, pageCount: 250, editionId: null},
+    {finished: true, finishedAt: null, pageCount: 250, editionId: null},
     [
       event("reading", "2026-03-01T10:00:00.000Z", 150),
       event("reading", "2026-03-02T10:00:00.000Z", 150),
@@ -186,7 +220,7 @@ test("a later page-count correction does not move the finish date", () => {
 test("reading summaries accept the time zone aliases browsers report", () => {
   for (const timeZone of ["Asia/Kolkata", "Europe/Kyiv", "Etc/UTC"]) {
     const result = catalog.summarizeReadingAttempt(
-      {finished: false, pageCount: 100, editionId: null},
+      {finished: false, finishedAt: null, pageCount: 100, editionId: null},
       [{
         type: "reading",
         createdAt: Timestamp.fromDate(new Date("2026-08-20T18:00:00.000Z")),
@@ -198,7 +232,7 @@ test("reading summaries accept the time zone aliases browsers report", () => {
     assert.equal(result.firstReadAt, "2026-08-20", timeZone);
   }
   assert.throws(() => catalog.summarizeReadingAttempt(
-    {finished: false, pageCount: 100, editionId: null}, [], "Mars/Olympus_Mons",
+    {finished: false, finishedAt: null, pageCount: 100, editionId: null}, [], "Mars/Olympus_Mons",
   ), /Unsupported time zone/);
 });
 
@@ -225,7 +259,7 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
         }})}),
       },
     },
-    identity: {uid: `reader-${index}`, finished: true, pageCount: 300, editionId: null},
+    identity: {uid: `reader-${index}`, finished: true, finishedAt: null, pageCount: 300, editionId: null},
     shared: {
       username: `reader-${index}`,
       displayName: `Reader ${index}`,
@@ -263,6 +297,7 @@ test("a full ten-owner page with maximum valid histories fits the read budget", 
     identity: {
       uid: `reader-${Math.floor(index / 5)}`,
       finished: true,
+      finishedAt: null,
       pageCount: 300,
       editionId: null,
     },

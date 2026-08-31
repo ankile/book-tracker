@@ -23,6 +23,7 @@ interface AddBookWriteInput extends BookWriteBase {
 
 interface UpdateBookWriteInput extends BookWriteBase {
   bookId: string;
+  previouslyFinished: boolean;
   pageCountClampFrom: number | null;
   catalogLink?: CatalogLinkWrite;
 }
@@ -202,6 +203,7 @@ export function prepareBookWrite({
         input: {
           ...input,
           bookId: book.id,
+          previouslyFinished: book.finished,
           pageCountClampFrom: pages.currentPage < book.currentPage
             ? book.currentPage
             : null,
