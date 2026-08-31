@@ -203,6 +203,7 @@ Root package commands:
 | `npm run test:e2e:browser` | Run Playwright against an already running test environment |
 | `npm run pages:assemble` | Assemble the Cloudflare Pages upload directory (`.pages-dist/`: the build plus the worker) |
 | `npm run pages:deploy` | Assemble and deploy the site to Cloudflare Pages with the pinned wrangler |
+| `npm run pages:purge` | Purge the Cloudflare edge cache so a release is visible before the TTL expires |
 | `node docs/architecture/verify.ts` | Route coverage, image freshness, and map sanitization |
 
 Functions package commands:

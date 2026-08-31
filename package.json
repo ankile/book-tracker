@@ -25,7 +25,8 @@
     "check:service-worker": "tsc --noEmit -p tsconfig.service-worker.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "pages:assemble": "node cloudflare/assemble.ts",
-    "pages:deploy": "npm run test:artifacts && npm run pages:assemble && cd .pages-dist && env -u CLOUDFLARE_API_TOKEN npm exec --yes --package wrangler@4.127.1 -- wrangler pages deploy . --project-name book-tracker --branch main --commit-dirty=true"
+    "pages:deploy": "npm run test:artifacts && npm run pages:assemble && cd .pages-dist && CLOUDFLARE_ACCOUNT_ID=a4fbfab9b7c5684af44072de53f22b88 npm exec --yes --package wrangler@4.127.1 -- wrangler pages deploy . --project-name book-tracker --branch main --commit-dirty=true",
+    "pages:purge": "curl -sf -X POST -H \"Authorization: Bearer $CLOUDFLARE_API_TOKEN\" -H \"Content-Type: application/json\" --data '{\"purge_everything\":true}' https://api.cloudflare.com/client/v4/zones/b09d8f9b48b4e7e05387c439c8bf4c53/purge_cache"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",
