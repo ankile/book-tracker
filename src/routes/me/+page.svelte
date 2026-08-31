@@ -1,7 +1,6 @@
 <script lang="ts">
   import { user, signOut } from '$lib/firebase/auth.ts';
   import { page } from '$app/state';
-  import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
   import SpeedSection from '$lib/components/SpeedSection.svelte';
@@ -51,16 +50,11 @@
   import type { BookUpdate } from '$lib/interfaces/reading.ts';
   import type { UserDocument } from '$lib/firebase/decoders.ts';
 
-  let newBookModal = $state(false);
-
   async function handleSignOut() {
     // signOut ends with a clean reload onto the front page (SEC-004:
     // the local Firestore mirror is dropped), so no goto here.
     await signOut();
   }
-
-  const toggleModal = () => (newBookModal = !newBookModal);
-  const closeModal = () => (newBookModal = false);
 
   // Get all books for statistics; undefined until the first snapshot (the
   // profile sync below must not run against the pre-snapshot empty list).
@@ -1104,8 +1098,6 @@
 </style>
 
 {#if $user}
-  <NewBookModal open={newBookModal} onclose={closeModal} userId={$user.uid} />
-
   <div class="profile-container">
     <div class="profile-header">
       <h1>Welcome back, {myProfile?.givenName || username}!</h1>
@@ -1113,7 +1105,6 @@
     </div>
 
     <div class="actions">
-      <button onclick={toggleModal}>Add New Book</button>
       <button onclick={handleSignOut}>Sign Out</button>
     </div>
 

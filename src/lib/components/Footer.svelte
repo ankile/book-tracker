@@ -101,7 +101,7 @@
         <a href="/">Currently reading</a>
         <a href="/finished">Finished books</a>
         <a href="/authors">Authors</a>
-        <a href="/me">My site</a>
+        <a href="/me">Dashboard</a>
       {/if}
     </nav>
   </div>

@@ -87,6 +87,25 @@ test('a live book and author listener survives reloading the original tab', asyn
     await expect(first.getByText(initialTitle, { exact: true })).toBeVisible();
     await expect(first.getByText(`${initialAuthor}:`, { exact: true })).toBeVisible();
 
+    const primaryNavigation = first.getByRole('navigation', { name: 'Primary navigation' });
+    await expect(primaryNavigation.getByRole('link', { name: 'Reading', exact: true }))
+      .toHaveAttribute('aria-current', 'page');
+    await expect(primaryNavigation.getByRole('link', { name: 'Finished', exact: true })).toBeVisible();
+    await expect(primaryNavigation.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible();
+    await primaryNavigation.getByRole('button', { name: '+ Add book', exact: true }).click();
+    await expect(first.getByRole('dialog', { name: 'Add new book' })).toBeVisible();
+    await first.getByRole('dialog', { name: 'Add new book' })
+      .getByRole('button', { name: 'Close', exact: true }).click();
+
+    await first.setViewportSize({ width: 390, height: 844 });
+    const brandBox = await first.getByRole('link', { name: 'Book Tracker home' }).boundingBox();
+    const readingBox = await primaryNavigation.getByRole('link', { name: 'Reading', exact: true })
+      .boundingBox();
+    expect(brandBox).not.toBeNull();
+    expect(readingBox).not.toBeNull();
+    expect(readingBox?.y).toBeGreaterThan((brandBox?.y ?? 0) + 30);
+    await first.setViewportSize({ width: 1280, height: 720 });
+
     // An already-running pre-hotfix tab has completed its startup setter and
     // listens to this same browserLocal/localStorage record. Keeping this tab
     // alive while the second (new-client) tab initializes exercises the mixed

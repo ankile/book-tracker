@@ -16,7 +16,7 @@
   // launch screen (the page doesn't need the session, so there is nothing
   // to wait for). It gets a minimal header instead of the app navbar —
   // just a "Go to app" link to /, which the gate below resolves to the
-  // login screen when signed out and Currently Reading when signed in.
+  // login screen when signed out and Reading when signed in.
   const publicRoute = $derived(page.route.id?.startsWith('/profiles') ?? false);
 
   // Let the requested page paint first, then load the other private routes'
