@@ -4,7 +4,7 @@ import type {
 } from "./decoders";
 
 const ORIGIN = "https://book.ankile.com";
-const PROFILE_CARD = `${ORIGIN}/social/profile-card.png`;
+const PROFILE_CARD = `${ORIGIN}/social/profile-card.jpg`;
 const TITLE_MARKER = '<title data-shell-title>Personal Book Tracker</title>';
 const DESCRIPTION_MARKER = [
   '<meta',
@@ -233,7 +233,7 @@ function profileHead(profile: PublicProfile, searchable: boolean): string {
     `<meta data-server-profile-meta property="profile:username" content="${escapeHtml(profile.username)}" />`,
     `<meta data-server-profile-meta property="og:image" content="${PROFILE_CARD}" />`,
     `<meta data-server-profile-meta property="og:image:secure_url" content="${PROFILE_CARD}" />`,
-    '<meta data-server-profile-meta property="og:image:type" content="image/png" />',
+    '<meta data-server-profile-meta property="og:image:type" content="image/jpeg" />',
     '<meta data-server-profile-meta property="og:image:width" content="1200" />',
     '<meta data-server-profile-meta property="og:image:height" content="630" />',
     '<meta data-server-profile-meta property="og:image:alt" content="Book Tracker reading profile" />',

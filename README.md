@@ -40,11 +40,11 @@ editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
 
 ### Currently reading
 
-![Currently Reading page](static/screenshots/currently_reading.png)
+![Currently Reading page](docs/screenshots/currently_reading.png)
 
 ### Profile and reading activity
 
-![Profile page with statistics and reading heatmap](static/screenshots/my_page.png)
+![Profile page with statistics and reading heatmap](docs/screenshots/my_page.png)
 
 ## What the app does
 
@@ -262,7 +262,8 @@ book-tracker/
 ├── src/
 │   ├── lib/                 UI, stores, Firebase access, types, and utilities
 │   └── routes/              SvelteKit pages
-├── static/                  Static assets and screenshots
+├── static/                  Static assets served from the site root (keep them small)
+├── docs/screenshots/        README screenshots, not deployed
 ├── functions/
 │   ├── src/                 Backend services and event handlers
 │   └── test/                Functions tests

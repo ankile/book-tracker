@@ -104,7 +104,7 @@ test("renders a complete, escaped, indexable profile document", () => {
   assert.match(html, /name="robots" content="index,follow,max-image-preview:large"/);
   assert.match(html, /rel="canonical" href="https:\/\/book\.ankile\.com\/profiles\/ada-lovelace"/);
   assert.match(html, /property="og:title"/);
-  assert.match(html, /property="og:image" content="https:\/\/book\.ankile\.com\/social\/profile-card\.png"/);
+  assert.match(html, /property="og:image" content="https:\/\/book\.ankile\.com\/social\/profile-card\.jpg"/);
   assert.match(html, /name="twitter:card" content="summary_large_image"/);
   const structuredDataMatch = html.match(
     /<script data-server-profile-meta type="application\/ld\+json">([^<]+)<\/script>/,
