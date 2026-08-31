@@ -188,15 +188,14 @@ for (const workDoc of works.docs) {
   const path = workDoc.ref.path;
   const required = [
     'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds',
-    'coverUrl', 'subjects', 'fiction', 'visibility', 'status', 'createdAt', 'updatedAt',
+    'coverUrl', 'subjects', 'fiction', 'status', 'createdAt', 'updatedAt',
   ];
   for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
   const allowedWorkFields = new Set([...required, 'mergedInto', 'mergedFrom']);
   for (const field of Object.keys(work)) {
     if (!allowedWorkFields.has(field)) found('catalog.work.unexpected-field', path, field);
   }
-  if (!['active', 'merged'].includes(work.status)) found('catalog.work.bad-status', path, String(work.status));
-  if (!['internal', 'searchable'].includes(work.visibility)) found('catalog.work.bad-visibility', path, String(work.visibility));
+  if (!['active', 'merged', 'hidden'].includes(work.status)) found('catalog.work.bad-status', path, String(work.status));
   if (typeof work.canonicalTitle !== 'string' || work.canonicalTitle.trim() === '') {
     found('catalog.work.bad-title', path, JSON.stringify(work.canonicalTitle));
   }
@@ -238,13 +237,13 @@ for (const workDoc of works.docs) {
   if (work.status === 'merged') {
     if (typeof work.mergedInto !== 'string' || !worksById.has(work.mergedInto)) {
       found('catalog.work.merge-target-missing', path, String(work.mergedInto));
-    } else if (worksById.get(work.mergedInto)?.status !== 'active') {
+    } else if (worksById.get(work.mergedInto)?.status === 'merged') {
       found('catalog.work.merge-not-one-hop', path, work.mergedInto);
     }
   } else if (work.mergedInto !== undefined) {
     found('catalog.work.active-has-merged-into', path, String(work.mergedInto));
   }
-  if (work.status === 'active') {
+  if (work.status !== 'merged') {
     if (!Array.isArray(work.mergedFrom) || work.mergedFrom.length > 29 || new Set(work.mergedFrom).size !== work.mergedFrom.length) {
       found('catalog.work.bad-merged-from', path, JSON.stringify(work.mergedFrom));
     } else {
@@ -403,12 +402,12 @@ const titleRowsByPair = new Map<string, string[]>();
 for (const indexDoc of workTitleIndexes.docs) {
   const index = indexDoc.data();
   const path = indexDoc.ref.path;
-  if (Object.keys(index).sort().join(',') !== 'title,titleKey,visibility,workId') {
+  if (Object.keys(index).sort().join(',') !== 'status,title,titleKey,workId') {
     found('catalog.title-index.bad-shape', path, JSON.stringify(index));
   }
   if (typeof index.workId !== 'string' || typeof index.title !== 'string' ||
       typeof index.titleKey !== 'string' ||
-      (index.visibility !== 'internal' && index.visibility !== 'searchable')) {
+      (index.status !== 'active' && index.status !== 'hidden')) {
     found('catalog.title-index.bad-shape', path, JSON.stringify(index));
     continue;
   }
@@ -416,16 +415,16 @@ for (const indexDoc of workTitleIndexes.docs) {
   if (indexDoc.id !== deterministicTitleIndexId(index.workId, index.titleKey)) found('catalog.title-index.bad-id', path);
   const work = worksById.get(index.workId);
   if (work === undefined) found('catalog.title-index.work-missing', path, index.workId);
-  else if (work.status !== 'active' || !Array.isArray(work.titleKeys) || !work.titleKeys.includes(index.titleKey)) {
+  else if (work.status === 'merged' || !Array.isArray(work.titleKeys) || !work.titleKeys.includes(index.titleKey)) {
     found('catalog.title-index.work-mismatch', path, index.workId);
-  } else if (index.visibility !== work.visibility) {
-    found('catalog.title-index.visibility-mismatch', path, `${index.visibility} != ${String(work.visibility)}`);
+  } else if (index.status !== work.status) {
+    found('catalog.title-index.status-mismatch', path, `${index.status} != ${String(work.status)}`);
   }
   const pair = `${index.workId}\0${index.titleKey}`;
   titleRowsByPair.set(pair, [...(titleRowsByPair.get(pair) ?? []), indexDoc.id]);
 }
 for (const [workId, work] of worksById) {
-  if (work.status !== 'active' || !Array.isArray(work.titleKeys)) continue;
+  if (work.status === 'merged' || !Array.isArray(work.titleKeys)) continue;
   for (const titleKey of work.titleKeys) {
     if (typeof titleKey !== 'string') continue;
     const rows = titleRowsByPair.get(`${workId}\0${titleKey}`) ?? [];

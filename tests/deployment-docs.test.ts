@@ -153,9 +153,9 @@ test('catalog queries have the required collection-group and pagination indexes'
 
   assert.equal(parsed.indexes.some((index) =>
     index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&
-    index.fields[0]?.fieldPath === 'visibility' && index.fields[0]?.order === 'ASCENDING' &&
+    index.fields[0]?.fieldPath === 'status' && index.fields[0]?.order === 'ASCENDING' &&
     index.fields[1]?.fieldPath === 'titleKey' && index.fields[1]?.order === 'ASCENDING'), true,
-  'missing searchable title-prefix composite index');
+  'missing active title-prefix composite index');
   assert.equal(parsed.indexes.some((index) =>
     index.collectionGroup === 'sharedWorkOwners' && index.queryScope === 'COLLECTION' &&
     index.fields[0]?.fieldPath === 'workId' && index.fields[0]?.order === 'ASCENDING' &&

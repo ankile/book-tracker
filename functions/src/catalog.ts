@@ -50,8 +50,7 @@ const SPEED_MIN_SESSION_MINUTES = 5;
 const SPEED_MAX_PAGES_PER_HOUR = 150;
 const BOOK_SPEED_MIN_MINUTES = 60;
 
-type WorkVisibility = "internal" | "searchable";
-type WorkStatus = "active" | "merged";
+type WorkStatus = "active" | "merged" | "hidden";
 
 interface StoredWork {
   canonicalTitle: string;
@@ -61,7 +60,6 @@ interface StoredWork {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
-  visibility: WorkVisibility;
   status: WorkStatus;
   mergedInto?: string;
   mergedFrom: string[];
@@ -291,11 +289,8 @@ function storedWork(snapshot: DocumentSnapshot): StoredWork {
   if (data === undefined) {
     throw new CatalogDataError(`Missing catalog work data ${snapshot.ref.path}.`);
   }
-  if (data.status !== "active" && data.status !== "merged") {
+  if (data.status !== "active" && data.status !== "merged" && data.status !== "hidden") {
     throw new CatalogDataError(`Invalid work status at ${snapshot.ref.path}.`);
-  }
-  if (data.visibility !== "internal" && data.visibility !== "searchable") {
-    throw new CatalogDataError(`Invalid work visibility at ${snapshot.ref.path}.`);
   }
   const arrays = [
     data.alternateTitles,
@@ -323,7 +318,6 @@ function storedWork(snapshot: DocumentSnapshot): StoredWork {
     coverUrl: data.coverUrl,
     subjects: data.subjects,
     fiction: data.fiction,
-    visibility: data.visibility,
     status: data.status,
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
     mergedFrom: data.mergedFrom ?? [],
@@ -457,13 +451,13 @@ async function resolveWorkSnapshot(
   snapshot: DocumentSnapshot,
 ): Promise<ResolvedWork> {
   const work = storedWork(snapshot);
-  if (work.status === "active") return {id: snapshot.id, work};
+  if (work.status !== "merged") return {id: snapshot.id, work};
   if (work.mergedInto === undefined || work.mergedInto === snapshot.id) {
     throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
   }
   const targetSnapshot = await db.collection("works").doc(work.mergedInto).get();
   const target = storedWork(targetSnapshot);
-  if (target.status !== "active") {
+  if (target.status === "merged") {
     throw new CatalogDataError(
       `Catalog redirect is not one hop at ${snapshot.ref.path}.`,
     );
@@ -533,7 +527,7 @@ async function exactIsbnResult(isbn13: string): Promise<CatalogSearchResult | nu
   if (editionWork.id !== resolved.id || edition.isbn13 !== isbn13) {
     throw new Error(`ISBN index ${index.ref.path} disagrees with its edition.`);
   }
-  if (resolved.work.visibility !== "searchable") return null;
+  if (resolved.work.status !== "active") return null;
   return {
     workId: resolved.id,
     editionId,
@@ -577,7 +571,7 @@ async function exactExternalIdResult(
       edition.externalIds[externalId.provider] !== externalId.id) {
     throw new Error(`External ID index ${index.ref.path} disagrees with its edition.`);
   }
-  if (resolved.work.visibility !== "searchable") return null;
+  if (resolved.work.status !== "active") return null;
   return {
     workId: resolved.id,
     editionId,
@@ -614,7 +608,7 @@ async function titleResults(
   const key = normalizeCatalogTitle(title);
   if (key === "") return [];
   const indexRows = await db.collection("workTitleIndex")
-    .where("visibility", "==", "searchable")
+    .where("status", "==", "active")
     .where("titleKey", ">=", key)
     .where("titleKey", "<", `${key}\uf8ff`)
     .orderBy("titleKey")
@@ -627,7 +621,7 @@ async function titleResults(
   ));
   const byId = new Map<string, ResolvedWork>();
   for (const candidate of resolved) {
-    if (candidate.work.visibility === "searchable") byId.set(candidate.id, candidate);
+    if (candidate.work.status === "active") byId.set(candidate.id, candidate);
   }
   const authorCache = new Map<string, Promise<ResolvedAuthor>>();
   const hydrated = await Promise.all([...byId.values()].map(async (candidate) => ({
@@ -674,12 +668,12 @@ function titleIndexId(workId: string, titleKey: string): string {
 async function transactionWork(tx: Transaction, workId: string): Promise<ResolvedWork> {
   const snapshot = await tx.get(db.collection("works").doc(workId));
   const work = storedWork(snapshot);
-  if (work.status === "active") return {id: snapshot.id, work};
+  if (work.status !== "merged") return {id: snapshot.id, work};
   if (work.mergedInto === undefined || work.mergedInto === snapshot.id) {
     throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
   }
   const target = storedWork(await tx.get(db.collection("works").doc(work.mergedInto)));
-  if (target.status !== "active") {
+  if (target.status === "merged") {
     throw new CatalogDataError(`Catalog redirect is not one hop at ${snapshot.ref.path}.`);
   }
   return {id: work.mergedInto, work: target};
@@ -760,7 +754,6 @@ export async function createCatalogEntry(
       coverUrl: request.work.coverUrl,
       subjects: request.work.subjects,
       fiction: request.work.fiction,
-      visibility: "searchable",
       status: "active",
       mergedFrom: [],
       createdBy,
@@ -787,7 +780,7 @@ export async function createCatalogEntry(
         .find((candidate) => normalizeCatalogTitle(candidate) === key) ?? request.work.canonicalTitle;
       tx.create(
         db.collection("workTitleIndex").doc(titleIndexId(workId, key)),
-        {workId, title, titleKey: key, visibility: "searchable"},
+        {workId, title, titleKey: key, status: "active"},
       );
     }
     return {workId, editionId, created: true};
@@ -1063,7 +1056,7 @@ async function publicWorkOrNotFound(workId: string): Promise<ResolvedWork> {
     });
     throw new functions.https.HttpsError("not-found", "Book not found.");
   }
-  if (resolved.work.visibility !== "searchable") {
+  if (resolved.work.status !== "active") {
     throw new functions.https.HttpsError("not-found", "Book not found.");
   }
   return resolved;

@@ -580,7 +580,6 @@ function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): 
     coverUrl: catalogCoverUrl(preferred.book.coverUrl),
     subjects: Array.isArray(preferred.book.subjects) ? preferred.book.subjects.filter((subject): subject is string => typeof subject === 'string') : [],
     fiction: typeof preferred.book.fiction === 'boolean' ? preferred.book.fiction : null,
-    visibility: 'searchable',
     status: 'active',
     mergedFrom: [],
     createdAt: now,
@@ -598,8 +597,8 @@ function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): 
       : group.alternateTitles.find((candidate) => normalizeCatalogTitle(candidate) === titleKey) ?? group.canonicalTitle
     specs.push({
       ref: db.collection('workTitleIndex').doc(deterministicTitleIndexId(workId, titleKey)),
-      data: { workId, title, titleKey, visibility: 'searchable' },
-      stableKeys: ['workId', 'title', 'titleKey', 'visibility'],
+      data: { workId, title, titleKey, status: 'active' },
+      stableKeys: ['workId', 'title', 'titleKey', 'status'],
       seedSources,
     })
   }

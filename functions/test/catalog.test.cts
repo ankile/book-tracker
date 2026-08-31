@@ -604,7 +604,6 @@ test("an exact title with the wrong author is not returned", async (t) => {
     coverUrl: "",
     subjects: [],
     fiction: null,
-    visibility: "searchable",
     status: "active",
     mergedFrom: [],
   };
@@ -634,7 +633,7 @@ test("an exact title with the wrong author is not returned", async (t) => {
         orderBy: () => query,
         limit: () => query,
         get: async () => ({docs: [snap("workTitleIndex/index", {
-          workId: "work", visibility: "searchable",
+          workId: "work", status: "active",
         })]}),
       };
       return query;
@@ -675,7 +674,7 @@ test("an exact title with the wrong author is not returned", async (t) => {
   assert.equal(aliasWork.results[0].workId, "work");
   assert.deepEqual(Object.keys(aliasWork.results[0].work.authors[0]).sort(),
     ["authorId", "canonicalName", "kind", "sortName"]);
-  assert.deepEqual(whereCalls[0], ["visibility", "==", "searchable"]);
+  assert.deepEqual(whereCalls[0], ["status", "==", "active"]);
   assert.equal(authorReads, 3);
 });
 
@@ -688,12 +687,12 @@ test("users create missing works and resolve existing identifiers", async (t) =>
     ["isbnIndex/9780000000002", {workId: "old-work", editionId: "old-edition"}],
     ["works/old-work", {
       canonicalTitle: "Old", alternateTitles: [], titleKeys: ["old"], authorIds: ["ada"],
-      coverUrl: "", subjects: [], fiction: null, visibility: "searchable", status: "merged",
+      coverUrl: "", subjects: [], fiction: null, status: "merged",
       mergedInto: "canonical-work", mergedFrom: [],
     }],
     ["works/canonical-work", {
       canonicalTitle: "Canonical", alternateTitles: [], titleKeys: ["canonical"], authorIds: ["ada"],
-      coverUrl: "", subjects: [], fiction: null, visibility: "searchable", status: "active",
+      coverUrl: "", subjects: [], fiction: null, status: "active",
       mergedFrom: ["old-work"],
     }],
   ]);
@@ -741,7 +740,7 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   assert.match(result.workId, /^work-/);
   assert.match(result.editionId, /^edition-/);
   const storedWork = rows.get(`works/${result.workId}`);
-  assert.equal(storedWork?.visibility, "searchable");
+  assert.equal(storedWork?.status, "active");
   assert.equal(storedWork?.createdBy, "owner");
   assert.deepEqual(storedWork?.titleKeys, ["new book"]);
   assert.equal(rows.get(`editions/${result.editionId}`)?.workId, result.workId);
@@ -779,7 +778,6 @@ test("work readers resolve aliases and return only consented redacted summaries"
     coverUrl: "https://example.test/work.jpg",
     subjects: ["Private implementation detail"],
     fiction: true,
-    visibility: "searchable",
     status: "active",
     mergedFrom: ["old-work"],
   };
@@ -916,7 +914,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
       path: `works/${id}`,
       get: async () => snap(`works/${id}`,
         id === "canonical-work" ? workData :
-          id === "internal-work" ? {...workData, visibility: "internal"} :
+          id === "hidden-work" ? {...workData, status: "hidden"} :
             id === "broken-work" ? {
               ...workData,
               status: "merged",
@@ -1069,7 +1067,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
     durationMs: readerLog[1].durationMs,
     aliasesQueried: true,
   });
-  for (const hiddenId of ["missing-work", "internal-work", "broken-work"]) {
+  for (const hiddenId of ["missing-work", "hidden-work", "broken-work"]) {
     await assert.rejects(
       deployed.catalog.workreaders.run({workId: hiddenId}, authContext),
       (error) => hasCode(error, "not-found") && hasMessage(error, "Book not found."),

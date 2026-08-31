@@ -1,7 +1,8 @@
 import type { Timestamp } from 'firebase/firestore';
 
-export type WorkVisibility = 'internal' | 'searchable';
-export type WorkStatus = 'active' | 'merged';
+// 'hidden' is the admin soft delete: the work and every link to it stay,
+// search and reader pages leave it out.
+export type WorkStatus = 'active' | 'merged' | 'hidden';
 export type CatalogAuthorKind = 'person' | 'entity' | 'placeholder';
 export type CatalogAuthorStatus = 'active' | 'merged';
 export type EditionFormat = 'full' | 'abridged' | 'revised' | 'unknown';
@@ -27,7 +28,6 @@ export interface WorkDocument {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
-  visibility: WorkVisibility;
   status: WorkStatus;
   mergedInto?: string;
   mergedFrom?: string[];
@@ -67,7 +67,6 @@ export interface WorkTitleIndexEntry {
   workId: string;
   title: string;
   titleKey: string;
-  visibility: WorkVisibility;
 }
 
 export interface EditionDocument {
@@ -240,7 +239,6 @@ export interface AdminCatalogWorkRow {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
-  visibility: WorkVisibility;
   status: WorkStatus;
   mergedInto: string | null;
   mergedFrom: string[];
@@ -347,7 +345,7 @@ export type AdminCatalogOperation =
   | {
     type: 'createWork';
     workId: string;
-    visibility: WorkVisibility;
+    status: 'active' | 'hidden';
     work: CatalogWorkInput;
     books: AdminCatalogBookTarget[];
   }
@@ -364,7 +362,7 @@ export type AdminCatalogOperation =
   | {
     type: 'editWork';
     workId: string;
-    visibility: WorkVisibility;
+    status: 'active' | 'hidden';
     work: CatalogWorkInput;
   }
   | {

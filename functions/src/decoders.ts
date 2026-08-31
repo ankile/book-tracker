@@ -675,7 +675,10 @@ export interface AdminBookTarget {
   bookId: string;
 }
 
-type AdminWorkVisibility = "internal" | "searchable";
+// A work is "active" (listed in search and on reader pages) or "hidden" (the
+// admin soft delete: the work and its links stay, search and readers do not
+// see it). "merged" is only ever set by the mergeWorks operation.
+type AdminWorkStatus = "active" | "hidden";
 
 export type AdminCatalogOperation =
   | {
@@ -691,7 +694,7 @@ export type AdminCatalogOperation =
   | {
       type: "createWork";
       workId: string;
-      visibility: AdminWorkVisibility;
+      status: AdminWorkStatus;
       work: CatalogWorkInput;
       books: AdminBookTarget[];
     }
@@ -708,7 +711,7 @@ export type AdminCatalogOperation =
   | {
       type: "editWork";
       workId: string;
-      visibility: AdminWorkVisibility;
+      status: AdminWorkStatus;
       work: CatalogWorkInput;
     }
   | {
@@ -773,13 +776,13 @@ function decodeAdminBookTargets(
   return targets;
 }
 
-function adminVisibility(
+function adminWorkStatus(
   value: unknown,
   label: string,
   fail: DecodeFailure,
-): AdminWorkVisibility {
-  if (value !== "internal" && value !== "searchable") {
-    fail(`${label} must be internal or searchable.`);
+): AdminWorkStatus {
+  if (value !== "active" && value !== "hidden") {
+    fail(`${label} must be active or hidden.`);
   }
   return value;
 }
@@ -817,11 +820,11 @@ export function decodeAdminCatalogOperation(
     return {type, sourceAuthorId, targetAuthorId};
   }
   if (type === "createWork") {
-    exactKeys(decoded, ["type", "workId", "visibility", "work", "books"], "operation", fail);
+    exactKeys(decoded, ["type", "workId", "status", "work", "books"], "operation", fail);
     return {
       type,
       workId: catalogDocumentId(decoded.workId, "operation.workId", fail),
-      visibility: adminVisibility(decoded.visibility, "operation.visibility", fail),
+      status: adminWorkStatus(decoded.status, "operation.status", fail),
       work: decodeCatalogWorkInput(decoded.work, fail),
       books: decodeAdminBookTargets(decoded.books, "operation.books", fail),
     };
@@ -857,11 +860,11 @@ export function decodeAdminCatalogOperation(
     return {type, sourceWorkIds, targetWorkId};
   }
   if (type === "editWork") {
-    exactKeys(decoded, ["type", "workId", "visibility", "work"], "operation", fail);
+    exactKeys(decoded, ["type", "workId", "status", "work"], "operation", fail);
     return {
       type,
       workId: catalogDocumentId(decoded.workId, "operation.workId", fail),
-      visibility: adminVisibility(decoded.visibility, "operation.visibility", fail),
+      status: adminWorkStatus(decoded.status, "operation.status", fail),
       work: decodeCatalogWorkInput(decoded.work, fail),
     };
   }

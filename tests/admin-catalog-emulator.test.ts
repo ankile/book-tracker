@@ -193,7 +193,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   const createTarget: AdminCatalogOperation = {
     type: 'createWork',
     workId: targetWorkId,
-    visibility: 'searchable',
+    status: 'active',
     work: workInput(`Target Work ${suffix}`, catalogAuthorId),
     books: [],
   };
@@ -201,7 +201,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   await previewAndApply({
     type: 'createWork',
     workId: sourceWorkId,
-    visibility: 'internal',
+    status: 'hidden',
     work: workInput(`Source Work ${suffix}`, catalogAuthorAliasId),
     books: [],
   });
@@ -464,7 +464,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   const editOperation: AdminCatalogOperation = {
     type: 'editWork',
     workId: targetWorkId,
-    visibility: 'searchable',
+    status: 'active',
     work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['The Target Alias']},
   };
   const edit = await previewAndApply(editOperation);
@@ -638,8 +638,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   const directWork = (title: string) => ({
     ...workInput(title, catalogAuthorId),
     titleKeys: [title.toLocaleLowerCase('en-US')],
-    visibility: 'internal',
-    status: 'active',
+    status: 'hidden',
     mergedFrom: [],
     createdAt: now,
     updatedAt: now,
@@ -669,7 +668,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   );
 
   const postDeleteOperation: AdminCatalogOperation = {
-    type: 'editWork', workId: targetWorkId, visibility: 'searchable',
+    type: 'editWork', workId: targetWorkId, status: 'active',
     work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['Post-delete denial']},
   };
   const postDeletePreview = await preview(postDeleteOperation);

@@ -36,14 +36,12 @@ const MAX_LINKED_EDITION_BOOKS = 100;
 const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_AUDIT_BYTES = 700_000;
 
-type Visibility = "internal" | "searchable";
-type WorkStatus = "active" | "merged";
+type WorkStatus = "active" | "merged" | "hidden";
 type MatchMethod = "isbn" | "external-id" | "catalog-choice" |
   "migration" | "admin" | null;
 
 interface WorkData extends CatalogWorkInput {
   titleKeys: string[];
-  visibility: Visibility;
   status: WorkStatus;
   mergedInto?: string;
   mergedFrom: string[];
@@ -168,14 +166,12 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
   if (data === undefined || typeof data.canonicalTitle !== "string" ||
       typeof data.coverUrl !== "string" ||
       (data.fiction !== null && typeof data.fiction !== "boolean") ||
-      (data.visibility !== "internal" && data.visibility !== "searchable") ||
-      (data.status !== "active" && data.status !== "merged")) {
+      (data.status !== "active" && data.status !== "merged" && data.status !== "hidden")) {
     throw new Error(`Invalid work ${snapshot.ref.path}.`);
   }
   assertStoredKeys(data, [
     "canonicalTitle", "alternateTitles", "titleKeys", "authorIds",
-    "coverUrl", "subjects", "fiction", "visibility",
-    "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt",
+    "coverUrl", "subjects", "fiction", "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt",
   ], snapshot.ref.path);
   const mergedInto = data.mergedInto;
   if (mergedInto !== undefined && typeof mergedInto !== "string") {
@@ -193,7 +189,6 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
     coverUrl: data.coverUrl,
     subjects: strings(data.subjects, `${snapshot.ref.path}.subjects`),
     fiction: data.fiction,
-    visibility: data.visibility,
     status: data.status,
     ...(mergedInto === undefined ? {} : {mergedInto}),
     mergedFrom: strings(data.mergedFrom ?? [], `${snapshot.ref.path}.mergedFrom`),
@@ -271,7 +266,7 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
 
 function workInputData(
   work: CatalogWorkInput,
-  visibility: Visibility,
+  status: WorkStatus,
   now: Timestamp,
   existing?: WorkData,
 ): WorkData {
@@ -283,8 +278,7 @@ function workInputData(
   return {
     ...work,
     titleKeys,
-    visibility,
-    status: "active",
+    status,
     mergedFrom: existing?.mergedFrom ?? [],
     ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
@@ -353,7 +347,6 @@ function wireWork(work: WorkData): Record<string, unknown> {
     coverUrl: work.coverUrl,
     subjects: work.subjects,
     fiction: work.fiction,
-    visibility: work.visibility,
     status: work.status,
     mergedInto: work.mergedInto ?? null,
     mergedFrom: work.mergedFrom,
@@ -582,15 +575,15 @@ async function ensureCollectionCapacity(
   if (rows.size + additions > maximum) catalogCapacity(collection, maximum);
 }
 
-async function activeWork(
+async function unmergedWork(
   reader: PlanReader,
   db: Firestore,
   workId: string,
 ): Promise<{snapshot: DocumentSnapshot; work: WorkData}> {
   const snapshot = await one(reader, db.collection("works").doc(workId));
   const work = workFrom(snapshot);
-  if (work.status !== "active") {
-    failedPrecondition("Operation target must be an active work.", "catalog-invariant");
+  if (work.status === "merged") {
+    failedPrecondition("Operation target must not be a merged work.", "catalog-invariant");
   }
   return {snapshot, work};
 }
@@ -639,7 +632,7 @@ async function titleIndexChanges(
           normalizeCatalogTitle(candidate) === titleKey,
         ) ?? work.canonicalTitle,
       titleKey,
-      visibility: work.visibility,
+      status: work.status,
     },
   ]));
   const changes: PlannedChange[] = [];
@@ -733,7 +726,7 @@ async function linkChanges(
   validateTarget = true,
 ): Promise<{changes: PlannedChange[]; versions: AdminCatalogExpected["books"]}> {
   if (target !== null && validateTarget) {
-    const resolved = await activeWork(reader, db, target.workId);
+    const resolved = await unmergedWork(reader, db, target.workId);
     if (target.editionId !== null) {
       const editionSnapshot = await one(
         reader,
@@ -961,8 +954,8 @@ async function planOperation(
     );
     catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
     // Catalog data is public whoever contributed it: any personal book may
-    // seed a searchable work, so no consent check sits here.
-    const work = workInputData(operation.work, operation.visibility, now);
+    // seed a work, so no consent check sits here.
+    const work = workInputData(operation.work, operation.status, now);
     changes.push(change("work", ref, "create", null, wireWork(work), {
       type: "create", data: {...work},
     }));
@@ -995,10 +988,10 @@ async function planOperation(
       }
     }
   } else if (operation.type === "editWork") {
-    const current = await activeWork(reader, db, operation.workId);
+    const current = await unmergedWork(reader, db, operation.workId);
     catalog.push(versionOf("work", current.snapshot));
     catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
-    const next = workInputData(operation.work, operation.visibility, now, current.work);
+    const next = workInputData(operation.work, operation.status, now, current.work);
     changes.push(change(
       "work", current.snapshot.ref, "update", wireWork(current.work), wireWork(next),
       {type: "set", data: {...next}},
@@ -1007,10 +1000,10 @@ async function planOperation(
     changes.push(...indexes.changes);
     catalog.push(...indexes.versions);
   } else if (operation.type === "mergeWorks") {
-    const target = await activeWork(reader, db, operation.targetWorkId);
+    const target = await unmergedWork(reader, db, operation.targetWorkId);
     catalog.push(versionOf("work", target.snapshot));
     const sources = await Promise.all(operation.sourceWorkIds.map((id) =>
-      activeWork(reader, db, id),
+      unmergedWork(reader, db, id),
     ));
     catalog.push(...sources.map(({snapshot}) => versionOf("work", snapshot)));
     const absorbed = [...new Set(sources.flatMap(({snapshot, work}) =>
@@ -1055,7 +1048,7 @@ async function planOperation(
       coverUrl: target.work.coverUrl,
       subjects: target.work.subjects,
       fiction: target.work.fiction,
-    }, target.work.visibility, now, {...target.work, mergedFrom});
+    }, target.work.status, now, {...target.work, mergedFrom});
     nextTarget.mergedFrom = mergedFrom;
     changes.push(change(
       "work", target.snapshot.ref, "update", wireWork(target.work), wireWork(nextTarget),
@@ -1113,7 +1106,7 @@ async function planOperation(
     changes.push(...targetIndexes.changes);
     catalog.push(...targetIndexes.versions);
   } else if (operation.type === "upsertEdition") {
-    const work = await activeWork(reader, db, operation.workId);
+    const work = await unmergedWork(reader, db, operation.workId);
     catalog.push(versionOf("work", work.snapshot));
     const ref = db.collection("editions").doc(operation.editionId);
     const snapshot = await one(reader, ref);
@@ -1429,9 +1422,10 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
   const resolvedWorkId = (workId: string): string | null => {
     const work = workById.get(workId);
     if (work === undefined) return null;
-    if (work.status === "active") return workId;
+    if (work.status !== "merged") return workId;
     if (work.mergedInto === undefined) return null;
-    return workById.get(work.mergedInto)?.status === "active" ? work.mergedInto : null;
+    const target = workById.get(work.mergedInto);
+    return target !== undefined && target.status !== "merged" ? work.mergedInto : null;
   };
   const resolvedCatalogAuthorId = (authorId: string): string | null => {
     const author = catalogAuthorById.get(authorId);
@@ -1696,10 +1690,10 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
   for (const [id, work] of workById) {
     const warnings: string[] = [];
     if (work.status === "merged" &&
-        (work.mergedInto === undefined || workById.get(work.mergedInto)?.status !== "active")) {
+        (work.mergedInto === undefined || (workById.get(work.mergedInto)?.status ?? "merged") === "merged")) {
       warnings.push("broken redirect");
     }
-    if (work.status === "active" && work.mergedFrom.length > 29) {
+    if (work.status !== "merged" && work.mergedFrom.length > 29) {
       warnings.push("too many aliases");
     }
     for (const authorId of work.authorIds) {

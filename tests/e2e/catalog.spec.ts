@@ -196,7 +196,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
         canonicalTitle: 'The Left Hand of Darkness', alternateTitles: [],
         titleKeys: ['left hand of darkness'], authorIds: [leGuinAuthorId],
         coverUrl: 'https://example.test/work-cover.jpg', subjects: ['Science fiction'],
-        fiction: true, visibility: 'searchable', status: 'active', mergedFrom: [],
+        fiction: true, status: 'active', mergedFrom: [],
         createdAt: now, updatedAt: now,
       }),
       db.doc(`editions/${editionId}`).set({
@@ -208,7 +208,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       db.doc(`isbnIndex/${isbn}`).set({workId, editionId}),
       db.doc(`workTitleIndex/${workId}-title`).set({
         workId, title: 'The Left Hand of Darkness', titleKey: 'left hand of darkness',
-        visibility: 'searchable',
+        status: 'active',
       }),
       db.doc(`profiles/${readerUsername}`).set({
         uid: readerUid, givenName: 'Shared', familyName: 'Reader', public: true,
@@ -409,14 +409,14 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.goto('/');
       await expect(page.getByText('Matilda', {exact: true})).toBeVisible();
       // A book that matched nothing seeded the shared catalog itself: a
-      // searchable work by this user, its edition on the ISBN, and the
+      // work by this user, its edition on the ISBN, and the
       // personal book linked to both.
       const matilda = await waitForBookByTitle(db, normalUid, 'Matilda');
       expect(typeof matilda.get('workId')).toBe('string');
       expect(typeof matilda.get('editionId')).toBe('string');
       const createdWork = await db.doc(`works/${matilda.get('workId')}`).get();
       expect(createdWork.get('canonicalTitle')).toBe('Matilda');
-      expect(createdWork.get('visibility')).toBe('searchable');
+      expect(createdWork.get('status')).toBe('active');
       expect(createdWork.get('createdBy')).toBe(normalUid);
       expect((await db.doc('isbnIndex/9780140328721').get()).get('editionId')).toBe(matilda.get('editionId'));
 

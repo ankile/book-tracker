@@ -111,7 +111,6 @@ const catalogWork = (overrides: Record<string, unknown> = {}) => ({
   coverUrl: '',
   subjects: [],
   fiction: true,
-  visibility: 'searchable',
   status: 'active',
   mergedFrom: [],
   createdAt: Timestamp.now(),
@@ -1060,36 +1059,36 @@ test('the audit shape mirror agrees with the rules', async () => {
   assert.deepEqual(disagreements, []);
 });
 
-test('catalog gets expose only active searchable records and never permit listing', async () => {
+test('catalog gets expose only active records and never permit listing', async () => {
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seeded = context.firestore();
-    await setDoc(doc(seeded, 'works', 'searchable'), catalogWork());
-    await setDoc(doc(seeded, 'works', 'internal'), catalogWork({ visibility: 'internal' }));
-    await setDoc(doc(seeded, 'works', 'merged'), catalogWork({ status: 'merged', mergedInto: 'searchable' }));
-    await setDoc(doc(seeded, 'editions', 'searchable-edition'), catalogEdition('searchable'));
-    await setDoc(doc(seeded, 'editions', 'internal-edition'), catalogEdition('internal'));
+    await setDoc(doc(seeded, 'works', 'active'), catalogWork());
+    await setDoc(doc(seeded, 'works', 'hidden'), catalogWork({ status: 'hidden' }));
+    await setDoc(doc(seeded, 'works', 'merged'), catalogWork({ status: 'merged', mergedInto: 'active' }));
+    await setDoc(doc(seeded, 'editions', 'active-edition'), catalogEdition('active'));
+    await setDoc(doc(seeded, 'editions', 'hidden-edition'), catalogEdition('hidden'));
     await setDoc(doc(seeded, 'isbnIndex', '9780306406157'), {
-      workId: 'searchable', editionId: 'searchable-edition',
+      workId: 'active', editionId: 'active-edition',
     });
     await setDoc(doc(seeded, 'workTitleIndex', 'catalog-work'), {
-      workId: 'searchable', title: 'Catalog work', titleKey: 'catalog work',
+      workId: 'active', title: 'Catalog work', titleKey: 'catalog work',
     });
     await setDoc(doc(seeded, 'externalIdIndex', 'external'), {
-      workId: 'searchable', editionId: 'searchable-edition', provider: 'open-library', externalId: 'OL1',
+      workId: 'active', editionId: 'active-edition', provider: 'open-library', externalId: 'OL1',
     });
     await setDoc(doc(seeded, 'sharedWorkOwners', 'projection'), {
-      workId: 'searchable', uid: 'reader', updatedAt: Timestamp.now(),
+      workId: 'active', uid: 'reader', updatedAt: Timestamp.now(),
     });
     await setDoc(doc(seeded, 'functionGlobalQuotas', 'catalogWorkReaders'), {
       count: 1, windowStartedAt: Timestamp.now(),
     });
   });
   const db = environment.authenticatedContext('catalog-reader').firestore();
-  await assertSucceeds(getDoc(doc(db, 'works', 'searchable')));
-  await assertSucceeds(getDoc(doc(db, 'editions', 'searchable-edition')));
-  await assertFails(getDoc(doc(db, 'works', 'internal')));
+  await assertSucceeds(getDoc(doc(db, 'works', 'active')));
+  await assertSucceeds(getDoc(doc(db, 'editions', 'active-edition')));
+  await assertFails(getDoc(doc(db, 'works', 'hidden')));
   await assertFails(getDoc(doc(db, 'works', 'merged')));
-  await assertFails(getDoc(doc(db, 'editions', 'internal-edition')));
+  await assertFails(getDoc(doc(db, 'editions', 'hidden-edition')));
   await assertFails(getDocs(collection(db, 'works')));
   await assertFails(getDocs(collection(db, 'editions')));
   await assertFails(getDoc(doc(db, 'isbnIndex', '9780306406157')));
@@ -1098,15 +1097,15 @@ test('catalog gets expose only active searchable records and never permit listin
   await assertFails(getDoc(doc(db, 'sharedWorkOwners', 'projection')));
   await assertFails(getDoc(doc(db, 'functionGlobalQuotas', 'catalogWorkReaders')));
   await assertFails(setDoc(doc(db, 'sharedWorkOwners', 'forged'), {
-    workId: 'searchable', uid: 'catalog-reader', updatedAt: Timestamp.now(),
+    workId: 'active', uid: 'catalog-reader', updatedAt: Timestamp.now(),
   }));
   await assertFails(setDoc(doc(db, 'functionGlobalQuotas', 'catalogWorkReaders'), {
     count: 0, windowStartedAt: Timestamp.now(),
   }));
-  await assertFails(getDoc(doc(environment.unauthenticatedContext().firestore(), 'works', 'searchable')));
+  await assertFails(getDoc(doc(environment.unauthenticatedContext().firestore(), 'works', 'active')));
 });
 
-test('owners can link only to active searchable works and matching editions', async () => {
+test('owners can link only to active works and matching editions', async () => {
   const uid = 'catalog-link-owner';
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seeded = context.firestore();
@@ -1114,7 +1113,7 @@ test('owners can link only to active searchable works and matching editions', as
       authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
     }));
     await setDoc(doc(seeded, 'works', 'other'), catalogWork({ canonicalTitle: 'Other' }));
-    await setDoc(doc(seeded, 'works', 'internal'), catalogWork({ visibility: 'internal' }));
+    await setDoc(doc(seeded, 'works', 'hidden'), catalogWork({ status: 'hidden' }));
     await setDoc(doc(seeded, 'works', 'merged'), catalogWork({ status: 'merged', mergedInto: 'target' }));
     await setDoc(doc(seeded, 'editions', 'target-edition'), catalogEdition('target'));
     await setDoc(doc(seeded, 'editions', 'other-edition'), catalogEdition('other'));
@@ -1134,9 +1133,9 @@ test('owners can link only to active searchable works and matching editions', as
     ...creatableBook(),
     workId: 'target', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
   }));
-  await assertFails(setDoc(doc(books, 'internal'), {
+  await assertFails(setDoc(doc(books, 'hidden'), {
     ...creatableBook(),
-    workId: 'internal', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+    workId: 'hidden', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
   }));
   await assertFails(setDoc(doc(books, 'merged'), {
     ...creatableBook(),

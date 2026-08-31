@@ -107,7 +107,6 @@ function validWork(title: string, titleKey: string, authorIds: string[]) {
     coverUrl: '',
     subjects: [],
     fiction: null,
-    visibility: 'searchable',
     status: 'active',
     mergedFrom: [],
     createdAt: now,
@@ -244,7 +243,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       workId: conflictWorkId,
       title: 'A Different Book',
       titleKey: conflictTitleKey,
-      visibility: 'searchable',
+      status: 'active',
     }),
   ])
 

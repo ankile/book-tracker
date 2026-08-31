@@ -245,7 +245,6 @@ function activeWork(title: string, overrides: Row = {}): Row {
     coverUrl: "",
     subjects: [],
     fiction: true,
-    visibility: "searchable",
     status: "active",
     mergedFrom: [],
     createdAt: now,
@@ -279,7 +278,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
   const operation = {
     type: "createWork",
     workId: "new-work",
-    visibility: "internal",
+    status: "hidden",
     work: {
       canonicalTitle: "The New Work",
       alternateTitles: [],
@@ -337,7 +336,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
   const create = {
     type: "createWork",
     workId: "over-capacity",
-    visibility: "internal",
+    status: "hidden",
     work: {
       canonicalTitle: "Over Capacity",
       alternateTitles: [],
@@ -357,7 +356,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
   const repair = {
     type: "editWork",
     workId: "work-0",
-    visibility: "searchable",
+    status: "active",
     work: {
       canonicalTitle: "Repaired Work",
       alternateTitles: [],
@@ -439,14 +438,14 @@ test("non-null admin links require a live self-owned book while unlink repairs r
 });
 
 // Catalog data is public whoever contributed it: any reader's book may seed
-// a searchable work, with no sharing consent involved. Private *work*
-// fields are still refused — the shape is the boundary, not the source.
-test("any personal book seeds a searchable work; private work fields are rejected", async (t) => {
+// a work and no sharing consent is involved. The stored shape is still the
+// boundary: a work document carrying an unsupported field is refused.
+test("any personal book seeds a work; unsupported stored work fields are rejected", async (t) => {
   const store = installCatalogStore(t);
-  store.write(store.ref("users/private-reader"), {uid: "private-reader"});
-  store.write(store.ref("users/private-reader/books/private-book"), {
-    owner: store.ref("users/private-reader"),
-    title: "Private",
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/seed-book"), {
+    owner: store.ref("users/reader"),
+    title: "Seed",
     workId: null,
     editionId: null,
     matchMethod: null,
@@ -454,38 +453,38 @@ test("any personal book seeds a searchable work; private work fields are rejecte
   });
   const create = {
     type: "createWork",
-    workId: "private-derived-work",
-    visibility: "searchable",
+    workId: "reader-derived-work",
+    status: "active",
     work: {
-      canonicalTitle: "Private Derived Work",
+      canonicalTitle: "Reader Derived Work",
       alternateTitles: [],
       authorIds: ["ada-author"],
       coverUrl: "",
       subjects: [],
       fiction: true,
     },
-    books: [{uid: "private-reader", bookId: "private-book"}],
+    books: [{uid: "reader", bookId: "seed-book"}],
   };
   const created = await deployed.admin.catalogpreview.run({operation: create}, recentAdmin());
   assert.equal(created.changes.some(({kind}) => kind === "work"), true);
   assert.equal(created.expected.books.length, 1);
 
-  store.write(store.ref("works/internal-work"), activeWork("Internal Work", {
-    visibility: "internal",
-    sourceUid: "must-never-be-published",
+  store.write(store.ref("works/hidden-work"), activeWork("Hidden Work", {
+    status: "hidden",
+    unsupportedField: "rejected by assertStoredKeys",
   }));
   store.write(store.ref(`users/${adminUid}/books/operator-book`), {
-    workId: "internal-work",
+    workId: "hidden-work",
     editionId: null,
     matchMethod: "admin",
     linkedAt: Timestamp.fromMillis(100),
   });
   const edit = {
     type: "editWork",
-    workId: "internal-work",
-    visibility: "searchable",
+    workId: "hidden-work",
+    status: "active",
     work: {
-      canonicalTitle: "Internal Work",
+      canonicalTitle: "Hidden Work",
       alternateTitles: [],
       authorIds: ["ada-author"],
       coverUrl: "",
@@ -497,7 +496,7 @@ test("any personal book seeds a searchable work; private work fields are rejecte
     deployed.admin.catalogpreview.run({operation: edit}, recentAdmin()),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "catalog-invariant" &&
-      messageMatches(error, /unsupported field sourceUid/),
+      messageMatches(error, /unsupported field unsupportedField/),
   );
 });
 
@@ -574,16 +573,16 @@ test("moving an edition atomically relinks its books and identifier indexes", as
   assert.equal(store.rows.get(bookRef.path)?.title, "Keep this title");
 });
 
-// Moving an edition between works, internal or searchable, needs no
-// consent: bibliographic data is public whoever contributed it.
-test("moving an edition out of an internal work needs no provenance", async (t) => {
+// Moving an edition between works, hidden or active, needs no consent:
+// bibliographic data is public whoever contributed it.
+test("moving an edition out of a hidden work needs no consent", async (t) => {
   const store = installCatalogStore(t);
-  store.write(store.ref("works/internal-work"), activeWork("Internal Work", {visibility: "internal"}));
+  store.write(store.ref("works/hidden-work"), activeWork("Hidden Work", {status: "hidden"}));
   store.write(store.ref("works/public-work"), activeWork("Public Work"));
-  store.write(store.ref("editions/private-edition"), edition("internal-work"));
+  store.write(store.ref("editions/moved-edition"), edition("hidden-work"));
   const operation = {
     type: "upsertEdition",
-    editionId: "private-edition",
+    editionId: "moved-edition",
     workId: "public-work",
     edition: {
       isbn13: null,
@@ -600,11 +599,11 @@ test("moving an edition out of an internal work needs no provenance", async (t) 
   };
   const unlinked = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
   assert.equal(unlinked.expected.books.length, 0);
-  store.write(store.ref("users/private-reader"), {uid: "private-reader"});
-  store.write(store.ref("users/private-reader/books/seed"), {
-    owner: store.ref("users/private-reader"),
-    workId: "internal-work",
-    editionId: "private-edition",
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/seed"), {
+    owner: store.ref("users/reader"),
+    workId: "hidden-work",
+    editionId: "moved-edition",
     matchMethod: "catalog-choice",
     linkedAt: Timestamp.fromMillis(100),
   });
@@ -644,25 +643,29 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
   );
 });
 
-test("internal sources merge into a searchable target without provenance", async (t) => {
+test("hidden sources merge into an active target and redirect to it", async (t) => {
   const store = installCatalogStore(t);
   store.write(store.ref("works/target"), activeWork("Target"));
-  store.write(store.ref("works/linked"), activeWork("Linked", {visibility: "internal"}));
-  store.write(store.ref("works/orphan"), activeWork("Orphan", {visibility: "internal"}));
-  store.write(store.ref("users/private"), {uid: "private"});
-  store.write(store.ref("users/private/books/private"), {
-    owner: store.ref("users/private"),
+  store.write(store.ref("works/linked"), activeWork("Linked", {status: "hidden"}));
+  store.write(store.ref("works/orphan"), activeWork("Orphan", {status: "hidden"}));
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/linked-copy"), {
+    owner: store.ref("users/reader"),
     workId: "linked", editionId: null, matchMethod: "isbn",
     linkedAt: Timestamp.fromMillis(1),
   });
   const preview = await deployed.admin.catalogpreview.run({operation: {
     type: "mergeWorks", sourceWorkIds: ["linked", "orphan"], targetWorkId: "target",
   }}, recentAdmin());
-  assert.deepEqual(
-    preview.changes.filter(({kind, action}) => kind === "work" && action === "update")
-      .map((change) => change.after?.mergedInto ?? change.after?.mergedFrom).length,
-    3,
-  );
+  const works = preview.changes
+    .filter(({kind, action}) => kind === "work" && action === "update")
+    .map((change) => [change.after?.canonicalTitle, change.after?.status, change.after?.mergedInto ?? null, change.after?.mergedFrom])
+    .sort();
+  assert.deepEqual(works, [
+    ["Linked", "merged", "target", []],
+    ["Orphan", "merged", "target", []],
+    ["Target", "active", null, ["linked", "orphan"]],
+  ]);
 });
 
 test("merging works keeps old personal links one-hop while moving editions and indexes", async (t) => {

@@ -123,8 +123,7 @@ service cloud.firestore {
     // active names and retain merged redirects for cached book references.
     match /works/{workId} {
       allow get: if request.auth != null
-                 && resource.data.status == 'active'
-                 && resource.data.visibility == 'searchable';
+                 && resource.data.status == 'active';
     }
 
     match /catalogAuthors/{authorId} {
@@ -134,8 +133,7 @@ service cloud.firestore {
     match /editions/{editionId} {
       allow get: if request.auth != null
                  && resource.data.workId is string
-                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.status == 'active'
-                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.visibility == 'searchable';
+                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.status == 'active';
     }
 
     match /users/{userId}/timerLifecycle/{lifecycleId} {
@@ -280,9 +278,9 @@ service cloud.firestore {
                  && exists(/databases/$(database)/documents/catalogAuthors/$(ids[index])));
     }
 
-    // A link changed by the browser may target only a public, active work.
-    // Admin and migration links can point to internal works because Admin
-    // SDK writes bypass Rules. Later metadata edits skip these reads while
+    // A link changed by the browser may target only an active work. Links
+    // to a hidden work (the admin soft delete) survive because Admin SDK
+    // writes bypass Rules; the browser just cannot create new ones. Later metadata edits skip these reads while
     // the four link fields remain unchanged, which keeps timer and ordinary
     // book edits inside the Rules expression and document-access budgets.
     function validBookCatalogLinkTransition() {
@@ -306,7 +304,6 @@ service cloud.firestore {
                  && method in ['isbn', 'external-id', 'catalog-choice']
                  && linkedAt is timestamp
                  && get(/databases/$(database)/documents/works/$(workId)).data.status == 'active'
-                 && get(/databases/$(database)/documents/works/$(workId)).data.visibility == 'searchable'
                  && (editionId == null
                      || (editionId is string
                          && editionId.matches('[^/]{1,100}')

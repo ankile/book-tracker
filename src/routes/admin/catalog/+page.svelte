@@ -15,7 +15,6 @@
     CatalogEditionInput,
     CatalogWorkInput,
     EditionFormat,
-    WorkVisibility,
   } from '$lib/interfaces/catalog.ts';
   import {
     classifyAdminCatalogFailure,
@@ -58,7 +57,7 @@
   });
 
   let workId = $state('');
-  let workVisibility = $state<WorkVisibility>('searchable');
+  let workStatus = $state<'active' | 'hidden'>('active');
   let canonicalTitle = $state('');
   let alternateTitles = $state('');
   let workAuthorIds = $state('');
@@ -97,7 +96,7 @@
   let repointEditionId = $state('');
 
   const draftFingerprint = $derived(JSON.stringify([
-    operationType, workId, workVisibility, canonicalTitle, alternateTitles,
+    operationType, workId, workStatus, canonicalTitle, alternateTitles,
     workAuthorIds, workCoverUrl, subjects, fiction, bookTargets,
     authorId, authorCanonicalName, authorAlternateNames, authorSortName,
     authorKind, mergeSourceAuthorId, mergeTargetAuthorId,
@@ -260,7 +259,7 @@
       return {
         type: operationType,
         workId: requireId(workId, 'Work ID'),
-        visibility: workVisibility,
+        status: workStatus,
         work: workInput(),
         books: parseAdminBookTargets(bookTargets),
       };
@@ -293,7 +292,7 @@
       return {
         type: operationType,
         workId: requireId(workId, 'Work ID'),
-        visibility: workVisibility,
+        status: workStatus,
         work: workInput(),
       };
     }
@@ -462,7 +461,7 @@
     if (selectedWork === null) return;
     operationType = 'editWork';
     workId = selectedWork.workId;
-    workVisibility = selectedWork.visibility;
+    workStatus = selectedWork.status === 'hidden' ? 'hidden' : 'active';
     canonicalTitle = selectedWork.canonicalTitle;
     alternateTitles = lines(selectedWork.alternateTitles);
     workAuthorIds = lines(selectedWork.authorIds);
@@ -544,7 +543,7 @@
       <h2 id="works-heading">Works <span>{scan.works.length}/{scan.limits.works}</span></h2>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Work</th><th>Created</th><th>Status</th><th>Visibility</th><th>Editions</th><th>{scan.bookCountsComplete ? 'Linked books' : 'Linked books loaded'}</th><th>Warnings</th><th></th></tr></thead>
+          <thead><tr><th>Work</th><th>Created</th><th>Status</th><th>Editions</th><th>{scan.bookCountsComplete ? 'Linked books' : 'Linked books loaded'}</th><th>Warnings</th><th></th></tr></thead>
           <tbody>
             <!-- Newest first: works users created through the add-book flow
                  land at the top for review (edit, merge, hide). -->
@@ -552,7 +551,7 @@
               <tr>
                 <td><strong>{work.canonicalTitle}</strong><small>{catalogAuthorNames(work.authorIds)} · {work.workId}</small></td>
                 <td>{new Date(work.createdAt).toISOString().slice(0, 10)}<small>{work.createdBy === null ? 'migration / admin' : `user ${work.createdBy.slice(0, 8)}…`}</small></td>
-                <td>{work.status}</td><td>{work.visibility}</td><td>{work.editionCount}</td><td>{work.linkedBookCount}</td>
+                <td>{work.status}</td><td>{work.editionCount}</td><td>{work.linkedBookCount}</td>
                 <td>{work.warnings.length === 0 ? '—' : work.warnings.join(' · ')}</td>
                 <td><button type="button" onclick={() => inspectWork(work.workId)}>Inspect</button></td>
               </tr>
@@ -632,7 +631,7 @@
           <button type="button" onclick={editSelectedWork}>Edit this work</button>
         </div>
         <dl class="facts">
-          <div><dt>Status</dt><dd>{selectedWork.status}</dd></div><div><dt>Visibility</dt><dd>{selectedWork.visibility}</dd></div>
+          <div><dt>Status</dt><dd>{selectedWork.status}</dd></div>
           <div><dt>Aliases</dt><dd>{selectedWork.alternateTitles.join(' · ') || '—'}</dd></div><div><dt>Merged IDs</dt><dd>{selectedWork.mergedFrom.join(', ') || '—'}</dd></div>
         </dl>
         <h3>Editions</h3>
@@ -680,7 +679,7 @@
     {:else if operationType === 'createWork' || operationType === 'editWork'}
       <div class="form-grid">
         <label>Work ID<input bind:value={workId} autocomplete="off" /></label>
-        <label>Visibility<select bind:value={workVisibility}><option value="searchable">Searchable</option><option value="internal">Hidden from search</option></select></label>
+        <label>Status<select bind:value={workStatus}><option value="active">Active</option><option value="hidden">Hidden (soft delete: kept, not searchable)</option></select></label>
         <label class="wide">Canonical title<input bind:value={canonicalTitle} /></label>
         <label>Catalog author IDs, one per line<textarea bind:value={workAuthorIds}></textarea></label>
         <label>Alternate titles, one per line<textarea bind:value={alternateTitles}></textarea></label>

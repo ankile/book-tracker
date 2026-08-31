@@ -115,7 +115,7 @@ test('duplicate warnings include books linked through merged aliases', () => {
   assert.deepEqual(linkedBooksForWork(books, work, 'alias').map((book) => book.id), ['canonical']);
 });
 
-test('only owner-selected or migrated searchable links open a work page', () => {
+test('only owner-selected or migrated links open a work page', () => {
   assert.equal(catalogWorkHref({workId: 'work/id', matchMethod: 'catalog-choice'}), '/books/work%2Fid');
   assert.equal(catalogWorkHref({workId: 'work', matchMethod: 'isbn'}), '/books/work');
   assert.equal(catalogWorkHref({workId: 'work', matchMethod: 'migration'}), '/books/work');

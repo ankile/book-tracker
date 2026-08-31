@@ -15,7 +15,7 @@ import {
 
 const work = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
-  coverUrl: '', subjects: [], fiction: null, visibility: 'internal', status: 'active',
+  coverUrl: '', subjects: [], fiction: null, status: 'hidden',
   mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900, updatedAt: 1000,
   editionCount: 1, linkedBookCount: 1, warnings: [],
 };

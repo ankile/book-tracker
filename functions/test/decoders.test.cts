@@ -129,7 +129,7 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
     },
     {type: "mergeAuthors", sourceAuthorId: "source-author", targetAuthorId: "target-author"},
     {
-      type: "createWork", workId: "new-work", visibility: "internal", work,
+      type: "createWork", workId: "new-work", status: "hidden", work,
       books: [{uid: "owner", bookId: "book"}],
     },
     {
@@ -137,7 +137,7 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
       target: {workId: "work", editionId: null},
     },
     {type: "mergeWorks", sourceWorkIds: ["source"], targetWorkId: "target"},
-    {type: "editWork", workId: "work", visibility: "searchable", work},
+    {type: "editWork", workId: "work", status: "active", work},
     {type: "upsertEdition", editionId: "edition", workId: "work", edition},
     {type: "repointIsbn", isbn13: "9780000000002", editionId: "edition"},
   ];

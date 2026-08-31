@@ -14,9 +14,9 @@ import type {
   AdminCatalogPreviewResponse,
   AdminCatalogScanResponse,
   AdminCatalogWorkRow,
+  CatalogAuthorStatus,
   CatalogMatchMethod,
   WorkStatus,
-  WorkVisibility,
 } from '../interfaces/catalog.ts';
 import {
   boolean,
@@ -50,14 +50,14 @@ function array<T>(value: unknown, context: string, decode: (entry: unknown, cont
   return value.map((entry, index) => decode(entry, `${context}[${index}]`));
 }
 
-function workVisibility(value: unknown, context: string): WorkVisibility {
-  if (value !== 'internal' && value !== 'searchable') {
-    throw new TypeError(`${context}: expected internal or searchable`);
+function workStatus(value: unknown, context: string): WorkStatus {
+  if (value !== 'active' && value !== 'merged' && value !== 'hidden') {
+    throw new TypeError(`${context}: expected active, merged or hidden`);
   }
   return value;
 }
 
-function workStatus(value: unknown, context: string): WorkStatus {
+function authorStatus(value: unknown, context: string): CatalogAuthorStatus {
   if (value !== 'active' && value !== 'merged') {
     throw new TypeError(`${context}: expected active or merged`);
   }
@@ -81,7 +81,7 @@ function decodeAuthor(value: unknown, context: string): AdminCatalogAuthorRow {
     nameKeys: strings(data.nameKeys, `${context}.nameKeys`),
     sortName: nonEmptyString(data.sortName, `${context}.sortName`),
     kind: data.kind,
-    status: workStatus(data.status, `${context}.status`),
+    status: authorStatus(data.status, `${context}.status`),
     mergedInto: nullableString(data.mergedInto, `${context}.mergedInto`),
     mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
     updatedAt: finiteNumber(data.updatedAt, `${context}.updatedAt`),
@@ -142,7 +142,7 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
   const data = record(value, context);
   exactKeys(data, [
     'workId', 'canonicalTitle', 'alternateTitles', 'authorIds', 'coverUrl', 'subjects',
-    'fiction', 'visibility', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt',
+    'fiction', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt',
     'updatedAt', 'editionCount', 'linkedBookCount', 'warnings',
   ], context);
   return {
@@ -153,7 +153,6 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
     coverUrl: string(data.coverUrl, `${context}.coverUrl`),
     subjects: strings(data.subjects, `${context}.subjects`),
     fiction: nullableBoolean(data.fiction, `${context}.fiction`),
-    visibility: workVisibility(data.visibility, `${context}.visibility`),
     status: workStatus(data.status, `${context}.status`),
     mergedInto: nullableString(data.mergedInto, `${context}.mergedInto`),
     mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
