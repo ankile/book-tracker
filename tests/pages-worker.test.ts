@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {afterEach, beforeEach, test} from 'node:test';
 
 import worker, {
+  AUTH_ACTION_ORIGIN,
   BASE_HEADERS,
   RENDERED_EDGE_CACHE,
   IMMUTABLE_CACHE_CONTROL,
@@ -9,6 +10,7 @@ import worker, {
   PROFILE_CACHE_CONTROL,
   SITEMAP_CACHE_CONTROL,
   cacheControlFor,
+  isAuthActionPath,
   isRenderedPath,
 } from '../cloudflare/worker.ts';
 
@@ -205,6 +207,35 @@ test('an unreachable renderer fails closed with a 503, never the shell', async (
   assert.match(await response.text(), /unavailable/);
   assertPolicy(response, PROFILE_CACHE_CONTROL);
   assert.equal(assetCalls.length, 0);
+});
+
+test('Firebase email-action links on our domain hop to the Hosting domain with the query string intact', async () => {
+  // Exactly what Auth puts in a verification email, with the action URL set
+  // to book.ankile.com — every parameter must reach the hosted page.
+  const query = '?mode=verifyEmail&oobCode=_fFeVG80o3e7X-nky&apiKey=AIzaSyExample&continueUrl=https%3A%2F%2Fbook.ankile.com%2F&lang=en';
+  const response = await run(`/__/auth/action${query}`);
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get('Location'), `${AUTH_ACTION_ORIGIN}/__/auth/action${query}`);
+  assert.equal(AUTH_ACTION_ORIGIN, 'https://book-tracker-d8f24.web.app');
+  // A single-use code must never be served from a cache, on either side.
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  for (const [name, value] of Object.entries(BASE_HEADERS)) {
+    if (name !== 'Cache-Control') assert.equal(response.headers.get(name), value, name);
+  }
+  assert.equal(assetCalls.length, 0);
+  assert.equal(originCalls.length, 0);
+
+  // The whole reserved Auth namespace hops (the SDK handler lives there too),
+  // but nothing that merely resembles it.
+  assert.equal((await run('/__/auth/handler?apiKey=x')).status, 302);
+  assert.equal(isAuthActionPath('/__/auth/action'), true);
+  assert.equal(isAuthActionPath('/__/auth/'), true);
+  assert.equal(isAuthActionPath('/__/authx'), false);
+  assert.equal(isAuthActionPath('/__/auth'), false);
+  assert.equal(isAuthActionPath('/auth/action'), false);
+  const shell = await run('/__/authx');
+  assert.equal(shell.status, 200);
+  assert.equal(assetCalls.length, 1);
 });
 
 test('rendered responses are edge-cached for the old CDN lifetimes and errors never are', () => {
