@@ -104,20 +104,21 @@ The shared catalog connects personal books without replacing them. A Work is
 the common intellectual work and references shared author entities. An Edition
 is a publication of that Work and can carry its own identifier, title, cover,
 page-count hint, publisher, date, language, format, and translators. Work-level
-title, authors, cover, subjects, tags, and fiction classification provide
+title, authors, cover, subjects, and fiction classification provide
 fallback metadata.
 
 Selecting a suggestion fills only empty personal fields. The personal book
 remains authoritative for tracking and may use a different page count or title,
-or remain unlinked. Verified accounts can resolve an existing shared author or
-request creation of a missing one; Works and Editions are curated through the
-restricted catalog page. Reader comparisons on `/books/[workId]` include only
-records whose owners enabled book sharing through a public profile.
+or remain unlinked. Verified accounts create what the catalog is missing: when
+a search finds nothing, the app creates the Work and Edition, and resolves or
+creates the shared authors it needs. Bibliographic records are public whoever
+added them; operators curate them afterwards through the restricted catalog
+page. Reader comparisons on `/books/[workId]` include only records whose owners
+enabled book sharing through a public profile.
 
-The migration and rollout boundary is documented in
-[MIGRATIONS.md](MIGRATIONS.md#shared-catalog-rollout). The complete product and
-data-model plan is in
-[ideas/cross-user-book-connections.md](ideas/cross-user-book-connections.md).
+The collections, statuses, consent boundary, and admin operations are
+documented in [docs/catalog.md](docs/catalog.md). The migration and rollout
+boundary is in [MIGRATIONS.md](MIGRATIONS.md#shared-catalog-rollout).
 
 ## Requirements
 

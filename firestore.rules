@@ -112,7 +112,9 @@ service cloud.firestore {
     // that tab degrades to stale author names rather than a listener error;
     // writes are gone — the migration has moved every reference to
     // catalogAuthors, and a book written by that old bundle is refused by
-    // validBookAuthors. Remove this block once the rollout is verified.
+    // validBookAuthors. The block and the documents it guards stay until the
+    // owner explicitly asks for the legacy per-user author documents to be
+    // moved or removed; nothing here schedules their deletion.
     match /users/{userId}/authors/{authorId} {
       allow read: if request.auth != null && userId == request.auth.uid;
     }

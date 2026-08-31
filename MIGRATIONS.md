@@ -105,8 +105,8 @@ compatibility sequence. If they do not, stop and add that sequence before
 touching production. Do not reuse a completed rollout sequence from an older
 migration.
 
-Hosting and public profile rendering remain one coupled release artifact. Do
-not deploy Hosting alone during a migration.
+The client site and the public profile renderer remain one coupled release
+artifact. Do not deploy the site alone during a migration.
 
 ### 5. Run the production migration
 
@@ -143,7 +143,7 @@ Do not use it for an ordinary release reversal.
 If a migration partially applies, stop new writes through the private incident
 procedure and determine whether the idempotent migration can safely resume.
 Use a purpose-built repair migration when data written by newer code cannot be
-understood by older code. Never roll back only one member of a coupled Hosting
+understood by older code. Never roll back only one member of a coupled site
 and renderer release.
 
 ## Script conventions
@@ -211,36 +211,47 @@ name/kind pair together while normalizing, sorting, and deduplicating, and
 rejects omitted kinds or conflicting classifications.
 
 The release is not additive at the Rules layer — the personal author
-collection loses its write rules and every book write must reference
-`catalogAuthors` — so the order below keeps the deployed client and the
-deployed Rules compatible at every step, with the migration in the middle:
+collection loses its write rules and every book write must reference the
+shared author catalog — and the client is a separate deploy artifact from
+Rules and the backend. The order below is Rules and backend, then the
+migration, then the client:
 
-1. deploy the backend only (`functions` and `firestore:indexes`): the new
-   callables and projection workers are unused until the client ships, the
-   migration needs nothing from them, and the collection-group indexes must
-   exist before any admin merge;
+1. deploy Rules, indexes and the backend together, before the migration
+   runs. The new Rules are a superset of the stored book shape: they
+   allowlist the four catalog link fields the migration adds, which the
+   previous Rules reject on a book's next edit — run the migration first and
+   every migrated book is frozen for its owner until the deploy lands. The
+   composite and collection-group indexes must exist before any curation
+   merge, and the new callables and projection triggers are simply unused
+   until the client ships. The cost of this order is stated in step 2;
 2. run the standard snapshot, dry-run, apply-twice, and audit loop with the
-   exact reviewed manifest while the previous Rules are still deployed. The
-   migration writes through the Admin SDK, so Rules do not constrain it.
-   Do not use the app between the snapshot and step 3: the migration is
-   only atomic against data nothing else is writing. Run
-   `migrate-finished-at.ts` (dry run, then `--apply`) in the same window:
-   the new client stamps `finishedAt` on every book it finishes, and the
-   backfill gives every already-finished book its inferred date. A
-   client still running the previous bundle keeps working during this step:
-   it reads its retained per-user author documents, and a book it writes with
-   a per-user author is picked up by the re-run in step 4;
-3. deploy the client, Rules and Functions together (`firebase deploy`, one
-   Hosting release). From this point a browser tab still holding the
-   previous bundle can read its per-user authors but cannot create one, so
-   an add/edit in that tab fails until it reloads; the service worker
-   installs the new bundle on the next navigation. Tell users to reload if a
-   save is refused;
+   exact reviewed manifest. Pass `--expect-overlap-groups=N` with the number
+   the reviewed dry-run printed, so a data change between review and apply
+   is a refusal rather than a different write. The migration writes through
+   the Admin SDK, so Rules do not constrain it. Do not use the app between
+   the snapshot and step 3: the migration is only atomic against data
+   nothing else is writing. Run `migrate-finished-at.ts` (dry run, then
+   `--apply`) in the same window: the new client stamps `finishedAt` on
+   every book it finishes, and the backfill gives every already-finished
+   book its inferred date. A browser tab still holding the pre-catalog
+   bundle is degraded from step 1 onward, not intact: it reads its retained
+   per-user author documents and can still record reading progress, but an
+   add or edit that writes a per-user author is refused until it reloads.
+   Editing is effectively down for un-reloaded tabs during this window;
+3. deploy the client with `npm run pages:deploy`. Rules and Functions went
+   out in step 1, so nothing else ships here; the service worker installs the
+   new bundle on the next navigation. Tell users to reload if a save was
+   refused;
 4. re-run the dry run; apply again only if step 2's window produced new
    personal-author references (the apply is idempotent and prints them as
    REVIEW lines otherwise), then audit;
 5. verify catalog suggestions, personal-book edits, sharing convergence, Work
    reader summaries, and restricted catalog curation.
+
+The two deploy commands are `firebase deploy --only
+firestore:rules,firestore:indexes,functions` for step 1 and `npm run
+pages:deploy` for step 3. They are never one command: the client is served
+from a different platform than Rules and the backend.
 
 Legacy per-user author documents and the read-only
 `users/{userId}/authors` compatibility block stay exactly as they are after

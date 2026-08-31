@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   deterministicCatalogId,
+  deterministicExternalIndexId,
+  deterministicSharedWorkOwnerId,
   deterministicTitleIndexId,
   planCrossUserCatalog,
   resolveMigrationAuthors,
@@ -14,7 +17,6 @@ const author = (id: string, name: string): MigrationAuthor => ({ id, name, kind:
 const book = (path: string, overrides: Partial<MigrationBook> = {}): MigrationBook => ({
   path,
   uid: path.split('/')[1],
-  bookId: path.split('/')[3],
   title: 'The Left Hand of Darkness',
   isbn: '9780441478125',
   authorIds: ['ursula'],
@@ -40,7 +42,6 @@ test('ISBN-first grouping links punctuation variants and preserves one suggested
   assert.equal(plan.ambiguities.length, 0)
   assert.equal(plan.groups.length, 1)
   assert.deepEqual(plan.groups[0].isbns, ['9780441478125'])
-  assert.deepEqual(plan.groups[0].seedIsbns, ['9780441478125'])
   assert.equal(plan.groups[0].candidates.length, 2)
   assert.equal(plan.groups[0].editionIds['9780441478125'], deterministicCatalogId('edition', `${plan.groups[0].workId}\0${'9780441478125'}`))
 })
@@ -49,13 +50,13 @@ test('every copy contributes its edition; a reviewed group still pins the canoni
   const authors = new Map([['ursula', author('ursula', 'Ursula K. Le Guin')]])
   const plan = planCrossUserCatalog([
     book('users/a/books/shared', {isbn: '', title: 'The Left Hand of Darkness'}),
-    book('users/b/books/private', {
+    book('users/b/books/second', {
       isbn: '9780441478125',
-      title: 'Private shelf label',
+      title: 'Second shelf label',
     }),
   ], authors, [{
-    id: 'reviewed-private-link',
-    bookPaths: ['users/a/books/shared', 'users/b/books/private'],
+    id: 'reviewed-second-link',
+    bookPaths: ['users/a/books/shared', 'users/b/books/second'],
     canonicalTitle: 'The Left Hand of Darkness',
     authorNames: ['Ursula K. Le Guin'],
     authorKinds: ['person'],
@@ -63,7 +64,6 @@ test('every copy contributes its edition; a reviewed group still pins the canoni
 
   assert.equal(plan.groups.length, 1)
   assert.deepEqual(plan.groups[0].isbns, ['9780441478125'])
-  assert.deepEqual(plan.groups[0].seedIsbns, ['9780441478125'])
   assert.equal(plan.groups[0].canonicalTitle, 'The Left Hand of Darkness')
 })
 
@@ -384,4 +384,84 @@ test('an invalid reviewed manifest assignment remains a review finding', () => {
   }])
 
   assert.equal(plan.ambiguities[0].type, 'invalid-reviewed-group')
+})
+
+// Four of these ids are minted on both sides of the wire: the backend
+// (functions/src/catalog.ts, catalogProjection.ts) and these migration and
+// audit scripts each hash the same inputs. The fixture is the contract
+// between the two hand-written copies; the functions-side suite asserts the
+// same rows.
+type CatalogIdCase = {
+  kind: string
+  input: Record<string, string>
+  expectedId: string
+}
+
+const catalogIdCases: CatalogIdCase[] = JSON.parse(
+  readFileSync(new URL('../test-fixtures/catalog-ids.json', import.meta.url), 'utf8'),
+)
+
+test('deterministic catalog ids match the shared fixture', () => {
+  assert.equal(catalogIdCases.length > 0, true)
+  const kinds = new Set<string>()
+  for (const {kind, input, expectedId} of catalogIdCases) {
+    kinds.add(kind)
+    const actual =
+      kind === 'catalog-author' ? deterministicCatalogId('author', input.nameKey)
+      : kind === 'work-title-index' ? deterministicTitleIndexId(input.workId, input.titleKey)
+      : kind === 'shared-work-owner' ? deterministicSharedWorkOwnerId(input.workId, input.uid)
+      : kind === 'external-id-index' ? deterministicExternalIndexId(input.provider, input.externalId)
+      : kind === 'migration-work' ? deterministicCatalogId('work', input.identityKey)
+      : kind === 'migration-edition'
+        ? deterministicCatalogId('edition', `${input.workId}\0${input.isbn13}`)
+        : null
+    assert.equal(actual, expectedId, `${kind} ${JSON.stringify(input)}`)
+  }
+  assert.deepEqual([...kinds].sort(), [
+    'catalog-author', 'external-id-index', 'migration-edition', 'migration-work',
+    'shared-work-owner', 'work-title-index',
+  ])
+})
+
+test('a non-string author id is a problem, never a dropped author', () => {
+  const authors = new Map([['ursula', author('ursula', 'Ursula K. Le Guin')]])
+  const plan = planCrossUserCatalog([
+    book('users/a/books/one', {authorIds: ['ursula', 42]}),
+  ], authors)
+
+  assert.equal(plan.candidates[0].authorProblems.includes('non-string-author-id:1'), true)
+  assert.equal(plan.groups.length, 0)
+  assert.equal(plan.ambiguities.some((item) =>
+    item.type === 'unresolved-book' && item.detail.includes('non-string-author-id:1')),
+  true)
+})
+
+test('an unknown author kind is a problem; an absent kind is the legacy person shape', () => {
+  const unknownKind = new Map<string, MigrationAuthor>([
+    ['corp', {id: 'corp', name: 'Acme Corp', kind: 'corporate', retirement: null}],
+  ])
+  const plan = planCrossUserCatalog([book('users/a/books/one', {authorIds: ['corp']})], unknownKind)
+  assert.equal(plan.candidates[0].authorProblems.includes('invalid-author-kind:corp'), true)
+  assert.equal(plan.authors.some((item) => item.canonicalName === 'Acme Corp'), false)
+  assert.equal(plan.groups.length, 0)
+
+  const noKind = new Map<string, MigrationAuthor>([
+    ['legacy', {id: 'legacy', name: 'Legacy Author', retirement: null}],
+  ])
+  const legacyPlan = planCrossUserCatalog([book('users/b/books/two', {authorIds: ['legacy']})], noKind)
+  assert.deepEqual(legacyPlan.candidates[0].authorProblems, [])
+  assert.equal(legacyPlan.authors[0].kind, 'person')
+})
+
+// Positive control for the legacy fallback: a book with no authorIds takes
+// its names from the embedded list and the single author field together,
+// deduplicated by normalized key.
+test('legacy embedded and single author fields collapse to one author', () => {
+  const plan = planCrossUserCatalog([
+    book('users/a/books/one', {
+      authorIds: [], authors: [{name: 'Ada Lovelace'}], author: 'ADA LOVELACE',
+    }),
+  ], new Map())
+
+  assert.deepEqual(plan.candidates[0].personalAuthors.map((entry) => entry.name), ['Ada Lovelace'])
 })

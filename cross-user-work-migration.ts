@@ -1,6 +1,24 @@
 import { createHash } from 'node:crypto'
+import type { DocumentSnapshot, Firestore, Transaction } from 'firebase-admin/firestore'
 import { normalizeCatalogAuthorName, normalizeCatalogTitle } from './src/lib/utils/catalog.ts'
 import { normalizeIsbn } from './src/lib/utils/isbn.ts'
+import { sharingConsentIsValid } from './sharing-consent.ts'
+
+// The operator's copy wins a spelling or metadata disagreement between two
+// users' copies of the same book (seedPriority 0 against 1).
+export const OPERATOR_UID = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2'
+
+// What a created catalog document was derived from: the exact personal book
+// and per-user author documents, at the Firestore versions the planner read.
+// Re-checked inside the write transaction so a concurrent edit to the
+// identity a document is built from aborts the create instead of freezing a
+// stale spelling into the shared catalog.
+export type MigrationSeedSource = {
+  uid: string
+  bookPath: string
+  bookVersion: number
+  authorVersions: Array<{path: string; version: number}>
+}
 
 export type MigrationAuthor = {
   id: string
@@ -13,7 +31,6 @@ export type MigrationAuthor = {
 export type MigrationBook = {
   path: string
   uid: string
-  bookId: string
   title?: unknown
   isbn?: unknown
   pageCount?: unknown
@@ -25,7 +42,7 @@ export type MigrationBook = {
   coverUrl?: unknown
   subjects?: unknown
   fiction?: unknown
-  sharingEligible?: boolean
+  sharingConsented?: boolean
   // 0 for the operator's copy, 1 for everyone else: which spelling and
   // metadata becomes canonical when copies disagree. Every live user's
   // book seeds the catalog (catalog data is public).
@@ -60,7 +77,6 @@ export type MigrationCandidate = {
   personalAuthors: Array<{name: string; kind: 'person' | 'entity' | 'placeholder'; sortName: string; catalogId?: string}>
   personalAuthorIds: string[]
   authorProblems: string[]
-  authorKey: string
   isbn13: string | null
   identityKey: string | null
   reviewedGroupId: string | null
@@ -75,7 +91,6 @@ export type MigrationGroup = {
   authorNames: string[]
   authorIds: string[]
   isbns: string[]
-  seedIsbns: string[]
   workId: string
   editionIds: Record<string, string>
   reviewedGroupId: string | null
@@ -114,8 +129,15 @@ export const deterministicCatalogId = (prefix: 'author' | 'work' | 'edition' | '
 export const deterministicTitleIndexId = (workId: string, titleKey: string): string =>
   createHash('sha256').update(`${workId}\0${titleKey}`).digest('hex')
 
-const stringList = (value: unknown): string[] =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+// The two ids the backend also mints (catalogProjection.sharedWorkOwnerId and
+// catalog.externalIndexId). They live here so the migration and the audit
+// share one copy; test-fixtures/catalog-ids.json pins the digests both sides
+// must produce.
+export const deterministicSharedWorkOwnerId = (workId: string, uid: string): string =>
+  createHash('sha256').update(`${workId}\0${uid}`).digest('hex')
+
+export const deterministicExternalIndexId = (provider: string, externalId: string): string =>
+  createHash('sha256').update(`${provider}\0${externalId}`).digest('hex')
 
 const cleanNames = (names: string[], includePlaceholders = false): string[] => {
   const byKey = new Map<string, string>()
@@ -186,13 +208,19 @@ const resolvedPersonalAuthors = (
   book: MigrationBook,
   authorsById: ReadonlyMap<string, MigrationAuthor>,
 ): { authors: MigrationCandidate['personalAuthors']; problems: string[] } => {
-  const ids = stringList(book.authorIds)
-  if (ids.length === 0) {
+  // A non-string id is a schema violation, not a value to drop: dropping it
+  // would rewrite the book with fewer authors than the client displays.
+  const ids: string[] = []
+  const idProblems: string[] = []
+  if (Array.isArray(book.authorIds)) {
+    for (const [index, value] of book.authorIds.entries()) {
+      if (typeof value === 'string') ids.push(value)
+      else idProblems.push(`non-string-author-id:${index}`)
+    }
+  }
+  if (ids.length === 0 && idProblems.length === 0) {
     return {
-      authors: cleanNames([
-        ...legacyAuthorNames(book),
-        ...(typeof book.author === 'string' ? [book.author] : []),
-      ], true).map((name) => {
+      authors: cleanNames(legacyAuthorNames(book), true).map((name) => {
         const kind = normalizeCatalogAuthorName(name) === 'various authors' ? 'placeholder' as const : 'person' as const
         return {name, kind, sortName: name}
       }),
@@ -201,7 +229,7 @@ const resolvedPersonalAuthors = (
   }
 
   const resolved: MigrationCandidate['personalAuthors'] = []
-  const problems: string[] = []
+  const problems: string[] = [...idProblems]
   for (const originalId of ids) {
     let id = originalId
     const seen = new Set<string>()
@@ -238,7 +266,17 @@ const resolvedPersonalAuthors = (
         problems.push(`invalid-author-name:${id}`)
         break
       }
-      const kind = author.kind === 'entity' || author.kind === 'placeholder' ? author.kind : 'person'
+      // An absent kind is the pre-catalog legacy shape and reads as a
+      // person; any other value is a schema violation the migration must
+      // not silently reclassify.
+      if (author.kind !== undefined && author.kind !== 'person' &&
+          author.kind !== 'entity' && author.kind !== 'placeholder') {
+        problems.push(`invalid-author-kind:${id}`)
+        break
+      }
+      const kind: ReviewedAuthor['kind'] = author.kind === 'entity'
+        ? 'entity'
+        : author.kind === 'placeholder' ? 'placeholder' : 'person'
       const name = author.name.trim().replace(/\s+/g, ' ')
       const sortName = kind === 'person' && typeof author.familyName === 'string' && author.familyName.trim()
         ? author.familyName.trim().replace(/\s+/g, ' ')
@@ -338,7 +376,7 @@ const makeCandidate = (
   return {
     book, title, titleKey, authorNames, personalAuthors: personal.authors, personalAuthorIds,
     authorProblems: personal.problems,
-    authorKey, isbn13, identityKey, reviewedGroupId, problems,
+    isbn13, identityKey, reviewedGroupId, problems,
   }
 }
 
@@ -441,11 +479,8 @@ export const planCrossUserCatalog = (
       }
     }
     const isbns = [...new Set(groupCandidates.flatMap((candidate) => (candidate.isbn13 ? [candidate.isbn13] : [])))].sort()
-    const seedIsbns = [...new Set(groupCandidates.flatMap(
-      (candidate) => candidate.isbn13 ? [candidate.isbn13] : [],
-    ))].sort()
     const workId = deterministicCatalogId('work', key)
-    const editionIds = Object.fromEntries(seedIsbns.map(
+    const editionIds = Object.fromEntries(isbns.map(
       (isbn) => [isbn, deterministicCatalogId('edition', `${workId}\0${isbn}`)],
     ))
     groups.push({
@@ -456,7 +491,6 @@ export const planCrossUserCatalog = (
       authorNames,
       authorIds,
       isbns,
-      seedIsbns,
       workId,
       editionIds,
       reviewedGroupId: preferred.reviewedGroupId,
@@ -542,5 +576,83 @@ export const planCrossUserCatalog = (
     authors: catalogAuthors,
     groups,
     ambiguities: ambiguities.sort((left, right) => left.type.localeCompare(right.type) || left.bookPaths.join().localeCompare(right.bookPaths.join())),
+  }
+}
+
+function assertSnapshotVersion(
+  path: string,
+  expectedVersion: number,
+  snapshot: DocumentSnapshot,
+): void {
+  if (!snapshot.exists || snapshot.updateTime?.toMillis() !== expectedVersion) {
+    throw new Error(`catalog identity source ${path} changed during migration`)
+  }
+}
+
+export async function assertMigrationSourceVersions(
+  transaction: Transaction,
+  db: Firestore,
+  sources: readonly MigrationSeedSource[],
+): Promise<void> {
+  const uniqueSources = [...new Map(sources.map((source) => [source.bookPath, source])).values()]
+  const authorVersions = new Map<string, number>()
+  for (const source of uniqueSources) {
+    for (const author of source.authorVersions) {
+      const existing = authorVersions.get(author.path)
+      if (existing !== undefined && existing !== author.version) {
+        throw new Error(`catalog identity source ${author.path} has conflicting versions`)
+      }
+      authorVersions.set(author.path, author.version)
+    }
+  }
+  const [books, authors] = await Promise.all([
+    Promise.all(uniqueSources.map((source) => transaction.get(db.doc(source.bookPath)))),
+    Promise.all([...authorVersions].map(([path]) => transaction.get(db.doc(path)))),
+  ])
+  for (let index = 0; index < uniqueSources.length; index += 1) {
+    assertSnapshotVersion(uniqueSources[index].bookPath, uniqueSources[index].bookVersion, books[index])
+  }
+  for (let index = 0; index < authors.length; index += 1) {
+    const [path, version] = [...authorVersions][index]
+    assertSnapshotVersion(path, version, authors[index])
+  }
+}
+
+// A sharedWorkOwners row is the one projection sharing consent governs, so
+// the consent the planner saw is re-read inside the write transaction: a
+// user who withdrew while the migration ran must not gain a reader row.
+export async function assertMigrationProjectionSourcesConsented(
+  transaction: Transaction,
+  db: Firestore,
+  sources: readonly MigrationSeedSource[],
+  workId: string,
+): Promise<void> {
+  if (sources.length === 0) throw new Error(`sharing projection for ${workId} has no source books`)
+  const uniqueSources = [...new Map(sources.map((source) => [source.bookPath, source])).values()]
+  const uid = uniqueSources[0].uid
+  if (uniqueSources.some((source) => source.uid !== uid)) {
+    throw new Error(`sharing projection for ${workId} mixes source owners`)
+  }
+  for (const source of uniqueSources) {
+    const expectedPrefix = `users/${uid}/books/`
+    if (!source.bookPath.startsWith(expectedPrefix) || source.bookPath.length === expectedPrefix.length) {
+      throw new Error(`invalid sharing projection source ${source.bookPath}`)
+    }
+  }
+
+  const [user, setting, ...books] = await Promise.all([
+    transaction.get(db.doc(`users/${uid}`)),
+    transaction.get(db.doc(`users/${uid}/settings/bookSharing`)),
+    ...uniqueSources.map((source) => transaction.get(db.doc(source.bookPath))),
+  ])
+  const settingData = setting.data()
+  const profile = typeof settingData?.profileUsername === 'string'
+    ? await transaction.get(db.doc(`profiles/${settingData.profileUsername}`))
+    : null
+  if (!sharingConsentIsValid(uid, user.data(), settingData, profile?.data())) {
+    throw new Error(`sharing projection source user ${uid} is no longer opted in`)
+  }
+  if (!books.some((book) => book.exists && book.get('workId') === workId)) {
+    throw new Error(`sharing projection for ${workId} has no currently linked source book`)
   }
 }

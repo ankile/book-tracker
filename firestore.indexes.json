@@ -9,14 +9,6 @@
       ]
     },
     {
-      "collectionGroup": "sharedWorkOwners",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "workId", "order": "ASCENDING" },
-        { "fieldPath": "__name__", "order": "ASCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "updates",
       "queryScope": "COLLECTION_GROUP",
       "fields": [

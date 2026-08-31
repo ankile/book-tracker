@@ -52,7 +52,7 @@ const rows: AccessRow[] = [
     reached: ['My site Authors card · direct URL'],
     read: ['Owner'],
     readKind: 'owner',
-    writes: ['None on this page', 'Shared author changes are operator-curated'],
+    writes: ['None on this page', 'Shared author records are created by book edits'],
   },
   {
     name: 'Book metadata',

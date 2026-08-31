@@ -14,6 +14,15 @@ const {db} = await connect({...flags, confirmWrite: flags.apply});
 let writes = 0;
 const users = await db.collection('users').listDocuments();
 for (const user of users) {
+  // A tombstoned account (SEC-006 soft delete) is frozen, exactly as in
+  // migrate-cross-user-works.ts: the private deletion runbook is the only
+  // thing that writes to it. A phantom user (no document, live books) is
+  // still stamped — db-audit reports the missing parent separately.
+  const account = await user.get();
+  if (account.get('deletedAt') !== undefined) {
+    console.log(`SKIP tombstoned-account ${user.path}`);
+    continue;
+  }
   const books = await user.collection('books').get();
   for (const book of books.docs) {
     if (!flags.apply) {
@@ -32,9 +41,10 @@ for (const user of users) {
         tx.get(book.ref),
         tx.get(book.ref.collection('updates')),
       ]);
-      if (!freshBook.exists) throw new Error(`${book.ref.path} disappeared during migration`);
+      const freshData = freshBook.data();
+      if (freshData === undefined) throw new Error(`${book.ref.path} disappeared during migration`);
       const patch = planFinishedAt(
-        freshBook.data() ?? {},
+        freshData,
         freshUpdates.docs.map((update) => ({id: update.id, data: update.data()})),
       );
       if (patch !== null) tx.update(book.ref, patch);

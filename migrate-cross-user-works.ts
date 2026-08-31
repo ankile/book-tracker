@@ -15,12 +15,21 @@
 //   node migrate-cross-user-works.ts [reviewed.json] --apply         # emulator apply
 //   node migrate-cross-user-works.ts [reviewed.json] --prod          # prod dry-run
 //   node migrate-cross-user-works.ts [reviewed.json] --prod --apply  # prod apply (typed confirm)
-import { createHash } from 'node:crypto'
+//
+// Two more flags:
+//   --expect-overlap-groups=N  refuse to run unless the planner finds exactly
+//     N migratable groups whose books span more than one account. The reviewed
+//     dry-run prints that number; passing it back to the apply turns "the data
+//     moved under me" into a refusal instead of a silently different write.
+//   --database=ID  target a non-default Firestore database (see migrate-lib.ts).
+//     The catalog lives in the default database; the credential database is
+//     never a migration target here.
 import { readFileSync } from 'node:fs'
-import { FieldValue, Timestamp, type DocumentReference, type Firestore } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp, type DocumentReference, type DocumentSnapshot, type Firestore } from 'firebase-admin/firestore'
 import { connect, parseFlags } from './migrate-lib.ts'
 import {
   deterministicCatalogId,
+  deterministicSharedWorkOwnerId,
   deterministicTitleIndexId,
   planCrossUserCatalog,
   type MigrationAmbiguity,
@@ -30,19 +39,17 @@ import {
   type MigrationGroup,
   type CrossUserCatalogPlan,
   type ReviewedWorkGroup,
+  assertMigrationProjectionSourcesConsented,
+  assertMigrationSourceVersions,
+  OPERATOR_UID,
+  type MigrationSeedSource,
 } from './cross-user-work-migration.ts'
 import {
   catalogTitleKeys,
   normalizeCatalogAuthorName,
   normalizeCatalogTitle,
 } from './src/lib/utils/catalog.ts'
-import {
-  assertMigrationProjectionSourcesEligible,
-  assertMigrationSourceVersions,
-  migrationSharingConsentIsValid,
-  OPERATOR_UID,
-  type MigrationSeedSource,
-} from './migration-seed-consent.ts'
+import { sharingConsentIsValid } from './sharing-consent.ts'
 
 type CatalogDoc = Record<string, unknown>
 type ExistingCatalog = {
@@ -160,7 +167,7 @@ for (const userRef of users) {
   const sharedProfile = typeof sharingData?.profileUsername === 'string'
     ? profilesByUsername.get(sharingData.profileUsername)
     : undefined
-  const optedIn = migrationSharingConsentIsValid(userRef.id, userData, sharingData, sharedProfile)
+  const consented = sharingConsentIsValid(userRef.id, userData, sharingData, sharedProfile)
   const seedPriority = userRef.id === OPERATOR_UID ? 0 : 1
   const localAuthorDocs = new Map(authorDocs.docs.map((author) => [author.id, {
     path: author.ref.path,
@@ -194,11 +201,10 @@ for (const userRef of users) {
       ...data,
       path: book.ref.path,
       uid: userRef.id,
-      bookId: book.id,
       authorIds: Array.isArray(data.authorIds)
         ? data.authorIds.map((id: unknown) => typeof id === 'string' && !existing.authors.has(id) ? `${userRef.id}:${id}` : id)
         : data.authorIds,
-      sharingEligible: optedIn,
+      sharingConsented: consented,
       seedPriority,
       migrationBookVersion: snapshotVersion(book.ref.path, book),
       migrationAuthorVersions: authorVersionsForBook(data, localAuthorDocs),
@@ -270,13 +276,13 @@ for (const spec of authorSpecs) {
     catalogWrites += 1
     console.log(`${tag}  create ${spec.ref.path}`)
   } else {
-    assertStableFields(spec.ref.path, existingSnapshot.data() ?? {}, spec.data, spec.stableKeys)
+    assertStableFields(spec.ref.path, existingData(existingSnapshot), spec.data, spec.stableKeys)
   }
   if (flags.apply && !existingSnapshot.exists) {
     await db.runTransaction(async (transaction) => {
       const current = await transaction.get(spec.ref)
       if (current.exists) {
-        assertStableFields(spec.ref.path, current.data() ?? {}, spec.data, spec.stableKeys)
+        assertStableFields(spec.ref.path, existingData(current), spec.data, spec.stableKeys)
         return
       }
       if (!spec.seedSources) throw new Error(`${spec.ref.path} has no identity source`)
@@ -305,7 +311,7 @@ for (const spec of uniqueCreates.values()) {
     catalogWrites += 1
     console.log(`${tag}  create ${spec.ref.path}`)
   } else {
-    assertStableFields(spec.ref.path, existingSnapshot.data() ?? {}, spec.data, spec.stableKeys)
+    assertStableFields(spec.ref.path, existingData(existingSnapshot), spec.data, spec.stableKeys)
   }
 }
 
@@ -324,7 +330,7 @@ if (flags.apply) {
       for (let index = 0; index < specs.length; index += 1) {
         const spec = specs[index]
         const snapshot = snapshots[index]
-        if (snapshot.exists) assertStableFields(spec.ref.path, snapshot.data() ?? {}, spec.data, spec.stableKeys)
+        if (snapshot.exists) assertStableFields(spec.ref.path, existingData(snapshot), spec.data, spec.stableKeys)
         else transaction.create(spec.ref, spec.data)
       }
     })
@@ -346,7 +352,7 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
   if (state === 'invalid') {
     ambiguities.push({ type: 'invalid-existing-link', bookPaths: [book.path], detail: 'Catalog link fields are partial or malformed' })
   } else if (state === 'linked') {
-    if (book.sharingEligible === true && typeof book.workId === 'string') {
+    if (book.sharingConsented === true && typeof book.workId === 'string') {
       addSharedWorkOwnerSpec(projectionSpecs, db, book.workId, migrationSource(book))
     }
     if (!sameLink(book, desiredLink)) {
@@ -356,7 +362,7 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
   } else if (!sameLink(book, desiredLink)) {
     linkPatch = desiredLink
   }
-  if (state !== 'linked' && book.sharingEligible === true && typeof desiredLink.workId === 'string') {
+  if (state !== 'linked' && book.sharingConsented === true && typeof desiredLink.workId === 'string') {
     addSharedWorkOwnerSpec(projectionSpecs, db, desiredLink.workId, migrationSource(book))
   }
   const authorPatch = candidate.authorProblems.length === 0 && !sameAuthorship(book, candidate)
@@ -372,7 +378,7 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
       await assertMigrationSourceVersions(transaction, db, [migrationSource(book)])
       const current = await transaction.get(ref)
       if (!current.exists) throw new Error(`${book.path} disappeared during migration`)
-      if (!sameInitialLink(current.data() ?? {}, book)) throw new Error(`${book.path} catalog link changed during migration`)
+      if (!sameInitialLink(existingData(current), book)) throw new Error(`${book.path} catalog link changed during migration`)
       transaction.update(ref, desired)
     })
   }
@@ -412,16 +418,16 @@ for (const userRef of liveUsers) {
 for (const spec of projectionSpecs.values()) {
   const snapshot = await spec.ref.get()
   if (!snapshot.exists) catalogWrites += 1
-  else assertStableFields(spec.ref.path, snapshot.data() ?? {}, spec.data, spec.stableKeys)
+  else assertStableFields(spec.ref.path, existingData(snapshot), spec.data, spec.stableKeys)
   if (!snapshot.exists) console.log(`${tag}  create ${spec.ref.path}`)
   if (flags.apply) {
     await db.runTransaction(async (transaction) => {
       const current = await transaction.get(spec.ref)
       if (current.exists) {
-        assertStableFields(spec.ref.path, current.data() ?? {}, spec.data, spec.stableKeys)
+        assertStableFields(spec.ref.path, existingData(current), spec.data, spec.stableKeys)
       } else {
         if (!spec.seedSources) throw new Error(`${spec.ref.path} has no sharing projection source`)
-        await assertMigrationProjectionSourcesEligible(
+        await assertMigrationProjectionSourcesConsented(
           transaction,
           db,
           spec.seedSources,
@@ -520,7 +526,9 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
 
   let workId = [...isbnTargets][0]
   if (workId) {
-    const work = existing.works.get(workId) ?? {}
+    // resolveWorkId only returns an id it read from existing.works.
+    const work = existing.works.get(workId)
+    if (work === undefined) throw new Error(`catalog work ${workId} disappeared while planning`)
     const workTitleKeys = Array.isArray(work.titleKeys) ? work.titleKeys : []
     const textMatches = group.candidates.some((candidate) => workTitleKeys.includes(candidate.titleKey))
     const authorMatches = JSON.stringify([...group.authorIds].sort()) ===
@@ -560,9 +568,7 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
     }
     const existingEditionId = matchingEditions[0]?.[0]
     if (existingEditionId) editionIds.set(isbn, existingEditionId)
-    else if (group.seedIsbns.includes(isbn)) {
-      editionIds.set(isbn, deterministicCatalogId('edition', `${workId}\0${isbn}`))
-    }
+    else editionIds.set(isbn, deterministicCatalogId('edition', `${workId}\0${isbn}`))
   }
   return { workId, editionIds, createWork: !existing.works.has(workId) }
 }
@@ -592,9 +598,17 @@ function workCreateSpecs(db: Firestore, group: MigrationGroup, workId: string): 
     seedSources,
   }]
   for (const [index, titleKey] of titleKeys.entries()) {
-    const title = index === 0
-      ? group.canonicalTitle
-      : group.alternateTitles.find((candidate) => normalizeCatalogTitle(candidate) === titleKey) ?? group.canonicalTitle
+    // catalogTitleKeys() derives every key from exactly these titles, so a
+    // key with no title is a normalization disagreement, not a title to
+    // guess at: indexing it under the canonical title would make the row
+    // unfindable by the title that produced it.
+    const alternate = group.alternateTitles.find(
+      (candidate) => normalizeCatalogTitle(candidate) === titleKey,
+    )
+    if (index > 0 && alternate === undefined) {
+      throw new Error(`title key "${titleKey}" of ${workId} matches no title of the group`)
+    }
+    const title = index === 0 ? group.canonicalTitle : alternate as string
     specs.push({
       ref: db.collection('workTitleIndex').doc(deterministicTitleIndexId(workId, titleKey)),
       data: { workId, title, titleKey, status: 'active' },
@@ -633,9 +647,9 @@ function catalogAuthorCreateSpec(
 function editionCreateSpecs(db: Firestore, group: MigrationGroup, target: CatalogTarget, existing: ExistingCatalog): CreateSpec[] {
   const specs: CreateSpec[] = []
   const seedSources = migrationGroupSeedSources(group)
-  for (const isbn of group.seedIsbns) {
+  for (const isbn of group.isbns) {
     const candidate = preferredSeedCandidate(group, (item) => item.isbn13 === isbn)
-    if (!candidate) throw new Error(`missing eligible edition source for ${isbn}`)
+    if (!candidate) throw new Error(`missing edition source for ${isbn}`)
     const editionId = target.editionIds.get(isbn)
     if (!editionId) throw new Error(`missing edition id for ${isbn}`)
     if (!existing.editions.has(editionId)) {
@@ -677,7 +691,7 @@ function preferredSeedCandidate(
       left.book.path.localeCompare(right.book.path),
     )
   const preferred = candidates[0]
-  if (!preferred) throw new Error(`migration group ${group.key} has no eligible metadata source`)
+  if (!preferred) throw new Error(`migration group ${group.key} has no metadata source`)
   return preferred
 }
 
@@ -695,6 +709,15 @@ function migrationSource(book: MigrationBook): MigrationSeedSource {
     bookVersion: book.migrationBookVersion,
     authorVersions: book.migrationAuthorVersions,
   }
+}
+
+// data() is undefined only when the snapshot does not exist, which every
+// caller has already ruled out; the fallback would have compared a created
+// document against an empty one and reported no conflict.
+function existingData(snapshot: DocumentSnapshot): CatalogDoc {
+  const data = snapshot.data()
+  if (data === undefined) throw new Error(`${snapshot.ref.path} exists without data`)
+  return data
 }
 
 function assertStableFields(path: string, actual: CatalogDoc, expected: CatalogDoc, keys: string[]): void {
@@ -721,7 +744,7 @@ function sharedWorkOwnerSpec(
   source: MigrationSeedSource,
 ): CreateSpec {
   const {uid} = source
-  const id = createHash('sha256').update(`${workId}\0${uid}`).digest('hex')
+  const id = deterministicSharedWorkOwnerId(workId, uid)
   return {
     ref: db.collection('sharedWorkOwners').doc(id),
     data: {workId, uid, updatedAt: Timestamp.now()},

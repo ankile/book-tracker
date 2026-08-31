@@ -1,6 +1,6 @@
 // The allowlists and byte caps of firestore.rules (validBookShape,
-// validBookTitle, validAuthorShape, validProfileOwnerRecord, and the key
-// set and list caps of validProfile), mirrored for the read-only audit so a
+// validBookTitle, validProfileOwnerRecord, and the key set and list caps of
+// validProfile), mirrored for the read-only audit so a
 // stored document that the rules would reject on its next client edit is
 // visible in the drift report before a user hits the denial. The mirror is
 // agreement-tested against the emulator in tests/firestore-rules.test.ts:
@@ -19,10 +19,6 @@ export const BOOK_FIELDS = [
   'workId', 'editionId', 'matchMethod', 'linkedAt',
   'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
   'publisher', 'subjects', 'title', 'updatedAt',
-] as const;
-
-export const AUTHOR_FIELDS = [
-  'name', 'nameLower', 'kind', 'givenName', 'familyName', 'retirement', 'updatedAt',
 ] as const;
 
 export const PROFILE_FIELDS = [
@@ -96,7 +92,12 @@ export function bookShapeViolations(book: Record<string, unknown>, ownerPath: st
     if (book.finished !== true) v.push('finishedAt.unfinished');
   }
   if ('authorIds' in book) {
-    v.push(...stringListViolations('authorIds', book.authorIds, 6, 5000));
+    // validBookShape caps the stored list at 50, not at the six a fresh
+    // authorship write may carry (validBookAuthors): a book the migration
+    // left with 7-50 ids can still have its title or page count corrected,
+    // so the audit must not report it. When that cap moves in the rules it
+    // moves here.
+    v.push(...stringListViolations('authorIds', book.authorIds, 50, 5000));
     if (Array.isArray(book.authorIds) &&
         book.authorIds.some((authorId) => typeof authorId !== 'string')) {
       v.push('authorIds.not-strings');
@@ -141,28 +142,6 @@ export function bookShapeViolations(book: Record<string, unknown>, ownerPath: st
   }
   if (typeof book.title !== 'string' || book.title.length === 0) v.push('title.not-string');
   else if (book.title.length > 500) v.push('title.size>500');
-  return v;
-}
-
-// validAuthorShape.
-export function authorShapeViolations(author: Record<string, unknown>): string[] {
-  const v: string[] = unknownKeys(author, AUTHOR_FIELDS);
-  if (typeof author.name !== 'string' || author.name.length === 0) v.push('name.not-string');
-  else if (author.name.length > 200) v.push('name.size>200');
-  if ('nameLower' in author) v.push(...cappedString('nameLower', author.nameLower, 200));
-  if ('kind' in author && !['person', 'entity', 'placeholder'].includes(author.kind as string)) v.push('kind.unknown');
-  if ('givenName' in author) v.push(...cappedString('givenName', author.givenName, 100));
-  if ('familyName' in author) v.push(...cappedString('familyName', author.familyName, 100));
-  if ('updatedAt' in author && !isTimestamp(author.updatedAt)) v.push('updatedAt.not-timestamp');
-  if ('retirement' in author) {
-    const retirement = author.retirement;
-    if (!isMap(retirement)) v.push('retirement.not-map');
-    else {
-      v.push(...unknownKeys(retirement, ['reason', 'targetId']).map((k) => `retirement.${k}`));
-      if (!['deleted', 'merged'].includes(retirement.reason as string)) v.push('retirement.reason.unknown');
-      if ('targetId' in retirement) v.push(...cappedString('retirement.targetId', retirement.targetId, 100));
-    }
-  }
   return v;
 }
 

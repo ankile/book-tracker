@@ -156,11 +156,11 @@ test('catalog queries have the required collection-group and pagination indexes'
     index.fields[0]?.fieldPath === 'status' && index.fields[0]?.order === 'ASCENDING' &&
     index.fields[1]?.fieldPath === 'titleKey' && index.fields[1]?.order === 'ASCENDING'), true,
   'missing active title-prefix composite index');
-  assert.equal(parsed.indexes.some((index) =>
-    index.collectionGroup === 'sharedWorkOwners' && index.queryScope === 'COLLECTION' &&
-    index.fields[0]?.fieldPath === 'workId' && index.fields[0]?.order === 'ASCENDING' &&
-    index.fields[1]?.fieldPath === '__name__' && index.fields[1]?.order === 'ASCENDING'), true,
-  'missing stable work-reader pagination composite index');
+  // The work-reader page (`where('workId', 'in', ...)` ordered by document
+  // id) needs no composite index: one equality plus __name__ ascending is
+  // exactly what the automatic single-field index on workId stores.
+  assert.equal(parsed.indexes.some((index) => index.collectionGroup === 'sharedWorkOwners'), false,
+  'redundant sharedWorkOwners composite index');
 });
 
 test('migration docs mark one-time rollouts complete and prescribe idempotency', async () => {

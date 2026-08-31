@@ -742,7 +742,8 @@ const bookShapeRejections = (
     fatSubjects: { subjects: ['a'.repeat(2501)] },
     fatSubjectsSpread: { subjects: Array.from({ length: 25 }, () => 'a'.repeat(101)) },
     nonStringSubject: { subjects: [{ name: 'x' }] },
-    tooManyAuthorIds: { authorIds: Array.from({ length: 9 }, (_, i) => `a${i}`) },
+    // 51 trips the stored-shape cap; 7-50 is only a write-time (validBookAuthors) refusal.
+    tooManyAuthorIds: { authorIds: Array.from({ length: 51 }, (_, i) => `a${i}`) },
     fatAuthorIds: { authorIds: ['a'.repeat(5001)] },
     // Author references are additionally checked against shared documents,
     // so non-string IDs are rejected even though join() can stringify them.
@@ -1013,6 +1014,29 @@ test('the audit shape mirror agrees with the rules', async () => {
     if (rules !== (mirror.length > 0)) disagreements.push(`book ${name}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
   }
 
+  // The one fixture that cannot be a create: a book the migration left with
+  // 7-50 per-user author ids. validBookShape caps the stored list at 50
+  // while validBookAuthors caps a fresh authorship at 6, so the rules admit
+  // a metadata edit that leaves authorIds alone. The mirror judges stored
+  // documents, so a 6-id cap there would report every such book as drift the
+  // rules never produce.
+  let overLimitBook: Record<string, unknown> = {};
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    overLimitBook = fullBook(seeded, uid, {
+      authorIds: Array.from({length: 7}, (_, index) => `legacy-${index}`),
+    });
+    await setDoc(doc(seeded, 'users', uid, 'books', 'legacy-seven'), overLimitBook);
+  });
+  const overLimitEdit = {...overLimitBook, title: 'Corrected title', updatedAt: Timestamp.now()};
+  const overLimitMirror = bookShapeViolations(overLimitEdit, `users/${uid}`);
+  const overLimitRules = await denied(updateDoc(doc(books, 'legacy-seven'), {
+    title: 'Corrected title', updatedAt: Timestamp.now(),
+  }));
+  if (overLimitRules !== (overLimitMirror.length > 0)) {
+    disagreements.push(`book legacySevenAuthors: rules ${overLimitRules ? 'deny' : 'admit'}, mirror ${JSON.stringify(overLimitMirror)}`);
+  }
+
   const profileCases: Record<string, Record<string, unknown>> = {
     valid: {},
     longGivenName: { givenName: 'g'.repeat(51) },
@@ -1079,9 +1103,6 @@ test('catalog gets expose only active records and never permit listing', async (
     await setDoc(doc(seeded, 'sharedWorkOwners', 'projection'), {
       workId: 'active', uid: 'reader', updatedAt: Timestamp.now(),
     });
-    await setDoc(doc(seeded, 'functionGlobalQuotas', 'catalogWorkReaders'), {
-      count: 1, windowStartedAt: Timestamp.now(),
-    });
   });
   const db = environment.authenticatedContext('catalog-reader').firestore();
   await assertSucceeds(getDoc(doc(db, 'works', 'active')));
@@ -1095,12 +1116,8 @@ test('catalog gets expose only active records and never permit listing', async (
   await assertFails(getDoc(doc(db, 'workTitleIndex', 'catalog-work')));
   await assertFails(getDoc(doc(db, 'externalIdIndex', 'external')));
   await assertFails(getDoc(doc(db, 'sharedWorkOwners', 'projection')));
-  await assertFails(getDoc(doc(db, 'functionGlobalQuotas', 'catalogWorkReaders')));
   await assertFails(setDoc(doc(db, 'sharedWorkOwners', 'forged'), {
     workId: 'active', uid: 'catalog-reader', updatedAt: Timestamp.now(),
-  }));
-  await assertFails(setDoc(doc(db, 'functionGlobalQuotas', 'catalogWorkReaders'), {
-    count: 0, windowStartedAt: Timestamp.now(),
   }));
   await assertFails(getDoc(doc(environment.unauthenticatedContext().firestore(), 'works', 'active')));
 });

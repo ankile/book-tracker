@@ -7,33 +7,34 @@ import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { initializeApp } from 'firebase-admin/app'
 import { getFirestore, Timestamp, type DocumentReference } from 'firebase-admin/firestore'
-import { deterministicCatalogId, deterministicTitleIndexId } from '../cross-user-work-migration.ts'
 import {
-  assertMigrationProjectionSourcesEligible,
+  assertMigrationProjectionSourcesConsented,
   assertMigrationSourceVersions,
+  deterministicCatalogId,
+  deterministicTitleIndexId,
   OPERATOR_UID,
-} from '../migration-seed-consent.ts'
+} from '../cross-user-work-migration.ts'
 
 const app = initializeApp({ projectId: 'book-tracker-d8f24' }, 'catalog-migration-test')
 const db = getFirestore(app)
 const secretsDb = getFirestore(app, 'secrets')
 const suffix = Date.now().toString(36)
 const sharingUid = `0catalog-sharing-${suffix}`
-const privateUid = `catalog-private-${suffix}`
+const nonSharingUid = `catalog-nonsharing-${suffix}`
 const username = `catalog-${suffix}`.slice(0, 30)
-const privateRaceUsername = `race-${suffix}`.slice(0, 30)
+const secondUsername = `race-${suffix}`.slice(0, 30)
 const migrationPath = fileURLToPath(new URL('../migrate-cross-user-works.ts', import.meta.url))
 const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url))
 const groupKey = 'title:left hand of darkness\0authors:ursula k le guin'
 const workId = deterministicCatalogId('work', groupKey)
 const isbn = '9780441478125'
 const editionId = deterministicCatalogId('edition', `${workId}\0${isbn}`)
-const privateIsbn = '9780316769488'
-const privateEditionId = deterministicCatalogId('edition', `${workId}\0${privateIsbn}`)
-const latePrivateIsbn = '9780140328721'
-const latePrivateEditionId = deterministicCatalogId('edition', `${workId}\0${latePrivateIsbn}`)
+const secondIsbn = '9780316769488'
+const secondEditionId = deterministicCatalogId('edition', `${workId}\0${secondIsbn}`)
+const lateIsbn = '9780140328721'
+const lateEditionId = deterministicCatalogId('edition', `${workId}\0${lateIsbn}`)
 const projectionId = createHash('sha256').update(`${workId}\0${sharingUid}`).digest('hex')
-const stalePrivateProjectionId = createHash('sha256').update(`${workId}\0${privateUid}`).digest('hex')
+const staleProjectionId = createHash('sha256').update(`${workId}\0${nonSharingUid}`).digest('hex')
 const conflictIsbn = '9781473217386'
 const conflictWorkId = `work-existing-${suffix}`
 const conflictEditionId = `edition-existing-${suffix}`
@@ -45,6 +46,7 @@ const leGuinAuthorId = deterministicCatalogId('author', 'ursula k le guin')
 const butlerAuthorId = deterministicCatalogId('author', 'octavia e butler')
 const someoneElseAuthorId = deterministicCatalogId('author', 'someone else')
 const catalogTesterAuthorId = deterministicCatalogId('author', 'catalog tester')
+const tombstonedUid = `catalog-tombstoned-${suffix}`
 const kindPersonUid = `catalog-kind-person-${suffix}`
 const kindEntityUid = `catalog-kind-entity-${suffix}`
 const conflictingKindAuthorId = deterministicCatalogId('author', 'same catalog name')
@@ -53,23 +55,24 @@ const operatorPriorityBookId = `catalog-priority-${suffix}`
 after(async () => {
   await Promise.all([
     db.recursiveDelete(db.doc(`users/${sharingUid}`)),
-    db.recursiveDelete(db.doc(`users/${privateUid}`)),
+    db.recursiveDelete(db.doc(`users/${nonSharingUid}`)),
+    db.recursiveDelete(db.doc(`users/${tombstonedUid}`)),
     db.recursiveDelete(db.doc(`users/${kindPersonUid}`)),
     db.recursiveDelete(db.doc(`users/${kindEntityUid}`)),
     db.doc(`users/${OPERATOR_UID}/books/${operatorPriorityBookId}`).delete(),
     db.doc(`users/${OPERATOR_UID}/authors/ursula-priority`).delete(),
     db.doc(`profiles/${username}`).delete(),
-    db.doc(`profiles/${privateRaceUsername}`).delete(),
+    db.doc(`profiles/${secondUsername}`).delete(),
     db.doc(`works/${workId}`).delete(),
     db.doc(`editions/${editionId}`).delete(),
-    db.doc(`editions/${privateEditionId}`).delete(),
-    db.doc(`editions/${latePrivateEditionId}`).delete(),
+    db.doc(`editions/${secondEditionId}`).delete(),
+    db.doc(`editions/${lateEditionId}`).delete(),
     db.doc(`isbnIndex/${isbn}`).delete(),
-    db.doc(`isbnIndex/${privateIsbn}`).delete(),
-    db.doc(`isbnIndex/${latePrivateIsbn}`).delete(),
+    db.doc(`isbnIndex/${secondIsbn}`).delete(),
+    db.doc(`isbnIndex/${lateIsbn}`).delete(),
     db.doc(`workTitleIndex/${deterministicTitleIndexId(workId, 'left hand of darkness')}`).delete(),
     db.doc(`sharedWorkOwners/${projectionId}`).delete(),
-    db.doc(`sharedWorkOwners/${stalePrivateProjectionId}`).delete(),
+    db.doc(`sharedWorkOwners/${staleProjectionId}`).delete(),
     db.doc(`works/${conflictWorkId}`).delete(),
     db.doc(`editions/${conflictEditionId}`).delete(),
     db.doc(`isbnIndex/${conflictIsbn}`).delete(),
@@ -82,7 +85,7 @@ after(async () => {
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).delete(),
     db.doc(`catalogAuthors/${catalogTesterAuthorId}`).delete(),
     db.doc(`catalogAuthors/${conflictingKindAuthorId}`).delete(),
-    secretsDb.doc(`togglTokens/${privateUid}`).delete(),
+    secretsDb.doc(`togglTokens/${nonSharingUid}`).delete(),
   ])
 })
 
@@ -164,21 +167,31 @@ test('author-kind conflicts preserve legacy rows instead of collapsing them', as
 
 test('catalog migration dry-runs, creates once, preserves updatedAt, and reports ISBN conflicts', async () => {
   const sharingUser = db.doc(`users/${sharingUid}`)
-  const privateUser = db.doc(`users/${privateUid}`)
+  const nonSharingUser = db.doc(`users/${nonSharingUid}`)
   const sharedBook = sharingUser.collection('books').doc('shared-copy')
-  const privateBook = privateUser.collection('books').doc('private-copy')
-  const privateMetadataBook = privateUser.collection('books').doc('private-metadata-copy')
-  const unmatchedBook = privateUser.collection('books').doc('private-only')
+  const unsharedBook = nonSharingUser.collection('books').doc('unshared-copy')
+  const unsharedMetadataBook = nonSharingUser.collection('books').doc('second-edition-copy')
+  const unmatchedBook = nonSharingUser.collection('books').doc('unique-copy')
   const conflictBook = sharingUser.collection('books').doc('isbn-conflict')
-  const privateConflictBook = privateUser.collection('books').doc('isbn-conflict-copy')
+  const nonSharingConflictBook = nonSharingUser.collection('books').doc('isbn-conflict-copy')
   const originalUpdatedAt = Timestamp.fromMillis(123_456)
   const now = Timestamp.now()
   const operatorUser = db.doc(`users/${OPERATOR_UID}`)
   const operatorBook = operatorUser.collection('books').doc(operatorPriorityBookId)
+  // A tombstoned account (SEC-006 soft delete) is frozen: its copy of the
+  // same book must neither seed the catalog nor be rewritten, and the
+  // deletion runbook stays the only path that touches it.
+  const tombstonedUser = db.doc(`users/${tombstonedUid}`)
+  const tombstonedBook = tombstonedUser.collection('books').doc('tombstoned-copy')
 
   await Promise.all([
     sharingUser.set({ uid: sharingUid }),
-    privateUser.set({ uid: privateUid }),
+    nonSharingUser.set({ uid: nonSharingUid }),
+    tombstonedUser.set({ uid: tombstonedUid, deletedAt: Timestamp.now() }),
+    tombstonedBook.set({
+      title: 'The Left Hand of Darkness', isbn, authorIds: [leGuinAuthorId],
+      pageCount: 304, updatedAt: originalUpdatedAt,
+    }),
     operatorUser.set({uid: OPERATOR_UID}, {merge: true}),
     db.doc(`profiles/${username}`).set({ uid: sharingUid, public: true }),
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).set({
@@ -194,8 +207,8 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     }),
     sharingUser.collection('authors').doc('ursula').set({ name: 'Ursula K. Le Guin', kind: 'person' }),
     sharingUser.collection('authors').doc('octavia').set({ name: 'Octavia E. Butler', kind: 'person' }),
-    privateUser.collection('authors').doc('ursula').set({ name: 'Ursula K. Le Guin', kind: 'person' }),
-    privateUser.collection('authors').doc('octavia').set({ name: 'Octavia E. Butler', kind: 'person' }),
+    nonSharingUser.collection('authors').doc('ursula').set({ name: 'Ursula K. Le Guin', kind: 'person' }),
+    nonSharingUser.collection('authors').doc('octavia').set({ name: 'Octavia E. Butler', kind: 'person' }),
     operatorUser.collection('authors').doc('ursula-priority').set({
       name: 'Ursula K. Le Guin', kind: 'person',
     }),
@@ -210,18 +223,18 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       isbn,
       authorIds: ['ursula'],
       pageCount: 304,
-      coverUrl: 'http://private-cover.example.test/not-shareable.jpg',
+      coverUrl: 'http://cover.example.test/cover.jpg',
       updatedAt: originalUpdatedAt,
     }),
-    privateBook.set({ title: 'Left Hand of Darkness, The', isbn, authorIds: ['ursula'], pageCount: 320, updatedAt: originalUpdatedAt }),
-    privateMetadataBook.set({
-      title: 'The Left Hand of Darkness', isbn: privateIsbn, authorIds: ['ursula'],
-      pageCount: 999, publisher: 'Private Shelf Press', publishedDate: 'secret-date',
-      coverUrl: 'https://private.example.test/cover.jpg', updatedAt: originalUpdatedAt,
+    unsharedBook.set({ title: 'Left Hand of Darkness, The', isbn, authorIds: ['ursula'], pageCount: 320, updatedAt: originalUpdatedAt }),
+    unsharedMetadataBook.set({
+      title: 'The Left Hand of Darkness', isbn: secondIsbn, authorIds: ['ursula'],
+      pageCount: 999, publisher: 'Second Press', publishedDate: 'secret-date',
+      coverUrl: 'https://second.example.test/cover.jpg', updatedAt: originalUpdatedAt,
     }),
     unmatchedBook.set({ title: 'Parable of the Sower', isbn: '', authorIds: ['octavia'], pageCount: 264, updatedAt: originalUpdatedAt }),
     conflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 304, updatedAt: originalUpdatedAt }),
-    privateConflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 288, updatedAt: originalUpdatedAt }),
+    nonSharingConflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 288, updatedAt: originalUpdatedAt }),
     db.doc(`works/${conflictWorkId}`).set(validWork('A Different Book', conflictTitleKey, [someoneElseAuthorId])),
     db.doc(`editions/${conflictEditionId}`).set({
       workId: conflictWorkId,
@@ -249,6 +262,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
 
   const dryRun = runScript(migrationPath, '--expect-overlap-groups=1')
   assert.match(dryRun, /^ACCEPT 1 cross-user overlap groups$/m)
+  assert.match(dryRun, new RegExp(`^SKIP tombstoned-account users/${tombstonedUid}$`, 'm'))
   assert.match(dryRun, new RegExp(`DRY  create works/${workId}`))
   assert.match(dryRun, /REVIEW existing-isbn-text-conflict/)
   assert.equal((await db.doc(`works/${workId}`).get()).exists, false)
@@ -257,6 +271,17 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
 
   const applied = runScript(migrationPath, '--apply')
   assert.match(applied, new RegExp(`SET  create works/${workId}`))
+  assert.match(applied, new RegExp(`^SKIP tombstoned-account users/${tombstonedUid}$`, 'm'))
+  // The frozen copy is untouched: it gains none of the four catalog link
+  // fields the same book earns for every live account, and no reader
+  // projection. Remove the skip and the key set below grows.
+  const tombstonedCopy = (await tombstonedBook.get()).data()
+  assert.deepEqual(Object.keys(tombstonedCopy ?? {}).sort(),
+    ['authorIds', 'isbn', 'pageCount', 'title', 'updatedAt'])
+  assert.equal(
+    (await db.collection('sharedWorkOwners').where('uid', '==', tombstonedUid).get()).empty,
+    true,
+  )
   assert.match(applied, /REVIEW existing-isbn-text-conflict/)
   const createdWork = (await db.doc(`works/${workId}`).get()).data()
   assert.equal(createdWork?.coverUrl, 'https://operator.example.test/cover.jpg')
@@ -269,36 +294,36 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.equal(createdEdition?.publisher, 'Operator Press')
   assert.equal(createdEdition?.publishedDate, '1969')
   assert.deepEqual((await db.doc(`isbnIndex/${isbn}`).get()).data(), { workId, editionId })
-  // Every copy seeds: the private user's ISBN is a second edition of the
+  // Every copy seeds: the second account's ISBN is another edition of the
   // same work (catalog data is public whoever contributed it).
-  assert.deepEqual((await db.doc(`isbnIndex/${privateIsbn}`).get()).data(), { workId, editionId: privateEditionId })
-  const privateEdition = (await db.doc(`editions/${privateEditionId}`).get()).data()
-  assert.equal(privateEdition?.publisher, 'Private Shelf Press')
-  assert.equal(privateEdition?.suggestedPageCount, 999)
+  assert.deepEqual((await db.doc(`isbnIndex/${secondIsbn}`).get()).data(), { workId, editionId: secondEditionId })
+  const secondEdition = (await db.doc(`editions/${secondEditionId}`).get()).data()
+  assert.equal(secondEdition?.publisher, 'Second Press')
+  assert.equal(secondEdition?.suggestedPageCount, 999)
   const projection = await db.doc(`sharedWorkOwners/${projectionId}`).get()
   assert.deepEqual(Object.keys(projection.data() ?? {}).sort(), ['uid', 'updatedAt', 'workId'])
   assert.equal(projection.get('workId'), workId)
   assert.equal(projection.get('uid'), sharingUid)
   assert.equal(projection.get('updatedAt') instanceof Timestamp, true)
-  assert.equal((await db.collection('sharedWorkOwners').where('uid', '==', privateUid).get()).empty, true)
+  assert.equal((await db.collection('sharedWorkOwners').where('uid', '==', nonSharingUid).get()).empty, true)
   assert.deepEqual((await db.doc(`isbnIndex/${conflictIsbn}`).get()).data(), {
     workId: conflictWorkId,
     editionId: conflictEditionId,
   })
 
   const shared = (await sharedBook.get()).data()
-  const privateCopy = (await privateBook.get()).data()
-  const privateMetadataCopy = (await privateMetadataBook.get()).data()
+  const unsharedCopy = (await unsharedBook.get()).data()
+  const unsharedMetadataCopy = (await unsharedMetadataBook.get()).data()
   const unmatched = (await unmatchedBook.get()).data()
   const conflict = (await conflictBook.get()).data()
-  const privateConflict = (await privateConflictBook.get()).data()
-  for (const snapshot of [shared, privateCopy, privateMetadataCopy]) {
+  const nonSharingConflict = (await nonSharingConflictBook.get()).data()
+  for (const snapshot of [shared, unsharedCopy, unsharedMetadataCopy]) {
     assert.deepEqual(snapshot?.authorIds, [leGuinAuthorId])
   }
-  for (const snapshot of [unmatched, conflict, privateConflict]) assert.deepEqual(snapshot?.authorIds, [butlerAuthorId])
+  for (const snapshot of [unmatched, conflict, nonSharingConflict]) assert.deepEqual(snapshot?.authorIds, [butlerAuthorId])
   // Legacy per-user author documents are retained (soft-delete policy);
   // the migration only proves no book references them any more.
-  for (const user of [sharingUser, privateUser]) {
+  for (const user of [sharingUser, nonSharingUser]) {
     const legacy = await user.collection('authors').get()
     assert.equal(legacy.empty, false)
     const legacyIds = new Set(legacy.docs.map((snapshot) => snapshot.id))
@@ -310,11 +335,11 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.equal(shared?.workId, workId)
   assert.equal(shared?.editionId, editionId)
   assert.equal(shared?.matchMethod, 'isbn')
-  assert.equal(privateCopy?.workId, workId)
-  assert.equal(privateCopy?.editionId, editionId)
-  assert.equal(privateMetadataCopy?.workId, workId)
-  assert.equal(privateMetadataCopy?.editionId, privateEditionId)
-  assert.equal(privateMetadataCopy?.matchMethod, 'isbn')
+  assert.equal(unsharedCopy?.workId, workId)
+  assert.equal(unsharedCopy?.editionId, editionId)
+  assert.equal(unsharedMetadataCopy?.workId, workId)
+  assert.equal(unsharedMetadataCopy?.editionId, secondEditionId)
+  assert.equal(unsharedMetadataCopy?.matchMethod, 'isbn')
   // A book nobody else has still seeds its own work (no ISBN, so no
   // edition); it is only the ISBN conflicts below that stay unlinked.
   assert.equal(typeof unmatched?.workId, 'string')
@@ -326,10 +351,10 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     { workId: null, editionId: null, matchMethod: null, linkedAt: null },
   )
   assert.deepEqual(
-    { workId: privateConflict?.workId, editionId: privateConflict?.editionId, matchMethod: privateConflict?.matchMethod, linkedAt: privateConflict?.linkedAt },
+    { workId: nonSharingConflict?.workId, editionId: nonSharingConflict?.editionId, matchMethod: nonSharingConflict?.matchMethod, linkedAt: nonSharingConflict?.linkedAt },
     { workId: null, editionId: null, matchMethod: null, linkedAt: null },
   )
-  for (const snapshot of [shared, privateCopy, privateMetadataCopy, unmatched, conflict, privateConflict]) {
+  for (const snapshot of [shared, unsharedCopy, unsharedMetadataCopy, unmatched, conflict, nonSharingConflict]) {
     assert.equal(snapshot?.updatedAt.toMillis(), originalUpdatedAt.toMillis())
   }
 
@@ -337,38 +362,38 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.match(rerun, /^0 catalog documents created$/m)
   assert.match(rerun, /^0 personal books updated$/m)
 
-  const latePrivateBook = privateUser.collection('books').doc('late-private-copy')
-  await latePrivateBook.set({
-    title: 'The Left Hand of Darkness', isbn: latePrivateIsbn, authorIds: [leGuinAuthorId],
-    pageCount: 777, publisher: 'Still Private Press', updatedAt: originalUpdatedAt,
+  const lateAddedBook = nonSharingUser.collection('books').doc('late-added-copy')
+  await lateAddedBook.set({
+    title: 'The Left Hand of Darkness', isbn: lateIsbn, authorIds: [leGuinAuthorId],
+    pageCount: 777, publisher: 'Third Press', updatedAt: originalUpdatedAt,
   })
   // A copy added after the first apply seeds its own edition on the re-run.
   const lateApply = runScript(migrationPath, '--apply')
   assert.match(lateApply, /^2 catalog documents created$/m)
-  assert.deepEqual((await db.doc(`isbnIndex/${latePrivateIsbn}`).get()).data(), { workId, editionId: latePrivateEditionId })
-  assert.equal((await db.doc(`editions/${latePrivateEditionId}`).get()).get('suggestedPageCount'), 777)
-  assert.equal((await latePrivateBook.get()).get('workId'), workId)
-  assert.equal((await latePrivateBook.get()).get('editionId'), latePrivateEditionId)
+  assert.deepEqual((await db.doc(`isbnIndex/${lateIsbn}`).get()).data(), { workId, editionId: lateEditionId })
+  assert.equal((await db.doc(`editions/${lateEditionId}`).get()).get('suggestedPageCount'), 777)
+  assert.equal((await lateAddedBook.get()).get('workId'), workId)
+  assert.equal((await lateAddedBook.get()).get('editionId'), lateEditionId)
   const lateRerun = runScript(migrationPath, '--apply')
   assert.match(lateRerun, /^0 catalog documents created$/m)
   assert.match(lateRerun, /^0 personal books updated$/m)
 
   const raceSource = sharingUser.collection('books').doc('preferred-race-source')
-  const revokedAlternateSource = privateUser.collection('books').doc('revoked-alternate-source')
+  const revokedAlternateSource = nonSharingUser.collection('books').doc('revoked-alternate-source')
   await Promise.all([
     raceSource.set({title: 'Preferred Seed', authorIds: [leGuinAuthorId], pageCount: 100}),
     revokedAlternateSource.set({title: 'Translated Seed', authorIds: [leGuinAuthorId], pageCount: 110}),
-    db.doc(`profiles/${privateRaceUsername}`).set({uid: privateUid, public: true}),
-    privateUser.collection('settings').doc('bookSharing').set({
-      profileUsername: privateRaceUsername,
+    db.doc(`profiles/${secondUsername}`).set({uid: nonSharingUid, public: true}),
+    nonSharingUser.collection('settings').doc('bookSharing').set({
+      profileUsername: secondUsername,
       timeZone: 'America/Los_Angeles',
       createdAt: now,
       updatedAt: now,
     }),
   ])
   const eligibleRaceSource = await migrationSource(sharingUid, raceSource)
-  const revokedRaceSource = await migrationSource(privateUid, revokedAlternateSource)
-  await privateUser.collection('settings').doc('bookSharing').delete()
+  const revokedRaceSource = await migrationSource(nonSharingUid, revokedAlternateSource)
+  await nonSharingUser.collection('settings').doc('bookSharing').delete()
 
   await raceSource.update({title: 'Concurrent identity edit'})
   await assert.rejects(
@@ -393,7 +418,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   await raceSource.update({workId})
   await assert.rejects(
     db.runTransaction(async (transaction) => {
-      await assertMigrationProjectionSourcesEligible(
+      await assertMigrationProjectionSourcesConsented(
         transaction,
         db,
         [eligibleRaceSource],
@@ -418,7 +443,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   await raceSource.update({workId: conflictWorkId})
   await assert.rejects(
     db.runTransaction(async (transaction) => {
-      await assertMigrationProjectionSourcesEligible(
+      await assertMigrationProjectionSourcesConsented(
         transaction,
         db,
         [eligibleRaceSource],
@@ -437,7 +462,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     raceSource.delete(),
     revokedAlternateSource.delete(),
     ursulaRef.delete(),
-    db.doc(`profiles/${privateRaceUsername}`).delete(),
+    db.doc(`profiles/${secondUsername}`).delete(),
   ])
 
   const audit = runScript(auditPath)
@@ -476,14 +501,14 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       unexpected: true,
     }),
     db.doc(`sharedWorkOwners/${projectionId}`).delete(),
-    db.doc(`sharedWorkOwners/${stalePrivateProjectionId}`).set({
+    db.doc(`sharedWorkOwners/${staleProjectionId}`).set({
       workId,
-      uid: privateUid,
+      uid: nonSharingUid,
       updatedAt: now,
     }),
     sharedBook.collection('updates').doc('bad-references').set({
-      owner: privateUser,
-      book: privateBook,
+      owner: nonSharingUser,
+      book: unsharedBook,
       type: 'reading',
       timeRead: 60,
       fromPage: 0,
@@ -492,8 +517,8 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       createdAt: now,
       updatedAt: now,
     }),
-    privateUser.update({toggl: null}),
-    secretsDb.doc(`togglTokens/${privateUid}`).set({
+    nonSharingUser.update({toggl: null}),
+    secretsDb.doc(`togglTokens/${nonSharingUid}`).set({
       apiToken: 'local-corrupt-shape-fixture',
       workspaceId: 1,
       projectId: 2,
@@ -514,10 +539,10 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.match(corruptAudit, new RegExp(`^catalog\\.external-index\\.bad-id externalIdIndex/${corruptExternalIndexId}`, 'm'))
   assert.match(corruptAudit, new RegExp(`^catalog\\.external-index\\.edition-missing externalIdIndex/${corruptExternalIndexId}`, 'm'))
   assert.match(corruptAudit, new RegExp(`^book-sharing\\.projection-missing sharedWorkOwners/${projectionId}`, 'm'))
-  assert.match(corruptAudit, new RegExp(`^book-sharing\\.projection-without-consent sharedWorkOwners/${stalePrivateProjectionId}`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^book-sharing\\.projection-without-consent sharedWorkOwners/${staleProjectionId}`, 'm'))
   assert.match(corruptAudit, new RegExp(`^update\\.owner-mismatch users/${sharingUid}/books/shared-copy/updates/bad-references`, 'm'))
   assert.match(corruptAudit, new RegExp(`^update\\.book-mismatch users/${sharingUid}/books/shared-copy/updates/bad-references`, 'm'))
-  assert.match(corruptAudit, new RegExp(`^catalog\\.book\\.isbn-provenance-mismatch users/${privateUid}/books/private-copy`, 'm'))
-  assert.match(corruptAudit, new RegExp(`^user\\.toggl-status\\.bad-shape users/${privateUid}`, 'm'))
-  assert.match(corruptAudit, new RegExp(`^toggl-secret\\.status-missing secrets:togglTokens/${privateUid}`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^catalog\\.book\\.isbn-provenance-mismatch users/${nonSharingUid}/books/unshared-copy`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^user\\.toggl-status\\.bad-shape users/${nonSharingUid}`, 'm'))
+  assert.match(corruptAudit, new RegExp(`^toggl-secret\\.status-missing secrets:togglTokens/${nonSharingUid}`, 'm'))
 })

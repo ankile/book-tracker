@@ -9,12 +9,21 @@
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
 import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
-import { createHash } from 'node:crypto';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
 import { Timestamp } from 'firebase-admin/firestore';
-import { deterministicTitleIndexId } from './cross-user-work-migration.ts';
+import {
+  deterministicExternalIndexId,
+  deterministicSharedWorkOwnerId,
+  deterministicTitleIndexId,
+} from './cross-user-work-migration.ts';
+import {
+  SHARING_SETTING_KEYS,
+  SHARING_USERNAME,
+  sharingConsentIsValid,
+  validTimeZone,
+} from './sharing-consent.ts';
 import {
   catalogTitleKeys,
   normalizeCatalogAuthorName,
@@ -67,22 +76,9 @@ const isbnIndexesById = new Map(isbnIndexes.docs.map((doc) => [doc.id, doc.data(
 const externalIdIndexesById = new Map(externalIdIndexes.docs.map((doc) => [doc.id, doc.data()]));
 const titleIndexesById = new Map(workTitleIndexes.docs.map((doc) => [doc.id, doc.data()]));
 
-const externalIndexId = (provider: string, externalId: string): string =>
-  createHash('sha256').update(`${provider}\0${externalId}`).digest('hex');
-const sharedWorkOwnerId = (workId: string, uid: string): string =>
-  createHash('sha256').update(`${workId}\0${uid}`).digest('hex');
 const trustedExternalProviders = new Set(['google-books', 'open-library']);
 const validCatalogCover = (value: unknown): boolean =>
   value === '' || (typeof value === 'string' && /^https:\/\/[^\s]+$/u.test(value));
-const validTimeZone = (value: unknown): boolean => {
-  if (typeof value !== 'string') return false;
-  try {
-    new Intl.DateTimeFormat('en-US', {timeZone: value}).format();
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 const resolveCatalogWork = (id: string): {id: string | null; hops: number; cycle: boolean} => {
   const visited = new Set<string>();
@@ -188,10 +184,13 @@ for (const workDoc of works.docs) {
   const path = workDoc.ref.path;
   const required = [
     'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds',
-    'coverUrl', 'subjects', 'fiction', 'status', 'createdAt', 'updatedAt',
+    'coverUrl', 'subjects', 'fiction', 'status', 'mergedFrom',
+    'createdAt', 'updatedAt',
   ];
   for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
-  const allowedWorkFields = new Set([...required, 'mergedInto', 'mergedFrom']);
+  // createdBy names the verified account whose catalog.create minted the
+  // work; the migration and the admin tools leave it absent.
+  const allowedWorkFields = new Set([...required, 'mergedInto', 'createdBy']);
   for (const field of Object.keys(work)) {
     if (!allowedWorkFields.has(field)) found('catalog.work.unexpected-field', path, field);
   }
@@ -324,7 +323,7 @@ for (const editionDoc of editions.docs) {
         found('catalog.edition.bad-external-id', path, `${provider}:${String(externalId)}`);
         continue;
       }
-      const index = externalIdIndexesById.get(externalIndexId(provider, externalId));
+      const index = externalIdIndexesById.get(deterministicExternalIndexId(provider, externalId));
       if (
         index?.editionId !== editionDoc.id ||
         index.workId !== edition.workId ||
@@ -340,11 +339,11 @@ for (const editionDoc of editions.docs) {
 for (const indexDoc of isbnIndexes.docs) {
   const index = indexDoc.data();
   const path = indexDoc.ref.path;
-  if (Object.keys(index).sort().join(',') !== 'editionId,workId') {
-    found('catalog.isbn-index.bad-shape', path, JSON.stringify(index));
-  }
   if (normalizeIsbn(indexDoc.id) !== indexDoc.id) found('catalog.isbn-index.bad-id', path);
-  if (typeof index.workId !== 'string' || typeof index.editionId !== 'string') {
+  // One row, one shape finding: the key set and the field types are the
+  // same defect seen twice.
+  if (Object.keys(index).sort().join(',') !== 'editionId,workId' ||
+      typeof index.workId !== 'string' || typeof index.editionId !== 'string') {
     found('catalog.isbn-index.bad-shape', path, JSON.stringify(index));
     continue;
   }
@@ -378,7 +377,7 @@ for (const indexDoc of externalIdIndexes.docs) {
     found('catalog.external-index.bad-fields', path, JSON.stringify(index));
     continue;
   }
-  if (externalIndexId(index.provider, index.externalId) !== indexDoc.id) {
+  if (deterministicExternalIndexId(index.provider, index.externalId) !== indexDoc.id) {
     found('catalog.external-index.bad-id', path, `${index.provider}:${index.externalId}`);
   }
   const edition = editionsById.get(index.editionId);
@@ -402,10 +401,8 @@ const titleRowsByPair = new Map<string, string[]>();
 for (const indexDoc of workTitleIndexes.docs) {
   const index = indexDoc.data();
   const path = indexDoc.ref.path;
-  if (Object.keys(index).sort().join(',') !== 'status,title,titleKey,workId') {
-    found('catalog.title-index.bad-shape', path, JSON.stringify(index));
-  }
-  if (typeof index.workId !== 'string' || typeof index.title !== 'string' ||
+  if (Object.keys(index).sort().join(',') !== 'status,title,titleKey,workId' ||
+      typeof index.workId !== 'string' || typeof index.title !== 'string' ||
       typeof index.titleKey !== 'string' ||
       (index.status !== 'active' && index.status !== 'hidden')) {
     found('catalog.title-index.bad-shape', path, JSON.stringify(index));
@@ -593,37 +590,53 @@ for (const record of profileOwners.docs) {
 let legacyAuthorDocCount = 0;
 let catalogLinkedBookCount = 0;
 let bookSharingSettingCount = 0;
-const eligibleSharingUsers = new Set<string>();
+const consentedSharingUsers = new Set<string>();
+
+// The backend judges consent with sharing-consent.ts; the audit adds one
+// assertion the backend deliberately does not make, that the setting
+// document carries exactly its four keys with both timestamps. A row that
+// fails the shape is reported once and not restated as a consent finding.
+const auditSharingSetting = (
+  userId: string,
+  path: string,
+  setting: Record<string, unknown>,
+): boolean => {
+  if (
+    Object.keys(setting).sort().join(',') !== [...SHARING_SETTING_KEYS].join(',') ||
+    !(setting.createdAt instanceof Timestamp) || !(setting.updatedAt instanceof Timestamp) ||
+    typeof setting.profileUsername !== 'string' ||
+    !SHARING_USERNAME.test(setting.profileUsername) ||
+    !validTimeZone(setting.timeZone)
+  ) {
+    found('book-sharing.bad-shape', path, JSON.stringify(setting));
+    return false;
+  }
+  if (!existingUsers.has(userId)) {
+    found('book-sharing.user-missing', path, userId);
+    return false;
+  }
+  const profile = publicProfilesByUsername.get(setting.profileUsername);
+  if (profile === undefined) {
+    found('book-sharing.profile-missing', path, setting.profileUsername);
+    return false;
+  }
+  if (profile.uid !== userId || profile.public !== true) {
+    found('book-sharing.profile-not-public-owner', path, setting.profileUsername);
+    return false;
+  }
+  return sharingConsentIsValid(userId, userProfilesById.get(userId), setting, profile);
+};
 const linkedOwnerWorkPairs = new Set<string>();
 
 for (const user of users) {
   const books = await user.collection('books').get();
   const lifecycle = await user.collection('timerLifecycle').doc('current').get();
   const bookSharing = await user.collection('settings').doc('bookSharing').get();
-  if (bookSharing.exists) {
+  const setting = bookSharing.data();
+  if (setting !== undefined) {
     bookSharingSettingCount += 1;
-    const setting = bookSharing.data() ?? {};
-    const settingKeys = Object.keys(setting).sort().join(',');
-    if (
-      settingKeys !== 'createdAt,profileUsername,timeZone,updatedAt' ||
-      typeof setting.profileUsername !== 'string' ||
-      !validTimeZone(setting.timeZone) ||
-      !(setting.createdAt instanceof Timestamp) ||
-      !(setting.updatedAt instanceof Timestamp)
-    ) {
-      found('book-sharing.bad-shape', bookSharing.ref.path, JSON.stringify(setting));
-    }
-    if (!existingUsers.has(user.id)) found('book-sharing.user-missing', bookSharing.ref.path, user.id);
-    const profile = typeof setting.profileUsername === 'string' ? publicProfilesByUsername.get(setting.profileUsername) : undefined;
-    if (profile === undefined) found('book-sharing.profile-missing', bookSharing.ref.path, String(setting.profileUsername));
-    else if (profile.uid !== user.id || profile.public !== true) {
-      found('book-sharing.profile-not-public-owner', bookSharing.ref.path, String(setting.profileUsername));
-    } else if (
-      existingUsers.has(user.id) && userProfilesById.get(user.id)?.deletedAt === undefined &&
-      profile.deletedAt === undefined && validTimeZone(setting.timeZone) &&
-      settingKeys === 'createdAt,profileUsername,timeZone,updatedAt'
-    ) {
-      eligibleSharingUsers.add(user.id);
+    if (auditSharingSetting(user.id, bookSharing.ref.path, setting)) {
+      consentedSharingUsers.add(user.id);
     }
   }
   for (const finding of auditTimerClaimState(
@@ -650,12 +663,19 @@ for (const user of users) {
     }
   }
 
+  // A tombstoned account (SEC-006 soft delete) is frozen: the catalog
+  // migration skips it and no client can edit its books, so the fields
+  // those two would have added are not drift anyone can act on.
+  const tombstoned = tombstonedUsers.has(user.id);
+
   for (const book of books.docs) {
     const b = book.data();
     const p = book.ref.path;
     for (const violation of bookShapeViolations(b, user.path)) found('book.rules-shape', p, violation);
 
-    for (const field of ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction', 'workId', 'editionId', 'matchMethod', 'linkedAt']) {
+    const requiredBookFields = ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction'];
+    if (!tombstoned) requiredBookFields.push('workId', 'editionId', 'matchMethod', 'linkedAt');
+    for (const field of requiredBookFields) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
     }
     if (b.workId === null) {
@@ -716,7 +736,7 @@ for (const user of users) {
     }
     // finishedAt: stamped by the client when finished flips, backfilled by
     // migrate-finished-at.ts; a finished book without it is migration drift.
-    if (b.finished === true && !(b.finishedAt instanceof Timestamp)) {
+    if (b.finished === true && !(b.finishedAt instanceof Timestamp) && !tombstoned) {
       found('book.finished-without-finishedAt', p);
     }
     if (Number.isFinite(b.currentPage) && Number.isFinite(b.pageCount) && b.currentPage > b.pageCount) {
@@ -793,20 +813,20 @@ for (const projection of sharedWorkOwners.docs) {
   }
   const pair = `${data.uid}\0${data.workId}`;
   projectedPairs.add(pair);
-  if (projection.id !== sharedWorkOwnerId(data.workId, data.uid)) {
+  if (projection.id !== deterministicSharedWorkOwnerId(data.workId, data.uid)) {
     found('book-sharing.projection-bad-id', path, pair);
   }
   if (!existingUsers.has(data.uid)) found('book-sharing.projection-user-missing', path, data.uid);
   if (!worksById.has(data.workId)) found('book-sharing.projection-work-missing', path, data.workId);
-  if (!eligibleSharingUsers.has(data.uid)) found('book-sharing.projection-without-consent', path, data.uid);
+  if (!consentedSharingUsers.has(data.uid)) found('book-sharing.projection-without-consent', path, data.uid);
   if (!linkedOwnerWorkPairs.has(pair)) found('book-sharing.projection-without-book', path, pair);
 }
 for (const pair of linkedOwnerWorkPairs) {
   const separator = pair.indexOf('\0');
   const uid = pair.slice(0, separator);
   const workId = pair.slice(separator + 1);
-  if (eligibleSharingUsers.has(uid) && !projectedPairs.has(pair)) {
-    found('book-sharing.projection-missing', `sharedWorkOwners/${sharedWorkOwnerId(workId, uid)}`, pair);
+  if (consentedSharingUsers.has(uid) && !projectedPairs.has(pair)) {
+    found('book-sharing.projection-missing', `sharedWorkOwners/${deterministicSharedWorkOwnerId(workId, uid)}`, pair);
   }
 }
 

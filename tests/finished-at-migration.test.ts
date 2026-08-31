@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {Timestamp} from 'firebase-admin/firestore';
 import {planFinishedAt} from '../finished-at-migration.ts';
@@ -43,4 +44,18 @@ test('unfinished and already-stamped books are left alone; malformed rows crash'
   assert.equal(planFinishedAt({finished: true, finishedAt: Timestamp.fromMillis(5)}, [row('r', 1, 5)]), null);
   assert.throws(() => planFinishedAt({finished: true, finishedAt: 'yesterday'}, []), /finishedAt must be a timestamp/);
   assert.throws(() => planFinishedAt({finished: true}, [{id: 'bad', data: {createdAt: Timestamp.fromMillis(1)}}]), /pagesRead/);
+});
+
+// The tombstone skip lives in the driver's traversal, not in the planner
+// (which never sees an account), and the driver cannot run without a
+// database. This pins the guard against silent deletion; the equivalent
+// skip in migrate-cross-user-works.ts is exercised end to end in
+// tests/cross-user-work-migration-emulator.test.ts.
+test('the driver skips tombstoned accounts', () => {
+  const driver = readFileSync(new URL('../migrate-finished-at.ts', import.meta.url), 'utf8');
+  const guard = driver.indexOf("account.get('deletedAt') !== undefined");
+  const books = driver.indexOf("user.collection('books')");
+  assert.notEqual(guard, -1, 'the driver must skip a tombstoned account');
+  assert.ok(guard < books, 'the tombstone check must precede the book traversal');
+  assert.match(driver, /SKIP tombstoned-account/);
 });
