@@ -52,6 +52,23 @@ test('the policy pins the injection-relevant directives', () => {
   assert.match(policy, /frame-src https:\/\/www\.google\.com\/recaptcha\//);
 });
 
+test('the Cloudflare Web Analytics beacon is allowed and nothing else third-party runs', () => {
+  const policy = metaPolicy(indexHtml);
+  const directive = (name: string) =>
+    policy.split(';').map((d) => d.trim()).find((d) => d.startsWith(`${name} `)) ?? '';
+  const scriptSrc = directive('script-src');
+  const connectSrc = directive('connect-src');
+  assert.ok(scriptSrc.includes('https://static.cloudflareinsights.com'), 'beacon script origin');
+  assert.ok(connectSrc.includes('https://cloudflareinsights.com'), 'beacon report origin');
+  // The only script hosts besides self and the inline hashes: reCAPTCHA and the beacon.
+  const hosts = scriptSrc.split(/\s+/).slice(1).filter((s) => s.startsWith('https://'));
+  assert.deepEqual(hosts.sort(), [
+    'https://static.cloudflareinsights.com',
+    'https://www.google.com/recaptcha/',
+    'https://www.gstatic.com/recaptcha/',
+  ]);
+});
+
 test('the profile shell serves the same policy as the SPA', () => {
   assert.equal(metaPolicy(shellHtml), metaPolicy(indexHtml));
 });

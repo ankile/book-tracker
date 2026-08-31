@@ -53,7 +53,11 @@ const config: Config = {
 					'self',
 					'sha256-/x7W7R75k8Roq0WaVRQX9blP4OufE5xbAdzklGxsgpw=',
 					'https://www.google.com/recaptcha/',
-					'https://www.gstatic.com/recaptcha/'
+					'https://www.gstatic.com/recaptcha/',
+					// Cloudflare Web Analytics beacon, injected at the edge into HTML
+					// served through book.ankile.com (owner decision 2026-08-31);
+					// cookieless, reports to cloudflareinsights.com below.
+					'https://static.cloudflareinsights.com'
 				],
 				// 41 style="" attributes in components and the profile snapshot's
 				// <style> block; style injection is a cosmetic vector, scripts are
@@ -76,6 +80,7 @@ const config: Config = {
 					'https://api.nb.no',
 					'https://openlibrary.org',
 					'https://www.google.com/recaptcha/',
+					'https://cloudflareinsights.com',
 					...emulatorConnectSrc
 				],
 				'frame-src': [
