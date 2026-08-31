@@ -15,6 +15,7 @@ const {gunzipSync}: typeof import("node:zlib") = require("node:zlib");
 const {
   MISS_BUDGET_EXHAUSTED,
   encodeResponse,
+  publicProfileView,
   SITEMAP_MAX_PROFILES,
   SITEMAP_READ_CONCURRENCY,
   SITEMAP_SCAN_BUDGET_MS,
@@ -95,9 +96,10 @@ const marker = {
 };
 
 test("renders a complete, escaped, indexable profile document", () => {
-  const html = renderProfileDocument(shell, profile("ada-lovelace", {
+  const adaProfile = profile("ada-lovelace", {
     givenName: "Ada </script><script>",
-  }), true);
+  });
+  const html = renderProfileDocument(shell, adaProfile, true, publicProfileView(adaProfile));
 
   assert.match(html, /Ada &lt;\/script&gt;&lt;script&gt; Lovelace&#39;s reading profile \| Book Tracker/);
   assert.doesNotMatch(html, /Ada <\/script><script>/);
@@ -110,6 +112,19 @@ test("renders a complete, escaped, indexable profile document", () => {
     /<script data-server-profile-meta type="application\/ld\+json">([^<]+)<\/script>/,
   );
   assert.ok(structuredDataMatch);
+  // The profile is inlined so the SPA hydrates without a fetch. It carries
+  // the same wire shape as /profiles/<username>.json and is escaped so a
+  // value containing </script> cannot break out of the block.
+  const bootstrapMatch = html.match(
+    /<script id="profile-bootstrap" type="application\/json">([^<]*)<\/script>/,
+  );
+  assert.ok(bootstrapMatch, "the profile bootstrap script is present");
+  assert.doesNotMatch(html, /Ada <\/script><script>/);
+  const bootstrap = JSON.parse(bootstrapMatch[1]);
+  assert.deepEqual(bootstrap, publicProfileView(adaProfile));
+  assert.equal(bootstrap.username, "ada-lovelace");
+  assert.equal(bootstrap.givenName, "Ada </script><script>");
+
   const structuredData = JSON.parse(structuredDataMatch[1]);
   assert.equal(structuredData["@type"], "ProfilePage");
   assert.equal(structuredData.mainEntity["@type"], "Person");
@@ -125,7 +140,8 @@ test("renders a complete, escaped, indexable profile document", () => {
 });
 
 test("renders public unlisted profiles with noindex", () => {
-  const html = renderProfileDocument(shell, profile(), false);
+  const plainProfile = profile();
+  const html = renderProfileDocument(shell, plainProfile, false, publicProfileView(plainProfile));
   assert.match(html, /name="robots" content="noindex,follow"/);
   assert.match(html, /<h1>Ada Lovelace<\/h1>/);
 });
