@@ -24,6 +24,20 @@ export const BASE_HEADERS: Readonly<Record<string, string>> & {'Cache-Control': 
     'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()',
 };
 export const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+// Firebase Auth's hosted email-action page (verify-email and password-reset
+// links land there) exists only on the project's Hosting domains: Hosting is
+// retired to a redirect, but the reserved /__/ paths keep working on it. The
+// action URL configured in Auth is https://book.ankile.com/__/auth/action so
+// the link a user sees in the email is our domain; this hop delivers it to
+// the page, query string verbatim (mode, oobCode, apiKey, continueUrl, lang).
+// 302 and no-store: an oobCode is single-use and must never sit in a cache.
+export const AUTH_ACTION_ORIGIN = 'https://book-tracker-d8f24.web.app';
+const AUTH_ACTION_PREFIX = '/__/auth/';
+
+export function isAuthActionPath(pathname: string): boolean {
+  return pathname.startsWith(AUTH_ACTION_PREFIX);
+}
 export const PROFILE_CACHE_CONTROL = 'public, max-age=60, s-maxage=300';
 export const SITEMAP_CACHE_CONTROL = 'public, max-age=300, s-maxage=300';
 
@@ -130,6 +144,12 @@ async function renderedResponse(request: Request, url: URL): Promise<Response> {
 const worker = {
   async fetch(request: Request, env: PagesEnv): Promise<Response> {
     const url = new URL(request.url);
+    if (isAuthActionPath(url.pathname)) {
+      const target = new URL(url.pathname + url.search, AUTH_ACTION_ORIGIN);
+      const hop = withPolicy(Response.redirect(target.toString(), 302), url.pathname);
+      hop.headers.set('Cache-Control', 'no-store');
+      return hop;
+    }
     const trailing = PROFILE_TRAILING_SLASH.exec(url.pathname);
     if (trailing !== null) {
       const target = new URL(`/profiles/${trailing[1]}${url.search}`, url);
