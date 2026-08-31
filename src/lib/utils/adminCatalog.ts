@@ -15,60 +15,23 @@ import type {
   AdminCatalogScanResponse,
   AdminCatalogWorkRow,
   CatalogMatchMethod,
-  EditionFormat,
   WorkStatus,
   WorkVisibility,
 } from '../interfaces/catalog.ts';
-
-type Data = Record<string, unknown>;
-
-function record(value: unknown, context: string): Data {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError(`${context}: expected an object`);
-  }
-  return value as Data;
-}
-
-function exactKeys(value: Data, keys: readonly string[], context: string): void {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new TypeError(`${context}: expected only ${expected.join(', ')}`);
-  }
-}
-
-function string(value: unknown, context: string): string {
-  if (typeof value !== 'string') throw new TypeError(`${context}: expected a string`);
-  return value;
-}
-
-function nonEmptyString(value: unknown, context: string): string {
-  const decoded = string(value, context);
-  if (decoded.length === 0) throw new TypeError(`${context}: expected a non-empty string`);
-  return decoded;
-}
-
-function nullableString(value: unknown, context: string): string | null {
-  return value === null ? null : nonEmptyString(value, context);
-}
-
-function boolean(value: unknown, context: string): boolean {
-  if (typeof value !== 'boolean') throw new TypeError(`${context}: expected a boolean`);
-  return value;
-}
-
-function finiteNumber(value: unknown, context: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new TypeError(`${context}: expected a finite number`);
-  }
-  return value;
-}
-
-function integer(value: unknown, context: string): number {
-  const decoded = finiteNumber(value, context);
-  if (!Number.isSafeInteger(decoded)) throw new TypeError(`${context}: expected a safe integer`);
-  return decoded;
-}
+import {
+  boolean,
+  type Data,
+  editionFormat,
+  exactKeys,
+  finiteNumber,
+  integer,
+  nonEmptyString,
+  nullableNumber,
+  nullableString,
+  record,
+  string,
+  strings,
+} from './decodePrimitives.ts';
 
 function nonNegativeInteger(value: unknown, context: string): number {
   const decoded = integer(value, context);
@@ -80,15 +43,6 @@ function positiveInteger(value: unknown, context: string): number {
   const decoded = integer(value, context);
   if (decoded <= 0) throw new TypeError(`${context}: expected a positive integer`);
   return decoded;
-}
-
-function nullableNumber(value: unknown, context: string): number | null {
-  return value === null ? null : finiteNumber(value, context);
-}
-
-function strings(value: unknown, context: string): string[] {
-  if (!Array.isArray(value)) throw new TypeError(`${context}: expected an array`);
-  return value.map((entry, index) => string(entry, `${context}[${index}]`));
 }
 
 function array<T>(value: unknown, context: string, decode: (entry: unknown, context: string) => T): T[] {
@@ -134,13 +88,6 @@ function decodeAuthor(value: unknown, context: string): AdminCatalogAuthorRow {
     workCount: nonNegativeInteger(data.workCount, `${context}.workCount`),
     warnings: strings(data.warnings, `${context}.warnings`),
   };
-}
-
-function editionFormat(value: unknown, context: string): EditionFormat {
-  if (value !== 'full' && value !== 'abridged' && value !== 'revised' && value !== 'unknown') {
-    throw new TypeError(`${context}: expected a supported edition format`);
-  }
-  return value;
 }
 
 function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod | null {

@@ -77,6 +77,12 @@ test('strict catalog search decoding checks nested ids and rejects extra fields'
     () => decodeCatalogSearchResponse({results: [{...exact, edition: {...edition, workId: 'other'}}]}),
     /summary ids do not agree/,
   );
+  assert.throws(
+    () => decodeCatalogSearchResponse({results: [{...exact, work: {...exact.work, canonicalTitle: ''}}]}),
+    /expected a non-empty string/,
+  );
+  assert.throws(() => decodeCatalogSearchResponse({results: ['not-a-result']}), /expected an object/);
+  assert.throws(() => decodeCatalogSearchResponse({results: [null]}), /expected an object/);
 });
 
 test('catalog selection preselects one exact edition and keeps title matches explicit', () => {

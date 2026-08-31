@@ -14,66 +14,20 @@ import type {
   WorkReadersResponse,
 } from '../interfaces/catalog.ts';
 import { normalizeCatalogAuthorNames, normalizeCatalogTitle } from './catalog.ts';
+import {
+  boolean,
+  editionFormat,
+  exactKeys,
+  finiteNumber,
+  integer,
+  nonEmptyString,
+  nullableNumber,
+  nullableString,
+  record,
+  string,
+  strings,
+} from './decodePrimitives.ts';
 import { normalizeIsbn } from './isbn.ts';
-
-type Data = Record<string, unknown>;
-
-function record(value: unknown, context: string): Data {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError(`${context}: expected an object`);
-  }
-  return value as Data;
-}
-
-function exactKeys(value: Data, keys: readonly string[], context: string): void {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new TypeError(`${context}: expected only ${expected.join(', ')}`);
-  }
-}
-
-function string(value: unknown, context: string): string {
-  if (typeof value !== 'string') throw new TypeError(`${context}: expected a string`);
-  return value;
-}
-
-function nonEmptyString(value: unknown, context: string): string {
-  const decoded = string(value, context);
-  if (decoded.length === 0) throw new TypeError(`${context}: expected a non-empty string`);
-  return decoded;
-}
-
-function nullableString(value: unknown, context: string): string | null {
-  return value === null ? null : nonEmptyString(value, context);
-}
-
-function boolean(value: unknown, context: string): boolean {
-  if (typeof value !== 'boolean') throw new TypeError(`${context}: expected a boolean`);
-  return value;
-}
-
-function finiteNumber(value: unknown, context: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new TypeError(`${context}: expected a finite number`);
-  }
-  return value;
-}
-
-function nullableNumber(value: unknown, context: string): number | null {
-  return value === null ? null : finiteNumber(value, context);
-}
-
-function integer(value: unknown, context: string): number {
-  const decoded = finiteNumber(value, context);
-  if (!Number.isSafeInteger(decoded)) throw new TypeError(`${context}: expected a safe integer`);
-  return decoded;
-}
-
-function strings(value: unknown, context: string): string[] {
-  if (!Array.isArray(value)) throw new TypeError(`${context}: expected an array`);
-  return value.map((entry, index) => string(entry, `${context}[${index}]`));
-}
 
 function calendarDate(value: unknown, context: string): string | null {
   if (value === null) return null;
@@ -83,13 +37,6 @@ function calendarDate(value: unknown, context: string): string | null {
     throw new TypeError(`${context}: expected a valid YYYY-MM-DD calendar date`);
   }
   return decoded;
-}
-
-function editionFormat(value: unknown, context: string): CatalogEditionSummary['format'] {
-  if (value !== 'full' && value !== 'abridged' && value !== 'revised' && value !== 'unknown') {
-    throw new TypeError(`${context}: expected a supported edition format`);
-  }
-  return value;
 }
 
 function decodeAuthorSummary(value: unknown, context: string): CatalogAuthorSummary {
