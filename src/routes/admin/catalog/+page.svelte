@@ -58,7 +58,7 @@
   });
 
   let workId = $state('');
-  let workVisibility = $state<WorkVisibility>('internal');
+  let workVisibility = $state<WorkVisibility>('searchable');
   let canonicalTitle = $state('');
   let alternateTitles = $state('');
   let workAuthorIds = $state('');
@@ -680,7 +680,7 @@
     {:else if operationType === 'createWork' || operationType === 'editWork'}
       <div class="form-grid">
         <label>Work ID<input bind:value={workId} autocomplete="off" /></label>
-        <label>Visibility<select bind:value={workVisibility}><option value="internal">Internal</option><option value="searchable">Searchable</option></select></label>
+        <label>Visibility<select bind:value={workVisibility}><option value="searchable">Searchable</option><option value="internal">Hidden from search</option></select></label>
         <label class="wide">Canonical title<input bind:value={canonicalTitle} /></label>
         <label>Catalog author IDs, one per line<textarea bind:value={workAuthorIds}></textarea></label>
         <label>Alternate titles, one per line<textarea bind:value={alternateTitles}></textarea></label>
