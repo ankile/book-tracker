@@ -1,4 +1,4 @@
-import { getIdToken, reload, sendEmailVerification } from 'firebase/auth';
+import { getIdToken, getIdTokenResult, reload, sendEmailVerification } from 'firebase/auth';
 import type { ActionCodeSettings, User } from 'firebase/auth';
 
 // Kept free of $app imports so the Auth emulator can exercise it directly
@@ -28,6 +28,21 @@ export async function sendVerificationEmail(user: User, origin: string): Promise
 export async function refreshVerification(user: User): Promise<boolean> {
   await reload(user);
   if (!user.emailVerified) return false;
+  await getIdToken(user, true);
+  return true;
+}
+
+// The SDK reloads the persisted account record on every page load
+// (initializeCurrentUser -> _reloadWithoutSaving) but keeps the cached ID
+// token, so an account that used its link in another tab comes back with
+// emailVerified true on the record and email_verified false in the token
+// for up to an hour: the banner hides, and every Rules check still denies
+// (seen in prod 2026-08-31 on the first test account). Called for every
+// signed-in user the store sees; when the two disagree it forces a fresh
+// token, which Firestore picks up through its own token listener.
+export async function syncVerifiedClaim(user: User): Promise<boolean> {
+  const { claims } = await getIdTokenResult(user);
+  if (!user.emailVerified || claims.email_verified === true) return false;
   await getIdToken(user, true);
   return true;
 }

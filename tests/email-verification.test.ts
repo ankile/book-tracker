@@ -44,6 +44,13 @@ test('sign-up sends the verification email to the account it just created', () =
   );
 });
 
+test('every signed-in user has its token claim reconciled with the account record', () => {
+  assert.match(
+    authSource,
+    /onAuthStateChanged\(auth, \(u\) => \{[\s\S]*?if \(u !== null\) void syncVerifiedClaim\(u\)/,
+  );
+});
+
 test('confirming verification re-emits the user so templates see the new claim', () => {
   assert.match(
     authSource,

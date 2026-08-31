@@ -7,8 +7,9 @@ import {
   connectAuthEmulator,
   createUserWithEmailAndPassword,
   getAuth,
+  reload,
 } from 'firebase/auth';
-import { refreshVerification, sendVerificationEmail } from '../src/lib/firebase/emailVerification.ts';
+import { refreshVerification, sendVerificationEmail, syncVerifiedClaim } from '../src/lib/firebase/emailVerification.ts';
 
 const PROJECT_ID = 'book-tracker-rules-test';
 const AUTH_EMULATOR = 'http://127.0.0.1:9099';
@@ -58,4 +59,39 @@ test('sign-up mails a verification link back to this origin, and confirming refr
   assert.equal(await refreshVerification(user), true);
   assert.equal(user.emailVerified, true);
   assert.equal((await user.getIdTokenResult()).claims.email_verified, true);
+});
+
+test('a page load after verifying elsewhere gets its stale token claim repaired', async (t) => {
+  const app = initializeApp({ projectId: PROJECT_ID, apiKey: 'test-key' }, randomUUID());
+  t.after(() => deleteApp(app));
+  const auth = getAuth(app);
+  connectAuthEmulator(auth, AUTH_EMULATOR, { disableWarnings: true });
+  const email = `${randomUUID()}@example.com`;
+  const { user } = await createUserWithEmailAndPassword(auth, email, 'valid-test-password');
+  await sendVerificationEmail(user, 'https://book.ankile.com');
+  const [code] = await oobCodesFor(email);
+  await applyActionCode(auth, code.oobCode);
+
+  // What the SDK does on start-up with a persisted session: reload the
+  // record, keep the token. Record and claim now disagree — the state the
+  // first prod test account was stuck in.
+  await reload(user);
+  assert.equal(user.emailVerified, true);
+  assert.equal((await user.getIdTokenResult()).claims.email_verified, false);
+
+  assert.equal(await syncVerifiedClaim(user), true);
+  assert.equal((await user.getIdTokenResult()).claims.email_verified, true);
+
+  // Agreement is left alone: no refresh, so no needless token traffic.
+  assert.equal(await syncVerifiedClaim(user), false);
+});
+
+test('an unverified account is not refreshed by the claim sync', async (t) => {
+  const app = initializeApp({ projectId: PROJECT_ID, apiKey: 'test-key' }, randomUUID());
+  t.after(() => deleteApp(app));
+  const auth = getAuth(app);
+  connectAuthEmulator(auth, AUTH_EMULATOR, { disableWarnings: true });
+  const { user } = await createUserWithEmailAndPassword(auth, `${randomUUID()}@example.com`, 'valid-test-password');
+  assert.equal(await syncVerifiedClaim(user), false);
+  assert.equal((await user.getIdTokenResult()).claims.email_verified, false);
 });
