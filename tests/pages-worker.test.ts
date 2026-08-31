@@ -3,6 +3,7 @@ import {afterEach, beforeEach, test} from 'node:test';
 
 import worker, {
   BASE_HEADERS,
+  RENDERED_EDGE_CACHE,
   IMMUTABLE_CACHE_CONTROL,
   ORIGIN,
   PROFILE_CACHE_CONTROL,
@@ -109,7 +110,7 @@ test('a stale immutable URL that falls back to the shell is not cached as immuta
   assertPolicy(stale, 'no-cache');
 });
 
-test('a profile page is proxied to the renderer origin with the query string and only safe request headers', async () => {
+test('a profile page is proxied to the renderer origin without the query string and with only safe request headers', async () => {
   const response = await run('/profiles/lars?x=1', {
     headers: {
       'Accept': 'text/html',
@@ -129,9 +130,12 @@ test('a profile page is proxied to the renderer origin with the query string and
 
   assert.equal(originCalls.length, 1);
   const [call] = originCalls;
-  assert.equal(call.url, `${ORIGIN}/profiles/lars?x=1`);
+  // The renderer ignores the query string; dropping it makes every ?cb=
+  // variant one edge cache entry instead of a billed renderer miss.
+  assert.equal(call.url, `${ORIGIN}/profiles/lars`);
   assert.equal(call.init?.method, 'GET');
   assert.equal(call.init?.redirect, 'manual');
+  assert.deepEqual((call.init as {cf?: unknown}).cf, RENDERED_EDGE_CACHE);
   const sent = call.init?.headers as Headers;
   assert.equal(sent.get('accept'), 'text/html');
   assert.equal(sent.get('accept-encoding'), 'br, gzip');
@@ -201,6 +205,13 @@ test('an unreachable renderer fails closed with a 503, never the shell', async (
   assert.match(await response.text(), /unavailable/);
   assertPolicy(response, PROFILE_CACHE_CONTROL);
   assert.equal(assetCalls.length, 0);
+});
+
+test('rendered responses are edge-cached for the old CDN lifetimes and errors never are', () => {
+  assert.deepEqual(RENDERED_EDGE_CACHE, {
+    cacheEverything: true,
+    cacheTtlByStatus: {'200-299': 300, '404': 60, '500-599': 0},
+  });
 });
 
 test('the header policy is the retired firebase.json Hosting policy, pinned literally', () => {

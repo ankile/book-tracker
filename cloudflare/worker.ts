@@ -81,20 +81,47 @@ function textResponse(status: number, body: string, extra: Record<string, string
   });
 }
 
+// Edge cache for rendered responses. Cloudflare only caches worker
+// subrequests for static file extensions by default, so without this every
+// profile request reaches Cloud Run (cf-cache-status DYNAMIC — the state
+// the migration briefly shipped). These TTLs reproduce the s-maxage the
+// old Hosting CDN honoured: a hot profile is served from the edge for five
+// minutes with no renderer or Firestore work, a miss (404) for one minute,
+// and an error is never cached. Firestore edits therefore take up to five
+// minutes to show publicly, as before.
+export const RENDERED_EDGE_CACHE = {
+  cacheEverything: true,
+  cacheTtlByStatus: {'200-299': 300, '404': 60, '500-599': 0},
+} as const;
+
+interface EdgeCachedRequestInit extends RequestInit {
+  cf: typeof RENDERED_EDGE_CACHE;
+}
+
 // Fail closed: a renderer outage is a 503 with no caching, never the SPA
 // shell (a crawler must not index the shell under a profile URL).
 async function renderedResponse(request: Request, url: URL): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return textResponse(405, 'Method not allowed.\n', {Allow: 'GET, HEAD'});
   }
-  const upstream = new URL(url.pathname + url.search, ORIGIN);
+  // The renderer routes on the path alone and ignores the query string, so
+  // it is dropped here: every ?cb=… variant of a profile URL shares one
+  // edge cache entry, and cache-busting cannot force renderer work
+  // (SEC-067's remaining billed-miss vector).
+  const upstream = new URL(url.pathname, ORIGIN);
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  const init: EdgeCachedRequestInit = {
+    method: request.method,
+    headers,
+    redirect: 'manual',
+    cf: RENDERED_EDGE_CACHE,
+  };
   try {
-    return await fetch(upstream, {method: request.method, headers, redirect: 'manual'});
+    return await fetch(upstream, init);
   } catch {
     return textResponse(503, 'Profile renderer unavailable.\n', {'Retry-After': '30'});
   }
