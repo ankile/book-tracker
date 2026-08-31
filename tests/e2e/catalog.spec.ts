@@ -421,17 +421,6 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
 
       await context.setOffline(false);
       await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(true);
-      await db.doc(`users/${normalUid}/functionQuotas/catalogEnsureAuthors`).set({
-        windowStartedAt: Timestamp.now(),
-        count: 60,
-      });
-      await page.getByRole('button', {name: 'Add book', exact: true}).click();
-      await expect(page.getByRole('dialog', {name: 'Add new book'})).toBeVisible();
-      await expect(page.getByText(/Catalog request limit reached/)).toBeVisible();
-      expect((await db.collection(`users/${normalUid}/books`)
-        .where('title', '==', 'A Newly Shared Author Test').get()).empty).toBe(true);
-
-      await db.doc(`users/${normalUid}/functionQuotas/catalogEnsureAuthors`).delete();
       await page.getByRole('button', {name: 'Add book', exact: true}).click();
       await expect(page.getByRole('dialog', {name: 'Add new book'})).toHaveCount(0);
       const expectedAuthorId = catalogAuthorId(newAuthorKey);

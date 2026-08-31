@@ -19,7 +19,7 @@ import {
   decodeWorkReadersRequest,
   normalizeCatalogIdentity,
 } from "./decoders";
-import {applyQuota, consumeQuota} from "./quota";
+import {consumeQuota} from "./quota";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {profileConsents, sharingSetting, validTimeZone} from "./sharingConsent";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
@@ -36,12 +36,10 @@ const EDITION_LIMIT = 100;
 const UPDATES_PER_BOOK_LIMIT = 200;
 const SEARCHES_PER_WINDOW = 60;
 const READER_CALLS_PER_WINDOW = 5;
-const AUTHOR_NAMES_PER_WINDOW = 60;
 // Emergency spend breaker, not abuse isolation: the per-account quota is
 // the primary caller bound, while this high ceiling limits a sybil burst.
 const GLOBAL_READER_CALLS_PER_WINDOW = 100;
 const GLOBAL_SEARCHES_PER_WINDOW = 100;
-const GLOBAL_AUTHOR_NAMES_PER_WINDOW = 500;
 const MAX_CATALOG_AUTHORS = 500;
 const QUOTA_WINDOW_MS = 60 * 60 * 1000;
 const SPEED_MIN_SESSION_MINUTES = 5;
@@ -1097,8 +1095,9 @@ exports.ensureauthors = callable.https.onCall(async (
     if (prior === undefined) byKey.set(key, author);
     return key;
   });
+  // No per-call or global quota here (owner decision 2026-08-31): a call is
+  // bounded by its own request, and the catalog cap below bounds the total.
   const keys = [...byKey.keys()];
-  await requireQuota(uid, "catalogEnsureAuthors", AUTHOR_NAMES_PER_WINDOW, keys.length);
   const authorIds = await db.runTransaction(async (tx) => {
     const matching = await tx.get(
       db.collection("catalogAuthors").where("nameKeys", "array-contains-any", keys),
@@ -1180,30 +1179,14 @@ exports.ensureauthors = callable.https.onCall(async (
       // A count() aggregation costs one read and does not drag the whole
       // collection into the transaction's read set, where any concurrent
       // author write would force a retry that re-reads it.
-      const [catalogCount, quotaSnapshot, deterministicSnapshots] = await Promise.all([
+      const [catalogCount, deterministicSnapshots] = await Promise.all([
         tx.get(db.collection("catalogAuthors").count()),
-        tx.get(db.doc("functionGlobalQuotas/catalogEnsureAuthors")),
         tx.getAll(...deterministicRefs),
       ]);
       if (catalogCount.data().count + missing.length > MAX_CATALOG_AUTHORS) {
         throw new functions.https.HttpsError(
           "resource-exhausted",
           "The shared author catalog is full. Ask an administrator to review its capacity.",
-        );
-      }
-      const quota = applyQuota(
-        tx,
-        quotaSnapshot.ref,
-        quotaSnapshot.data(),
-        GLOBAL_AUTHOR_NAMES_PER_WINDOW,
-        QUOTA_WINDOW_MS,
-        Timestamp.now(),
-        missing.length,
-      );
-      if (!quota.granted) {
-        throw new functions.https.HttpsError(
-          "resource-exhausted",
-          "Shared author creation is temporarily busy. Try again later.",
         );
       }
       for (const [index, snapshot] of deterministicSnapshots.entries()) {

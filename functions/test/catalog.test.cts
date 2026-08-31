@@ -405,8 +405,6 @@ test("ordinary users resolve existing shared authors and create only missing cat
     data: () => rows.get(reference.path),
     get: (field: string) => rows.get(reference.path)?.[field],
   });
-  let transactionCount = 0;
-  const quotaWrites: Array<{path: string; data: Row}> = [];
   t.mock.method(db, "doc", (path: string) => ref(path));
   t.mock.method(db, "collection", (name: string) => {
     if (name === "users") {
@@ -434,13 +432,6 @@ test("ordinary users resolve existing shared authors and create only missing cat
     update?(reference: Ref, data: Row): void;
     create?(reference: Ref, data: Row): void;
   }>) => {
-    transactionCount += 1;
-    if (transactionCount === 1) {
-      return handler({
-        get: async () => ({data: () => undefined}),
-        set: (reference: Ref, data: Row) => quotaWrites.push({path: reference.path, data}),
-      });
-    }
     return handler({
       get: async (value: AuthorQuery | Ref) => {
         if ("where" in value) {
@@ -461,8 +452,8 @@ test("ordinary users resolve existing shared authors and create only missing cat
         return snap(value);
       },
       getAll: async (...references: Ref[]) => references.map(snap),
-      set: (reference: Ref, data: Row) => quotaWrites.push({path: reference.path, data}),
-      update: (reference: Ref, data: Row) => quotaWrites.push({path: reference.path, data}),
+      set: () => assert.fail("ensureauthors writes no quota documents"),
+      update: () => assert.fail("ensureauthors writes no quota documents"),
       create: (reference: Ref, data: Row) => {
         assert.equal(rows.has(reference.path), false);
         rows.set(reference.path, data);
@@ -480,11 +471,6 @@ test("ordinary users resolve existing shared authors and create only missing cat
   assert.equal(created.canonicalName, "Octavia E. Butler");
   assert.deepEqual(created.nameKeys, ["octavia e butler"]);
   assert.equal(created.status, "active");
-  assert.deepEqual(quotaWrites.map(({path, data}) => ({path, count: data.count})), [
-    {path: "users/owner/functionQuotas/catalogEnsureAuthors", count: 2},
-    {path: "functionGlobalQuotas/catalogEnsureAuthors", count: 1},
-  ]);
-
   await assert.rejects(
     deployed.catalog.ensureauthors.run({authors: [{
       canonicalName: "Ursula K. Le Guin", sortName: "Le Guin", kind: "entity",
@@ -511,10 +497,7 @@ test("ordinary users resolve existing shared authors and create only missing cat
   );
 });
 
-function installMissingAuthorBoundaryStore(
-  t: TestContext,
-  {catalogSize, globalCount}: {catalogSize: number; globalCount: number | null},
-): void {
+function installMissingAuthorBoundaryStore(t: TestContext, catalogSize: number): void {
   const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
   const snapshot = (reference: Ref, data: Row | undefined) => ({
     exists: data !== undefined,
@@ -523,7 +506,6 @@ function installMissingAuthorBoundaryStore(
     data: () => data,
     get: (field: string) => data?.[field],
   });
-  let transactions = 0;
   t.mock.method(db, "doc", ref);
   t.mock.method(db, "collection", (name: string) => {
     if (name === "users") {
@@ -543,13 +525,6 @@ function installMissingAuthorBoundaryStore(
     update?(): void;
     create?(): void;
   }>) => {
-    transactions += 1;
-    if (transactions === 1) {
-      return handler({
-        get: async () => ({data: () => undefined}),
-        set: () => undefined,
-      });
-    }
     return handler({
       get: async (value: {kind: string} | Ref) => {
         if ("kind" in value) {
@@ -557,10 +532,7 @@ function installMissingAuthorBoundaryStore(
           if (value.kind === "capacity") return {data: () => ({count: catalogSize})};
           assert.fail(`unexpected catalogAuthors query ${value.kind}`);
         }
-        assert.equal(value.path, "functionGlobalQuotas/catalogEnsureAuthors");
-        return snapshot(value, globalCount === null ? undefined : {
-          windowStartedAt: Timestamp.now(), count: globalCount,
-        });
+        assert.fail(`unexpected document read ${value.path}`);
       },
       getAll: async (...references: Ref[]) => references.map((reference) => snapshot(reference, undefined)),
       set: () => undefined,
@@ -571,22 +543,12 @@ function installMissingAuthorBoundaryStore(
 }
 
 test("shared author creation refuses the hard catalog capacity", async (t) => {
-  installMissingAuthorBoundaryStore(t, {catalogSize: 500, globalCount: 0});
+  installMissingAuthorBoundaryStore(t, 500);
   await assert.rejects(
     deployed.catalog.ensureauthors.run({authors: [{
       canonicalName: "New Author", sortName: "Author", kind: "person",
     }]}, authContext),
     (error) => hasCode(error, "resource-exhausted") && messageMatches(error, /catalog is full/),
-  );
-});
-
-test("shared author creation refuses the global missing-name breaker", async (t) => {
-  installMissingAuthorBoundaryStore(t, {catalogSize: 0, globalCount: 500});
-  await assert.rejects(
-    deployed.catalog.ensureauthors.run({authors: [{
-      canonicalName: "New Author", sortName: "Author", kind: "person",
-    }]}, authContext),
-    (error) => hasCode(error, "resource-exhausted") && messageMatches(error, /temporarily busy/),
   );
 });
 
