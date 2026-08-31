@@ -83,10 +83,12 @@ test('the README documents the current routine release without completed migrati
     'Commit the source and generated artifacts',
     'npm run validate',
     'artifact checks compare',
+    'npm run pages:deploy',
     'firebase-tools@15.24.0',
   ]);
-  assert.match(deployment, /Hosting and the public profile renderer are coupled/i);
-  assert.match(deployment, /Do not release Hosting\s+by\s+itself/i);
+  assert.match(deployment, /site and the public profile renderer are coupled/i);
+  assert.match(deployment, /release both together,\s+never one\s+by\s+itself/i);
+  assert.match(deployment, /retired Firebase Hosting\s+site, which only redirects/i);
   assert.doesNotMatch(deployment, /migrate-timer-claims|migrate-reading-progress-sources/i);
   assert.doesNotMatch(deployment, /7-day|old-bundle overlap|let old in-flight invocations drain/i);
   assert.doesNotMatch(deployment, /functions:config:export|--force/i);

@@ -56,14 +56,12 @@ test('the profile shell serves the same policy as the SPA', () => {
   assert.equal(metaPolicy(shellHtml), metaPolicy(indexHtml));
 });
 
-test('the header-only directives live in firebase.json and publicweb', () => {
-  const config = JSON.parse(readFileSync('firebase.json', 'utf8'));
-  const star = config.hosting.headers.find((b: { source: string }) => b.source === '**');
-  const keys = Object.fromEntries(star.headers.map((h: { key: string; value: string }) => [h.key, h.value]));
-  assert.equal(keys['Content-Security-Policy'], "frame-ancestors 'none'");
-  assert.equal(keys['X-Frame-Options'], 'DENY');
-  assert.equal(keys['X-Content-Type-Options'], 'nosniff');
-  assert.match(keys['Permissions-Policy'], /camera=\(\)/);
+test('the header-only directives live in the Pages worker and publicweb', async () => {
+  const {BASE_HEADERS} = await import('../cloudflare/worker.ts');
+  assert.equal(BASE_HEADERS['Content-Security-Policy'], "frame-ancestors 'none'");
+  assert.equal(BASE_HEADERS['X-Frame-Options'], 'DENY');
+  assert.equal(BASE_HEADERS['X-Content-Type-Options'], 'nosniff');
+  assert.match(BASE_HEADERS['Permissions-Policy'], /camera=\(\)/);
   const publicWeb = readFileSync('functions/src/publicWeb.ts', 'utf8');
   assert.match(publicWeb, /"Content-Security-Policy": "frame-ancestors 'none'",\s*"X-Frame-Options": "DENY",\s*"X-Content-Type-Options": "nosniff",\s*"Referrer-Policy": "no-referrer",/);
   assert.match(publicWeb, /const headers = \{\.\.\.SECURITY_HEADERS, \.\.\.response\.headers\};/);

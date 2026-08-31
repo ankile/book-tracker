@@ -106,34 +106,22 @@ test('robots allow crawling and advertise the generated sitemap', async () => {
   assert.doesNotMatch(robots, /Disallow:\s*\/profiles/i);
 });
 
-test('Hosting routes crawlable pages to the pinned renderer before the SPA fallback', async () => {
+test('the Firebase Hosting site is retired to a redirect: no rewrites, nothing servable', async () => {
   const config = JSON.parse(await readFile(firebaseConfigPath, 'utf8'));
-  const rewrites = config.hosting.rewrites;
+  const hosting = config.hosting;
 
-  assert.deepEqual(config.hosting.redirects, [{
-    source: '/profiles/:username/',
-    destination: '/profiles/:username',
+  assert.equal(hosting.public, 'hosting-retired');
+  assert.equal(hosting.rewrites, undefined);
+  assert.deepEqual(hosting.redirects, [{
+    source: '/:path*',
+    destination: 'https://book.ankile.com/:path',
     type: 301,
   }]);
+  assert.equal(JSON.stringify(hosting).includes('publicweb'), false);
+  assert.equal(JSON.stringify(hosting).includes('pinTag'), false);
 
-  assert.deepEqual(rewrites.at(0), {
-    source: '/{sitemap.xml,profiles/**}',
-    function: {functionId: 'publicweb', region: 'europe-west1', pinTag: true},
-  });
-  assert.deepEqual(rewrites.at(-1), {source: '**', destination: '/index.html'});
-
-  const profileHeaders = config.hosting.headers.find(
-    (entry: {source: string}) => entry.source === '/profiles/**',
-  );
-  const sitemapHeaders = config.hosting.headers.find(
-    (entry: {source: string}) => entry.source === '/sitemap.xml',
-  );
-  assert.deepEqual(profileHeaders.headers, [{
-    key: 'Cache-Control', value: 'public, max-age=60, s-maxage=300',
-  }]);
-  assert.deepEqual(sitemapHeaders.headers, [{
-    key: 'Cache-Control', value: 'public, max-age=300, s-maxage=300',
-  }]);
+  const retired = await readdir(new URL('../hosting-retired/', import.meta.url));
+  assert.deepEqual(retired, ['404.html']);
 });
 
 test('JavaScript clients skip the crawler snapshot instead of flashing a second profile design', async () => {

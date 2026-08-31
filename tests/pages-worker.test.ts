@@ -203,17 +203,18 @@ test('an unreachable renderer fails closed with a 503, never the shell', async (
   assert.equal(assetCalls.length, 0);
 });
 
-test('the header policy is the firebase.json Hosting policy, verbatim', async () => {
-  const {readFile} = await import('node:fs/promises');
-  const config = JSON.parse(await readFile(new URL('../firebase.json', import.meta.url), 'utf8'));
-  const blocks = Object.fromEntries(
-    config.hosting.headers.map((block: {source: string; headers: {key: string; value: string}[]}) => [
-      block.source,
-      Object.fromEntries(block.headers.map((h) => [h.key, h.value])),
-    ]),
-  );
-  assert.deepEqual(blocks['**'], BASE_HEADERS);
-  assert.equal(blocks['/_app/immutable/**']['Cache-Control'], IMMUTABLE_CACHE_CONTROL);
-  assert.equal(blocks['/profiles/**']['Cache-Control'], PROFILE_CACHE_CONTROL);
-  assert.equal(blocks['/sitemap.xml']['Cache-Control'], SITEMAP_CACHE_CONTROL);
+test('the header policy is the retired firebase.json Hosting policy, pinned literally', () => {
+  assert.deepEqual(BASE_HEADERS, {
+    'Cache-Control': 'no-cache',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "frame-ancestors 'none'",
+    'X-Frame-Options': 'DENY',
+    'X-Content-Type-Options': 'nosniff',
+    'Permissions-Policy':
+      'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()',
+  });
+  assert.equal(IMMUTABLE_CACHE_CONTROL, 'public, max-age=31536000, immutable');
+  assert.equal(PROFILE_CACHE_CONTROL, 'public, max-age=60, s-maxage=300');
+  assert.equal(SITEMAP_CACHE_CONTROL, 'public, max-age=300, s-maxage=300');
+  assert.equal(ORIGIN, 'https://publicweb-juiumzbyrq-ew.a.run.app');
 });

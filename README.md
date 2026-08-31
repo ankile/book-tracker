@@ -242,16 +242,20 @@ For a routine release:
 6. Run `npm run validate` from that clean commit. The artifact checks compare
    the generated files with `HEAD`, so this step belongs after the artifact
    commit and before deployment. Confirm the working tree remains clean.
-7. Deploy the configured targets with the pinned CLI and follow the private
-   verification and rollback runbooks.
+7. Deploy the site to Cloudflare Pages, then the backend, with the pinned
+   CLIs, and follow the private verification and rollback runbooks.
 
 ```bash
+npm run pages:deploy
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
 ```
 
-Hosting and the public profile renderer are coupled. Do not release Hosting by
-itself. A routine release must not rerun database migrations, legacy
-configuration exports, or completed rollout steps.
+The site and the public profile renderer are coupled: the renderer serves a
+shell synchronized from the site build, so release both together, never one
+by itself. `firebase deploy` also republishes the retired Firebase Hosting
+site, which only redirects to the canonical domain. A routine release must not
+rerun database migrations, legacy configuration exports, or completed rollout
+steps.
 
 For any data-shape change, use [MIGRATIONS.md](MIGRATIONS.md) and the migration
 script's own header. Production migration timing and emergency procedures stay
@@ -266,6 +270,8 @@ book-tracker/
 │   └── routes/              SvelteKit pages
 ├── static/                  Static assets served from the site root (keep them small)
 ├── docs/screenshots/        README screenshots, not deployed
+├── cloudflare/              Pages worker (routing, renderer proxy, header policy) and its assembly script
+├── hosting-retired/         Redirect-only content for the retired Firebase Hosting site
 ├── functions/
 │   ├── src/                 Backend services and event handlers
 │   └── test/                Functions tests
@@ -285,7 +291,8 @@ book-tracker/
 - Svelte 5 and SvelteKit 2
 - Vite 7 and TypeScript 5
 - Bootstrap 5
-- Firebase Authentication, Firestore, Functions, and Hosting
+- Firebase Authentication, Firestore, and Functions
+- Cloudflare Pages for the site, with a worker that proxies public profile pages to the renderer
 - Node.js 22 for backend services and repository tools
 
 ## Development notes
