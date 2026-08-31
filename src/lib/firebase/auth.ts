@@ -14,7 +14,7 @@ import {
 import { app } from './index.ts';
 import { browser } from '$app/environment';
 import { clearErrors } from '../stores/errors.ts';
-import { refreshVerification, sendVerificationEmail } from './emailVerification.ts';
+import { refreshVerification, sendVerificationEmail, syncVerifiedClaim } from './emailVerification.ts';
 
 // Pin the browser to the existing localStorage backend at initialization. Do
 // not call setPersistence during module startup: that operation temporarily
@@ -51,6 +51,12 @@ function createUserStore(): UserStore {
       clearErrors();
       current = u;
       set(u);
+      // The record can say verified while the token still says not (see
+      // syncVerifiedClaim); a stale claim is a Rules denial on every
+      // verified-only path, so it is repaired here rather than left to the
+      // hourly token rotation. A failure surfaces like any other auth
+      // problem instead of being swallowed.
+      if (u !== null) void syncVerifiedClaim(u).then((changed) => { if (changed) set(current); });
     });
   }
 
