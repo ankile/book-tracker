@@ -28,7 +28,7 @@
         "type": 301
       },
       {
-        "source": "/:path*",
+        "regex": "^/(?P<path>(?:[^_/][^/]*|_(?:[^_/][^/]*)?|__[^/]+)(?:/.*)?)$",
         "destination": "https://book.ankile.com/:path",
         "type": 301
       }
