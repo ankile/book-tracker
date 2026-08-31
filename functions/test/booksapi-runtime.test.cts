@@ -92,7 +92,8 @@ test("lookupisbn rejects unverified and deleted accounts before quota or fetch",
   assert.equal(store.userReads(), 0);
   await assert.rejects(
     deployed.booksapi.lookupisbn.run({isbn: "9780000000002"}, authContext),
-    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /not active/),
+    (error) => hasCode(error, "failed-precondition") &&
+      messageMatches(error, /account has been deleted/),
   );
   assert.equal(store.userReads(), 1);
   assert.equal(store.quota(), undefined);

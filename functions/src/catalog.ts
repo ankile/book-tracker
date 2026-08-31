@@ -7,7 +7,6 @@ import {
   getFirestore,
   QuerySnapshot,
   Timestamp,
-  Transaction,
 } from "firebase-admin/firestore";
 import {createHash, randomUUID} from "node:crypto";
 import {Buffer} from "node:buffer";
@@ -23,6 +22,7 @@ import {
   normalizeCatalogIdentity,
 } from "./decoders";
 import {consumeQuota} from "./quota";
+import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {profileConsents, sharingSetting, validTimeZone} from "./sharingConsent";
 import {CATALOG_LIMITS} from "./catalogLimits";
@@ -34,16 +34,14 @@ const db = getFirestore();
 const SEARCH_LIMIT = 10;
 const TITLE_CANDIDATE_LIMIT = 25;
 const BOOKS_PER_UID_LIMIT = 5;
-const SHARED_ATTEMPT_LIMIT = 50;
 const SHARED_OWNER_LIMIT = 10;
 const EDITION_LIMIT = 100;
 const UPDATES_PER_BOOK_LIMIT = 200;
-const SEARCHES_PER_WINDOW = 60;
-const READER_CALLS_PER_WINDOW = 5;
-// Emergency spend breaker, not abuse isolation: the per-account quota is
-// the primary caller bound, while this high ceiling limits a sybil burst.
-const GLOBAL_READER_CALLS_PER_WINDOW = 100;
-const GLOBAL_SEARCHES_PER_WINDOW = 100;
+// Cost basis: one reader page reads at most ten owners × five books × 200
+// update rows, ~10k reads ≈ $0.006. At 60 calls an hour a single hostile
+// verified account can spend ≈ $0.36/h ≈ $9/day, under the billing alert.
+// Search has no quota: it costs on the order of 100 reads ≈ $0.00006.
+const READER_CALLS_PER_WINDOW = 60;
 const MAX_CATALOG_AUTHORS = CATALOG_LIMITS.catalogAuthors;
 const QUOTA_WINDOW_MS = 60 * 60 * 1000;
 const SPEED_MIN_SESSION_MINUTES = 5;
@@ -52,7 +50,7 @@ const BOOK_SPEED_MIN_MINUTES = 60;
 
 type WorkStatus = "active" | "merged" | "hidden";
 
-interface StoredWork {
+export interface StoredWork {
   canonicalTitle: string;
   alternateTitles: string[];
   titleKeys: string[];
@@ -65,7 +63,7 @@ interface StoredWork {
   mergedFrom: string[];
 }
 
-interface StoredCatalogAuthor {
+export interface StoredCatalogAuthor {
   canonicalName: string;
   alternateNames: string[];
   nameKeys: string[];
@@ -76,7 +74,7 @@ interface StoredCatalogAuthor {
   mergedFrom: string[];
 }
 
-interface StoredEdition {
+export interface StoredEdition {
   workId: string;
   isbn13: string | null;
   title: string;
@@ -168,57 +166,41 @@ interface ReadingAttemptMetrics {
 interface WorkReaderAttemptSummary extends ReadingAttemptMetrics {
   username: string;
   displayName: string;
-  editionIsbn13: string | null;
 }
 
 class CatalogDataError extends Error {}
+
+// The stored-document decoders below are shared with the admin scan, which
+// reports a violation as a failed-precondition the console can render
+// instead of a CatalogDataError. Only the reporter differs, so it is the
+// parameter.
+export type CatalogDataFail = (_message: string) => never;
+
+const catalogDataError: CatalogDataFail = (message) => {
+  throw new CatalogDataError(message);
+};
 
 const invalidArgument = (message: string): never => {
   throw new functions.https.HttpsError("invalid-argument", message);
 };
 
-function signedInUid(context: functions.https.CallableContext): string {
-  if (context.auth === undefined) {
-    throw new functions.https.HttpsError(
-      "unauthenticated",
-      "Sign in to use the shared book catalog.",
-    );
-  }
-  if (context.auth.token.email_verified !== true) {
-    throw new functions.https.HttpsError(
-      "failed-precondition",
-      "Verify your email before using the shared book catalog.",
-    );
-  }
-  return context.auth.uid;
-}
-
-function catalogAuthorId(nameKey: string): string {
+export function catalogAuthorId(nameKey: string): string {
   return `author_${createHash("sha256")
     .update(`author\0${nameKey}`)
     .digest("hex")
     .slice(0, 24)}`;
 }
 
-async function requireLiveUser(uid: string): Promise<void> {
-  const user = await db.collection("users").doc(uid).get();
-  if (!user.exists || user.get("deletedAt") !== undefined) {
-    throw new functions.https.HttpsError("failed-precondition", "This account is not active.");
-  }
-}
-
 async function requireQuota(
   uid: string,
   name: string,
   limit: number,
-  amount = 1,
 ): Promise<void> {
   const decision = await consumeQuota(
     db,
     `users/${uid}/functionQuotas/${name}`,
     limit,
     QUOTA_WINDOW_MS,
-    amount,
   );
   if (!decision.granted) {
     throw new functions.https.HttpsError(
@@ -228,43 +210,7 @@ async function requireQuota(
   }
 }
 
-async function requireGlobalReaderQuota(): Promise<void> {
-  const decision = await consumeQuota(
-    db,
-    "functionGlobalQuotas/catalogWorkReaders",
-    GLOBAL_READER_CALLS_PER_WINDOW,
-    QUOTA_WINDOW_MS,
-  );
-  if (!decision.granted) {
-    throw new functions.https.HttpsError(
-      "resource-exhausted",
-      "Reader summaries are temporarily busy. Try again later.",
-    );
-  }
-}
-
-async function requireGlobalSearchQuota(): Promise<void> {
-  const decision = await consumeQuota(
-    db,
-    "functionGlobalQuotas/catalogSearch",
-    GLOBAL_SEARCHES_PER_WINDOW,
-    QUOTA_WINDOW_MS,
-  );
-  if (!decision.granted) {
-    throw new functions.https.HttpsError(
-      "resource-exhausted",
-      "Catalog search is temporarily busy. Try again later.",
-    );
-  }
-}
-
 const SUPPORTED_LEADING_TITLE_ARTICLES = ["a", "an", "the"] as const;
-
-// One normalizer for every catalog identity: the decoders' copy writes
-// nameKeys on ensureauthors and the admin scan recomputes them, so a fold
-// added to one table but not another would report every stored author as
-// corrupt and make lookups miss existing authors.
-export const normalizeCatalogText = normalizeCatalogIdentity;
 
 function moveTrailingEnglishArticle(title: string): string {
   const match = /^(.*\S)\s*,\s*(a|an|the)\s*$/iu.exec(title);
@@ -272,7 +218,7 @@ function moveTrailingEnglishArticle(title: string): string {
 }
 
 export function normalizeCatalogTitle(value: string): string {
-  const normalized = normalizeCatalogText(moveTrailingEnglishArticle(value));
+  const normalized = normalizeCatalogIdentity(moveTrailingEnglishArticle(value));
   const words = normalized.split(" ");
   const first = words[0] as typeof SUPPORTED_LEADING_TITLE_ARTICLES[number];
   if (words.length > 1 && SUPPORTED_LEADING_TITLE_ARTICLES.includes(first)) {
@@ -281,34 +227,33 @@ export function normalizeCatalogTitle(value: string): string {
   return normalized;
 }
 
-function storedWork(snapshot: DocumentSnapshot): StoredWork {
-  if (!snapshot.exists) {
-    throw new CatalogDataError(`Missing catalog work ${snapshot.ref.path}.`);
-  }
+export function storedWork(
+  snapshot: DocumentSnapshot,
+  fail: CatalogDataFail = catalogDataError,
+): StoredWork {
+  if (!snapshot.exists) fail(`Missing catalog work ${snapshot.ref.path}.`);
   const data = snapshot.data();
-  if (data === undefined) {
-    throw new CatalogDataError(`Missing catalog work data ${snapshot.ref.path}.`);
-  }
+  if (data === undefined) fail(`Missing catalog work data ${snapshot.ref.path}.`);
   if (data.status !== "active" && data.status !== "merged" && data.status !== "hidden") {
-    throw new CatalogDataError(`Invalid work status at ${snapshot.ref.path}.`);
+    fail(`Invalid work status at ${snapshot.ref.path}.`);
   }
   const arrays = [
     data.alternateTitles,
     data.titleKeys,
     data.authorIds,
     data.subjects,
-    data.mergedFrom ?? [],
+    data.mergedFrom,
   ];
   if (arrays.some((value) =>
     !Array.isArray(value) || value.some((entry) => typeof entry !== "string"))) {
-    throw new CatalogDataError(`Invalid work arrays at ${snapshot.ref.path}.`);
+    fail(`Invalid work arrays at ${snapshot.ref.path}.`);
   }
   if (typeof data.canonicalTitle !== "string" || typeof data.coverUrl !== "string" ||
       (data.fiction !== null && typeof data.fiction !== "boolean")) {
-    throw new CatalogDataError(`Invalid catalog work ${snapshot.ref.path}.`);
+    fail(`Invalid catalog work ${snapshot.ref.path}.`);
   }
   if (data.mergedInto !== undefined && typeof data.mergedInto !== "string") {
-    throw new CatalogDataError(`Invalid work redirect at ${snapshot.ref.path}.`);
+    fail(`Invalid work redirect at ${snapshot.ref.path}.`);
   }
   return {
     canonicalTitle: data.canonicalTitle,
@@ -320,14 +265,17 @@ function storedWork(snapshot: DocumentSnapshot): StoredWork {
     fiction: data.fiction,
     status: data.status,
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
-    mergedFrom: data.mergedFrom ?? [],
+    mergedFrom: data.mergedFrom,
   };
 }
 
-function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
-  if (!snapshot.exists) throw new Error(`Missing catalog edition ${snapshot.ref.path}.`);
+export function storedEdition(
+  snapshot: DocumentSnapshot,
+  fail: CatalogDataFail = catalogDataError,
+): StoredEdition {
+  if (!snapshot.exists) fail(`Missing catalog edition ${snapshot.ref.path}.`);
   const data = snapshot.data();
-  if (data === undefined) throw new Error(`Missing edition data ${snapshot.ref.path}.`);
+  if (data === undefined) fail(`Missing edition data ${snapshot.ref.path}.`);
   if (typeof data.workId !== "string" ||
       (data.isbn13 !== null && typeof data.isbn13 !== "string") ||
       typeof data.title !== "string" ||
@@ -340,7 +288,7 @@ function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
       data.externalIds === null || Array.isArray(data.externalIds) ||
       Object.entries(data.externalIds).some(([provider, id]) =>
         !/^[a-z0-9-]{1,40}$/.test(provider) || typeof id !== "string")) {
-    throw new Error(`Invalid catalog edition ${snapshot.ref.path}.`);
+    fail(`Invalid catalog edition ${snapshot.ref.path}.`);
   }
   return {
     workId: data.workId,
@@ -357,24 +305,25 @@ function storedEdition(snapshot: DocumentSnapshot): StoredEdition {
   };
 }
 
-function storedCatalogAuthor(snapshot: DocumentSnapshot): StoredCatalogAuthor {
-  if (!snapshot.exists) {
-    throw new CatalogDataError(`Missing catalog author ${snapshot.ref.path}.`);
-  }
+export function storedCatalogAuthor(
+  snapshot: DocumentSnapshot,
+  fail: CatalogDataFail = catalogDataError,
+): StoredCatalogAuthor {
+  if (!snapshot.exists) fail(`Missing catalog author ${snapshot.ref.path}.`);
   const data = snapshot.data();
   if (data === undefined || typeof data.canonicalName !== "string" ||
       typeof data.sortName !== "string" ||
       !["person", "entity", "placeholder"].includes(data.kind) ||
       (data.status !== "active" && data.status !== "merged")) {
-    throw new CatalogDataError(`Invalid catalog author ${snapshot.ref.path}.`);
+    fail(`Invalid catalog author ${snapshot.ref.path}.`);
   }
-  const arrays = [data.alternateNames, data.nameKeys, data.mergedFrom ?? []];
+  const arrays = [data.alternateNames, data.nameKeys, data.mergedFrom];
   if (arrays.some((value) => !Array.isArray(value) ||
       value.some((entry) => typeof entry !== "string"))) {
-    throw new CatalogDataError(`Invalid catalog author arrays at ${snapshot.ref.path}.`);
+    fail(`Invalid catalog author arrays at ${snapshot.ref.path}.`);
   }
   if (data.mergedInto !== undefined && typeof data.mergedInto !== "string") {
-    throw new CatalogDataError(`Invalid catalog author redirect at ${snapshot.ref.path}.`);
+    fail(`Invalid catalog author redirect at ${snapshot.ref.path}.`);
   }
   return {
     canonicalName: data.canonicalName,
@@ -384,7 +333,7 @@ function storedCatalogAuthor(snapshot: DocumentSnapshot): StoredCatalogAuthor {
     kind: data.kind,
     status: data.status,
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
-    mergedFrom: data.mergedFrom ?? [],
+    mergedFrom: data.mergedFrom,
   };
 }
 
@@ -447,7 +396,15 @@ export function externalIndexId(externalId: CatalogExternalId): string {
     .digest("hex");
 }
 
-async function resolveWorkSnapshot(
+// A merge redirect is followed with the caller's own reader: a plain get
+// outside a transaction, tx.get inside one, so the transaction that acts on
+// the target has read it and cannot commit against a stale redirect.
+type SnapshotReader = (_ref: DocumentReference) => Promise<DocumentSnapshot>;
+
+const readSnapshot: SnapshotReader = (ref) => ref.get();
+
+async function resolveWork(
+  read: SnapshotReader,
   snapshot: DocumentSnapshot,
 ): Promise<ResolvedWork> {
   const work = storedWork(snapshot);
@@ -455,14 +412,13 @@ async function resolveWorkSnapshot(
   if (work.mergedInto === undefined || work.mergedInto === snapshot.id) {
     throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
   }
-  const targetSnapshot = await db.collection("works").doc(work.mergedInto).get();
-  const target = storedWork(targetSnapshot);
+  const target = storedWork(await read(db.collection("works").doc(work.mergedInto)));
   if (target.status === "merged") {
     throw new CatalogDataError(
       `Catalog redirect is not one hop at ${snapshot.ref.path}.`,
     );
   }
-  return {id: targetSnapshot.id, work: target};
+  return {id: work.mergedInto, work: target};
 }
 
 async function workSummary(
@@ -501,85 +457,61 @@ function editionSummary(
   };
 }
 
-async function exactIsbnResult(isbn13: string): Promise<CatalogSearchResult | null> {
-  const index = await db.collection("isbnIndex").doc(isbn13).get();
-  if (!index.exists) {
-    await Promise.all([
-      db.collection("works").doc("__catalog-search-miss__").get(),
-      db.collection("editions").doc("__catalog-search-miss__").get(),
-      db.collection("works").doc("__catalog-search-miss-padding__").get(),
-    ]);
-    return null;
-  }
+// One exact-identifier lookup for both indexes: the index row names a work
+// and an edition, and the edition must still carry the identifier that led
+// here. A miss returns null after the single index read.
+async function exactIndexResult(
+  indexRef: DocumentReference,
+  reason: string,
+  agrees: (_index: DocumentSnapshot, _edition: StoredEdition) => boolean,
+): Promise<CatalogSearchResult | null> {
+  const index = await indexRef.get();
+  if (!index.exists) return null;
   const workId = index.get("workId");
   const editionId = index.get("editionId");
   if (typeof workId !== "string" || typeof editionId !== "string") {
-    throw new Error(`Invalid ISBN index ${index.ref.path}.`);
+    throw new CatalogDataError(`Invalid catalog index ${index.ref.path}.`);
   }
   const [workSnapshot, editionSnapshot] = await Promise.all([
     db.collection("works").doc(workId).get(),
     db.collection("editions").doc(editionId).get(),
   ]);
-  const resolved = await resolveWorkSnapshot(workSnapshot);
+  const resolved = await resolveWork(readSnapshot, workSnapshot);
   const edition = storedEdition(editionSnapshot);
   const editionWork = edition.workId === workId ? resolved :
-    await resolveWorkSnapshot(await db.collection("works").doc(edition.workId).get());
-  if (editionWork.id !== resolved.id || edition.isbn13 !== isbn13) {
-    throw new Error(`ISBN index ${index.ref.path} disagrees with its edition.`);
+    await resolveWork(readSnapshot, await db.collection("works").doc(edition.workId).get());
+  if (editionWork.id !== resolved.id || !agrees(index, edition)) {
+    throw new CatalogDataError(`Catalog index ${index.ref.path} disagrees with its edition.`);
   }
   if (resolved.work.status !== "active") return null;
   return {
     workId: resolved.id,
     editionId,
     confidence: "exact-edition",
-    reason: "Exact ISBN match",
+    reason,
     work: await workSummary(resolved),
     edition: editionSummary(editionId, edition, resolved.id),
   };
 }
 
+async function exactIsbnResult(isbn13: string): Promise<CatalogSearchResult | null> {
+  return exactIndexResult(
+    db.collection("isbnIndex").doc(isbn13),
+    "Exact ISBN match",
+    (_index, edition) => edition.isbn13 === isbn13,
+  );
+}
+
 async function exactExternalIdResult(
   externalId: CatalogExternalId,
 ): Promise<CatalogSearchResult | null> {
-  const index = await db.collection("externalIdIndex")
-    .doc(externalIndexId(externalId))
-    .get();
-  if (!index.exists) {
-    await Promise.all([
-      db.collection("works").doc("__catalog-search-miss__").get(),
-      db.collection("editions").doc("__catalog-search-miss__").get(),
-      db.collection("works").doc("__catalog-search-miss-padding__").get(),
-    ]);
-    return null;
-  }
-  const workId = index.get("workId");
-  const editionId = index.get("editionId");
-  if (typeof workId !== "string" || typeof editionId !== "string" ||
-      index.get("provider") !== externalId.provider ||
-      index.get("externalId") !== externalId.id) {
-    throw new Error(`Invalid external ID index ${index.ref.path}.`);
-  }
-  const [workSnapshot, editionSnapshot] = await Promise.all([
-    db.collection("works").doc(workId).get(),
-    db.collection("editions").doc(editionId).get(),
-  ]);
-  const resolved = await resolveWorkSnapshot(workSnapshot);
-  const edition = storedEdition(editionSnapshot);
-  const editionWork = edition.workId === workId ? resolved :
-    await resolveWorkSnapshot(await db.collection("works").doc(edition.workId).get());
-  if (editionWork.id !== resolved.id ||
-      edition.externalIds[externalId.provider] !== externalId.id) {
-    throw new Error(`External ID index ${index.ref.path} disagrees with its edition.`);
-  }
-  if (resolved.work.status !== "active") return null;
-  return {
-    workId: resolved.id,
-    editionId,
-    confidence: "exact-edition",
-    reason: "Exact external ID match",
-    work: await workSummary(resolved),
-    edition: editionSummary(editionId, edition, resolved.id),
-  };
+  return exactIndexResult(
+    db.collection("externalIdIndex").doc(externalIndexId(externalId)),
+    "Exact external ID match",
+    (index, edition) => index.get("provider") === externalId.provider &&
+      index.get("externalId") === externalId.id &&
+      edition.externalIds[externalId.provider] === externalId.id,
+  );
 }
 
 function tokenSimilarity(left: string, right: string): number {
@@ -592,12 +524,13 @@ function tokenSimilarity(left: string, right: string): number {
   return (2 * overlap) / (leftTokens.size + rightTokens.size);
 }
 
+// The decoder refuses a title search with no author name, so `requested` is
+// never empty here.
 function authorAgreement(requested: readonly string[], authors: readonly ResolvedAuthor[]): number {
-  if (requested.length === 0) return 0;
   const candidates = new Set(authors.flatMap((author) =>
-    [normalizeCatalogText(author.canonicalName), ...author.nameKeys],
+    [normalizeCatalogIdentity(author.canonicalName), ...author.nameKeys],
   ));
-  const normalized = [...new Set(requested.map(normalizeCatalogText))];
+  const normalized = [...new Set(requested.map(normalizeCatalogIdentity))];
   return normalized.filter((name) => candidates.has(name)).length / normalized.length;
 }
 
@@ -617,7 +550,7 @@ async function titleResults(
   const candidateIds = [...new Set(indexRows.docs.map((row) => row.get("workId")))]
     .filter((id): id is string => typeof id === "string");
   const resolved = await Promise.all(candidateIds.map(async (id) =>
-    resolveWorkSnapshot(await db.collection("works").doc(id).get()),
+    resolveWork(readSnapshot, await db.collection("works").doc(id).get()),
   ));
   const byId = new Map<string, ResolvedWork>();
   for (const candidate of resolved) {
@@ -661,22 +594,19 @@ async function titleResults(
   }));
 }
 
-function titleIndexId(workId: string, titleKey: string): string {
+// The workTitleIndex row, shared with the admin scan: a stale copy in one
+// writer would make the same key resolve to two different rows.
+export function titleIndexId(workId: string, titleKey: string): string {
   return createHash("sha256").update(`${workId}\0${titleKey}`).digest("hex");
 }
 
-async function transactionWork(tx: Transaction, workId: string): Promise<ResolvedWork> {
-  const snapshot = await tx.get(db.collection("works").doc(workId));
-  const work = storedWork(snapshot);
-  if (work.status !== "merged") return {id: snapshot.id, work};
-  if (work.mergedInto === undefined || work.mergedInto === snapshot.id) {
-    throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
-  }
-  const target = storedWork(await tx.get(db.collection("works").doc(work.mergedInto)));
-  if (target.status === "merged") {
-    throw new CatalogDataError(`Catalog redirect is not one hop at ${snapshot.ref.path}.`);
-  }
-  return {id: work.mergedInto, work: target};
+export function titleIndexRow(
+  workId: string,
+  title: string,
+  titleKey: string,
+  status: WorkStatus,
+): {workId: string; title: string; titleKey: string; status: WorkStatus} {
+  return {workId, title, titleKey, status};
 }
 
 interface CatalogCreateResult {
@@ -731,7 +661,11 @@ export async function createCatalogEntry(
       if (typeof indexedWorkId !== "string" || typeof indexedEditionId !== "string") {
         throw new CatalogDataError(`Invalid catalog index ${indexed.ref.path}.`);
       }
-      const resolved = await transactionWork(tx, indexedWorkId);
+      const read: SnapshotReader = (ref) => tx.get(ref);
+      const resolved = await resolveWork(
+        read,
+        await read(db.collection("works").doc(indexedWorkId)),
+      );
       return {workId: resolved.id, editionId: indexedEditionId, created: false};
     }
     if (workCount.data().count >= CATALOG_LIMITS.works ||
@@ -741,11 +675,14 @@ export async function createCatalogEntry(
         "The shared catalog has reached its size bound. Ask an administrator to raise it.",
       );
     }
-    const titleKeys = [...new Set(
-      [request.work.canonicalTitle, ...request.work.alternateTitles]
-        .map(normalizeCatalogTitle)
-        .filter((key) => key !== ""),
-    )];
+    // Each index row keeps the spelling its key came from, so the pairing is
+    // built once instead of looked up again per key.
+    const titleRows = new Map<string, string>();
+    for (const title of [request.work.canonicalTitle, ...request.work.alternateTitles]) {
+      const key = normalizeCatalogTitle(title);
+      if (key !== "" && !titleRows.has(key)) titleRows.set(key, title);
+    }
+    const titleKeys = [...titleRows.keys()];
     tx.create(db.collection("works").doc(workId), {
       canonicalTitle: request.work.canonicalTitle,
       alternateTitles: request.work.alternateTitles,
@@ -775,12 +712,10 @@ export async function createCatalogEntry(
         externalId: external.id,
       });
     }
-    for (const key of titleKeys) {
-      const title = [request.work.canonicalTitle, ...request.work.alternateTitles]
-        .find((candidate) => normalizeCatalogTitle(candidate) === key) ?? request.work.canonicalTitle;
+    for (const [key, title] of titleRows) {
       tx.create(
         db.collection("workTitleIndex").doc(titleIndexId(workId, key)),
-        {workId, title, titleKey: key, status: "active"},
+        titleIndexRow(workId, title, key, "active"),
       );
     }
     return {workId, editionId, created: true};
@@ -849,7 +784,6 @@ export function summarizeReadingAttempt(
     finished: boolean;
     finishedAt: Timestamp | null;
     pageCount: number;
-    editionId: string | null;
   },
   events: readonly ReadingEvent[],
   timeZone: string,
@@ -915,7 +849,6 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
   finished: boolean;
   finishedAt: Timestamp | null;
   pageCount: number;
-  editionId: string | null;
 } {
   const segments = snapshot.ref.path.split("/");
   if (segments.length !== 4 || segments[0] !== "users" || segments[2] !== "books") {
@@ -928,10 +861,8 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
   const finished = snapshot.get("finished");
   const finishedAt = snapshot.get("finishedAt");
   const pageCount = snapshot.get("pageCount");
-  const editionId = snapshot.get("editionId");
   if (typeof finished !== "boolean" || !Number.isSafeInteger(pageCount) || pageCount <= 0 ||
-      (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp)) ||
-      (editionId !== null && editionId !== undefined && typeof editionId !== "string")) {
+      (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp))) {
     throw new CatalogDataError(`Invalid personal book summary fields ${snapshot.ref.path}.`);
   }
   return {
@@ -939,7 +870,6 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
     finished,
     finishedAt: finishedAt ?? null,
     pageCount,
-    editionId: editionId ?? null,
   };
 }
 
@@ -985,20 +915,16 @@ export async function summarizeReaderBooks(
   const rows: WorkReaderAttemptSummary[] = [];
   let incomplete = initialIncomplete;
   let omittedAttempts = initialOmittedAttempts;
-  // At most SHARED_ATTEMPT_LIMIT histories per call, each capped at
-  // UPDATES_PER_BOOK_LIMIT rows, so the read budget is fixed by the two
-  // constants and the queries can run concurrently; a book over its cap is
-  // omitted on its own without crowding out the next owner.
-  const attempted = books.slice(0, SHARED_ATTEMPT_LIMIT);
-  if (books.length > attempted.length) {
-    omittedAttempts += books.length - attempted.length;
-    incomplete = true;
-  }
-  const histories = await Promise.all(attempted.map(({snapshot}) =>
+  // The caller's page is already bounded by SHARED_OWNER_LIMIT owners ×
+  // BOOKS_PER_UID_LIMIT books, and each history is capped at
+  // UPDATES_PER_BOOK_LIMIT rows, so the read budget is fixed and the
+  // queries can run concurrently; a book over its own cap is omitted on its
+  // own without crowding out the next owner.
+  const histories = await Promise.all(books.map(({snapshot}) =>
     snapshot.ref.collection("updates").limit(UPDATES_PER_BOOK_LIMIT + 1).get(),
   ));
   for (const [index, updates] of histories.entries()) {
-    const {snapshot, identity, shared} = attempted[index];
+    const {snapshot, identity, shared} = books[index];
     if (updates.size > UPDATES_PER_BOOK_LIMIT) {
       logger.warn("catalog.work_readers.attempt_skipped", {
         workId,
@@ -1012,10 +938,6 @@ export async function summarizeReaderBooks(
       rows.push({
         username: shared.username,
         displayName: shared.displayName,
-        // The shared-catalog privacy decision is work-level disclosure only.
-        // Keep the response shape forward-compatible without revealing which
-        // edition or ISBN this reader chose.
-        editionIsbn13: null,
         ...summarizeReadingAttempt(
           identity,
           readingEvents(updates, identity.uid, snapshot.ref.path),
@@ -1045,7 +967,8 @@ export async function summarizeReaderBooks(
 async function publicWorkOrNotFound(workId: string): Promise<ResolvedWork> {
   let resolved: ResolvedWork;
   try {
-    resolved = await resolveWorkSnapshot(
+    resolved = await resolveWork(
+      readSnapshot,
       await db.collection("works").doc(workId).get(),
     );
   } catch (error) {
@@ -1076,7 +999,7 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
 }> {
   const aliases = [...new Set(resolved.work.mergedFrom)];
   if (aliases.length > 29 || aliases.includes(resolved.id)) {
-    throw new Error(`Invalid merged aliases on works/${resolved.id}.`);
+    throw new CatalogDataError(`Invalid merged aliases on works/${resolved.id}.`);
   }
   const linkedIds = [resolved.id, ...aliases];
   let ownersQuery = db.collection("sharedWorkOwners")
@@ -1197,10 +1120,9 @@ exports.search = callable.https.onCall(async (
   context,
 ): Promise<{results: CatalogSearchResult[]}> => {
   logAppCheckPresence("catalog.search", context);
-  const uid = signedInUid(context);
+  const uid = requireVerifiedUid(context);
   const request: CatalogSearchRequest = decodeCatalogSearchRequest(data, invalidArgument);
   await requireLiveUser(uid);
-  await requireQuota(uid, "catalogSearch", SEARCHES_PER_WINDOW);
   if (request.isbn13 !== undefined) {
     const exact = await exactIsbnResult(request.isbn13);
     if (exact !== null) return {results: [exact]};
@@ -1209,11 +1131,11 @@ exports.search = callable.https.onCall(async (
     const exact = await exactExternalIdResult(request.externalId);
     if (exact !== null) return {results: [exact]};
   }
-  if (request.title !== undefined) await requireGlobalSearchQuota();
-  return {
-    results: request.title === undefined ? [] :
-      await titleResults(request.title, request.authorNames ?? []),
-  };
+  if (request.title === undefined) return {results: []};
+  if (request.authorNames === undefined) {
+    throw new Error("A decoded title search must carry its author names.");
+  }
+  return {results: await titleResults(request.title, request.authorNames)};
 });
 
 exports.create = callable.https.onCall(async (
@@ -1221,7 +1143,7 @@ exports.create = callable.https.onCall(async (
   context,
 ): Promise<CatalogCreateResult> => {
   logAppCheckPresence("catalog.create", context);
-  const uid = signedInUid(context);
+  const uid = requireVerifiedUid(context);
   const request = decodeCatalogCreateRequest(data, invalidArgument);
   await requireLiveUser(uid);
   return createCatalogEntry(request, uid);
@@ -1232,7 +1154,7 @@ exports.ensureauthors = callable.https.onCall(async (
   context,
 ): Promise<{authorIds: string[]}> => {
   logAppCheckPresence("catalog.ensureauthors", context);
-  const uid = signedInUid(context);
+  const uid = requireVerifiedUid(context);
   const request = decodeEnsureCatalogAuthorsRequest(data, invalidArgument);
   await requireLiveUser(uid);
 
@@ -1385,12 +1307,11 @@ exports.workreaders = callable.https.onCall(async (
 }> => {
   logAppCheckPresence("catalog.workreaders", context);
   const startedAt = Date.now();
-  const uid = signedInUid(context);
+  const uid = requireVerifiedUid(context);
   const request = decodeWorkReadersRequest(data, invalidArgument);
   await requireLiveUser(uid);
   await requireQuota(uid, "workReaders", READER_CALLS_PER_WINDOW);
   const resolved = await publicWorkOrNotFound(request.workId);
-  await requireGlobalReaderQuota();
   const result = await workReaders(resolved, request.cursor);
   const readerCount = new Set(
     result.response.attempts.map((attempt) => attempt.username),

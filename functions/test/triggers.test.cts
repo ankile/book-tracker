@@ -224,7 +224,7 @@ test("preserves the Firestore and Authentication event contracts", () => {
   }
 });
 
-test("a linked book write creates only the consent-eligible work-owner projection", async (t) => {
+test("a linked book write creates only the consented work-owner projection", async (t) => {
   interface Ref {
     path: string;
     id: string;
@@ -512,8 +512,9 @@ test("projection handlers converge across consent, profile, retry, and last-book
     rows.delete(`users/${uid}/books/reread-${String(index).padStart(3, "0")}`);
   }
 
-  // The explicit per-owner bound fails closed before any fan-out rather than
-  // silently maintaining only the first page.
+  // Granting consent is not bounded either: an owner with more linked works
+  // than one page is projected in full. Refusing above a bound wrote none of
+  // their rows and left their sharing silently doing nothing, forever.
   const errors: unknown[][] = [];
   t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
   for (let index = 105; index < 201; index += 1) {
@@ -526,11 +527,10 @@ test("projection handlers converge across consent, profile, retry, and last-book
     params: {userId: uid},
     data: change(undefined, renamed),
   });
-  assert.equal([...rows.keys()].some((path) => path.startsWith("sharedWorkOwners/")), false);
-  assert.deepEqual(errors[0], [
-    "catalog.shared_work_owner.catalog_bound_exceeded",
-    {uid, maximum: 200, source: "owner-works"},
-  ]);
+  // 201 bulk works plus the still-linked book-two.
+  assert.equal([...rows.keys()].filter((path) =>
+    path.startsWith("sharedWorkOwners/")).length, 202);
+  assert.deepEqual(errors, []);
 
   // Withdrawn consent is not bounded: a reader who accumulated more rows
   // than the fan-out bound, one link at a time, loses every one of them,
@@ -626,11 +626,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   const cleanupEvents: string[] = [];
   const sets: PathWrite[] = [];
   const deletes: string[] = [];
-  let sharingDeletes = 0;
-  const sharingRef = {
-    path: "users/owner/settings/bookSharing",
-    delete: async () => { sharingDeletes += 1; cleanupEvents.push("sharing"); },
-  };
+
   let userValue: Record<string, unknown> | undefined = {
     email: "owner@example.test",
     uid: "owner",
@@ -703,10 +699,10 @@ test("user deletion tombstones the user document and its profiles, deletes only 
     assert.equal(path, "profileDiscovery");
     return {doc: (name: string) => discoveryRef(name)};
   });
-  t.mock.method(db, "doc", (path: string) => {
-    assert.equal(path, "users/owner/settings/bookSharing");
-    return sharingRef;
-  });
+  // Soft delete: the sharing setting is kept like every other document, and
+  // the profile tombstone withdraws consent through the projection trigger.
+  t.mock.method(db, "doc", (path: string): never =>
+    assert.fail(`account deletion must not touch ${path}`));
   t.mock.method(db, "runTransaction", async (handler: (transaction: {
     get(ref: object): Promise<{exists: boolean; get(field: string): unknown}>;
     set(ref: object, value: Record<string, unknown>, options: Record<string, unknown>): void;
@@ -753,11 +749,9 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   pages.push(names.slice(100, 200).map((n, i) => profileDoc(n, i === 0 ? {seconds: 1} : undefined)));
   pages.push(names.slice(200).map((n) => profileDoc(n, undefined)));
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.equal(sharingDeletes, 1);
   assert.equal(cleanupEvents[0], "user");
   assert.equal(cleanupEvents.filter((event) => event === "profiles").length, 3);
   assert.ok(cleanupEvents.includes("credential"));
-  assert.ok(cleanupEvents.includes("sharing"));
 
   // The user document keeps every field and gains the tombstone.
   assert.equal(sets[0][0], "users/owner");
@@ -793,7 +787,6 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   markerOwner = "squatter";
   pages.push([profileDoc("ada-lovelace", {seconds: 1})]);
   await functions.deleteUserDocument.run({uid: "owner"});
-  assert.equal(sharingDeletes, 2);
   assert.deepEqual(sets, [] as PathWrite[]);
   assert.deepEqual(deletes, [] as string[]);
   assert.equal(commits, 0);
@@ -803,7 +796,6 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   sets.length = 0; deletes.length = 0; commits = 0; markerOwner = "owner";
   await functions.deleteUserDocument.run({uid: "owner"});
   assert.deepEqual(sets, [] as PathWrite[]);
-  assert.equal(sharingDeletes, 3);
 
   // A uid whose document never existed still gets a tombstone, so the
   // admin overview can tell "deleted" from "orphaned".
@@ -812,7 +804,6 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   assert.equal(sets.length, 1);
   const tombstoneWrite = firstPathWrite(sets);
   assert.equal(tombstoneWrite[1].uid, "owner");
-  assert.equal(sharingDeletes, 4);
 
   // A failure in one cleanup subsystem does not prevent the other two from
   // converging, and the retryable trigger still reports the failure.
@@ -825,7 +816,6 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   );
   assert.ok(sets.some(([path]) => path === "profiles/cleanup-survivor"));
   assert.ok(deletes.includes("profileDiscovery/cleanup-survivor"));
-  assert.equal(sharingDeletes, 5);
 
   // A delivery that fails is retried rather than dropped — for both Auth
   // triggers: nothing else can create users/{uid}.

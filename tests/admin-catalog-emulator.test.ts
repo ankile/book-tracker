@@ -477,17 +477,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     .where('operationId', '==', edit.planned.operationId).get();
   assert.equal(replayAudits.size, 1);
 
-  await Promise.all([
-    db.doc(`users/${ADMIN_UID}`).set({uid: ADMIN_UID}),
-    db.doc(`users/${ADMIN_UID}/books/source-provenance-${suffix}`).set({
-      owner: db.doc(`users/${ADMIN_UID}`),
-      title: 'Operator-approved source',
-      workId: sourceWorkId,
-      editionId: sourceEditionId,
-      matchMethod: 'admin',
-      linkedAt: Timestamp.now(),
-    }),
-  ]);
+  await db.doc(`users/${ADMIN_UID}`).set({uid: ADMIN_UID});
 
   await previewAndApply({
     type: 'mergeWorks',
@@ -561,7 +551,7 @@ test('all admin catalog operations use real callable transactions and preserve p
       path: `users/${attackerUid}/books/attack-${String(index).padStart(4, '0')}`,
       data: {
         title: `Attack Book ${index}`,
-        authors: [{name: 'Attacker Author'}],
+        authorIds: [catalogAuthorId],
         isbn: '',
         pageCount: 100,
         publisher: '',
@@ -629,8 +619,10 @@ test('all admin catalog operations use real callable transactions and preserve p
     finding.code === 'book-link-anomaly' &&
     finding.books.some((book) => book.uid === personalUid && book.bookId === overLimitBookId),
   )), true);
+  // personal, cross-ISBN, prior-target-ISBN, same-work-ISBN, and the stale
+  // book relinked to the merged source.
   assert.equal(pages.reduce((total, page) => total +
-    (page.works.find((work) => work.workId === targetWorkId)?.linkedBookCount ?? 0), 0), 6);
+    (page.works.find((work) => work.workId === targetWorkId)?.linkedBookCount ?? 0), 0), 5);
 
   const largeTargetId = `large-target-${suffix}`;
   const largeSourceId = `large-source-${suffix}`;

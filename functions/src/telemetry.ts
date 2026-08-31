@@ -4,6 +4,7 @@ import {getFirestore} from "firebase-admin/firestore";
 import {decodeIssueReport} from "./decoders";
 import {logIssue} from "./logging";
 import {consumeQuota} from "./quota";
+import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logAppCheckPresence} from "./appCheck";
 
@@ -40,27 +41,9 @@ exports.reportissue = functions
   .region("europe-west1")
   .https.onCall(async (data: unknown, context): Promise<{recorded: true}> => {
     logAppCheckPresence("telemetry.reportissue", context);
-    if (context.auth === undefined) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Sign in to report an issue.",
-      );
-    }
-    if (context.auth.token.email_verified !== true) {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "Verify your email before reporting an issue.",
-      );
-    }
+    const uid = requireVerifiedUid(context);
     const issue = decodeIssueReport(data, invalidArgument);
-    const uid = context.auth.uid;
-    const user = await db.collection("users").doc(uid).get();
-    if (!user.exists || user.get("deletedAt") !== undefined) {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "This account is not active.",
-      );
-    }
+    await requireLiveUser(uid);
     const decision = await consumeQuota(
       db,
       `users/${uid}/functionQuotas/issueReports`,

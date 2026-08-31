@@ -20,78 +20,11 @@ export interface CatalogLink {
   linkedAt: Timestamp | null;
 }
 
-export interface WorkDocument {
-  canonicalTitle: string;
-  alternateTitles: string[];
-  titleKeys: string[];
-  authorIds: string[];
-  coverUrl: string;
-  subjects: string[];
-  fiction: boolean | null;
-  status: WorkStatus;
-  mergedInto?: string;
-  mergedFrom?: string[];
-  createdAt: Timestamp;
-  updatedAt: Timestamp;
-}
-
-export interface CatalogAuthorDocument {
-  canonicalName: string;
-  alternateNames: string[];
-  nameKeys: string[];
-  sortName: string;
-  kind: CatalogAuthorKind;
-  status: CatalogAuthorStatus;
-  mergedInto?: string;
-  mergedFrom?: string[];
-  createdAt: Timestamp;
-  updatedAt: Timestamp;
-}
-
-export interface CatalogAuthor extends CatalogAuthorDocument {
-  id: string;
-}
-
 export interface CatalogAuthorSummary {
   authorId: string;
   canonicalName: string;
   sortName: string;
   kind: CatalogAuthorKind;
-}
-
-export interface Work extends WorkDocument {
-  id: string;
-}
-
-export interface WorkTitleIndexEntry {
-  workId: string;
-  title: string;
-  titleKey: string;
-}
-
-export interface EditionDocument {
-  workId: string;
-  isbn13: string | null;
-  title: string;
-  publisher: string;
-  publishedDate: string;
-  language: string;
-  translatorNames: string[];
-  format: EditionFormat;
-  suggestedPageCount: number | null;
-  coverUrl: string;
-  externalIds: Record<string, string>;
-  createdAt: Timestamp;
-  updatedAt: Timestamp;
-}
-
-export interface Edition extends EditionDocument {
-  id: string;
-}
-
-export interface IsbnIndexEntry {
-  workId: string;
-  editionId: string;
 }
 
 export interface CatalogSelection {
@@ -209,7 +142,6 @@ export interface WorkReaderAttemptSummary {
   displayName: string;
   status: 'reading' | 'finished';
   pageCount: number;
-  editionIsbn13: string | null;
   firstProgressAt: string | null;
   firstReadAt: string | null;
   finishedAt: string | null;
@@ -231,6 +163,8 @@ export interface WorkReadersResponse {
   nextCursor: string | null;
 }
 
+// The scan rows carry what the curation console renders or prefills a form
+// with, and nothing else.
 export interface AdminCatalogWorkRow {
   workId: string;
   canonicalTitle: string;
@@ -240,13 +174,11 @@ export interface AdminCatalogWorkRow {
   subjects: string[];
   fiction: boolean | null;
   status: WorkStatus;
-  mergedInto: string | null;
   mergedFrom: string[];
   // uid of the user who created the work through the add-book flow; null
   // for migration- or admin-created works. Newest first on the admin page.
   createdBy: string | null;
   createdAt: number;
-  updatedAt: number;
   editionCount: number;
   linkedBookCount: number;
   warnings: string[];
@@ -256,13 +188,10 @@ export interface AdminCatalogAuthorRow {
   authorId: string;
   canonicalName: string;
   alternateNames: string[];
-  nameKeys: string[];
   sortName: string;
   kind: CatalogAuthorKind;
   status: CatalogAuthorStatus;
-  mergedInto: string | null;
   mergedFrom: string[];
-  updatedAt: number;
   workCount: number;
   warnings: string[];
 }
@@ -271,7 +200,6 @@ export interface AdminCatalogEditionRow extends Omit<CatalogEditionInput, 'exter
   editionId: string;
   workId: string;
   externalIds: Record<string, string>;
-  updatedAt: number;
 }
 
 export interface AdminCatalogBookTarget {
@@ -284,21 +212,34 @@ export interface AdminCatalogBookRow extends AdminCatalogBookTarget {
   authorNames: string[];
   isbn13: string | null;
   rawIsbn: string | null;
-  pageCount: number;
+  // null when the book has no usable page count; the console renders an em
+  // dash rather than dropping the row.
+  pageCount: number | null;
   publisher: string;
-  publishedDate: string;
   coverUrl: string;
   workId: string | null;
   editionId: string | null;
-  matchMethod: CatalogMatchMethod | null;
-  linkedAt: number | null;
-  createdAt: number;
-  updatedAt: number;
   anomaly: string | null;
 }
 
+// The codes the scan emits (functions/src/adminCatalog.ts). Decoding them as
+// a union is what makes an unlabelled code a decode failure instead of a
+// blank cell.
+export type AdminCatalogFindingCode =
+  | 'book-row-anomaly'
+  | 'book-link-anomaly'
+  | 'unmatched-isbn-candidate'
+  | 'unmatched-title-author-candidate'
+  | 'likely-title-author-candidate'
+  | 'edition-missing-work'
+  | 'isbn-index-mismatch'
+  | 'external-id-index-mismatch'
+  | 'work-invariant'
+  | 'duplicate-author-name'
+  | 'suspected-duplicate-works';
+
 export interface AdminCatalogFinding {
-  code: string;
+  code: AdminCatalogFindingCode;
   severity: 'error' | 'warning';
   message: string;
   workIds: string[];
@@ -309,11 +250,7 @@ export interface AdminCatalogFinding {
 export interface AdminCatalogLimits {
   catalogAuthors: number;
   works: number;
-  editions: number;
   books: number;
-  isbnIndexes: number;
-  externalIdIndexes: number;
-  authorsPerWork: number;
 }
 
 export interface AdminCatalogScanResponse {

@@ -109,7 +109,8 @@ test("reportissue rejects unverified and deleted accounts before quota or storag
   assert.equal(store.userReads(), 0);
   await assert.rejects(
     deployed.telemetry.reportissue.run(report, authContext),
-    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /not active/),
+    (error) => hasCode(error, "failed-precondition") &&
+      messageMatches(error, /account has been deleted/),
   );
   assert.equal(store.userReads(), 1);
   assert.equal(store.quota(), undefined);

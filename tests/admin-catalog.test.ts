@@ -16,36 +16,32 @@ import {
 const work = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, status: 'hidden',
-  mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900, updatedAt: 1000,
+  mergedFrom: [], createdBy: null, createdAt: 900,
   editionCount: 1, linkedBookCount: 1, warnings: [],
 };
 const edition = {
   editionId: 'edition', workId: 'work', isbn13: '9780316769488', title: 'Book',
   publisher: '', publishedDate: '', language: '',
   translatorNames: [], format: 'unknown', suggestedPageCount: 200, coverUrl: '',
-  externalIds: {openlibrary: 'OL1M'}, updatedAt: 1000,
+  externalIds: {'open-library': 'OL1M'},
 };
 const author = {
-  authorId: 'author', canonicalName: 'Author', alternateNames: [], nameKeys: ['author'],
-  sortName: 'Author', kind: 'person', status: 'active', mergedInto: null,
-  mergedFrom: [], updatedAt: 1000, workCount: 1, warnings: [],
+  authorId: 'author', canonicalName: 'Author', alternateNames: [],
+  sortName: 'Author', kind: 'person', status: 'active',
+  mergedFrom: [], workCount: 1, warnings: [],
 };
-const limits = {
-  catalogAuthors: 500, works: 200, editions: 500, books: 100,
-  isbnIndexes: 500, externalIdIndexes: 500, authorsPerWork: 20,
-};
+const limits = {catalogAuthors: 500, works: 200, books: 100};
 const book = {
   uid: 'user', bookId: 'book', title: 'Personal title', authorNames: ['Author'],
-  isbn13: '9780316769488', rawIsbn: null, pageCount: 201, publisher: '', publishedDate: '',
-  coverUrl: '', workId: 'work', editionId: 'edition', matchMethod: 'migration',
-  linkedAt: 1000, createdAt: 900, updatedAt: 1000, anomaly: null,
+  isbn13: '9780316769488', rawIsbn: null, pageCount: 201, publisher: '',
+  coverUrl: '', workId: 'work', editionId: 'edition', anomaly: null,
 };
 
 test('admin catalog scan decoder accepts the bounded identity-only projection', () => {
   const decoded = decodeAdminCatalogScanResponse({
     authors: [author], works: [work], editions: [edition], books: [book], nextBookCursor: null,
     bookCountsComplete: true, findings: [{
-      code: 'title-conflict', severity: 'warning', message: 'Review title',
+      code: 'unmatched-isbn-candidate', severity: 'warning', message: 'Review link',
       workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'book'}],
     }],
     limits,
@@ -55,6 +51,38 @@ test('admin catalog scan decoder accepts the bounded identity-only projection', 
   assert.equal('currentPage' in decoded.books[0], false);
   assert.equal('timeRead' in decoded.books[0], false);
   assert.equal('activeTimer' in decoded.books[0], false);
+});
+
+// A book with no usable page count is the reason the scan reports null: an
+// older row may carry none at all, and dropping the whole page over it left
+// the console blank (the decoder used to refuse anything but a positive
+// integer).
+test('admin catalog scan decoder keeps a book that has no page count', () => {
+  const response = {
+    authors: [author], works: [work], editions: [edition], nextBookCursor: null,
+    bookCountsComplete: true, findings: [], limits,
+  };
+  const decoded = decodeAdminCatalogScanResponse({
+    ...response, books: [{...book, pageCount: null}],
+  });
+  assert.equal(decoded.books[0].pageCount, null);
+  assert.throws(() => decodeAdminCatalogScanResponse({
+    ...response, books: [{...book, pageCount: 0}],
+  }), /positive safe integer or null/);
+});
+
+// The console labels findings by code, so a code it does not know is a
+// deploy mismatch, not a row to render blank.
+test('admin catalog scan decoder rejects an unknown finding code', () => {
+  assert.throws(() => decodeAdminCatalogScanResponse({
+    authors: [author], works: [work], editions: [edition], books: [book],
+    nextBookCursor: null, bookCountsComplete: true,
+    findings: [{
+      code: 'title-conflict', severity: 'warning', message: 'Review title',
+      workIds: [], editionIds: [], books: [],
+    }],
+    limits,
+  }), /known catalog finding code/);
 });
 
 test('admin catalog scan decoder rejects extra personal and nested fields', () => {
@@ -70,7 +98,7 @@ test('admin catalog scan decoder rejects extra personal and nested fields', () =
 });
 
 test('admin catalog candidates prioritize exact identity evidence and prefill exact editions', () => {
-  const unmatched = {...book, workId: null, editionId: null, matchMethod: null, linkedAt: null};
+  const unmatched = {...book, workId: null, editionId: null};
   const scan = decodeAdminCatalogScanResponse({
     authors: [author], works: [work], editions: [edition], books: [unmatched], nextBookCursor: null,
     bookCountsComplete: true,

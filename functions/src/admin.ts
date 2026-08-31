@@ -117,7 +117,7 @@ async function audit(
 // never does. Treat this as an authorization boundary, not a secret one.
 async function requireAdmin(
   context: functions.https.CallableContext,
-): Promise<{uid: string; email: string | null}> {
+): Promise<AdminIdentity> {
   const caller = context.auth;
   if (!caller) {
     throw new functions.https.HttpsError("not-found", "Not found.");
@@ -136,12 +136,17 @@ async function requireAdmin(
 // would compile and deploy perfectly well while being wide open — the
 // wrapper is what makes forgetting the check impossible rather than
 // merely unlikely.
+interface AdminIdentity {
+  uid: string;
+  email: string | null;
+}
+
 function adminCallable<Request>(
   endpointName: string,
   decode: (_value: unknown, _fail: DecodeFailure) => Request,
   handler: (
     _request: Request,
-    _context: functions.https.CallableContext,
+    _identity: AdminIdentity,
   ) => Promise<unknown>,
   options: {recentAuth?: boolean; auditView?: boolean} = {},
 ): functions.HttpsFunction {
@@ -168,9 +173,11 @@ function adminCallable<Request>(
         }
       }
       const request = decode(data, invalidArgument);
-      const result = await handler(request, context);
+      // Before the handler, not after: a handler that throws half-way
+      // through a cross-user read has still read, and an unaudited read is
+      // the one this record exists to make impossible.
       if (options.auditView === true) await audit("view", identity);
-      return result;
+      return handler(request, identity);
     });
 }
 
@@ -385,10 +392,6 @@ exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
 exports.catalogapply = adminCallable<AdminCatalogApplyRequest>(
   "admin.catalogapply",
   decodeAdminCatalogApplyRequest,
-  async (request, context) => applyAdminCatalogOperation(
-    db,
-    context.auth?.uid ?? "",
-    request,
-  ),
+  async (request, identity) => applyAdminCatalogOperation(db, identity.uid, request),
   {recentAuth: true},
 );

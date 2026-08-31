@@ -6,13 +6,11 @@ export interface ConsentSnapshot {
   get(_field: string): unknown;
 }
 
-// Every reader of a user's sharing consent — the projection triggers, the
-// work-reader callable and the admin promotion check — answers the same
-// question from the same three documents: a live account, a well-formed
-// setting, and a public profile that still belongs to that account. One
-// predicate keeps them from drifting (review: six hand-written copies, one
-// of which validated the time zone with Intl.supportedValuesOf and so
-// silently hid every reader in Asia/Kolkata, Europe/Kyiv or Etc/UTC).
+// Both readers of a user's sharing consent — the projection triggers in
+// catalogProjection.ts and the work-reader callable in catalog.ts — answer
+// the same question from the same three documents: a live account, a
+// well-formed setting, and a public profile that still belongs to that
+// account. One predicate keeps them from drifting.
 
 const SHARING_USERNAME = /^[a-z0-9-]{3,30}$/;
 

@@ -53,7 +53,6 @@ interface ReaderBookStub {
     finished: boolean;
     finishedAt: import("firebase-admin/firestore").Timestamp | null;
     pageCount: number;
-    editionId: string | null;
   };
   shared: {username: string; displayName: string; timeZone: string};
 }
@@ -69,12 +68,14 @@ interface CreateResult {
 // only the members the helpers read, so the module is typed locally.
 interface CatalogModule {
   normalizeCatalogTitle(value: string): string;
+  catalogAuthorId(nameKey: string): string;
+  titleIndexId(workId: string, titleKey: string): string;
+  externalIndexId(externalId: {provider: string; id: string}): string;
   summarizeReadingAttempt(
     book: {
       finished: boolean;
       finishedAt: import("firebase-admin/firestore").Timestamp | null;
       pageCount: number;
-      editionId: string | null;
     },
     events: readonly ReadingEventStub[],
     timeZone: string,
@@ -117,6 +118,25 @@ test("the Functions title normalizer agrees with the shared client fixture", () 
   }
 });
 
+// The migration scripts derive the same document ids with their own copies
+// of these formulas; the fixture is asserted from both packages so a drift
+// on either side goes red instead of minting a second active document.
+test("the Functions id derivations agree with the shared id fixture", () => {
+  const fixtures: Array<{kind: string; input: Record<string, string>; expectedId: string}> =
+    JSON.parse(readFileSync(join(__dirname, "..", "..", "test-fixtures", "catalog-ids.json"), "utf8"));
+  const derive: Record<string, (input: Record<string, string>) => string> = {
+    "catalog-author": (input) => catalog.catalogAuthorId(input.nameKey),
+    "work-title-index": (input) => catalog.titleIndexId(input.workId, input.titleKey),
+    "shared-work-owner": (input) => sharedWorkOwnerId(input.workId, input.uid),
+    "external-id-index": (input) => catalog.externalIndexId({provider: input.provider, id: input.externalId}),
+  };
+  const covered = fixtures.filter((fixture) => fixture.kind in derive);
+  assert.equal(covered.length, 6);
+  for (const fixture of covered) {
+    assert.equal(derive[fixture.kind](fixture.input), fixture.expectedId, fixture.kind);
+  }
+});
+
 test("reading summaries use the reader timezone and the 3 AM boundary", () => {
   const event = (type: string, createdAt: string, pagesRead: number, timeRead = 0): ReadingEventStub => ({
     type,
@@ -125,7 +145,7 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
     timeRead,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 300, editionId: "edition"},
+    {finished: true, finishedAt: null, pageCount: 300},
     [
       event("update", "2024-03-10T09:30:00.000Z", 0),
       event("reading", "2024-03-10T10:30:00.000Z", 30, 30),
@@ -158,7 +178,7 @@ test("reading summary dates preserve four-digit years below 1000", () => {
     timeRead: 60,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 100, editionId: null},
+    {finished: true, finishedAt: null, pageCount: 100},
     [event("0001-01-01T04:00:00.000Z", 50), event("0001-01-02T04:00:00.000Z", 50)],
     "UTC",
   );
@@ -185,7 +205,6 @@ test("an explicit finishedAt stamp wins over the reading history", () => {
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-03-05T20:00:00.000Z")),
       pageCount: 200,
-      editionId: null,
     },
     [reading("2026-03-01T10:00:00.000Z"), reading("2026-03-02T10:00:00.000Z")],
     "UTC",
@@ -202,7 +221,7 @@ test("a later page-count correction does not move the finish date", () => {
     timeRead: type === "reading" ? 60 : 0,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 250, editionId: null},
+    {finished: true, finishedAt: null, pageCount: 250},
     [
       event("reading", "2026-03-01T10:00:00.000Z", 150),
       event("reading", "2026-03-02T10:00:00.000Z", 150),
@@ -220,7 +239,7 @@ test("a later page-count correction does not move the finish date", () => {
 test("reading summaries accept the time zone aliases browsers report", () => {
   for (const timeZone of ["Asia/Kolkata", "Europe/Kyiv", "Etc/UTC"]) {
     const result = catalog.summarizeReadingAttempt(
-      {finished: false, finishedAt: null, pageCount: 100, editionId: null},
+      {finished: false, finishedAt: null, pageCount: 100},
       [{
         type: "reading",
         createdAt: Timestamp.fromDate(new Date("2026-08-20T18:00:00.000Z")),
@@ -232,7 +251,7 @@ test("reading summaries accept the time zone aliases browsers report", () => {
     assert.equal(result.firstReadAt, "2026-08-20", timeZone);
   }
   assert.throws(() => catalog.summarizeReadingAttempt(
-    {finished: false, finishedAt: null, pageCount: 100, editionId: null}, [], "Mars/Olympus_Mons",
+    {finished: false, finishedAt: null, pageCount: 100}, [], "Mars/Olympus_Mons",
   ), /Unsupported time zone/);
 });
 
@@ -259,7 +278,7 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
         }})}),
       },
     },
-    identity: {uid: `reader-${index}`, finished: true, finishedAt: null, pageCount: 300, editionId: null},
+    identity: {uid: `reader-${index}`, finished: true, finishedAt: null, pageCount: 300},
     shared: {
       username: `reader-${index}`,
       displayName: `Reader ${index}`,
@@ -274,12 +293,17 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
   assert.equal(result.omittedAttempts, 1);
 });
 
-test("a full ten-owner page with maximum valid histories fits the read budget", async () => {
+// The page is bounded by its caller: ten owners (SHARED_OWNER_LIMIT) times
+// five rereads each (BOOKS_PER_UID_LIMIT). All fifty are summarized, each
+// history read once at the 200-row cap, and none is dropped.
+test("the largest possible owner page is summarized in full", async () => {
+  let queries = 0;
   const books: ReaderBookStub[] = Array.from({length: 50}, (_, index) => ({
     snapshot: {
       ref: {
         path: `users/reader-${Math.floor(index / 5)}/books/book-${index}`,
         collection: () => ({limit: (limit: number) => ({get: async () => {
+          queries += 1;
           assert.equal(limit, 201);
           const reading: Row = {
             type: "reading",
@@ -299,7 +323,6 @@ test("a full ten-owner page with maximum valid histories fits the read budget", 
       finished: true,
       finishedAt: null,
       pageCount: 300,
-      editionId: null,
     },
     shared: {
       username: `reader-${String(Math.floor(index / 5)).padStart(2, "0")}`,
@@ -308,6 +331,7 @@ test("a full ten-owner page with maximum valid histories fits the read budget", 
     },
   }));
   const result = await catalog.summarizeReaderBooks(books, "work");
+  assert.equal(queries, 50);
   assert.equal(result.attempts.length, 50);
   assert.equal(result.incomplete, false);
   assert.equal(result.omittedAttempts, 0);
@@ -340,31 +364,11 @@ test("catalog callables reject anonymous and malformed requests before Firestore
   assert.equal(touched, false);
 });
 
-test("catalog search has a separate bounded hourly quota", async (t) => {
-  const quotaRef = {path: "users/owner/functionQuotas/catalogSearch"};
-  const quota = {windowStartedAt: Timestamp.now(), count: 60};
-  t.mock.method(db, "doc", (path: string) => {
-    assert.equal(path, quotaRef.path);
-    return quotaRef;
-  });
-  t.mock.method(db, "collection", (name: string) => {
-    assert.equal(name, "users");
-    return liveUserCollection();
-  });
-  t.mock.method(db, "runTransaction", async (handler: Handler<{
-    get(): Promise<{data(): Row}>;
-    update(): void;
-  }>) => handler({
-    get: async () => ({data: () => quota}),
-    update: () => undefined,
-  }));
-  await assert.rejects(
-    deployed.catalog.search.run({title: "Book", authorNames: ["Author"]}, authContext),
-    (error) => hasCode(error, "resource-exhausted"),
-  );
-});
-
-test("title search has a global hourly spend breaker", async (t) => {
+// A reader page can cost ~10k reads (ten owners x five books x 200 update
+// rows); sixty an hour caps one hostile account at roughly $0.36/h. The
+// account's own counter is the only meter, and it is spent before the work
+// is read.
+test("reader summaries are metered per account at sixty an hour", async (t) => {
   const paths: string[] = [];
   t.mock.method(db, "doc", (path: string) => ({path}));
   t.mock.method(db, "collection", (name: string) => {
@@ -372,29 +376,20 @@ test("title search has a global hourly spend breaker", async (t) => {
     return liveUserCollection();
   });
   t.mock.method(db, "runTransaction", async (handler: Handler<{
-    get(reference: {path: string}): Promise<{data(): Row | undefined}>;
-    set(): void;
+    get(reference: {path: string}): Promise<{data(): Row}>;
     update(): void;
   }>) => handler({
     get: async (reference: {path: string}) => {
       paths.push(reference.path);
-      return {
-        data: () => reference.path === "functionGlobalQuotas/catalogSearch" ? {
-          windowStartedAt: Timestamp.now(), count: 100,
-        } : undefined,
-      };
+      return {data: () => ({windowStartedAt: Timestamp.now(), count: 60})};
     },
-    set: () => undefined,
     update: () => undefined,
   }));
   await assert.rejects(
-    deployed.catalog.search.run({title: "Book", authorNames: ["Author"]}, authContext),
+    deployed.catalog.workreaders.run({workId: "work"}, authContext),
     (error) => hasCode(error, "resource-exhausted"),
   );
-  assert.deepEqual(paths, [
-    "users/owner/functionQuotas/catalogSearch",
-    "functionGlobalQuotas/catalogSearch",
-  ]);
+  assert.deepEqual(paths, ["users/owner/functionQuotas/workReaders"]);
 });
 
 test("catalog callables reject deleted accounts before quotas or catalog reads", async (t) => {
@@ -614,14 +609,11 @@ test("an exact title with the wrong author is not returned", async (t) => {
     data: () => data,
     get: (field: string) => data?.[field],
   });
-  t.mock.method(db, "doc", () => ({path: "users/owner/functionQuotas/catalogSearch"}));
-  t.mock.method(db, "runTransaction", async (handler: Handler<{
-    get(): Promise<{data(): undefined}>;
-    set(): void;
-  }>) => handler({
-    get: async () => ({data: () => undefined}),
-    set: () => undefined,
-  }));
+  // A title search costs on the order of 100 reads (~$0.00006), so it has no
+  // quota: it must not read or write a quota document at all.
+  t.mock.method(db, "doc", (path: string): never => assert.fail(`search read ${path}`));
+  t.mock.method(db, "runTransaction", (): never =>
+    assert.fail("search runs no quota transaction"));
   t.mock.method(db, "collection", (name: string) => {
     if (name === "users") return liveUserCollection();
     if (name === "workTitleIndex") {
@@ -1000,7 +992,6 @@ test("work readers resolve aliases and return only consented redacted summaries"
   assert.deepEqual(result.attempts, [{
     username: "ada-reader",
     displayName: "Ada Reader",
-    editionIsbn13: null,
     status: "finished",
     pageCount: 300,
     firstProgressAt: "2026-08-20",

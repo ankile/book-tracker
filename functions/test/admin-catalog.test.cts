@@ -34,9 +34,10 @@ interface Query {
   where(field: string, operator: string, value: unknown): Query;
   limit(maximum: number): Query;
   orderBy(): Query;
+  startAfter(): Query;
   get(): Promise<QuerySnapshot>;
   doc?(id: string): Reference;
-  add?(): Promise<{id: string}>;
+  add?(_data: Row): Promise<{id: string}>;
 }
 interface TransactionStub {
   get(value: Query | Reference): Promise<QuerySnapshot | Snapshot>;
@@ -64,8 +65,23 @@ interface ApplyResult {
   touchedDocuments: number;
 }
 interface ScanResult {
-  books: Array<{uid: string; bookId: string; isbn13: string | null; rawIsbn: string | null}>;
-  findings: Array<{code: string; workIds: string[]; books: Array<{uid: string; bookId: string}>}>;
+  authors: Array<{authorId: string}>;
+  works: Array<{workId: string; linkedBookCount: number}>;
+  editions: Array<{editionId: string}>;
+  books: Array<{
+    uid: string;
+    bookId: string;
+    isbn13: string | null;
+    rawIsbn: string | null;
+    pageCount: number | null;
+  }>;
+  findings: Array<{
+    code: string;
+    message: string;
+    workIds: string[];
+    books: Array<{uid: string; bookId: string}>;
+  }>;
+  bookCountsComplete: boolean;
 }
 interface Deployed {
   admin: {
@@ -184,6 +200,7 @@ function installCatalogStore(t: TestContext): CatalogStore {
         return query;
       },
       orderBy: () => query,
+      startAfter: () => query,
       get: async () => querySnapshot(query),
     };
     return query;
@@ -206,7 +223,12 @@ function installCatalogStore(t: TestContext): CatalogStore {
   t.mock.method(db, "collection", (name: string) => {
     const query = makeQuery(name);
     query.doc = (id: string) => ref(`${name}/${id}`);
-    if (name === "adminAudit") query.add = async () => ({id: "view-audit"});
+    if (name === "adminAudit") {
+      query.add = async (data: Row) => {
+        write(ref("adminAudit/view-audit"), data);
+        return {id: "view-audit"};
+      };
+    }
     return query;
   });
   t.mock.method(db, "collectionGroup", (name: string) => makeQuery(name, true));
@@ -774,4 +796,101 @@ test("scan suggestions need the complete author set and read ISBN-10 books", asy
     scan.findings.filter(({code}) => code === "unmatched-isbn-candidate").map(({books}) => books[0].bookId),
     ["isbn-ten"],
   );
+});
+
+// One malformed personal book is reported and dropped, not coerced into a
+// plausible row: the console curates identity, and "(malformed title)" hid
+// the corruption behind something that looked like data.
+test("a malformed book row is reported and skipped", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  const row = (title: unknown, extra: Row = {}): Row => ({
+    owner: store.ref("users/reader"),
+    title,
+    pageCount: 100,
+    workId: null,
+    editionId: null,
+    matchMethod: null,
+    linkedAt: null,
+    ...extra,
+  });
+  store.write(store.ref("users/reader/books/readable"), row("Readable"));
+  store.write(store.ref("users/reader/books/untitled"), row(42));
+  store.write(store.ref("users/reader/books/unlinkable"), row("Bad link", {
+    matchMethod: "guessed",
+  }));
+  const scan = await deployed.admin.catalogscan.run({}, recentAdmin());
+  assert.deepEqual(scan.books.map(({bookId}) => bookId), ["readable"]);
+  const anomalies = scan.findings.filter(({code}) => code === "book-row-anomaly");
+  assert.deepEqual(anomalies.map(({books}) => books[0].bookId).sort(), [
+    "unlinkable", "untitled",
+  ]);
+  assert.equal(anomalies.some(({message}) => /title must be a non-empty string/.test(message)), true);
+  assert.equal(anomalies.some(({message}) => /Invalid catalog link/.test(message)), true);
+});
+
+// A missing or nonsensical page count is a display gap, not a reason to
+// drop the row (the client decoder used to refuse the whole page over it).
+test("a book with no page count is still scanned", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/no-pages"), {
+    owner: store.ref("users/reader"),
+    title: "No page count",
+    workId: null,
+    editionId: null,
+    matchMethod: null,
+    linkedAt: null,
+  });
+  const scan = await deployed.admin.catalogscan.run({}, recentAdmin());
+  assert.deepEqual(scan.books.map(({bookId, pageCount}) => [bookId, pageCount]), [
+    ["no-pages", null],
+  ]);
+});
+
+// A continuation page answers for its own books only: re-reading and
+// re-serialising the whole catalog on every page is what the cursor exists
+// to avoid. Works stay because the page states link counts against them.
+test("a continuation scan page carries no catalog inventory", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/target-work"), activeWork("Target Work"));
+  store.write(store.ref("editions/an-edition"), edition("target-work"));
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/linked"), {
+    owner: store.ref("users/reader"),
+    title: "Linked copy",
+    pageCount: 100,
+    workId: "target-work",
+    editionId: null,
+    matchMethod: null,
+    linkedAt: null,
+  });
+  const first = await deployed.admin.catalogscan.run({}, recentAdmin());
+  assert.deepEqual(
+    [first.authors.length, first.editions.length, first.works.length],
+    [1, 1, 1],
+  );
+  assert.equal(first.bookCountsComplete, true);
+  const next = await deployed.admin.catalogscan.run(
+    {bookCursor: "users/reader/books/aaa"},
+    recentAdmin(),
+  );
+  assert.deepEqual([next.authors, next.editions], [[], []]);
+  assert.deepEqual(next.works.map(({workId, linkedBookCount}) => [workId, linkedBookCount]), [
+    ["target-work", 1],
+  ]);
+  assert.equal(next.bookCountsComplete, false);
+});
+
+// The audit row is the evidence that an operator read cross-user data. A
+// handler that throws part-way through has still read, so the row is
+// written before the handler runs, not after it returns.
+test("an admin read that fails is still audited", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/corrupt-work"), activeWork("Corrupt", {status: "invented"}));
+  await assert.rejects(
+    deployed.admin.catalogscan.run({}, recentAdmin()),
+    (error) => hasCode(error, "failed-precondition"),
+  );
+  assert.equal(store.rows.get("adminAudit/view-audit")?.uid, adminUid);
 });

@@ -6,13 +6,13 @@ import {
   getFirestore,
   Timestamp,
 } from "firebase-admin/firestore";
-import {logger} from "firebase-functions";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {profileConsents, sharingSetting} from "./sharingConsent";
 
-const MAX_OWNER_WORKS = 200;
-const MAX_LINKED_BOOKS = 500;
+// Page size only, not a bound on the owner: both directions page to the end
+// (see withdrawOwner and refreshOwner).
+const REFRESH_PAGE = 200;
 const REFRESH_CONCURRENCY = 10;
 const TRIGGER_OPTIONS = {
   region: "europe-west1",
@@ -60,16 +60,15 @@ async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void
 
 // Withdrawn consent removes every projection row the owner has, however
 // many: the per-link path bounds nothing per owner, so a reader who linked
-// works one at a time can hold more than MAX_OWNER_WORKS rows, and a
-// revoke that refused above the bound would leave them all behind — each a
-// wasted read on every work page, forever. Deleting has no fan-out to
-// bound, so it pages to the end.
+// works one at a time can hold any number of rows, and a revoke that
+// refused above a bound would leave them all behind — each a wasted read on
+// every work page, forever. So it pages to the end.
 async function withdrawOwner(uid: string): Promise<void> {
   const db = getFirestore();
   let cursor: DocumentSnapshot | null = null;
   for (;;) {
     let query = db.collection("sharedWorkOwners").where("uid", "==", uid)
-      .orderBy(FieldPath.documentId()).limit(MAX_OWNER_WORKS);
+      .orderBy(FieldPath.documentId()).limit(REFRESH_PAGE);
     if (cursor !== null) query = query.startAfter(cursor);
     const page = await query.get();
     if (page.empty) return;
@@ -78,7 +77,7 @@ async function withdrawOwner(uid: string): Promise<void> {
         refreshSharedWorkOwner(uid, String(row.get("workId"))),
       ));
     }
-    if (page.size < MAX_OWNER_WORKS) return;
+    if (page.size < REFRESH_PAGE) return;
     cursor = page.docs[page.size - 1];
   }
 }
@@ -98,35 +97,32 @@ async function refreshOwner(uid: string): Promise<void> {
     await withdrawOwner(uid);
     return;
   }
-  const candidates = await db.collection(`users/${uid}/books`).where("workId", "!=", null)
-    .orderBy("workId")
-    .limit(MAX_LINKED_BOOKS + 1).get();
-  if (candidates.size > MAX_LINKED_BOOKS) {
-    logger.error("catalog.shared_work_owner.catalog_bound_exceeded", {
-      uid,
-      maximum: MAX_LINKED_BOOKS,
-      source: "linked-books",
-    });
-    return;
-  }
+  // Granted consent pages to the end too. Refusing above a bound left the
+  // reader's every projection row unwritten and their sharing silently
+  // doing nothing, forever, with nothing to tell them so.
   const workIds = new Set<string>();
-  for (const snapshot of candidates.docs) {
-    const workId = snapshot.get("workId");
-    if (typeof workId === "string") workIds.add(workId);
-  }
-  if (workIds.size > MAX_OWNER_WORKS) {
-    logger.error("catalog.shared_work_owner.catalog_bound_exceeded", {
-      uid,
-      maximum: MAX_OWNER_WORKS,
-      source: "owner-works",
-    });
-    return;
-  }
-  const bounded = [...workIds];
-  for (let index = 0; index < bounded.length; index += REFRESH_CONCURRENCY) {
-    await Promise.all(bounded.slice(index, index + REFRESH_CONCURRENCY).map((workId) =>
-      refreshSharedWorkOwner(uid, workId),
-    ));
+  let cursor: DocumentSnapshot | null = null;
+  for (;;) {
+    let query = db.collection(`users/${uid}/books`).where("workId", "!=", null)
+      .orderBy("workId").limit(REFRESH_PAGE);
+    if (cursor !== null) query = query.startAfter(cursor);
+    const page = await query.get();
+    if (page.empty) break;
+    const pending: string[] = [];
+    for (const snapshot of page.docs) {
+      const workId = snapshot.get("workId");
+      if (typeof workId === "string" && !workIds.has(workId)) {
+        workIds.add(workId);
+        pending.push(workId);
+      }
+    }
+    for (let index = 0; index < pending.length; index += REFRESH_CONCURRENCY) {
+      await Promise.all(pending.slice(index, index + REFRESH_CONCURRENCY).map((workId) =>
+        refreshSharedWorkOwner(uid, workId),
+      ));
+    }
+    if (page.size < REFRESH_PAGE) break;
+    cursor = page.docs[page.size - 1];
   }
 }
 

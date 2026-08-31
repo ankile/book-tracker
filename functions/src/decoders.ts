@@ -173,7 +173,6 @@ export function decodeAdminCatalogScanRequest(
   value: unknown,
   fail: DecodeFailure = throwDecodeError,
 ): AdminCatalogScanRequest {
-  if (value === null || value === undefined) return {bookCursor: null};
   const decoded = record(value, "request data", fail);
   exactKeys(decoded, ["bookCursor"], "request data", fail);
   if (decoded.bookCursor === undefined || decoded.bookCursor === null) {
@@ -224,16 +223,39 @@ export interface IsbnLookupRequest {
   isbn: string;
 }
 
-function checksumValidIsbn13(value: unknown, label: string, fail: DecodeFailure): string {
-  if (typeof value !== "string" || !/^\d{13}$/.test(value)) {
-    fail(`${label} must be a checksum-valid ISBN-13 string.`);
-  }
+function isbn13CheckDigit(first12: string): string {
   let sum = 0;
   for (let index = 0; index < 12; index += 1) {
-    sum += Number(value[index]) * (index % 2 === 0 ? 1 : 3);
+    sum += Number(first12[index]) * (index % 2 === 0 ? 1 : 3);
   }
-  const checkDigit = String((10 - (sum % 10)) % 10);
-  if (value[12] !== checkDigit) {
+  return String((10 - (sum % 10)) % 10);
+}
+
+// The one ISBN normalizer: any ISBN-10 or ISBN-13 spelling a personal book
+// may carry (hyphens and spaces included) becomes the checksum-valid
+// ISBN-13 the catalog indexes by, or null. The admin scan reports link
+// candidates with it, so it must agree with what the link path accepts.
+export function normalizeIsbn13(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const isbn = value.replace(/[-\s]/g, "").toUpperCase();
+  if (/^\d{9}[\dX]$/.test(isbn)) {
+    let isbn10Sum = 0;
+    for (let index = 0; index < 10; index += 1) {
+      isbn10Sum += (10 - index) * (isbn[index] === "X" ? 10 : Number(isbn[index]));
+    }
+    if (isbn10Sum % 11 !== 0) return null;
+    const core = `978${isbn.slice(0, 9)}`;
+    return `${core}${isbn13CheckDigit(core)}`;
+  }
+  if (!/^\d{13}$/.test(isbn)) return null;
+  return isbn[12] === isbn13CheckDigit(isbn) ? isbn : null;
+}
+
+// The wire form is stricter than the normalizer: a request carries the
+// canonical thirteen digits, never an ISBN-10 or a hyphenated spelling.
+function checksumValidIsbn13(value: unknown, label: string, fail: DecodeFailure): string {
+  if (typeof value !== "string" || !/^\d{13}$/.test(value) ||
+      normalizeIsbn13(value) !== value) {
     fail(`${label} must be a checksum-valid ISBN-13 string.`);
   }
   return value;
@@ -336,6 +358,11 @@ const CATALOG_CHARACTER_FOLDS: Readonly<Record<string, string>> = {
   "þ": "th",
 };
 
+// One normalizer for every catalog identity: this writes nameKeys on
+// ensureauthors, catalog.ts derives title keys from it and the admin scan
+// recomputes both, so a fold added for one table but not another would
+// report every stored author as corrupt and make lookups miss existing
+// authors.
 export function normalizeCatalogIdentity(value: string): string {
   const folded = [...value.normalize("NFKD").toLowerCase()].map((character) =>
     CATALOG_CHARACTER_FOLDS[character] ?? character,
@@ -726,9 +753,19 @@ export type AdminCatalogOperation =
       editionId: string;
     };
 
+export const VERSIONED_KINDS = [
+  "author", "work", "edition", "isbn", "external-id", "title-index",
+] as const;
+export type VersionedKind = typeof VERSIONED_KINDS[number];
+
+export const MATCH_METHODS = [
+  "isbn", "external-id", "catalog-choice", "migration", "admin",
+] as const;
+export type MatchMethod = typeof MATCH_METHODS[number];
+
 export interface AdminCatalogExpected {
   catalog: Array<{
-    kind: "author" | "work" | "edition" | "isbn" | "external-id" | "title-index";
+    kind: VersionedKind;
     id: string;
     exists: boolean;
     updatedAt: number | null;
@@ -738,8 +775,7 @@ export interface AdminCatalogExpected {
     bookId: string;
     workId: string | null;
     editionId: string | null;
-    matchMethod: "isbn" | "external-id" | "catalog-choice" |
-      "migration" | "admin" | null;
+    matchMethod: MatchMethod | null;
     linkedAt: number | null;
     decisionIsbn13: string | null;
     decisionAuthorIds: string[] | null;
@@ -935,19 +971,12 @@ function decodeAdminCatalogExpected(
       `expected.catalog[${index}]`,
       fail,
     );
-    if (version.kind !== "author" && version.kind !== "work" && version.kind !== "edition" &&
-        version.kind !== "isbn" && version.kind !== "external-id" &&
-        version.kind !== "title-index") {
+    if (typeof version.kind !== "string" ||
+        !VERSIONED_KINDS.includes(version.kind as VersionedKind)) {
       fail(`expected.catalog[${index}].kind is unsupported.`);
     }
-    const kind = version.kind === "author" ? "author" as const :
-      version.kind === "work" ? "work" as const :
-      version.kind === "edition" ? "edition" as const :
-        version.kind === "isbn" ? "isbn" as const :
-          version.kind === "external-id" ? "external-id" as const :
-            "title-index" as const;
     return {
-      kind,
+      kind: version.kind as VersionedKind,
       id: documentId(version.id, `expected.catalog[${index}].id`, fail),
       exists: boolean(version.exists, `expected.catalog[${index}].exists`, fail),
       updatedAt: nullableMillis(
@@ -958,7 +987,6 @@ function decodeAdminCatalogExpected(
   if (!Array.isArray(decoded.books) || decoded.books.length > 200) {
     fail("expected.books must contain at most 200 link versions.");
   }
-  const methods = ["isbn", "external-id", "catalog-choice", "migration", "admin"];
   const books = decoded.books.map((entry, index) => {
     const book = record(entry, `expected.books[${index}]`, fail);
     exactKeys(
@@ -972,7 +1000,8 @@ function decodeAdminCatalogExpected(
     );
     const matchMethod = book.matchMethod;
     if (matchMethod !== null &&
-        (typeof matchMethod !== "string" || !methods.includes(matchMethod))) {
+        (typeof matchMethod !== "string" ||
+         !MATCH_METHODS.includes(matchMethod as MatchMethod))) {
       fail(`expected.books[${index}].matchMethod is unsupported.`);
     }
     return {
@@ -982,8 +1011,7 @@ function decodeAdminCatalogExpected(
       editionId: nullableDocumentId(
         book.editionId, `expected.books[${index}].editionId`, fail,
       ),
-      matchMethod: matchMethod as "isbn" | "external-id" | "catalog-choice" |
-        "migration" | "admin" | null,
+      matchMethod: matchMethod as MatchMethod | null,
       linkedAt: nullableMillis(book.linkedAt, `expected.books[${index}].linkedAt`, fail),
       decisionIsbn13: book.decisionIsbn13 === null ? null : checksumValidIsbn13(
         book.decisionIsbn13,

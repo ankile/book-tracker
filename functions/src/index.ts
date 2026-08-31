@@ -178,14 +178,15 @@ exports.deleteUserDocument = functions
     // the reverse order left a race where a still-valid ID token could
     // strand a live credential on a deleted account).
     await tombstoneUser(user.uid);
-    // Each cleanup must run even if another subsystem is temporarily down.
-    // The durable user tombstone already makes stale sharing rows inert; the
-    // profile tombstone closes public rendering, while retries converge all
-    // three cleanup operations.
+    // Each cleanup must run even if another subsystem is temporarily down,
+    // and retries converge both. The sharing setting is kept like every
+    // other document: tombstoning the profile withdraws consent through the
+    // projection trigger (withdrawOwner deletes every sharedWorkOwners row
+    // the account has), so deleting the setting removed data without
+    // changing what anyone can see.
     const cleanup = await Promise.allSettled([
       tombstoneProfiles(user.uid),
       deleteTogglCredential(user.uid),
-      db.doc(`users/${user.uid}/settings/bookSharing`).delete(),
     ]);
     const failures = cleanup.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],

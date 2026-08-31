@@ -148,6 +148,12 @@
         const priorCounts = new Map(scan.works.map((work) => [work.workId, work.linkedBookCount]));
         scan = {
           ...page,
+          // A continuation page answers for its own hundred books only: the
+          // author and edition inventories came with the first page and are
+          // empty here, so they are kept rather than overwritten. Linked
+          // book counts accumulate across pages.
+          authors: scan.authors,
+          editions: scan.editions,
           works: page.works.map((work) => ({
             ...work,
             linkedBookCount: (priorCounts.get(work.workId) ?? 0) + work.linkedBookCount,
@@ -578,7 +584,7 @@
                     {#if book.coverUrl}<img src={book.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
                     <span><strong>{book.title}</strong><small>{book.authorNames.join(', ')}</small></span>
                   </td>
-                  <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td><td>{book.pageCount}</td><td>{book.publisher || '—'}</td>
+                  <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td><td>{book.pageCount ?? '—'}</td><td>{book.publisher || '—'}</td>
                   <td><code>{book.uid}/{book.bookId}</code></td>
                   <td class="candidate-cell">
                     {#each adminCatalogCandidatesForBook(scan, book) as candidate (`${book.uid}/${book.bookId}/${candidate.workId}`)}
@@ -644,7 +650,7 @@
         <h3>Attached personal books</h3>
         <div class="compact-list">
           {#each selectedLinkedBooks as book (`${book.uid}/${book.bookId}`)}
-            <div><span><strong>{book.title}</strong> · {book.authorNames.join(', ')} · {book.pageCount} pages</span><code>{book.uid}/{book.bookId}</code></div>
+            <div><span><strong>{book.title}</strong> · {book.authorNames.join(', ')} · {book.pageCount ?? '—'} pages</span><code>{book.uid}/{book.bookId}</code></div>
           {/each}
           {#if selectedLinkedBooks.length === 0}<p class="empty">No linked personal books.</p>{/if}
         </div>
