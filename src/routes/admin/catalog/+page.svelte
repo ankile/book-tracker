@@ -328,7 +328,10 @@
       const response = await adminCatalogPreview({operation});
       preview = {operation, response};
       previewDraftFingerprint = draftFingerprint;
-      statusMessage = `Preview ready: ${response.touchedDocuments} documents would be touched.`;
+      statusMessage = `Preview ready: ${response.touchedDocuments} documents would be touched${
+        response.canonicalize === null ? '' :
+          `, then ${response.canonicalize.works} works and ${response.canonicalize.books} personal books would be rewritten`
+      }.`;
     } catch (error) {
       if (error instanceof TypeError) errorMessage = error.message;
       else {
@@ -377,13 +380,16 @@
     if (failure.kind === 'identifier-conflict') {
       return 'An ISBN or external identifier is already assigned elsewhere. Nothing was applied.';
     }
-    return 'The catalog operation failed. Nothing was applied; reload the scan before retrying.';
+    return 'The catalog operation failed. Applying the same preview again is safe: an operation that already committed replays without new writes, and an interrupted author rewrite resumes where it stopped.';
   }
 
   async function applyCurrentPreview(confirmFirst = true): Promise<void> {
     if (preview === null) return;
     if (confirmFirst && !confirm(
-      `Apply operation ${preview.response.operationId} and its ${preview.response.changes.length} exact changes?`,
+      `Apply operation ${preview.response.operationId} and its ${preview.response.changes.length} exact changes${
+        preview.response.canonicalize === null ? '' :
+          `, then rewrite ${preview.response.canonicalize.works} works and ${preview.response.canonicalize.books} personal books`
+      }?`,
     )) return;
     operationPending = true;
     errorMessage = '';
@@ -397,7 +403,10 @@
       preview = null;
       previewDraftFingerprint = null;
       selectedBookKeys = [];
-      statusMessage = `Applied ${result.operationId}: ${result.touchedDocuments} documents changed.`;
+      statusMessage = `Applied ${result.operationId}: ${result.touchedDocuments} documents changed${
+        result.canonicalized === null ? '' :
+          `, then ${result.canonicalized.works} works and ${result.canonicalized.liveBooks} personal books rewritten (${result.canonicalized.frozenBooks} in deleted accounts left as they were)`
+      }.`;
       await loadScan();
     } catch (error) {
       const failure = classifyAdminCatalogFailure(error);
@@ -726,6 +735,9 @@
         <h3 id="preview-heading">Exact preview</h3>
         <p><code>{preview.response.operationId}</code> · hash <code>{preview.response.operationHash}</code> · {preview.response.touchedDocuments} touched documents</p>
         <details><summary>Operation payload</summary><pre>{JSON.stringify(preview.operation, null, 2)}</pre></details>
+        {#if preview.response.canonicalize}
+          <p class="follow-up">After these commit, every work ({preview.response.canonicalize.works}) and personal book ({preview.response.canonicalize.books}) naming {preview.response.canonicalize.absorbed.join(', ')} is rewritten to <code>{preview.response.canonicalize.targetId}</code> in pages; books in deleted accounts are left as they are. If that rewrite is interrupted, applying this same preview again resumes it.</p>
+        {/if}
         <ol>
           {#each preview.response.changes as change (`${change.kind}:${change.id}:${change.action}`)}
             <li><strong>{change.action} {change.kind} {change.id}</strong><div class="diff"><div><span>Before</span><pre>{JSON.stringify(change.before, null, 2)}</pre></div><div><span>After</span><pre>{JSON.stringify(change.after, null, 2)}</pre></div></div></li>

@@ -97,6 +97,15 @@ operations are `upsertAuthor`, `mergeAuthors`, `createWork`, `linkBooks`,
 `mergeWorks`, `editWork`, `upsertEdition` and `repointIsbn`. Every apply is
 idempotent by operation id and writes an `adminAudit` record.
 
+`mergeAuthors` is atomic on the author documents only; the same apply then
+rewrites every work and live-account book naming an absorbed id to the
+survivor, one transaction per page of 200, each page advancing the counters
+on the audit record (`canonicalization`). The preview states how many works
+and books that is; the result and the audit record state what was rewritten
+and that the sweep completed. Applying the same preview again resumes an
+interrupted sweep. Books in tombstoned accounts stay on the alias, which
+every reader still resolves in one hop.
+
 ## Migration
 
 `migrate-cross-user-works.ts` (planner: `cross-user-work-migration.ts`) creates

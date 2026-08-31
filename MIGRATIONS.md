@@ -294,8 +294,10 @@ npm run pages:deploy
 ```
 
 `<N>` and the expected dry-run counts are production observations and live
-in the operator log, not here; the reviewed manifest is
-`reviewed-cross-user-works.json` in this repository.
+in the operator log, not here. The reviewed manifest is
+`reviewed-cross-user-works.json`, tracked in this repository: it is part of
+the reviewed change (which books form a group and under which author), not
+rehearsal evidence.
 
 Legacy per-user author documents and the read-only
 `users/{userId}/authors` compatibility block stay exactly as they are after
@@ -310,8 +312,8 @@ retired-as-deleted author is a REVIEW line rather than a rewrite, and
 tombstoned accounts are skipped entirely so the private deletion runbook
 stays the only path that touches them.
 
-The migration header documents its flags. Keep reviewed manifests and
-production rehearsal evidence in the approved private runbook, not in Git.
+The migration header documents its flags. Production rehearsal evidence
+(dry-run output, counts, `<N>`) stays in the operator log, not in Git.
 
 ## Documentation maintenance
 

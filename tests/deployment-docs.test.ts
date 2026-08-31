@@ -183,6 +183,16 @@ test('migration docs mark one-time rollouts complete and prescribe idempotency',
   ]);
 });
 
+test('the reviewed catalog manifest is tracked and the docs say so consistently', async () => {
+  const migrations = await readFile(migrationsUrl, 'utf8');
+  const manifest = JSON.parse(
+    await readFile(new URL('../reviewed-cross-user-works.json', import.meta.url), 'utf8'),
+  ) as {groups: unknown[]};
+  assert.ok(Array.isArray(manifest.groups) && manifest.groups.length >= 1);
+  assert.match(migrations, /`reviewed-cross-user-works\.json`,\s+tracked in this repository/);
+  assert.doesNotMatch(migrations, /manifests?[^.\n]*(?:not in Git|out of Git|private runbook)/i);
+});
+
 test('README lists every package script', async () => {
   const [readme, rootPackage, functionsPackage] = await Promise.all([
     readFile(readmeUrl, 'utf8'),

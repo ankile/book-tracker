@@ -102,12 +102,18 @@ test('all admin catalog operations use real callable transactions and preserve p
       expected: {catalog: unknown[]; books: unknown[]};
       changes: unknown[];
       touchedDocuments: number;
+      canonicalize: {absorbed: string[]; targetId: string; works: number; books: number} | null;
     }>('admin-catalogpreview', {operation});
   }
 
   async function previewAndApply(operation: AdminCatalogOperation) {
     const planned = await preview(operation);
-    const result = await callable<{operationId: string; applied: true; touchedDocuments: number}>(
+    const result = await callable<{
+      operationId: string;
+      applied: true;
+      touchedDocuments: number;
+      canonicalized: {works: number; liveBooks: number; frozenBooks: number} | null;
+    }>(
       'admin-catalogapply',
       {operationId: planned.operationId, operation, expected: planned.expected},
     );
@@ -271,11 +277,22 @@ test('all admin catalog operations use real callable transactions and preserve p
     authorIds: [catalogAuthorAliasId],
     updatedAt: personalUpdatedAt,
   });
-  await previewAndApply(mergeAuthorOperation);
+  const merged = await previewAndApply(mergeAuthorOperation);
   // The transaction is atomic on the author documents; the sweep that runs
   // inside the same apply call canonicalizes the work and the live book
   // (without touching the book's order-bearing updatedAt) and leaves the
-  // tombstoned account's book on the one-hop alias.
+  // tombstoned account's book on the one-hop alias. Preview states the
+  // follow-up, the result and the audit row state what it did.
+  assert.deepEqual(merged.planned.canonicalize, {
+    absorbed: [catalogAuthorAliasId], targetId: catalogAuthorId, works: 1, books: 2,
+  });
+  assert.deepEqual(merged.result.canonicalized, {works: 1, liveBooks: 1, frozenBooks: 1});
+  const mergeAudit = await db.doc(`adminAudit/${merged.planned.operationId}`).get();
+  assert.deepEqual(mergeAudit.get('canonicalization'), {
+    absorbed: [catalogAuthorAliasId], targetId: catalogAuthorId,
+    completed: true, works: 1, liveBooks: 1, frozenBooks: 1,
+  });
+  assert.deepEqual(mergeAudit.get('result'), merged.result);
   assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorId]);
   assert.equal((await personalRef.get()).get('updatedAt').toMillis(), personalUpdatedAt.toMillis());
   assert.deepEqual((await db.doc(`works/${sourceWorkId}`).get()).get('authorIds'), [catalogAuthorId]);

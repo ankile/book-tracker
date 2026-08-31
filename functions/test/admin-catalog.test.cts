@@ -36,19 +36,26 @@ interface Query {
   orderBy(): Query;
   startAfter(): Query;
   get(): Promise<QuerySnapshot>;
+  count(): {get(): Promise<{data(): {count: number}}>};
   doc?(id: string): Reference;
   add?(_data: Row): Promise<{id: string}>;
 }
 interface TransactionStub {
   get(value: Query | Reference): Promise<QuerySnapshot | Snapshot>;
+  getAll(...references: Reference[]): Promise<Snapshot[]>;
   create(reference: Reference, data: Row): void;
   set(reference: Reference, data: Row, options?: {merge?: boolean}): void;
+  update(reference: Reference, data: Row): void;
   delete(reference: Reference): void;
 }
 interface CatalogStore {
   rows: Map<string, Row>;
   ref(path: string): Reference;
   write(reference: Reference, data: Row, merge?: boolean): void;
+  // Runs after a transaction body finishes and before its writes land, with
+  // the paths the body read; a write from here is a concurrent edit the
+  // transaction must retry against, a throw is a failed commit.
+  beforeCommit: ((readPaths: string[]) => void) | null;
 }
 interface PreviewResult {
   operationId: string;
@@ -58,11 +65,13 @@ interface PreviewResult {
     books: unknown[];
   };
   changes: Array<{kind: string; action: string; after: Row | null}>;
+  canonicalize: {absorbed: string[]; targetId: string; works: number; books: number} | null;
 }
 interface ApplyResult {
   operationId: string;
   applied: boolean;
   touchedDocuments: number;
+  canonicalized: {works: number; liveBooks: number; frozenBooks: number} | null;
 }
 interface ScanResult {
   authors: Array<{authorId: string}>;
@@ -202,6 +211,7 @@ function installCatalogStore(t: TestContext): CatalogStore {
       orderBy: () => query,
       startAfter: () => query,
       get: async () => querySnapshot(query),
+      count: () => ({get: async () => ({data: () => ({count: querySnapshot(query).size})})}),
     };
     return query;
   };
@@ -234,33 +244,54 @@ function installCatalogStore(t: TestContext): CatalogStore {
   t.mock.method(db, "collectionGroup", (name: string) => makeQuery(name, true));
   t.mock.method(db, "doc", (path: string) => ref(path));
   t.mock.method(db, "getAll", async (...references: Reference[]) => references.map(snapshot));
-  t.mock.method(db, "batch", () => {
-    const writes: Array<() => void> = [];
-    return {
-      update: (reference: Reference, data: Row) => {
-        writes.push(() => {
-          assert.equal(rows.has(reference.path), true, reference.path);
-          write(reference, data, true);
-        });
-      },
-      commit: async () => {
-        for (const apply of writes) apply();
-      },
-    };
+  const store: CatalogStore = {rows, ref, write, beforeCommit: null};
+  // Optimistic transactions: writes are buffered until the body returns and
+  // land only if nothing the body read changed meanwhile; otherwise the
+  // body reruns, as the Admin SDK retries a contended transaction.
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => {
+    for (;;) {
+      const reads = new Map<string, import("firebase-admin/firestore").Timestamp | undefined>();
+      const writes: Array<() => void> = [];
+      const read = (reference: Reference): Snapshot => {
+        reads.set(reference.path, updateTimes.get(reference.path));
+        return snapshot(reference);
+      };
+      const result = await handler({
+        get: async (value: Query | Reference) => {
+          if (!("_query" in value)) return read(value);
+          const found = querySnapshot(value);
+          for (const document of found.docs) read(document.ref);
+          return found;
+        },
+        getAll: async (...references: Reference[]) => references.map(read),
+        create: (reference: Reference, data: Row) => {
+          writes.push(() => {
+            assert.equal(rows.has(reference.path), false, reference.path);
+            write(reference, data);
+          });
+        },
+        set: (reference: Reference, data: Row, options?: {merge?: boolean}) => {
+          writes.push(() => write(reference, data, options?.merge === true));
+        },
+        update: (reference: Reference, data: Row) => {
+          writes.push(() => {
+            assert.equal(rows.has(reference.path), true, reference.path);
+            write(reference, data, true);
+          });
+        },
+        delete: (reference: Reference) => {
+          writes.push(() => {
+            rows.delete(reference.path);
+            updateTimes.delete(reference.path);
+          });
+        },
+      });
+      store.beforeCommit?.([...reads.keys()]);
+      if ([...reads].some(([path, seen]) => updateTimes.get(path) !== seen)) continue;
+      for (const apply of writes) apply();
+      return result;
+    }
   });
-  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
-    get: async (value: Query | Reference) => "_query" in value ? querySnapshot(value) : snapshot(value),
-    create: (reference: Reference, data: Row) => {
-      assert.equal(rows.has(reference.path), false, reference.path);
-      write(reference, data);
-    },
-    set: (reference: Reference, data: Row, options?: {merge?: boolean}) =>
-      write(reference, data, options?.merge === true),
-    delete: (reference: Reference) => {
-      rows.delete(reference.path);
-      updateTimes.delete(reference.path);
-    },
-  }));
   write(ref(`users/${adminUid}`), {uid: adminUid});
   const now = Timestamp.fromMillis(1000);
   write(ref("catalogAuthors/ada-author"), {
@@ -268,7 +299,7 @@ function installCatalogStore(t: TestContext): CatalogStore {
     sortName: "Author", kind: "person", status: "active", mergedFrom: [],
     createdAt: now, updatedAt: now,
   });
-  return {rows, ref, write};
+  return store;
 }
 
 function activeWork(title: string, overrides: Row = {}): Row {
@@ -350,6 +381,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
     operationId: preview.operationId,
     applied: true,
     touchedDocuments: 3,
+    canonicalized: null,
   });
   assert.deepEqual(second, first);
   assert.equal(store.rows.get("works/new-work")?.canonicalTitle, "The New Work");
@@ -392,14 +424,21 @@ test("merging an author on 198 works canonicalizes them all after the redirect",
     targetAuthorId: "ada-author",
   };
   const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  // The transaction touches the two author rows and the audit row; the
+  // preview states the follow-up rewrite separately.
   assert.equal(preview.touchedDocuments, 3);
   assert.deepEqual(preview.expected.catalog.map(({kind, exists}) => [kind, exists]),
     [["author", true], ["author", true]]);
-  await deployed.admin.catalogapply.run({
+  assert.deepEqual(preview.canonicalize, {
+    absorbed: ["alias-author"], targetId: "ada-author", works: 198, books: 2,
+  });
+  const result = await deployed.admin.catalogapply.run({
     operationId: preview.operationId,
     operation,
     expected: preview.expected,
   }, recentAdmin());
+  assert.equal(result.touchedDocuments, 3);
+  assert.deepEqual(result.canonicalized, {works: 198, liveBooks: 1, frozenBooks: 1});
   assert.equal(store.rows.get("catalogAuthors/alias-author")?.mergedInto, "ada-author");
   for (let position = 0; position < 198; position += 1) {
     assert.deepEqual(store.rows.get(`works/work-${position}`)?.authorIds, ["ada-author"]);
@@ -408,6 +447,100 @@ test("merging an author on 198 works canonicalizes them all after the redirect",
   // updatedAt drives the reading-list order; the sweep must not touch it.
   assert.equal(store.rows.get("users/reader/books/shadow")?.updatedAt, now);
   assert.deepEqual(store.rows.get("users/gone/books/frozen")?.authorIds, ["alias-author"]);
+  const audit = store.rows.get(`adminAudit/${preview.operationId}`);
+  assert.deepEqual(audit?.canonicalization, {
+    absorbed: ["alias-author"], targetId: "ada-author",
+    completed: true, works: 198, liveBooks: 1, frozenBooks: 1,
+  });
+  assert.deepEqual(audit?.result, result);
+});
+
+test("a user's author edit during the sweep survives it", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("catalogAuthors/alias-author"), {
+    canonicalName: "A. Author", alternateNames: [], nameKeys: ["a author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  store.write(store.ref("users/reader/books/shadow"), {authorIds: ["alias-author"], updatedAt: now});
+  const operation = {
+    type: "mergeAuthors",
+    sourceAuthorId: "alias-author",
+    targetAuthorId: "ada-author",
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  // Between the sweep reading the book and committing its page, the reader
+  // adds a co-author. The page must retry against that value, not overwrite it.
+  let edited = false;
+  store.beforeCommit = (readPaths) => {
+    if (edited || !readPaths.includes("users/reader/books/shadow")) return;
+    edited = true;
+    store.write(store.ref("users/reader/books/shadow"), {authorIds: ["alias-author", "bea-author"]}, true);
+  };
+  const result = await deployed.admin.catalogapply.run({
+    operationId: preview.operationId,
+    operation,
+    expected: preview.expected,
+  }, recentAdmin());
+  assert.equal(edited, true);
+  assert.deepEqual(store.rows.get("users/reader/books/shadow")?.authorIds, ["ada-author", "bea-author"]);
+  // The retried page counts once.
+  assert.deepEqual(result.canonicalized, {works: 0, liveBooks: 1, frozenBooks: 0});
+});
+
+test("an interrupted sweep resumes when the same operation is applied again", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("catalogAuthors/alias-author"), {
+    canonicalName: "A. Author", alternateNames: [], nameKeys: ["a author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  for (let position = 0; position < 250; position += 1) {
+    store.write(store.ref(`works/work-${position}`), activeWork(`Work ${position}`, {authorIds: ["alias-author"]}));
+  }
+  const operation = {
+    type: "mergeAuthors",
+    sourceAuthorId: "alias-author",
+    targetAuthorId: "ada-author",
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const request = {operationId: preview.operationId, operation, expected: preview.expected};
+  // The second page of works fails to commit after the redirect and the
+  // first page have landed.
+  let pages = 0;
+  store.beforeCommit = (readPaths) => {
+    if (!readPaths.some((path) => path.startsWith("works/"))) return;
+    pages += 1;
+    if (pages === 2) throw new Error("commit lost");
+  };
+  await assert.rejects(deployed.admin.catalogapply.run(request, recentAdmin()));
+  assert.equal(store.rows.get("catalogAuthors/alias-author")?.mergedInto, "ada-author");
+  const canonicalized = () => [...store.rows.entries()]
+    .filter(([path, row]) => path.startsWith("works/") &&
+      JSON.stringify(row.authorIds) === JSON.stringify(["ada-author"])).length;
+  assert.equal(canonicalized(), 200);
+  const audit = () => store.rows.get(`adminAudit/${preview.operationId}`);
+  assert.deepEqual(audit()?.canonicalization, {
+    absorbed: ["alias-author"], targetId: "ada-author",
+    completed: false, works: 200, liveBooks: 0, frozenBooks: 0,
+  });
+  assert.equal((audit()?.result as ApplyResult).canonicalized, null);
+  // The replay returns the audited result and finishes the sweep from what
+  // still names the alias; the counters carry on from the audit row.
+  store.beforeCommit = null;
+  const result = await deployed.admin.catalogapply.run(request, recentAdmin());
+  assert.deepEqual(result.canonicalized, {works: 250, liveBooks: 0, frozenBooks: 0});
+  assert.equal(canonicalized(), 250);
+  assert.deepEqual(audit()?.canonicalization, {
+    absorbed: ["alias-author"], targetId: "ada-author",
+    completed: true, works: 250, liveBooks: 0, frozenBooks: 0,
+  });
+  assert.deepEqual(audit()?.result, result);
+  // A further replay is a no-op that reports the same result.
+  assert.deepEqual(await deployed.admin.catalogapply.run(request, recentAdmin()), result);
 });
 
 test("catalog creation stops at the scan capacity while repair edits remain available", async (t) => {

@@ -1198,6 +1198,9 @@ export async function previewAdminCatalogOperation(
     expected: plan.expected,
     changes: wireChanges(plan.changes),
     touchedDocuments: plan.changes.length + 1,
+    canonicalize: plan.canonicalize === null ?
+      null :
+      await countMergedAuthorReferrers(db, plan.canonicalize),
   };
 }
 
@@ -1210,18 +1213,75 @@ function expectedEqual(
 
 // A merge pays its whole cost up front: after the atomic author redirect
 // commits, every work and live-account book naming an absorbed id is
-// rewritten to the canonical id here, in id-ordered pages of batched
-// writes, so no per-transaction ceiling applies. This is a repair pass,
-// not a correctness requirement — every reader resolves the one-hop alias,
-// which also covers the seconds before this lands, a crash between pages
-// (the scan reports leftover aliases), and books in tombstoned accounts,
-// which stay frozen on the alias. Book updatedAt is never touched: it
-// drives the reading-list order.
+// rewritten to the canonical id, in id-ordered pages, so no
+// per-transaction ceiling applies. Each page is read and rewritten inside
+// one transaction that also advances the counters on the audit row, so a
+// concurrent edit to a document on the page retries against the fresh
+// value instead of being overwritten, and the audit always states exactly
+// how far the sweep got. The sweep only queries what still names an
+// absorbed id, so an interrupted one resumes when the same operation is
+// applied again (see applyAdminCatalogOperation). It is a repair pass, not
+// a correctness requirement — every reader resolves the one-hop alias,
+// which covers the seconds before it lands and books in tombstoned
+// accounts, which stay frozen on the alias. Book updatedAt is never
+// touched: it drives the reading-list order.
 const CANONICALIZE_PAGE = 200;
+
+type CanonicalizationSpec = NonNullable<Plan["canonicalize"]>;
+
+interface CanonicalizationState extends CanonicalizationSpec {
+  completed: boolean;
+  works: number;
+  liveBooks: number;
+  frozenBooks: number;
+}
+
+function canonicalizationState(audit: DocumentSnapshot): CanonicalizationState | null {
+  const value = audit.get("canonicalization");
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object") {
+    throw new Error(`${audit.ref.path}.canonicalization is malformed.`);
+  }
+  const {absorbed, targetId, completed, works, liveBooks, frozenBooks} =
+    value as Record<string, unknown>;
+  if (!Array.isArray(absorbed) || absorbed.some((id) => typeof id !== "string") ||
+      typeof targetId !== "string" || typeof completed !== "boolean" ||
+      typeof works !== "number" || typeof liveBooks !== "number" ||
+      typeof frozenBooks !== "number") {
+    throw new Error(`${audit.ref.path}.canonicalization is malformed.`);
+  }
+  return {absorbed, targetId, completed, works, liveBooks, frozenBooks};
+}
+
+function referrerQuery(db: Firestore, scope: "works" | "books", authorId: string): Query {
+  return (scope === "works" ? db.collection("works") : db.collectionGroup("books"))
+    .where("authorIds", "array-contains", authorId);
+}
+
+// The preview's statement of the follow-up: how many works and personal
+// books the sweep will rewrite. Which books belong to tombstoned accounts
+// is only decided page by page.
+async function countMergedAuthorReferrers(
+  db: Firestore,
+  spec: CanonicalizationSpec,
+): Promise<CanonicalizationSpec & {works: number; books: number}> {
+  let works = 0;
+  let books = 0;
+  for (const authorId of spec.absorbed) {
+    const [workCount, bookCount] = await Promise.all([
+      referrerQuery(db, "works", authorId).count().get(),
+      referrerQuery(db, "books", authorId).count().get(),
+    ]);
+    works += workCount.data().count;
+    books += bookCount.data().count;
+  }
+  return {...spec, works, books};
+}
 
 async function canonicalizeMergedAuthorReferrers(
   db: Firestore,
-  {absorbed, targetId}: NonNullable<Plan["canonicalize"]>,
+  auditRef: DocumentReference,
+  {absorbed, targetId}: CanonicalizationSpec,
 ): Promise<void> {
   const rewrite = (value: unknown, path: string): string[] => {
     if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
@@ -1229,60 +1289,64 @@ async function canonicalizeMergedAuthorReferrers(
     }
     return [...new Set(value.map((id) => (absorbed.includes(id) ? targetId : id)))];
   };
-  let works = 0;
-  let liveBooks = 0;
-  let frozenBooks = 0;
   for (const authorId of absorbed) {
     for (const scope of ["works", "books"] as const) {
       let cursor: QueryDocumentSnapshot | null = null;
       for (;;) {
-        let query = (scope === "works" ? db.collection("works") : db.collectionGroup("books"))
-          .where("authorIds", "array-contains", authorId)
+        let query = referrerQuery(db, scope, authorId)
           .orderBy(FieldPath.documentId())
           .limit(CANONICALIZE_PAGE);
         if (cursor !== null) query = query.startAfter(cursor);
-        const page = await query.get();
-        if (page.docs.length === 0) break;
-        let live = new Set<string>();
-        if (scope === "books") {
-          const owners = [...new Set(page.docs.map((snapshot) => {
-            const path = snapshot.ref.path.split("/");
-            if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
-              throw new Error(`Unexpected personal book path ${snapshot.ref.path}.`);
-            }
-            return path[1];
-          }))];
-          const users = await db.getAll(...owners.map((uid) => db.collection("users").doc(uid)));
-          live = new Set(users.filter((snapshot) =>
-            snapshot.exists && snapshot.get("deletedAt") === undefined,
-          ).map(({id}) => id));
-        }
-        const batch = db.batch();
-        for (const snapshot of page.docs) {
-          if (scope === "works") {
-            batch.update(snapshot.ref, {
-              authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
-              updatedAt: Timestamp.now(),
-            });
-            works += 1;
-          } else if (live.has(snapshot.ref.path.split("/")[1])) {
-            batch.update(snapshot.ref, {
-              authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
-            });
-            liveBooks += 1;
-          } else {
-            frozenBooks += 1;
+        const page = await db.runTransaction(async (transaction) => {
+          const [rows, audit] = await Promise.all([
+            transaction.get(query),
+            transaction.get(auditRef),
+          ]);
+          if (rows.docs.length === 0) return rows;
+          const state = canonicalizationState(audit);
+          if (state === null) throw new Error(`${auditRef.path} is not canonicalizing.`);
+          let live = new Set<string>();
+          if (scope === "books") {
+            const owners = [...new Set(rows.docs.map((snapshot) => {
+              const path = snapshot.ref.path.split("/");
+              if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
+                throw new Error(`Unexpected personal book path ${snapshot.ref.path}.`);
+              }
+              return path[1];
+            }))];
+            const users = await transaction.getAll(
+              ...owners.map((uid) => db.collection("users").doc(uid)),
+            );
+            live = new Set(users.filter((snapshot) =>
+              snapshot.exists && snapshot.get("deletedAt") === undefined,
+            ).map(({id}) => id));
           }
-        }
-        await batch.commit();
+          const counts = {works: state.works, liveBooks: state.liveBooks, frozenBooks: state.frozenBooks};
+          for (const snapshot of rows.docs) {
+            if (scope === "works") {
+              transaction.update(snapshot.ref, {
+                authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
+                updatedAt: Timestamp.now(),
+              });
+              counts.works += 1;
+            } else if (live.has(snapshot.ref.path.split("/")[1])) {
+              transaction.update(snapshot.ref, {
+                authorIds: rewrite(snapshot.get("authorIds"), snapshot.ref.path),
+              });
+              counts.liveBooks += 1;
+            } else {
+              counts.frozenBooks += 1;
+            }
+          }
+          transaction.update(auditRef, {canonicalization: {...state, ...counts}});
+          return rows;
+        });
+        if (page.docs.length === 0) break;
         cursor = page.docs[page.docs.length - 1];
         if (page.docs.length < CANONICALIZE_PAGE) break;
       }
     }
   }
-  logger.info("admin.catalog.merge_canonicalized", {
-    targetId, absorbed, works, liveBooks, frozenBooks,
-  });
 }
 
 export async function applyAdminCatalogOperation(
@@ -1298,6 +1362,13 @@ export async function applyAdminCatalogOperation(
     if (existingAudit.exists) {
       if (existingAudit.get("operationHash") !== hash) {
         failedPrecondition("Operation ID was already used.", "catalog-invariant");
+      }
+      // The redirect committed together with this row, so the merge can
+      // never be planned again; a replay is how an interrupted sweep
+      // resumes.
+      const state = canonicalizationState(existingAudit);
+      if (state !== null && !state.completed) {
+        canonicalize = {absorbed: state.absorbed, targetId: state.targetId};
       }
       return existingAudit.get("result");
     }
@@ -1330,6 +1401,7 @@ export async function applyAdminCatalogOperation(
       operationId: request.operationId,
       applied: true as const,
       touchedDocuments: plan.changes.length + 1,
+      canonicalized: null,
     };
     const audit = {
       type: "catalog-mutation",
@@ -1341,6 +1413,9 @@ export async function applyAdminCatalogOperation(
       expiresAt: Timestamp.fromMillis(now.toMillis() + AUDIT_RETENTION_MS),
       touchedDocuments: applied.touchedDocuments,
       beforeAfter: wireChanges(plan.changes),
+      canonicalization: plan.canonicalize === null ? null : {
+        ...plan.canonicalize, completed: false, works: 0, liveBooks: 0, frozenBooks: 0,
+      },
       result: applied,
     };
     if (Buffer.byteLength(JSON.stringify(audit), "utf8") > MAX_AUDIT_BYTES) {
@@ -1349,10 +1424,23 @@ export async function applyAdminCatalogOperation(
     transaction.create(auditRef, audit);
     return applied;
   });
-  // Only a fresh apply sweeps: an idempotent replay returned the audited
-  // result above without re-planning, and the first pass already ran it.
-  if (canonicalize !== null) await canonicalizeMergedAuthorReferrers(db, canonicalize);
-  return result;
+  if (canonicalize === null) return result;
+  await canonicalizeMergedAuthorReferrers(db, auditRef, canonicalize);
+  return db.runTransaction(async (transaction) => {
+    const audit = await transaction.get(auditRef);
+    const state = canonicalizationState(audit);
+    if (state === null) throw new Error(`${auditRef.path} lost its canonicalization.`);
+    const {works, liveBooks, frozenBooks} = state;
+    const completed = {...audit.get("result"), canonicalized: {works, liveBooks, frozenBooks}};
+    transaction.update(auditRef, {
+      canonicalization: {...state, completed: true},
+      result: completed,
+    });
+    logger.info("admin.catalog.merge_canonicalized", {
+      operationId: request.operationId, works, liveBooks, frozenBooks,
+    });
+    return completed;
+  });
 }
 
 function tokenAgreement(left: string, right: string): number {
@@ -1761,7 +1849,9 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
           resolvedId,
           (catalogAuthorWorkCounts.get(resolvedId) ?? 0) + 1,
         );
-        if (resolvedId !== authorId) warnings.push(`stale author alias ${authorId}`);
+        if (resolvedId !== authorId) {
+          warnings.push(`stale author alias ${authorId} (apply its merge again to resume canonicalization)`);
+        }
       }
     }
     workWarnings.set(id, warnings);
