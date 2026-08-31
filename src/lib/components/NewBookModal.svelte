@@ -5,6 +5,7 @@
   import CatalogMatchPanel from "$lib/components/CatalogMatchPanel.svelte";
 
   import { Database } from "../firebase/db.ts";
+  import { user } from "../firebase/auth.ts";
   import { editableBookAuthorChips, resolveChip, AUTHOR_KINDS } from "../utils/authors.ts";
   import { normalizeIsbn } from "../utils/isbn.ts";
   import {
@@ -301,6 +302,13 @@
   async function handleSubmit() {
     if (resolvingAuthors) return;
     lookupError = "";
+    // The shared author list is readable by verified accounts only, so for
+    // an unverified account the listener never delivers and "loading" would
+    // be a lie the user cannot act on.
+    if ($user && !$user.emailVerified) {
+      lookupError = 'Verify your email address to add or edit books.';
+      return;
+    }
     if (!authorsLoaded) {
       lookupError = 'Authors loading.';
       return;
