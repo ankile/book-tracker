@@ -97,7 +97,7 @@
   {#if message}<div class="catalog-message" role="status">{message}</div>{/if}
 
   {#if !selected}
-    <div class="catalog-message">No match? Save the personal book unlinked. An administrator can create or connect its shared work later.</div>
+    <div class="catalog-message">No match? Saving creates a shared work for this book so other readers can find it.</div>
     {#if !online}
       <div class="catalog-message">Offline. You can save now and find a matching work after reconnecting.</div>
     {/if}

@@ -195,8 +195,8 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
   const data = record(value, context);
   exactKeys(data, [
     'workId', 'canonicalTitle', 'alternateTitles', 'authorIds', 'coverUrl', 'subjects',
-    'fiction', 'visibility', 'status', 'mergedInto', 'mergedFrom', 'updatedAt',
-    'editionCount', 'linkedBookCount', 'warnings',
+    'fiction', 'visibility', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt',
+    'updatedAt', 'editionCount', 'linkedBookCount', 'warnings',
   ], context);
   return {
     workId: nonEmptyString(data.workId, `${context}.workId`),
@@ -210,6 +210,8 @@ function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
     status: workStatus(data.status, `${context}.status`),
     mergedInto: nullableString(data.mergedInto, `${context}.mergedInto`),
     mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
+    createdBy: nullableString(data.createdBy, `${context}.createdBy`),
+    createdAt: finiteNumber(data.createdAt, `${context}.createdAt`),
     updatedAt: finiteNumber(data.updatedAt, `${context}.updatedAt`),
     editionCount: nonNegativeInteger(data.editionCount, `${context}.editionCount`),
     linkedBookCount: nonNegativeInteger(data.linkedBookCount, `${context}.linkedBookCount`),

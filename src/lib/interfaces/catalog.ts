@@ -146,6 +146,17 @@ export interface CatalogSearchResponse {
   results: CatalogSearchResult[];
 }
 
+export interface CatalogCreateRequest {
+  work: CatalogWorkInput;
+  edition: CatalogEditionInput;
+}
+
+export interface CatalogCreateResponse {
+  workId: string;
+  editionId: string;
+  created: boolean;
+}
+
 export interface CatalogWorkInput {
   canonicalTitle: string;
   alternateTitles: string[];
@@ -233,6 +244,10 @@ export interface AdminCatalogWorkRow {
   status: WorkStatus;
   mergedInto: string | null;
   mergedFrom: string[];
+  // uid of the user who created the work through the add-book flow; null
+  // for migration- or admin-created works. Newest first on the admin page.
+  createdBy: string | null;
+  createdAt: number;
   updatedAt: number;
   editionCount: number;
   linkedBookCount: number;

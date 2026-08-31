@@ -21,7 +21,7 @@
     extractModsGenres,
     extractModsCoverUrl,
   } from "../utils/nasjonalbiblioteket.ts";
-  import { catalogSearch, lookupIsbn } from "../firebase/functions.ts";
+  import { catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
@@ -41,6 +41,7 @@
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
   import {
     automaticIsbnSelectionStillApplies,
+    buildCatalogCreateRequest,
     buildCatalogSearchRequest,
     createLatestRequestGate,
     exactEditionPreselection,
@@ -115,6 +116,7 @@
   let lookupError = $state("");
   let bookWrite = $state({ accepted: false });
   let resolvingAuthors = $state(false);
+  let creatingWork = $state(false);
   let authorResolutionRequest = 0;
   const unresolvedAuthorCount = $derived(authorChips.filter(
     (chip) => chip.id !== null && 'unresolved' in chip,
@@ -366,6 +368,55 @@
       if (!prepared.valid) {
         lookupError = prepared.message;
         return;
+      }
+    }
+    // A book that matched nothing and that the user did not explicitly
+    // save unlinked seeds the shared catalog itself (catalog data is
+    // public). Offline it stays unlinked, as the panel says; a creation
+    // failure keeps the draft so the user can retry or save unlinked.
+    if (catalogSelection === null && !catalogChoiceTouched && online) {
+      const request = buildCatalogCreateRequest({
+        title: prepared.write.input.title,
+        authorIds: authorChips.flatMap((chip) => chip.id === null ? [] : [chip.id]),
+        isbn: prepared.write.input.isbn,
+        pageCount: prepared.write.input.pageCount,
+        metadata: $state.snapshot(metadata),
+      });
+      if (request !== null) {
+        creatingWork = true;
+        try {
+          const created = await catalogCreate(request);
+          if (!open) return;
+          catalogSelection = {
+            workId: created.workId,
+            editionId: created.editionId,
+            matchMethod: 'catalog-choice',
+          };
+          catalogChoiceTouched = true;
+        } catch (error) {
+          console.error('Catalog creation failed', error);
+          lookupError = 'Could not create the shared work. Try again, or remove the link to save the book unlinked.';
+          return;
+        } finally {
+          creatingWork = false;
+        }
+        prepared = prepareBookWrite({
+          userId,
+          book,
+          authorChips,
+          title,
+          pageCount,
+          currentPage,
+          isbn,
+          metadata: $state.snapshot(metadata),
+          catalogSelection: $state.snapshot(catalogSelection),
+          catalogSelectionTouched: catalogChoiceTouched,
+          catalogSelectionIsbn13: automaticSelectionIsbn13,
+        });
+        if (!prepared.valid) {
+          lookupError = prepared.message;
+          return;
+        }
       }
     }
     // The SDK has accepted the mutation into its offline queue once the
@@ -663,7 +714,7 @@
   onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
-  primaryDisabled={!authorsLoaded || resolvingAuthors || bookWrite.accepted}
+  primaryDisabled={!authorsLoaded || resolvingAuthors || creatingWork || bookWrite.accepted}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
     <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" disabled={resolvingAuthors} />

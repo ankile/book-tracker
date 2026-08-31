@@ -1,6 +1,9 @@
 import type { Book } from '../interfaces/book.ts';
+import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
   CatalogAuthorSummary,
+  CatalogCreateRequest,
+  CatalogCreateResponse,
   CatalogEditionSummary,
   CatalogSearchRequest,
   CatalogSearchResponse,
@@ -182,6 +185,52 @@ export function decodeCatalogSearchResponse(value: unknown): CatalogSearchRespon
       edition,
     };
   })};
+}
+
+export function decodeCatalogCreateResponse(value: unknown): CatalogCreateResponse {
+  const data = record(value, 'catalog-create response');
+  exactKeys(data, ['workId', 'editionId', 'created'], 'catalog-create response');
+  return {
+    workId: nonEmptyString(data.workId, 'catalog-create response.workId'),
+    editionId: nonEmptyString(data.editionId, 'catalog-create response.editionId'),
+    created: boolean(data.created, 'catalog-create response.created'),
+  };
+}
+
+// The work and edition a book with no catalog match creates: the personal
+// book's own bibliographic fields, nothing inferred. Books without a
+// resolved author cannot seed a work (a work needs at least one author).
+export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, metadata}: {
+  title: string;
+  authorIds: readonly string[];
+  isbn: string;
+  pageCount: number;
+  metadata: BookMetadata;
+}): CatalogCreateRequest | null {
+  if (authorIds.length === 0) return null;
+  const coverUrl = metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '';
+  return {
+    work: {
+      canonicalTitle: title,
+      alternateTitles: [],
+      authorIds: [...authorIds],
+      coverUrl,
+      subjects: metadata.subjects,
+      fiction: metadata.fiction,
+    },
+    edition: {
+      isbn13: normalizeIsbn(isbn) ?? null,
+      title,
+      publisher: metadata.publisher,
+      publishedDate: metadata.publishedDate,
+      language: '',
+      translatorNames: [],
+      format: 'unknown',
+      suggestedPageCount: pageCount,
+      coverUrl,
+      externalIds: {},
+    },
+  };
 }
 
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {

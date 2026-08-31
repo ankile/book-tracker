@@ -16,8 +16,8 @@ import {
 const work = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, visibility: 'internal', status: 'active',
-  mergedInto: null, mergedFrom: [], updatedAt: 1000, editionCount: 1,
-  linkedBookCount: 1, warnings: [],
+  mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900, updatedAt: 1000,
+  editionCount: 1, linkedBookCount: 1, warnings: [],
 };
 const edition = {
   editionId: 'edition', workId: 'work', isbn13: '9780316769488', title: 'Book',

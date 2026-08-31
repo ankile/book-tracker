@@ -32,9 +32,9 @@ interface WorkReadersResult {
 interface Deployed {
   catalog: {
     search: Runnable<SearchResult>;
+    create: Runnable<{workId: string; editionId: string; created: boolean}>;
     ensureauthors: Runnable<{authorIds: string[]}>;
     workreaders: Runnable<WorkReadersResult>;
-    create?: unknown;
   };
 }
 interface ReadingEventStub {
@@ -578,7 +578,7 @@ function installMissingAuthorBoundaryStore(t: TestContext, catalogSize: number):
 }
 
 test("shared author creation refuses the hard catalog capacity", async (t) => {
-  installMissingAuthorBoundaryStore(t, 500);
+  installMissingAuthorBoundaryStore(t, 5000);
   await assert.rejects(
     deployed.catalog.ensureauthors.run({authors: [{
       canonicalName: "New Author", sortName: "Author", kind: "person",
@@ -679,11 +679,90 @@ test("an exact title with the wrong author is not returned", async (t) => {
   assert.equal(authorReads, 3);
 });
 
-// Work and edition creation is admin-only (adminCatalog.ts); there is no
-// ordinary-user creation callable and no exported creation path to drift.
-test("ordinary catalog creation is not deployed", () => {
-  assert.equal(deployed.catalog.create, undefined);
-  assert.equal("createCatalogEntry" in catalog, false);
+// Any verified user creates the work and edition a book lacks (catalog
+// data is public); an identifier already in the catalog resolves to the
+// existing entry so retries and races never duplicate one.
+test("users create missing works and resolve existing identifiers", async (t) => {
+  const rows = new Map<string, Row>([
+    ["catalogAuthors/ada", activeAuthor("Ada Lovelace")],
+    ["isbnIndex/9780000000002", {workId: "old-work", editionId: "old-edition"}],
+    ["works/old-work", {
+      canonicalTitle: "Old", alternateTitles: [], titleKeys: ["old"], authorIds: ["ada"],
+      coverUrl: "", subjects: [], fiction: null, visibility: "searchable", status: "merged",
+      mergedInto: "canonical-work", mergedFrom: [],
+    }],
+    ["works/canonical-work", {
+      canonicalTitle: "Canonical", alternateTitles: [], titleKeys: ["canonical"], authorIds: ["ada"],
+      coverUrl: "", subjects: [], fiction: null, visibility: "searchable", status: "active",
+      mergedFrom: ["old-work"],
+    }],
+  ]);
+  const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snap = (reference: Ref) => ({
+    exists: rows.has(reference.path), id: reference.id, ref: reference,
+    data: () => rows.get(reference.path),
+    get: (field: string) => rows.get(reference.path)?.[field],
+  });
+  const created: Array<{path: string; data: Row}> = [];
+  t.mock.method(db, "doc", (path: string) => ref(path));
+  t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return liveUserCollection();
+    return {
+      doc: (id: string) => ref(`${name}/${id}`),
+      count: () => ({kind: "count", name}),
+    };
+  });
+  t.mock.method(db, "runTransaction", async (handler: Handler<{
+    get(value: {kind: string; name: string} | Ref): Promise<unknown>;
+    create(reference: Ref, data: Row): void;
+  }>) => handler({
+    get: async (value: {kind: string; name: string} | Ref) => {
+      if ("kind" in value) {
+        return {data: () => ({count: [...rows.keys()].filter((path) => path.startsWith(`${value.name}/`)).length})};
+      }
+      return snap(value);
+    },
+    create: (reference: Ref, data: Row) => {
+      assert.equal(rows.has(reference.path), false, reference.path);
+      rows.set(reference.path, data);
+      created.push({path: reference.path, data});
+    },
+  }));
+  const edition = {
+    isbn13: null, title: "A New Book", publisher: "", publishedDate: "", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+  };
+  const work = {
+    canonicalTitle: "A New Book", alternateTitles: [], authorIds: ["ada"],
+    coverUrl: "", subjects: [], fiction: null,
+  };
+  const result = await deployed.catalog.create.run({work, edition}, authContext);
+  assert.equal(result.created, true);
+  assert.match(result.workId, /^work-/);
+  assert.match(result.editionId, /^edition-/);
+  const storedWork = rows.get(`works/${result.workId}`);
+  assert.equal(storedWork?.visibility, "searchable");
+  assert.equal(storedWork?.createdBy, "owner");
+  assert.deepEqual(storedWork?.titleKeys, ["new book"]);
+  assert.equal(rows.get(`editions/${result.editionId}`)?.workId, result.workId);
+  assert.equal(created.some(({path, data}) => path.startsWith("workTitleIndex/") &&
+    data.workId === result.workId && data.titleKey === "new book"), true);
+
+  // An ISBN the catalog already has resolves to the canonical work — one
+  // merge hop followed — and creates nothing.
+  created.length = 0;
+  const existing = await deployed.catalog.create.run({
+    work, edition: {...edition, isbn13: "9780000000002"},
+  }, authContext);
+  assert.deepEqual(existing, {workId: "canonical-work", editionId: "old-edition", created: false});
+  assert.deepEqual(created, []);
+
+  // A retired author cannot seed a work.
+  rows.set("catalogAuthors/ada", {...activeAuthor("Ada Lovelace"), status: "merged", mergedInto: "x"});
+  await assert.rejects(
+    deployed.catalog.create.run({work, edition}, authContext),
+    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /no longer active/),
+  );
 });
 
 test("work readers resolve aliases and return only consented redacted summaries", async (t) => {

@@ -632,6 +632,26 @@ export function decodeCatalogEditionInput(
   };
 }
 
+export interface CatalogCreateRequest {
+  work: CatalogWorkInput;
+  edition: CatalogEditionInput;
+}
+
+// Any verified user may add a work and edition the catalog lacks
+// (catalog data is public; only reading data is private). Identifiers
+// that already exist resolve to the existing entry server-side.
+export function decodeCatalogCreateRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): CatalogCreateRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["work", "edition"], "request data", fail);
+  return {
+    work: decodeCatalogWorkInput(decoded.work, fail),
+    edition: decodeCatalogEditionInput(decoded.edition, fail),
+  };
+}
+
 export interface WorkReadersRequest {
   workId: string;
   cursor: string | null;

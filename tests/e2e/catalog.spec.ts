@@ -401,11 +401,24 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.getByLabel('Book title', {exact: true}).fill('Matilda');
       await page.getByLabel("Your edition's page count", {exact: true}).fill('240');
       await page.getByLabel('ISBN number (optional)', {exact: true}).fill('9780140328721');
-      await expect(page.getByRole('button', {name: /create a shared work/i})).toHaveCount(0);
-      await expect(page.getByText(/administrator can create or connect/i)).toBeVisible();
+      await expect(page.getByText(/Saving creates a shared work/i)).toBeVisible();
       await page.getByRole('button', {name: 'Add book', exact: true}).click();
+      // Creation is a callable round trip before the book write is queued,
+      // so the dialog closing is the signal that the save was accepted.
+      await expect(page.getByRole('dialog', {name: 'Add new book'})).toHaveCount(0);
       await page.goto('/');
       await expect(page.getByText('Matilda', {exact: true})).toBeVisible();
+      // A book that matched nothing seeded the shared catalog itself: a
+      // searchable work by this user, its edition on the ISBN, and the
+      // personal book linked to both.
+      const matilda = await waitForBookByTitle(db, normalUid, 'Matilda');
+      expect(typeof matilda.get('workId')).toBe('string');
+      expect(typeof matilda.get('editionId')).toBe('string');
+      const createdWork = await db.doc(`works/${matilda.get('workId')}`).get();
+      expect(createdWork.get('canonicalTitle')).toBe('Matilda');
+      expect(createdWork.get('visibility')).toBe('searchable');
+      expect(createdWork.get('createdBy')).toBe(normalUid);
+      expect((await db.doc('isbnIndex/9780140328721').get()).get('editionId')).toBe(matilda.get('editionId'));
 
       await openNewBook(page);
       await page.getByLabel('Author', {exact: true}).fill(newAuthorName);

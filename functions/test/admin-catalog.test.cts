@@ -79,6 +79,7 @@ const deployed: Deployed = require("../lib");
 // After the bundle: catalog.js calls getFirestore() at load, which needs
 // the app that ../lib initializes.
 const {externalIndexId}: typeof import("../src/catalog") = require("../lib/catalog");
+const {CATALOG_LIMITS}: typeof import("../src/catalogLimits") = require("../lib/catalogLimits");
 const db = getFirestore();
 const adminUid = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
 const recentAdmin = () => ({
@@ -330,7 +331,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
 
 test("catalog creation stops at the scan capacity while repair edits remain available", async (t) => {
   const store = installCatalogStore(t);
-  for (let index = 0; index < 200; index += 1) {
+  for (let index = 0; index < CATALOG_LIMITS.works; index += 1) {
     store.write(store.ref(`works/work-${index}`), activeWork(`Work ${index}`));
   }
   const create = {
@@ -351,7 +352,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
     deployed.admin.catalogpreview.run({operation: create}, recentAdmin()),
     (error) => hasCode(error, "resource-exhausted") &&
       detail(error, "reason") === "catalog-capacity" &&
-      detail(error, "collection") === "works" && detail(error, "maximum") === 200,
+      detail(error, "collection") === "works" && detail(error, "maximum") === CATALOG_LIMITS.works,
   );
   const repair = {
     type: "editWork",

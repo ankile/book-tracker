@@ -123,6 +123,9 @@
     (scan?.authors ?? []).map((author) => [author.authorId, author.canonicalName]),
   ));
   const selectedWork = $derived(scan?.works.find((work) => work.workId === selectedWorkId) ?? null);
+  const worksNewestFirst = $derived(
+    [...(scan?.works ?? [])].sort((left, right) => right.createdAt - left.createdAt),
+  );
   const selectedEditions = $derived(
     scan?.editions.filter((edition) => edition.workId === selectedWorkId) ?? [],
   );
@@ -541,11 +544,14 @@
       <h2 id="works-heading">Works <span>{scan.works.length}/{scan.limits.works}</span></h2>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Work</th><th>Status</th><th>Visibility</th><th>Editions</th><th>{scan.bookCountsComplete ? 'Linked books' : 'Linked books loaded'}</th><th>Warnings</th><th></th></tr></thead>
+          <thead><tr><th>Work</th><th>Created</th><th>Status</th><th>Visibility</th><th>Editions</th><th>{scan.bookCountsComplete ? 'Linked books' : 'Linked books loaded'}</th><th>Warnings</th><th></th></tr></thead>
           <tbody>
-            {#each scan.works as work (work.workId)}
+            <!-- Newest first: works users created through the add-book flow
+                 land at the top for review (edit, merge, hide). -->
+            {#each worksNewestFirst as work (work.workId)}
               <tr>
                 <td><strong>{work.canonicalTitle}</strong><small>{catalogAuthorNames(work.authorIds)} · {work.workId}</small></td>
+                <td>{new Date(work.createdAt).toISOString().slice(0, 10)}<small>{work.createdBy === null ? 'migration / admin' : `user ${work.createdBy.slice(0, 8)}…`}</small></td>
                 <td>{work.status}</td><td>{work.visibility}</td><td>{work.editionCount}</td><td>{work.linkedBookCount}</td>
                 <td>{work.warnings.length === 0 ? '—' : work.warnings.join(' · ')}</td>
                 <td><button type="button" onclick={() => inspectWork(work.workId)}>Inspect</button></td>

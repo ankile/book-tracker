@@ -7,6 +7,8 @@ import type {
   AdminCatalogPreviewResponse,
   AdminCatalogScanResponse,
   AdminCatalogScanRequest,
+  CatalogCreateRequest,
+  CatalogCreateResponse,
   CatalogSearchRequest,
   CatalogSearchResponse,
   EnsureCatalogAuthorsRequest,
@@ -20,6 +22,7 @@ import {
   decodeAdminCatalogScanResponse,
 } from '../utils/adminCatalog.ts';
 import {
+  decodeCatalogCreateResponse,
   decodeCatalogSearchResponse,
   decodeWorkReadersResponse,
 } from '../utils/catalogClient.ts';
@@ -123,6 +126,7 @@ export const reportIssue = httpsCallable<IssueReport, { recorded: true }>(fns, '
 const catalogSearchCallable = httpsCallable<CatalogSearchRequest, unknown>(fns, 'catalog-search');
 const ensureCatalogAuthorsCallable = httpsCallable<EnsureCatalogAuthorsRequest, EnsureCatalogAuthorsResponse>(fns, 'catalog-ensureauthors');
 const workReadersCallable = httpsCallable<WorkReadersRequest, unknown>(fns, 'catalog-workreaders');
+const catalogCreateCallable = httpsCallable<CatalogCreateRequest, unknown>(fns, 'catalog-create');
 const adminCatalogScanCallable = httpsCallable<AdminCatalogScanRequest, unknown>(fns, 'admin-catalogscan');
 const adminCatalogPreviewCallable = httpsCallable<AdminCatalogPreviewRequest, unknown>(fns, 'admin-catalogpreview');
 const adminCatalogApplyCallable = httpsCallable<AdminCatalogApplyRequest, unknown>(fns, 'admin-catalogapply');
@@ -135,6 +139,10 @@ export async function ensureCatalogAuthors(
   request: EnsureCatalogAuthorsRequest,
 ): Promise<EnsureCatalogAuthorsResponse> {
   return (await ensureCatalogAuthorsCallable(request)).data;
+}
+
+export async function catalogCreate(request: CatalogCreateRequest): Promise<CatalogCreateResponse> {
+  return decodeCatalogCreateResponse((await catalogCreateCallable(request)).data);
 }
 
 export async function workReaders(request: WorkReadersRequest): Promise<WorkReadersResponse> {

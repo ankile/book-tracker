@@ -22,13 +22,14 @@ import {
 } from "./decoders";
 import {externalIndexId, normalizeCatalogText, normalizeCatalogTitle} from "./catalog";
 import {profileConsents, sharingSetting} from "./sharingConsent";
+import {CATALOG_LIMITS} from "./catalogLimits";
 
-const MAX_WORKS = 200;
-const MAX_CATALOG_AUTHORS = 500;
-const MAX_EDITIONS = 500;
+const MAX_WORKS = CATALOG_LIMITS.works;
+const MAX_CATALOG_AUTHORS = CATALOG_LIMITS.catalogAuthors;
+const MAX_EDITIONS = CATALOG_LIMITS.editions;
 const BOOK_PAGE_SIZE = 100;
-const MAX_ISBN_INDEXES = 500;
-const MAX_EXTERNAL_ID_INDEXES = 500;
+const MAX_ISBN_INDEXES = CATALOG_LIMITS.isbnIndexes;
+const MAX_EXTERNAL_ID_INDEXES = CATALOG_LIMITS.externalIdIndexes;
 const MAX_AUTHORS_PER_WORK = 20;
 const MAX_AUTHORS_PER_PERSONAL_BOOK = 6;
 const MAX_TOUCHED_DOCUMENTS = 200;
@@ -48,6 +49,9 @@ interface WorkData extends CatalogWorkInput {
   status: WorkStatus;
   mergedInto?: string;
   mergedFrom: string[];
+  // The uid that created the work through catalog.create; absent for
+  // works the migration or an administrator created.
+  createdBy?: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -173,11 +177,15 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
   assertStoredKeys(data, [
     "canonicalTitle", "alternateTitles", "titleKeys", "authorIds",
     "coverUrl", "subjects", "fiction", "visibility",
-    "status", "mergedInto", "mergedFrom", "createdAt", "updatedAt",
+    "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt",
   ], snapshot.ref.path);
   const mergedInto = data.mergedInto;
   if (mergedInto !== undefined && typeof mergedInto !== "string") {
     throw new Error(`Invalid redirect ${snapshot.ref.path}.`);
+  }
+  const createdBy = data.createdBy;
+  if (createdBy !== undefined && typeof createdBy !== "string") {
+    throw new Error(`Invalid creator ${snapshot.ref.path}.`);
   }
   return {
     canonicalTitle: data.canonicalTitle,
@@ -191,6 +199,7 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
     status: data.status,
     ...(mergedInto === undefined ? {} : {mergedInto}),
     mergedFrom: strings(data.mergedFrom ?? [], `${snapshot.ref.path}.mergedFrom`),
+    ...(createdBy === undefined ? {} : {createdBy}),
     createdAt: assertTimestamp(data.createdAt, `${snapshot.ref.path}.createdAt`),
     updatedAt: assertTimestamp(data.updatedAt, `${snapshot.ref.path}.updatedAt`),
   };
@@ -279,6 +288,7 @@ function workInputData(
     visibility,
     status: "active",
     mergedFrom: existing?.mergedFrom ?? [],
+    ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -1867,6 +1877,8 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     works: [...workById].map(([workId, work]) => ({
       workId,
       ...wireWork(work),
+      createdBy: work.createdBy ?? null,
+      createdAt: work.createdAt.toMillis(),
       editionCount: editionCounts.get(workId) ?? 0,
       linkedBookCount: linkedCounts.get(workId) ?? 0,
       warnings: workWarnings.get(workId) ?? [],

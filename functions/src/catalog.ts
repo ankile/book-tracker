@@ -7,13 +7,16 @@ import {
   getFirestore,
   QuerySnapshot,
   Timestamp,
+  Transaction,
 } from "firebase-admin/firestore";
-import {createHash} from "node:crypto";
+import {createHash, randomUUID} from "node:crypto";
 import {Buffer} from "node:buffer";
 import {
   CatalogAuthorCreateInput,
+  CatalogCreateRequest,
   CatalogExternalId,
   CatalogSearchRequest,
+  decodeCatalogCreateRequest,
   decodeCatalogSearchRequest,
   decodeEnsureCatalogAuthorsRequest,
   decodeWorkReadersRequest,
@@ -22,6 +25,7 @@ import {
 import {consumeQuota} from "./quota";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {profileConsents, sharingSetting, validTimeZone} from "./sharingConsent";
+import {CATALOG_LIMITS} from "./catalogLimits";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logAppCheckPresence} from "./appCheck";
 
@@ -40,7 +44,7 @@ const READER_CALLS_PER_WINDOW = 5;
 // the primary caller bound, while this high ceiling limits a sybil burst.
 const GLOBAL_READER_CALLS_PER_WINDOW = 100;
 const GLOBAL_SEARCHES_PER_WINDOW = 100;
-const MAX_CATALOG_AUTHORS = 500;
+const MAX_CATALOG_AUTHORS = CATALOG_LIMITS.catalogAuthors;
 const QUOTA_WINDOW_MS = 60 * 60 * 1000;
 const SPEED_MIN_SESSION_MINUTES = 5;
 const SPEED_MAX_PAGES_PER_HOUR = 150;
@@ -663,6 +667,133 @@ async function titleResults(
   }));
 }
 
+function titleIndexId(workId: string, titleKey: string): string {
+  return createHash("sha256").update(`${workId}\0${titleKey}`).digest("hex");
+}
+
+async function transactionWork(tx: Transaction, workId: string): Promise<ResolvedWork> {
+  const snapshot = await tx.get(db.collection("works").doc(workId));
+  const work = storedWork(snapshot);
+  if (work.status === "active") return {id: snapshot.id, work};
+  if (work.mergedInto === undefined || work.mergedInto === snapshot.id) {
+    throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
+  }
+  const target = storedWork(await tx.get(db.collection("works").doc(work.mergedInto)));
+  if (target.status !== "active") {
+    throw new CatalogDataError(`Catalog redirect is not one hop at ${snapshot.ref.path}.`);
+  }
+  return {id: work.mergedInto, work: target};
+}
+
+interface CatalogCreateResult {
+  workId: string;
+  editionId: string;
+  created: boolean;
+}
+
+// Any verified user may add the work and edition the catalog lacks for a
+// book they are adding: catalog data is public whoever contributed it
+// (owner decision 2026-08-31). An identifier already in the catalog
+// resolves to its existing entry instead, so a retry or a race never
+// duplicates one. The work records who created it for the admin review
+// list; the admin curates (edit, merge, hide) from there.
+export async function createCatalogEntry(
+  request: CatalogCreateRequest,
+  createdBy: string,
+): Promise<CatalogCreateResult> {
+  const workId = `work-${randomUUID()}`;
+  const editionId = `edition-${randomUUID()}`;
+  const now = Timestamp.now();
+  return db.runTransaction(async (tx): Promise<CatalogCreateResult> => {
+    const isbnRef = request.edition.isbn13 === null ? null :
+      db.collection("isbnIndex").doc(request.edition.isbn13);
+    const externalRefs = Object.entries(request.edition.externalIds).map(([provider, id]) => ({
+      provider,
+      id,
+      ref: db.collection("externalIdIndex").doc(externalIndexId({provider, id})),
+    }));
+    const [isbnSnapshot, externalSnapshots, authorSnapshots, workCount, editionCount] =
+      await Promise.all([
+        isbnRef === null ? Promise.resolve(null) : tx.get(isbnRef),
+        Promise.all(externalRefs.map(({ref}) => tx.get(ref))),
+        Promise.all(request.work.authorIds.map((authorId) =>
+          tx.get(db.collection("catalogAuthors").doc(authorId)),
+        )),
+        tx.get(db.collection("works").count()),
+        tx.get(db.collection("editions").count()),
+      ]);
+    for (const snapshot of authorSnapshots) {
+      if (storedCatalogAuthor(snapshot).status !== "active") {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "A selected catalog author is no longer active.",
+        );
+      }
+    }
+    const indexed = [isbnSnapshot, ...externalSnapshots].find((snapshot) => snapshot?.exists);
+    if (indexed !== undefined && indexed !== null) {
+      const indexedWorkId = indexed.get("workId");
+      const indexedEditionId = indexed.get("editionId");
+      if (typeof indexedWorkId !== "string" || typeof indexedEditionId !== "string") {
+        throw new CatalogDataError(`Invalid catalog index ${indexed.ref.path}.`);
+      }
+      const resolved = await transactionWork(tx, indexedWorkId);
+      return {workId: resolved.id, editionId: indexedEditionId, created: false};
+    }
+    if (workCount.data().count >= CATALOG_LIMITS.works ||
+        editionCount.data().count >= CATALOG_LIMITS.editions) {
+      throw new functions.https.HttpsError(
+        "resource-exhausted",
+        "The shared catalog has reached its size bound. Ask an administrator to raise it.",
+      );
+    }
+    const titleKeys = [...new Set(
+      [request.work.canonicalTitle, ...request.work.alternateTitles]
+        .map(normalizeCatalogTitle)
+        .filter((key) => key !== ""),
+    )];
+    tx.create(db.collection("works").doc(workId), {
+      canonicalTitle: request.work.canonicalTitle,
+      alternateTitles: request.work.alternateTitles,
+      titleKeys,
+      authorIds: request.work.authorIds,
+      coverUrl: request.work.coverUrl,
+      subjects: request.work.subjects,
+      fiction: request.work.fiction,
+      visibility: "searchable",
+      status: "active",
+      mergedFrom: [],
+      createdBy,
+      createdAt: now,
+      updatedAt: now,
+    });
+    tx.create(db.collection("editions").doc(editionId), {
+      workId,
+      ...request.edition,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (isbnRef !== null) tx.create(isbnRef, {workId, editionId});
+    for (const external of externalRefs) {
+      tx.create(external.ref, {
+        workId,
+        editionId,
+        provider: external.provider,
+        externalId: external.id,
+      });
+    }
+    for (const key of titleKeys) {
+      const title = [request.work.canonicalTitle, ...request.work.alternateTitles]
+        .find((candidate) => normalizeCatalogTitle(candidate) === key) ?? request.work.canonicalTitle;
+      tx.create(
+        db.collection("workTitleIndex").doc(titleIndexId(workId, key)),
+        {workId, title, titleKey: key, visibility: "searchable"},
+      );
+    }
+    return {workId, editionId, created: true};
+  });
+}
+
 function dayParts(at: Timestamp, timeZone: string): {key: string; epochDay: number} {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -1090,6 +1221,17 @@ exports.search = callable.https.onCall(async (
     results: request.title === undefined ? [] :
       await titleResults(request.title, request.authorNames ?? []),
   };
+});
+
+exports.create = callable.https.onCall(async (
+  data: unknown,
+  context,
+): Promise<CatalogCreateResult> => {
+  logAppCheckPresence("catalog.create", context);
+  const uid = signedInUid(context);
+  const request = decodeCatalogCreateRequest(data, invalidArgument);
+  await requireLiveUser(uid);
+  return createCatalogEntry(request, uid);
 });
 
 exports.ensureauthors = callable.https.onCall(async (
