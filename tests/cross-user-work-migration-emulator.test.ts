@@ -10,7 +10,6 @@ import { getFirestore, Timestamp, type DocumentReference } from 'firebase-admin/
 import { deterministicCatalogId, deterministicTitleIndexId } from '../cross-user-work-migration.ts'
 import {
   assertMigrationProjectionSourcesEligible,
-  assertMigrationSeedSourcesEligible,
   assertMigrationSourceVersions,
   OPERATOR_UID,
 } from '../migration-seed-consent.ts'
@@ -42,7 +41,6 @@ const conflictTitleKey = 'different book'
 const cycleWorkA = `work-cycle-a-${suffix}`
 const cycleWorkB = `work-cycle-b-${suffix}`
 const corruptExternalIndexId = `bad-external-index-${suffix}`
-const revokedSeedWorkId = `revoked-seed-${suffix}`
 const leGuinAuthorId = deterministicCatalogId('author', 'ursula k le guin')
 const butlerAuthorId = deterministicCatalogId('author', 'octavia e butler')
 const someoneElseAuthorId = deterministicCatalogId('author', 'someone else')
@@ -79,7 +77,6 @@ after(async () => {
     db.doc(`works/${cycleWorkA}`).delete(),
     db.doc(`works/${cycleWorkB}`).delete(),
     db.doc(`externalIdIndex/${corruptExternalIndexId}`).delete(),
-    db.doc(`works/${revokedSeedWorkId}`).delete(),
     db.doc(`catalogAuthors/${leGuinAuthorId}`).delete(),
     db.doc(`catalogAuthors/${butlerAuthorId}`).delete(),
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).delete(),
@@ -273,8 +270,12 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.equal(createdEdition?.publisher, 'Operator Press')
   assert.equal(createdEdition?.publishedDate, '1969')
   assert.deepEqual((await db.doc(`isbnIndex/${isbn}`).get()).data(), { workId, editionId })
-  assert.equal((await db.doc(`isbnIndex/${privateIsbn}`).get()).exists, false)
-  assert.equal((await db.doc(`editions/${privateEditionId}`).get()).exists, false)
+  // Every copy seeds: the private user's ISBN is a second edition of the
+  // same work (catalog data is public whoever contributed it).
+  assert.deepEqual((await db.doc(`isbnIndex/${privateIsbn}`).get()).data(), { workId, editionId: privateEditionId })
+  const privateEdition = (await db.doc(`editions/${privateEditionId}`).get()).data()
+  assert.equal(privateEdition?.publisher, 'Private Shelf Press')
+  assert.equal(privateEdition?.suggestedPageCount, 999)
   const projection = await db.doc(`sharedWorkOwners/${projectionId}`).get()
   assert.deepEqual(Object.keys(projection.data() ?? {}).sort(), ['uid', 'updatedAt', 'workId'])
   assert.equal(projection.get('workId'), workId)
@@ -313,12 +314,14 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.equal(privateCopy?.workId, workId)
   assert.equal(privateCopy?.editionId, editionId)
   assert.equal(privateMetadataCopy?.workId, workId)
-  assert.equal(privateMetadataCopy?.editionId, null)
-  assert.equal(privateMetadataCopy?.matchMethod, 'migration')
-  assert.deepEqual(
-    { workId: unmatched?.workId, editionId: unmatched?.editionId, matchMethod: unmatched?.matchMethod, linkedAt: unmatched?.linkedAt },
-    { workId: null, editionId: null, matchMethod: null, linkedAt: null },
-  )
+  assert.equal(privateMetadataCopy?.editionId, privateEditionId)
+  assert.equal(privateMetadataCopy?.matchMethod, 'isbn')
+  // A book nobody else has still seeds its own work (no ISBN, so no
+  // edition); it is only the ISBN conflicts below that stay unlinked.
+  assert.equal(typeof unmatched?.workId, 'string')
+  assert.equal(unmatched?.editionId, null)
+  assert.equal(unmatched?.matchMethod, 'migration')
+  assert.equal((await db.doc(`works/${unmatched?.workId}`).get()).get('canonicalTitle'), 'Parable of the Sower')
   assert.deepEqual(
     { workId: conflict?.workId, editionId: conflict?.editionId, matchMethod: conflict?.matchMethod, linkedAt: conflict?.linkedAt },
     { workId: null, editionId: null, matchMethod: null, linkedAt: null },
@@ -340,12 +343,13 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     title: 'The Left Hand of Darkness', isbn: latePrivateIsbn, authorIds: [leGuinAuthorId],
     pageCount: 777, publisher: 'Still Private Press', updatedAt: originalUpdatedAt,
   })
+  // A copy added after the first apply seeds its own edition on the re-run.
   const lateApply = runScript(migrationPath, '--apply')
-  assert.match(lateApply, /^0 catalog documents created$/m)
-  assert.equal((await db.doc(`isbnIndex/${latePrivateIsbn}`).get()).exists, false)
-  assert.equal((await db.doc(`editions/${latePrivateEditionId}`).get()).exists, false)
+  assert.match(lateApply, /^2 catalog documents created$/m)
+  assert.deepEqual((await db.doc(`isbnIndex/${latePrivateIsbn}`).get()).data(), { workId, editionId: latePrivateEditionId })
+  assert.equal((await db.doc(`editions/${latePrivateEditionId}`).get()).get('suggestedPageCount'), 777)
   assert.equal((await latePrivateBook.get()).get('workId'), workId)
-  assert.equal((await latePrivateBook.get()).get('editionId'), null)
+  assert.equal((await latePrivateBook.get()).get('editionId'), latePrivateEditionId)
   const lateRerun = runScript(migrationPath, '--apply')
   assert.match(lateRerun, /^0 catalog documents created$/m)
   assert.match(lateRerun, /^0 personal books updated$/m)
@@ -366,17 +370,6 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const eligibleRaceSource = await migrationSource(sharingUid, raceSource)
   const revokedRaceSource = await migrationSource(privateUid, revokedAlternateSource)
   await privateUser.collection('settings').doc('bookSharing').delete()
-  await assert.rejects(
-    db.runTransaction(async (transaction) => {
-      await assertMigrationSeedSourcesEligible(transaction, db, [
-        eligibleRaceSource,
-        revokedRaceSource,
-      ])
-      transaction.create(db.doc(`works/${revokedSeedWorkId}`), validWork('Revoked Seed', 'revoked seed', [leGuinAuthorId]))
-    }),
-    /is no longer eligible to publish metadata/,
-  )
-  assert.equal((await db.doc(`works/${revokedSeedWorkId}`).get()).exists, false)
 
   await raceSource.update({title: 'Concurrent identity edit'})
   await assert.rejects(
@@ -391,7 +384,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   await ursulaRef.update({name: 'Concurrent Author Edit'})
   await assert.rejects(
     db.runTransaction(async (transaction) => {
-      await assertMigrationSeedSourcesEligible(transaction, db, [authorRaceSource])
+      await assertMigrationSourceVersions(transaction, db, [authorRaceSource])
     }),
     /changed during migration/,
   )

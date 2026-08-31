@@ -438,9 +438,14 @@ test("non-null admin links require a live self-owned book while unlink repairs r
   assert.equal(preview.changes[0].after?.workId, null);
 });
 
-test("searchable promotion requires consent provenance and rejects private work fields", async (t) => {
+// Catalog data is public whoever contributed it: any reader's book may seed
+// a searchable work, with no sharing consent involved. Private *work*
+// fields are still refused — the shape is the boundary, not the source.
+test("any personal book seeds a searchable work; private work fields are rejected", async (t) => {
   const store = installCatalogStore(t);
+  store.write(store.ref("users/private-reader"), {uid: "private-reader"});
   store.write(store.ref("users/private-reader/books/private-book"), {
+    owner: store.ref("users/private-reader"),
     title: "Private",
     workId: null,
     editionId: null,
@@ -461,11 +466,9 @@ test("searchable promotion requires consent provenance and rejects private work 
     },
     books: [{uid: "private-reader", bookId: "private-book"}],
   };
-  await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: create}, recentAdmin()),
-    (error) => hasCode(error, "failed-precondition") &&
-      detail(error, "reason") === "catalog-invariant",
-  );
+  const created = await deployed.admin.catalogpreview.run({operation: create}, recentAdmin());
+  assert.equal(created.changes.some(({kind}) => kind === "work"), true);
+  assert.equal(created.expected.books.length, 1);
 
   store.write(store.ref("works/internal-work"), activeWork("Internal Work", {
     visibility: "internal",
@@ -571,10 +574,9 @@ test("moving an edition atomically relinks its books and identifier indexes", as
   assert.equal(store.rows.get(bookRef.path)?.title, "Keep this title");
 });
 
-// editions/{id} is readable exactly when its work is searchable, so moving
-// an edition from an internal work under a searchable one discloses it;
-// that needs the same consent provenance editWork and mergeWorks demand.
-test("moving an edition out of an internal work needs consent-eligible provenance", async (t) => {
+// Moving an edition between works, internal or searchable, needs no
+// consent: bibliographic data is public whoever contributed it.
+test("moving an edition out of an internal work needs no provenance", async (t) => {
   const store = installCatalogStore(t);
   store.write(store.ref("works/internal-work"), activeWork("Internal Work", {visibility: "internal"}));
   store.write(store.ref("works/public-work"), activeWork("Public Work"));
@@ -596,12 +598,8 @@ test("moving an edition out of an internal work needs consent-eligible provenanc
       externalIds: {},
     },
   };
-  const refused = (error: unknown): boolean => hasCode(error, "failed-precondition") &&
-    detail(error, "reason") === "catalog-invariant" &&
-    messageMatches(error, /consent-eligible/);
-  // No linked book at all: nothing proves consent, fail closed.
-  await assert.rejects(deployed.admin.catalogpreview.run({operation}, recentAdmin()), refused);
-  // A private reader's book seeded it: still refused.
+  const unlinked = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.equal(unlinked.expected.books.length, 0);
   store.write(store.ref("users/private-reader"), {uid: "private-reader"});
   store.write(store.ref("users/private-reader/books/seed"), {
     owner: store.ref("users/private-reader"),
@@ -610,19 +608,8 @@ test("moving an edition out of an internal work needs consent-eligible provenanc
     matchMethod: "catalog-choice",
     linkedAt: Timestamp.fromMillis(100),
   });
-  await assert.rejects(deployed.admin.catalogpreview.run({operation}, recentAdmin()), refused);
-  // The reader opts in (Asia/Kolkata is a browser-reported zone the old
-  // supportedValuesOf validator refused): the move is allowed.
-  store.write(store.ref("users/private-reader/settings/bookSharing"), {
-    profileUsername: "reader-name", timeZone: "Asia/Kolkata",
-  });
-  store.write(store.ref("profiles/reader-name"), {uid: "private-reader", public: true});
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  assert.equal(preview.expected.books.length, 1);
-  // A move between two searchable works never needs provenance.
-  store.write(store.ref("works/internal-work"), activeWork("Now Public", {visibility: "searchable"}));
-  store.write(store.ref("profiles/reader-name"), {uid: "private-reader", public: false});
-  assert.equal((await deployed.admin.catalogpreview.run({operation}, recentAdmin())).expected.books.length, 1);
+  const linked = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.equal(linked.expected.books.length, 1);
 });
 
 test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
@@ -657,30 +644,25 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
   );
 });
 
-test("each internal source needs its own provenance before a searchable merge", async (t) => {
+test("internal sources merge into a searchable target without provenance", async (t) => {
   const store = installCatalogStore(t);
   store.write(store.ref("works/target"), activeWork("Target"));
-  store.write(store.ref("works/consented"), activeWork("Consented", {visibility: "internal"}));
-  store.write(store.ref("works/private"), activeWork("Private", {visibility: "internal"}));
-  store.write(store.ref("users/reader/books/consented"), {
-    workId: "consented", editionId: null, matchMethod: "isbn",
-    linkedAt: Timestamp.fromMillis(1),
-  });
-  store.write(store.ref("users/reader"), {uid: "reader"});
-  store.write(store.ref("users/reader/settings/bookSharing"), {
-    profileUsername: "reader-name", timeZone: "UTC",
-  });
-  store.write(store.ref("profiles/reader-name"), {
-    uid: "reader", public: true,
-  });
+  store.write(store.ref("works/linked"), activeWork("Linked", {visibility: "internal"}));
+  store.write(store.ref("works/orphan"), activeWork("Orphan", {visibility: "internal"}));
+  store.write(store.ref("users/private"), {uid: "private"});
   store.write(store.ref("users/private/books/private"), {
-    workId: "private", editionId: null, matchMethod: "isbn",
+    owner: store.ref("users/private"),
+    workId: "linked", editionId: null, matchMethod: "isbn",
     linkedAt: Timestamp.fromMillis(1),
   });
-  await assert.rejects(deployed.admin.catalogpreview.run({operation: {
-    type: "mergeWorks", sourceWorkIds: ["consented", "private"], targetWorkId: "target",
-  }}, recentAdmin()), (error) => hasCode(error, "failed-precondition") &&
-    detail(error, "reason") === "catalog-invariant" && messageMatches(error, /private/));
+  const preview = await deployed.admin.catalogpreview.run({operation: {
+    type: "mergeWorks", sourceWorkIds: ["linked", "orphan"], targetWorkId: "target",
+  }}, recentAdmin());
+  assert.deepEqual(
+    preview.changes.filter(({kind, action}) => kind === "work" && action === "update")
+      .map((change) => change.after?.mergedInto ?? change.after?.mergedFrom).length,
+    3,
+  );
 });
 
 test("merging works keeps old personal links one-hop while moving editions and indexes", async (t) => {

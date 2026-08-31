@@ -1,8 +1,9 @@
 // Build the server-owned work/edition catalog from personal books and add
-// explicit catalog-link fields to every personal book. Automatic catalog
-// creation is limited to the operator's library and users who opted into
-// per-book sharing. Private books may link to an existing catalog entry but
-// never seed one.
+// explicit catalog-link fields to every personal book. Every live user's
+// books seed the catalog — bibliographic data is public whoever added it
+// (owner decision 2026-08-31); the operator's copy wins a spelling or
+// metadata disagreement. Sharing consent matters only for the reader
+// projections (sharedWorkOwners), never for catalog creation.
 //
 // Ambiguous cases are printed and left unlinked. Operators can resolve an
 // exact reviewed set with an optional JSON manifest whose groups contain:
@@ -37,9 +38,7 @@ import {
 } from './src/lib/utils/catalog.ts'
 import {
   assertMigrationProjectionSourcesEligible,
-  assertMigrationSeedSourcesEligible,
   assertMigrationSourceVersions,
-  migrationSeedIsEligible,
   migrationSharingConsentIsValid,
   OPERATOR_UID,
   type MigrationSeedSource,
@@ -162,8 +161,7 @@ for (const userRef of users) {
     ? profilesByUsername.get(sharingData.profileUsername)
     : undefined
   const optedIn = migrationSharingConsentIsValid(userRef.id, userData, sharingData, sharedProfile)
-  const eligibleSeed = liveUser && (userRef.id === OPERATOR_UID || optedIn)
-  const seedPriority = userRef.id === OPERATOR_UID ? 0 : optedIn ? 1 : 2
+  const seedPriority = userRef.id === OPERATOR_UID ? 0 : 1
   const localAuthorDocs = new Map(authorDocs.docs.map((author) => [author.id, {
     path: author.ref.path,
     version: snapshotVersion(author.ref.path, author),
@@ -200,7 +198,6 @@ for (const userRef of users) {
       authorIds: Array.isArray(data.authorIds)
         ? data.authorIds.map((id: unknown) => typeof id === 'string' && !existing.authors.has(id) ? `${userRef.id}:${id}` : id)
         : data.authorIds,
-      eligibleSeed,
       sharingEligible: optedIn,
       seedPriority,
       migrationBookVersion: snapshotVersion(book.ref.path, book),
@@ -323,11 +320,7 @@ if (flags.apply) {
         }
         return spec.seedSources
       })
-      await assertMigrationSeedSourcesEligible(
-        transaction,
-        db,
-        seedSources,
-      )
+      await assertMigrationSourceVersions(transaction, db, seedSources)
       for (let index = 0; index < specs.length; index += 1) {
         const spec = specs[index]
         const snapshot = snapshots[index]
@@ -550,10 +543,7 @@ function chooseCatalogTarget(group: MigrationGroup, existing: ExistingCatalog, a
     workId = textTargets[0]?.[0]
   }
 
-  if (!workId) {
-    if (!group.eligibleSeed) return null
-    workId = group.workId
-  }
+  if (!workId) workId = group.workId
   const editionIds = new Map<string, string>()
   for (const isbn of group.isbns) {
     const indexed = existing.isbnIndex.get(isbn)
@@ -682,7 +672,7 @@ function preferredSeedCandidate(
   predicate: (candidate: MigrationCandidate) => boolean = () => true,
 ): MigrationCandidate {
   const candidates = group.candidates
-    .filter((candidate) => candidate.book.eligibleSeed && predicate(candidate))
+    .filter(predicate)
     .sort((left, right) =>
       left.book.seedPriority - right.book.seedPriority ||
       left.book.path.localeCompare(right.book.path),
@@ -693,9 +683,7 @@ function preferredSeedCandidate(
 }
 
 function migrationGroupSeedSources(group: MigrationGroup): MigrationSeedSource[] {
-  return group.candidates
-    .filter((candidate) => candidate.book.eligibleSeed)
-    .map((candidate) => migrationSource(candidate.book))
+  return group.candidates.map((candidate) => migrationSource(candidate.book))
 }
 
 function migrationSource(book: MigrationBook): MigrationSeedSource {

@@ -23,7 +23,7 @@ for (const user of users) {
         updates.docs.map((update) => ({id: update.id, data: update.data()})),
       );
       if (patch === null) continue;
-      console.log(`DRY ${book.ref.path} finishedAt=${patch.finishedAt.toDate().toISOString()}`);
+      console.log(`DRY ${book.ref.path} finishedAt=${new Date(patch.finishedAt.toMillis()).toISOString()}`);
       writes += 1;
       continue;
     }
@@ -41,7 +41,7 @@ for (const user of users) {
       return patch;
     });
     if (applied === null) continue;
-    console.log(`MIGRATE ${book.ref.path} finishedAt=${applied.finishedAt.toDate().toISOString()}`);
+    console.log(`MIGRATE ${book.ref.path} finishedAt=${new Date(applied.finishedAt.toMillis()).toISOString()}`);
     writes += 1;
   }
 }

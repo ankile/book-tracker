@@ -21,7 +21,6 @@ import {
   CatalogWorkInput,
 } from "./decoders";
 import {externalIndexId, normalizeCatalogText, normalizeCatalogTitle} from "./catalog";
-import {profileConsents, sharingSetting} from "./sharingConsent";
 import {CATALOG_LIMITS} from "./catalogLimits";
 
 const MAX_WORKS = CATALOG_LIMITS.works;
@@ -36,7 +35,6 @@ const MAX_TOUCHED_DOCUMENTS = 200;
 const MAX_LINKED_EDITION_BOOKS = 100;
 const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_AUDIT_BYTES = 700_000;
-const ADMIN_UID = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
 
 type Visibility = "internal" | "searchable";
 type WorkStatus = "active" | "merged";
@@ -785,29 +783,6 @@ async function linkChanges(
   return {changes, versions};
 }
 
-async function promotionEligible(
-  reader: PlanReader,
-  db: Firestore,
-  snapshots: DocumentSnapshot[],
-): Promise<boolean> {
-  for (const snapshot of snapshots) {
-    const path = snapshot.ref.path.split("/");
-    if (path[1] === ADMIN_UID) return true;
-  }
-  const uids = [...new Set(snapshots.map((snapshot) => snapshot.ref.path.split("/")[1]))];
-  for (const uid of uids) {
-    const [user, setting] = await Promise.all([
-      one(reader, db.collection("users").doc(uid)),
-      one(reader, db.doc(`users/${uid}/settings/bookSharing`)),
-    ]);
-    const consented = sharingSetting(user, setting);
-    if (consented === null) continue;
-    const profile = await one(reader, db.collection("profiles").doc(consented.username));
-    if (profileConsents(profile, uid)) return true;
-  }
-  return false;
-}
-
 function sortExpected(expected: AdminCatalogExpected): AdminCatalogExpected {
   const catalog = new Map(expected.catalog.map((version) =>
     [`${version.kind}/${version.id}`, version],
@@ -985,20 +960,8 @@ async function planOperation(
       reader, db.collection("works"), MAX_WORKS, 1, "works",
     );
     catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
-    if (operation.visibility === "searchable" && operation.books.length > 0) {
-      const selected = await Promise.all(operation.books.map(({uid, bookId}) =>
-        one(reader, db.doc(`users/${uid}/books/${bookId}`)),
-      ));
-      if (selected.some((book) => !book.exists) ||
-          !await promotionEligible(reader, db, selected)) {
-        failedPrecondition(
-          "Selected private books do not permit searchable catalog disclosure.",
-          "catalog-invariant",
-        );
-      }
-    }
-    // A zero-book searchable create is treated as external curation by the
-    // administrator: no reader or private library record is disclosed.
+    // Catalog data is public whoever contributed it: any personal book may
+    // seed a searchable work, so no consent check sits here.
     const work = workInputData(operation.work, operation.visibility, now);
     changes.push(change("work", ref, "create", null, wireWork(work), {
       type: "create", data: {...work},
@@ -1035,19 +998,6 @@ async function planOperation(
     const current = await activeWork(reader, db, operation.workId);
     catalog.push(versionOf("work", current.snapshot));
     catalog.push(...await validateWorkAuthors(reader, db, operation.work.authorIds));
-    if (current.work.visibility === "internal" && operation.visibility === "searchable") {
-      const ids = [current.snapshot.id, ...current.work.mergedFrom];
-      const linked = await many(reader, db.collectionGroup("books")
-        .where("workId", "in", ids)
-        .limit(101));
-      const candidates = linked.docs.slice(0, 100);
-      if (candidates.length === 0 || !await promotionEligible(reader, db, candidates)) {
-        failedPrecondition(
-          "This work has no consent-eligible linked book for promotion.",
-          "catalog-invariant",
-        );
-      }
-    }
     const next = workInputData(operation.work, operation.visibility, now, current.work);
     changes.push(change(
       "work", current.snapshot.ref, "update", wireWork(current.work), wireWork(next),
@@ -1066,20 +1016,6 @@ async function planOperation(
     const absorbed = [...new Set(sources.flatMap(({snapshot, work}) =>
       [snapshot.id, ...work.mergedFrom],
     ))];
-    if (target.work.visibility === "searchable") {
-      for (const source of sources.filter(({work}) => work.visibility === "internal")) {
-        const ids = [source.snapshot.id, ...source.work.mergedFrom];
-        const candidates = await many(reader, db.collectionGroup("books")
-          .where("workId", "in", ids).limit(101));
-        if (candidates.empty ||
-            !await promotionEligible(reader, db, candidates.docs.slice(0, 100))) {
-          failedPrecondition(
-            `Internal source ${source.snapshot.id} needs consent-eligible provenance before a searchable merge.`,
-            "catalog-invariant",
-          );
-        }
-      }
-    }
     const mergedFrom = [...new Set([...target.work.mergedFrom, ...absorbed])];
     if (mergedFrom.length > 29 || mergedFrom.includes(target.snapshot.id)) {
       failedPrecondition("A canonical work may have at most 29 aliases.", "catalog-invariant");
@@ -1233,21 +1169,6 @@ async function planOperation(
         .where("editionId", "==", operation.editionId)
         .limit(MAX_LINKED_EDITION_BOOKS + 1));
       if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
-      // Moving an edition under a searchable work makes it readable
-      // (editions/{id} get rule follows the work's visibility), so an
-      // edition seeded under an internal work needs the same consent
-      // provenance as editWork and mergeWorks promotion. Anything but a
-      // searchable source counts as internal, fail-closed.
-      const oldWork = await one(reader, db.collection("works").doc(old.workId));
-      catalog.push(versionOf("work", oldWork));
-      if (oldWork.get("visibility") !== "searchable" &&
-          work.work.visibility === "searchable" &&
-          (linked.empty || !await promotionEligible(reader, db, linked.docs))) {
-        failedPrecondition(
-          "This edition has no consent-eligible linked book for searchable disclosure.",
-          "catalog-invariant",
-        );
-      }
       await validateLinkOwners(reader, db, linked.docs);
       books = linked.docs.map((book) => {
         const path = book.ref.path.split("/");

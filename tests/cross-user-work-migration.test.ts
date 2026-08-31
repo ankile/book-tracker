@@ -18,7 +18,6 @@ const book = (path: string, overrides: Partial<MigrationBook> = {}): MigrationBo
   title: 'The Left Hand of Darkness',
   isbn: '9780441478125',
   authorIds: ['ursula'],
-  eligibleSeed: true,
   seedPriority: 1,
   ...overrides,
 })
@@ -35,7 +34,7 @@ test('ISBN-first grouping links punctuation variants and preserves one suggested
   const authors = new Map([['ursula', author('ursula', 'Ursula K. Le Guin')]])
   const plan = planCrossUserCatalog([
     book('users/a/books/one'),
-    book('users/b/books/two', { title: 'Left Hand of Darkness, The', pageCount: 304, eligibleSeed: false }),
+    book('users/b/books/two', { title: 'Left Hand of Darkness, The', pageCount: 304 }),
   ], authors)
 
   assert.equal(plan.ambiguities.length, 0)
@@ -46,13 +45,11 @@ test('ISBN-first grouping links punctuation variants and preserves one suggested
   assert.equal(plan.groups[0].editionIds['9780441478125'], deterministicCatalogId('edition', `${plan.groups[0].workId}\0${'9780441478125'}`))
 })
 
-test('private copies can join a work but cannot contribute shared titles or editions', () => {
+test('every copy contributes its edition; a reviewed group still pins the canonical title', () => {
   const authors = new Map([['ursula', author('ursula', 'Ursula K. Le Guin')]])
   const plan = planCrossUserCatalog([
     book('users/a/books/shared', {isbn: '', title: 'The Left Hand of Darkness'}),
     book('users/b/books/private', {
-      eligibleSeed: false,
-      seedPriority: 2,
       isbn: '9780441478125',
       title: 'Private shelf label',
     }),
@@ -66,8 +63,8 @@ test('private copies can join a work but cannot contribute shared titles or edit
 
   assert.equal(plan.groups.length, 1)
   assert.deepEqual(plan.groups[0].isbns, ['9780441478125'])
-  assert.deepEqual(plan.groups[0].seedIsbns, [])
-  assert.deepEqual(plan.groups[0].alternateTitles, [])
+  assert.deepEqual(plan.groups[0].seedIsbns, ['9780441478125'])
+  assert.equal(plan.groups[0].canonicalTitle, 'The Left Hand of Darkness')
 })
 
 test('same title and author groups editions while different authors remain separate', () => {
@@ -372,16 +369,6 @@ test('merged personal authors resolve to the canonical non-placeholder author', 
     names: ['Ursula K. Le Guin'],
     problems: [],
   })
-})
-
-test('private-only groups are identified but cannot seed catalog documents', () => {
-  const authors = new Map([['ursula', author('ursula', 'Ursula K. Le Guin')]])
-  const plan = planCrossUserCatalog([
-    book('users/a/books/one', { eligibleSeed: false, seedPriority: 2 }),
-  ], authors)
-
-  assert.equal(plan.groups.length, 1)
-  assert.equal(plan.groups[0].eligibleSeed, false)
 })
 
 test('an invalid reviewed manifest assignment remains a review finding', () => {

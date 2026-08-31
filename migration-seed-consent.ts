@@ -70,17 +70,6 @@ export async function assertMigrationSourceVersions(
   }
 }
 
-export function migrationSeedIsEligible(
-  uid: string,
-  user: CatalogDoc | undefined,
-  setting: CatalogDoc | undefined,
-  profile: CatalogDoc | undefined,
-): boolean {
-  if (user === undefined || user.deletedAt !== undefined) return false
-  if (uid === OPERATOR_UID) return true
-  return migrationSharingConsentIsValid(uid, user, setting, profile)
-}
-
 export function migrationSharingConsentIsValid(
   uid: string,
   user: CatalogDoc | undefined,
@@ -89,59 +78,6 @@ export function migrationSharingConsentIsValid(
 ): boolean {
   return user !== undefined && user.deletedAt === undefined && validSharingSetting(setting) &&
     profile?.uid === uid && profile.public === true && profile.deletedAt === undefined
-}
-
-export async function assertMigrationSeedSourcesEligible(
-  transaction: Transaction,
-  db: Firestore,
-  sources: readonly MigrationSeedSource[],
-): Promise<void> {
-  const uniqueSources = [...new Map(sources.map((source) => [source.bookPath, source])).values()]
-  const sourceReads = await Promise.all(uniqueSources.map(async (source) => {
-    const expectedPrefix = `users/${source.uid}/books/`
-    if (!source.bookPath.startsWith(expectedPrefix) || source.bookPath.length === expectedPrefix.length) {
-      throw new Error(`invalid catalog seed source ${source.bookPath}`)
-    }
-    const [user, book, setting] = await Promise.all([
-      transaction.get(db.doc(`users/${source.uid}`)),
-      transaction.get(db.doc(source.bookPath)),
-      source.uid === OPERATOR_UID
-        ? Promise.resolve(null)
-        : transaction.get(db.doc(`users/${source.uid}/settings/bookSharing`)),
-    ])
-    if (!book.exists) throw new Error(`catalog seed source ${source.bookPath} no longer exists`)
-    assertSnapshotVersion(source.bookPath, source.bookVersion, book)
-    return { source, user: user.data(), setting: setting?.data() }
-  }))
-
-  const authorVersions = new Map<string, number>()
-  for (const source of uniqueSources) {
-    for (const author of source.authorVersions) authorVersions.set(author.path, author.version)
-  }
-  const authorSnapshots = await Promise.all(
-    [...authorVersions].map(([path]) => transaction.get(db.doc(path))),
-  )
-  for (let index = 0; index < authorSnapshots.length; index += 1) {
-    const [path, version] = [...authorVersions][index]
-    assertSnapshotVersion(path, version, authorSnapshots[index])
-  }
-
-  const profileNames = [...new Set(sourceReads.flatMap(({ source, setting }) =>
-    source.uid !== OPERATOR_UID && typeof setting?.profileUsername === 'string'
-      ? [setting.profileUsername]
-      : [],
-  ))]
-  const profiles = await Promise.all(profileNames.map((username) => transaction.get(db.doc(`profiles/${username}`))))
-  const profilesByUsername = new Map(profiles.map((profile) => [profile.id, profile.data()]))
-
-  for (const { source, user, setting } of sourceReads) {
-    const profile = typeof setting?.profileUsername === 'string'
-      ? profilesByUsername.get(setting.profileUsername)
-      : undefined
-    if (!migrationSeedIsEligible(source.uid, user, setting, profile)) {
-      throw new Error(`catalog seed source ${source.bookPath} is no longer eligible to publish metadata`)
-    }
-  }
 }
 
 export async function assertMigrationProjectionSourcesEligible(

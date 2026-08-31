@@ -25,8 +25,10 @@ export type MigrationBook = {
   coverUrl?: unknown
   subjects?: unknown
   fiction?: unknown
-  eligibleSeed: boolean
   sharingEligible?: boolean
+  // 0 for the operator's copy, 1 for everyone else: which spelling and
+  // metadata becomes canonical when copies disagree. Every live user's
+  // book seeds the catalog (catalog data is public).
   seedPriority: number
   workId?: unknown
   editionId?: unknown
@@ -68,7 +70,6 @@ export type MigrationCandidate = {
 export type MigrationGroup = {
   key: string
   candidates: MigrationCandidate[]
-  eligibleSeed: boolean
   canonicalTitle: string
   alternateTitles: string[]
   authorNames: string[]
@@ -345,7 +346,6 @@ const preferredCandidate = (candidates: MigrationCandidate[]): MigrationCandidat
   [...candidates].sort(
     (left, right) =>
       left.book.seedPriority - right.book.seedPriority ||
-      Number(right.book.eligibleSeed) - Number(left.book.eligibleSeed) ||
       left.book.path.localeCompare(right.book.path)
   )[0]
 
@@ -395,13 +395,12 @@ export const planCrossUserCatalog = (
   const reviewedById = new Map([...reviewed.byPath.values()].map((group) => [group.id, group]))
   const groups: MigrationGroup[] = []
   for (const [key, groupCandidates] of [...byIdentity.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const eligibleCandidates = groupCandidates.filter((candidate) => candidate.book.eligibleSeed)
-    const preferred = preferredCandidate(eligibleCandidates.length > 0 ? eligibleCandidates : groupCandidates)
+    const preferred = preferredCandidate(groupCandidates)
     const reviewedGroup = preferred.reviewedGroupId ? reviewedById.get(preferred.reviewedGroupId) : undefined
     const canonicalTitle = reviewedGroup?.canonicalTitle.trim() || preferred.title
     const alternateTitles = cleanTitles([
       ...(reviewedGroup?.alternateTitles ?? []),
-      ...eligibleCandidates.map((candidate) => candidate.title),
+      ...groupCandidates.map((candidate) => candidate.title),
     ]).filter((title) => normalizeCatalogTitle(title) !== normalizeCatalogTitle(canonicalTitle))
     const authorNames = reviewedGroup ? reviewedGroup.authorNames : preferred.authorNames
     const authorIds = authorNames.map((name) => {
@@ -442,7 +441,7 @@ export const planCrossUserCatalog = (
       }
     }
     const isbns = [...new Set(groupCandidates.flatMap((candidate) => (candidate.isbn13 ? [candidate.isbn13] : [])))].sort()
-    const seedIsbns = [...new Set(eligibleCandidates.flatMap(
+    const seedIsbns = [...new Set(groupCandidates.flatMap(
       (candidate) => candidate.isbn13 ? [candidate.isbn13] : [],
     ))].sort()
     const workId = deterministicCatalogId('work', key)
@@ -452,7 +451,6 @@ export const planCrossUserCatalog = (
     groups.push({
       key,
       candidates: [...groupCandidates].sort((left, right) => left.book.path.localeCompare(right.book.path)),
-      eligibleSeed: groupCandidates.some((candidate) => candidate.book.eligibleSeed),
       canonicalTitle,
       alternateTitles,
       authorNames,
