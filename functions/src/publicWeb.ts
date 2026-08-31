@@ -614,7 +614,7 @@ async function profileResponse(
     status: 200,
     headers: htmlHeaders(PROFILE_CACHE_CONTROL),
     body: request.method === "HEAD" ? "" :
-      renderProfileDocument(shell, profile, searchable),
+      renderProfileDocument(shell, profile, searchable, publicProfileView(profile)),
   };
 }
 

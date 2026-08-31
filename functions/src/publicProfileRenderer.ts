@@ -250,6 +250,7 @@ export function renderProfileDocument(
   shell: string,
   profile: PublicProfile,
   searchable: boolean,
+  publicView: unknown,
 ): string {
   const title = `${displayName(profile)}'s reading profile | Book Tracker`;
   const description = profileDescription(profile);
@@ -264,10 +265,17 @@ export function renderProfileDocument(
     `<meta data-shell-description name="description" content="${escapeHtml(description)}" />`,
   );
   document = replaceExactlyOnce(document, HEAD_MARKER, `\t\t${profileHead(profile, searchable)}`);
+  // The profile data, inlined so a fresh page load hydrates the SPA without
+  // the /profiles/<username>.json round trip that showed a "Loading…" flash
+  // on every refresh. Same wire shape as that endpoint; jsonForHtml escapes
+  // it so a value containing </script> cannot break out. It lives inside the
+  // snapshot slot (not between it and #app-shell) so the no-JS
+  // adjacent-sibling CSS and the client's consume-and-clear both still hold.
   return replaceExactlyOnce(
     document,
     SNAPSHOT_MARKER,
-    `\t\t<div id="profile-snapshot-slot">${renderSnapshot(profile)}</div>`,
+    `\t\t<div id="profile-snapshot-slot">${renderSnapshot(profile)}`
+    + `<script id="profile-bootstrap" type="application/json">${jsonForHtml(publicView)}</script></div>`,
   );
 }
 

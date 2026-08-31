@@ -401,6 +401,28 @@ function storedAuthorIds(chips: AuthorChip[]): string[] {
 // shell — so other people's profiles only resolve against a deployed or
 // emulated Hosting stack; the content-type check turns that into a clear
 // error instead of a JSON parse failure.
+// The renderer inlines the profile as <script id="profile-bootstrap"> on a
+// fresh /profiles/<username> load, so the SPA hydrates synchronously instead
+// of fetching /profiles/<username>.json and flashing "Loading…". Consumed
+// once: the element is removed on read, so a client-side navigation to
+// another profile — or a return visit — falls through to the fetch and gets
+// fresh data. A malformed or mismatched block is ignored, not surfaced, so a
+// broken inline can only cost the fetch it would have replaced.
+function readInlineProfile(username: string): ProfileView | undefined {
+  if (typeof document === 'undefined') return undefined;
+  const element = document.getElementById('profile-bootstrap');
+  if (element === null) return undefined;
+  const text = element.textContent ?? '';
+  element.remove();
+  if (text.trim() === '') return undefined;
+  try {
+    const payload: unknown = JSON.parse(text);
+    return assertProfileViewFor(decodeProfileView(payload, `profiles/${username} (inline)`), username);
+  } catch {
+    return undefined;
+  }
+}
+
 async function fetchPublicProfile(username: string): Promise<ProfileView | null> {
   // credentials: 'omit' — the CDN varies on cookie, so a first-party cookie
   // would turn the shared cache entry into one per viewer (SEC-092).
@@ -578,7 +600,11 @@ class Database {
 
   // The public projection alone (no auth). Returns null for a missing or
   // private profile; the caller falls back to getProfile for the owner read.
+  // A fresh page load carries the profile inline, so it hydrates with no
+  // fetch (and no loading flash); a client-side navigation fetches.
   static getPublicProfile(username: string): Promise<ProfileView | null> {
+    const inline = readInlineProfile(username);
+    if (inline !== undefined) return Promise.resolve(inline);
     return fetchPublicProfile(username);
   }
 
