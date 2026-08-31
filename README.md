@@ -201,6 +201,8 @@ Root package commands:
 | `npm run test:bundle` | JavaScript and CSS bundle budgets |
 | `npm run test:e2e` | Browser tests against local emulators |
 | `npm run test:e2e:browser` | Run Playwright against an already running test environment |
+| `npm run pages:assemble` | Assemble the Cloudflare Pages upload directory (`.pages-dist/`: the build plus the worker) |
+| `npm run pages:deploy` | Assemble and deploy the site to Cloudflare Pages with the pinned wrangler |
 | `node docs/architecture/verify.ts` | Route coverage, image freshness, and map sanitization |
 
 Functions package commands:
