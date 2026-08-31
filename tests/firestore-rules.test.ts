@@ -203,6 +203,11 @@ test('publishing needs a verified account whose users document still exists', as
   await assertFails(setDoc(doc(unverified, 'profileDiscovery', 'legacy-reader'), marker('unverified')));
   await assertFails(setDoc(doc(ghost, 'profileDiscovery', 'real-reader'), marker('ghost')));
   await assertSucceeds(setDoc(doc(verified('real'), 'profileDiscovery', 'real-reader'), marker('real')));
+  // The marker now exists. Re-writing it — the blind setDoc a client with a
+  // stale (marker-absent) local cache would attempt when the owner toggles
+  // discovery back on — is an update, and updates are denied. So the client
+  // enable path must be a create-if-absent transaction, never a plain setDoc.
+  await assertFails(setDoc(doc(verified('real'), 'profileDiscovery', 'real-reader'), marker('real')));
   // The gate does not lock an unverified owner out of deleting what it has.
   const legacyDelete = writeBatch(unverified);
   legacyDelete.delete(doc(unverified, 'profiles', 'legacy-reader'));
