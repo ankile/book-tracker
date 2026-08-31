@@ -10,6 +10,7 @@ import type {
   CatalogSearchResult,
   CatalogSelection,
   CatalogWorkSummary,
+  EnsureCatalogAuthorsResponse,
   WorkReaderAttemptSummary,
   WorkReadersResponse,
 } from '../interfaces/catalog.ts';
@@ -144,6 +145,23 @@ export function decodeCatalogCreateResponse(value: unknown): CatalogCreateRespon
   };
 }
 
+// One id per requested author, in request order: the caller pairs them
+// positionally, so a response of another length is a protocol violation and
+// not something the caller can line up.
+export function decodeEnsureCatalogAuthorsResponse(
+  value: unknown,
+  requestedAuthors: number,
+): EnsureCatalogAuthorsResponse {
+  const context = 'catalog-ensureauthors response';
+  const data = record(value, context);
+  exactKeys(data, ['authorIds'], context);
+  const authorIds = strings(data.authorIds, `${context}.authorIds`);
+  if (authorIds.length !== requestedAuthors) {
+    throw new TypeError(`${context}.authorIds: expected ${requestedAuthors} ids`);
+  }
+  return {authorIds};
+}
+
 // The work and edition a book with no catalog match creates: the personal
 // book's own bibliographic fields, nothing inferred. Books without a
 // resolved author cannot seed a work (a work needs at least one author).
@@ -183,10 +201,9 @@ export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, me
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {
   const data = record(value, context);
   exactKeys(data, [
-    'username', 'displayName', 'status', 'pageCount', 'editionIsbn13',
-    'firstProgressAt', 'firstReadAt', 'finishedAt', 'calendarDays', 'activeDays',
-    'trackedMinutes', 'sessionCount', 'qualifiedPagesPerHour', 'percentPerHour',
-    'trackingCoverage',
+    'username', 'displayName', 'status', 'pageCount', 'firstProgressAt',
+    'firstReadAt', 'finishedAt', 'calendarDays', 'activeDays', 'trackedMinutes',
+    'sessionCount', 'qualifiedPagesPerHour', 'percentPerHour', 'trackingCoverage',
   ], context);
   if (data.status !== 'reading' && data.status !== 'finished') {
     throw new TypeError(`${context}.status: expected reading or finished`);
@@ -214,7 +231,6 @@ function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummar
     displayName: nonEmptyString(data.displayName, `${context}.displayName`),
     status: data.status,
     pageCount,
-    editionIsbn13: nullableString(data.editionIsbn13, `${context}.editionIsbn13`),
     firstProgressAt: calendarDate(data.firstProgressAt, `${context}.firstProgressAt`),
     firstReadAt: calendarDate(data.firstReadAt, `${context}.firstReadAt`),
     finishedAt: calendarDate(data.finishedAt, `${context}.finishedAt`),
@@ -311,15 +327,10 @@ export function linkedBooksForWork(
   return books.filter((book) => book.id !== excludingBookId && book.workId !== null && ids.has(book.workId));
 }
 
-export function catalogWorkHref(
-  book: Pick<Book, 'workId' | 'matchMethod'>,
-): string | null {
-  if (book.workId === null ||
-      (book.matchMethod !== 'isbn' && book.matchMethod !== 'external-id' &&
-       book.matchMethod !== 'catalog-choice' && book.matchMethod !== 'migration')) {
-    return null;
-  }
-  return `/books/${encodeURIComponent(book.workId)}`;
+// The work page reads the same shared work whatever linked the book to it,
+// so every linked book gets a link and how the link was made does not matter.
+export function catalogWorkHref(book: Pick<Book, 'workId'>): string | null {
+  return book.workId === null ? null : `/books/${encodeURIComponent(book.workId)}`;
 }
 
 export function appendDistinctReaderPage(
@@ -330,7 +341,7 @@ export function appendDistinctReaderPage(
   return [...current, ...next.filter((attempt) => !currentUsernames.has(attempt.username))];
 }
 
-export interface ReaderAttemptGroup {
+interface ReaderAttemptGroup {
   username: string;
   displayName: string;
   attempts: WorkReaderAttemptSummary[];
@@ -370,7 +381,7 @@ export function displayTrackingCoverage(value: number | null): string {
   return `${Math.round(Math.min(1, value) * 100)}%`;
 }
 
-export interface LatestRequestGate {
+interface LatestRequestGate {
   begin(): number;
   isCurrent(requestId: number): boolean;
   invalidate(): void;

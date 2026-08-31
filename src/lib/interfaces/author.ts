@@ -9,24 +9,15 @@ interface AuthorBase {
   id: string;
   name: string;
   nameLower: string;
-  alternateNames?: string[];
-  sortName?: string;
+  alternateNames: string[];
+  sortName: string;
   retirement?: AuthorRetirement;
 }
 
-export interface PersonAuthor extends AuthorBase {
-  kind: 'person';
-  givenName?: string;
-  familyName: string;
+// A person's sortName is the family name; other kinds sort by their full name.
+export interface Author extends AuthorBase {
+  kind: AuthorKind;
 }
-
-export interface NonPersonAuthor extends AuthorBase {
-  kind: 'entity' | 'placeholder';
-  givenName?: never;
-  familyName?: never;
-}
-
-export type Author = PersonAuthor | NonPersonAuthor;
 
 export interface AuthorSummary {
   id: string;

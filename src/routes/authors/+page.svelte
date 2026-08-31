@@ -11,7 +11,7 @@
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
-      const authorsStore = Database.getAuthors($user.uid);
+      const authorsStore = Database.getAuthors();
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
       return unsubscribe;
     }
@@ -26,11 +26,17 @@
     }
   });
 
-  const sortKey = (author: Author) => `${author.sortName ?? author.name} ${author.name}`.toLowerCase();
-  const authors = $derived(selectableAuthors(authorList ?? []).toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)));
+  const sortKey = (author: Author) => `${author.sortName} ${author.name}`.toLowerCase();
   const authorMap = $derived(new Map((authorList ?? []).map((author) => [author.id, author])));
 
+  // The catalog holds every author anyone has added; this page is about the
+  // reader's own shelf, so only the authors their books reference are listed.
   const bookCounts = $derived(bookAuthorReferenceCounts(allBooks ?? [], authorMap));
+  const authors = $derived(
+    selectableAuthors(authorList ?? [])
+      .filter((author) => bookCounts.has(author.id))
+      .toSorted((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)),
+  );
 </script>
 
 <style>
@@ -97,11 +103,12 @@
 <div class="authors-container">
   <h1>Authors</h1>
   <p class="hint">
-    Authors are shared across Book Tracker. The book count is for your library.
-    Catalog administrators manage names, alternate spellings, and merges.
+    The authors your books reference. The records themselves are shared across
+    Book Tracker, and catalog administrators manage names, alternate spellings,
+    and merges.
   </p>
 
-  {#if authorList === undefined}
+  {#if authorList === undefined || allBooks === undefined}
     <p>Loading…</p>
   {:else if authors.length === 0}
     <p>No authors yet — they appear as you add books.</p>
@@ -112,7 +119,7 @@
           <tr>
             <th>Name</th>
             <th>Kind</th>
-            <th>Family name</th>
+            <th>Sort name</th>
             <th class="count">Books</th>
           </tr>
         </thead>
@@ -121,8 +128,8 @@
             {@const count = bookCounts.get(author.id) ?? 0}
             <tr>
               <td>{author.name}</td>
-              <td class="kind">{author.kind ?? 'person'}</td>
-              <td class="sort-name">{author.sortName ?? author.name}</td>
+              <td class="kind">{author.kind}</td>
+              <td class="sort-name">{author.sortName}</td>
               <td class="count">{count}</td>
             </tr>
           {/each}

@@ -5,9 +5,9 @@ import { deleteApp, initializeApp } from 'firebase/app';
 import { doc, getFirestore, Timestamp } from 'firebase/firestore';
 
 import {
-  decodeAuthor,
   decodeBook,
   decodeBookUpdate,
+  decodeCatalogAuthor,
   decodeLiveQueueSweepItem,
   decodeProfile,
   decodeProfileDiscovery,
@@ -151,26 +151,32 @@ test('book decoder distinguishes current and documented legacy authorship', () =
   );
 });
 
-test('author and user decoders reject malformed nested data', () => {
-  const merged = decodeAuthor('old', {
-    name: 'Old Author',
-    nameLower: 'old author',
-    kind: 'person',
-    givenName: 'Old',
-    familyName: 'Author',
-    retirement: {reason: 'merged', targetId: 'new'},
-  }, 'users/owner/authors/old');
+test('the catalog author decoder derives person parts and rejects a missing sort name', () => {
+  const person = decodeCatalogAuthor('dahl', {
+    canonicalName: 'Roald Dahl', alternateNames: ['R. Dahl'],
+    nameKeys: ['roald dahl'], sortName: 'Dahl', kind: 'person',
+    status: 'active', mergedFrom: [],
+  }, 'catalogAuthors/dahl');
+  assert.deepEqual(person, {
+    id: 'dahl', name: 'Roald Dahl', nameLower: 'roald dahl',
+    alternateNames: ['R. Dahl'], sortName: 'Dahl', kind: 'person',
+  });
+  const merged = decodeCatalogAuthor('old', {
+    canonicalName: 'Old Author', alternateNames: [], nameKeys: ['old author'],
+    sortName: 'Author', kind: 'person', status: 'merged', mergedInto: 'new',
+    mergedFrom: [],
+  }, 'catalogAuthors/old');
   assert.deepEqual(merged.retirement, {reason: 'merged', targetId: 'new'});
   assert.throws(
-    () => decodeAuthor('bad', {
-      name: 'Bad Author',
-      nameLower: 'bad author',
-      kind: 'person',
-      givenName: 'Wrong',
-      familyName: 'Parts',
-    }, 'users/owner/authors/bad'),
-    /matching its explicit name parts/,
+    () => decodeCatalogAuthor('bad', {
+      canonicalName: 'Bad Author', alternateNames: [], nameKeys: ['bad author'],
+      kind: 'person', status: 'active', mergedFrom: [],
+    }, 'catalogAuthors/bad'),
+    /sortName/,
   );
+});
+
+test('the user decoder rejects malformed nested data', () => {
   assert.throws(
     () => decodeUser({
       uid: 'owner',

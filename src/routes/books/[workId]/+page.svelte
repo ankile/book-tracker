@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
+  import { FirebaseError } from 'firebase/app';
   import { workReaders } from '$lib/firebase/functions.ts';
   import type { WorkReadersResponse } from '$lib/interfaces/catalog.ts';
   import {
@@ -38,7 +39,9 @@
       if (!requestGate.isCurrent(requestId)) return;
       console.error('Work readers failed', reason);
       response = null;
-      error = 'This linked work is unavailable or has not been shared yet.';
+      error = isRateLimited(reason)
+        ? 'Too many requests for now — try again in a while.'
+        : 'This linked work is unavailable or has not been shared yet.';
       loading = false;
     });
     return () => requestGate.invalidate();
@@ -64,10 +67,19 @@
     } catch (reason) {
       if (!requestGate.isCurrent(requestId)) return;
       console.error('More work readers failed', reason);
-      moreError = 'More readers could not be loaded. Try again later.';
+      moreError = isRateLimited(reason)
+        ? 'Too many requests for now — try again in a while.'
+        : 'More readers could not be loaded. Try again later.';
     } finally {
       if (requestGate.isCurrent(requestId)) loadingMore = false;
     }
+  }
+
+  // The reader summary is rate limited per user and across all readers, so a
+  // burst of page loads is the one rejection worth naming: the generic
+  // message would send the reader looking for a problem with the work.
+  function isRateLimited(reason: unknown): boolean {
+    return reason instanceof FirebaseError && reason.code === 'functions/resource-exhausted';
   }
 
   function displayDate(value: string | null): string {
@@ -134,8 +146,8 @@
       {#if response.incomplete}
         <p class="partial-note" role="status">
           This is a partial summary. {response.omittedAttempts > 0
-            ? `${response.omittedAttempts} opted-in reading ${response.omittedAttempts === 1 ? 'attempt was' : 'attempts were'} omitted because the safety limits were reached.`
-            : 'Additional reader rows may exist beyond the safety limit.'}
+            ? `${response.omittedAttempts} opted-in reading ${response.omittedAttempts === 1 ? 'attempt is' : 'attempts are'} not shown.`
+            : 'Some reader rows could not be read.'}
         </p>
       {/if}
       {#if readers.length === 0}
@@ -164,7 +176,6 @@
                       <div><dt>Edition per tracked hour</dt><dd>{attempt.percentPerHour === null ? 'Not enough data' : `${attempt.percentPerHour.toFixed(1)}%`}</dd></div>
                       <div><dt>Tracking coverage</dt><dd>{displayTrackingCoverage(attempt.trackingCoverage)}</dd></div>
                     </dl>
-                    {#if attempt.editionIsbn13}<p class="isbn">Shared edition ISBN {attempt.editionIsbn13}</p>{/if}
                   </section>
                 {/each}
               </div>
@@ -209,7 +220,7 @@
   h1 { margin: 0.35rem 0 0.25rem; }
   h2 { margin-top: 2rem; }
   .authors { margin: 0; font-size: 1.1rem; }
-  .aliases, .privacy-note, .edition span, .isbn { color: #65716e; font-size: 0.9rem; }
+  .aliases, .privacy-note, .edition span { color: #65716e; font-size: 0.9rem; }
   .partial-note { padding: 0.75rem; border-left: 4px solid #a56712; background: #fff4d9; color: #5f410f; }
   .back { color: #35686a; text-decoration: none; }
 

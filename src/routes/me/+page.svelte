@@ -79,7 +79,7 @@
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
-      const authorsStore = Database.getAuthors($user.uid);
+      const authorsStore = Database.getAuthors();
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
       return unsubscribe;
     }
@@ -155,6 +155,18 @@
   // Books whose metadata cannot be filled in without a human: no ISBN, or
   // one that fails its check digit. The /isbns page repairs them.
   let isbnProblems = $derived(countIsbnProblems(allBooks ?? []));
+
+  // The author catalog is shared, so its size is not a personal statistic:
+  // count the authors this reader's own books reference. Ids no selectable
+  // author row backs (dangling or retired) are left out, as on /authors.
+  const referencedAuthors = $derived.by(() => {
+    const selectable = new Set(selectableAuthors(authorList ?? []).map((author) => author.id));
+    const referenced = new Set<string>();
+    for (const book of analyticsBooks) {
+      for (const id of book.authorIds) if (selectable.has(id)) referenced.add(id);
+    }
+    return referenced.size;
+  });
 
   // User document (for the Toggl connection status)
   let userDoc = $state<UserDocument | null | undefined>(undefined);
@@ -1409,7 +1421,8 @@
       <StatCard label="Books Read" value={stats.finishedBooks} href="/finished"
         subtext={stats.firstFinishedAt && stats.lastFinishedAt ? formatDateRange(stats.firstFinishedAt, stats.lastFinishedAt) : 'Completed books'} />
       <StatCard label="Currently Reading" value={stats.readingBooks} subtext="In progress" href="/" />
-      <StatCard label="Catalog Authors" value={authorList === undefined ? '…' : selectableAuthors(authorList).length} subtext="Browse shared names" href="/authors" />
+      <StatCard label="Authors" value={authorList === undefined || allBooks === undefined ? '…' : referencedAuthors}
+        subtext="Across your books" href="/authors" />
       <StatCard label="Needs an ISBN" value={allBooks === undefined ? '…' : isbnProblems}
         subtext="Missing or mistyped, so no cover or genre" href="/isbns" />
       <StatCard label="Total Time Read" value={`${stats.totalTimeReadHours} hrs`}

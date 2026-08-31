@@ -42,6 +42,7 @@ import {
   writeTogglReportedIds,
 } from '../utils/toggl.ts';
 import { joinPersonName } from '../utils/authors.ts';
+import { MAX_BOOK_AUTHORS } from '../utils/bookForm.ts';
 import { invokeReportedWrite } from '../utils/offlineWrite.ts';
 import { runRetryableSessionTask } from '../utils/sessionTask.ts';
 import {
@@ -54,7 +55,12 @@ import {
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from './readingSessionWrites.ts';
-import type { Author, AuthorChip } from '../interfaces/author.ts';
+import type {
+  Author,
+  AuthorChip,
+  ExistingAuthorChip,
+  UnresolvedAuthorChip,
+} from '../interfaces/author.ts';
 import type { ActiveTimer, Book } from '../interfaces/book.ts';
 import type { CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
@@ -152,12 +158,21 @@ const listenError = (label: string) => (error: FirestoreError) => {
 const userStores = new Map<string, Readable<UserDocument | null | undefined>>();
 const booksStores = new Map<string, Readable<Book[]>>();
 const allBooksStores = new Map<string, Readable<Book[] | undefined>>();
-const authorsStores = new Map<string, Readable<Author[] | undefined>>();
 const profileStores = new Map<string, Readable<Profile | null | undefined>>();
 const profileDiscoveryStores = new Map<string, Readable<ProfileDiscovery | null | undefined>>();
 const bookSharingStores = new Map<string, Readable<BookSharingSettings | null | undefined>>();
 const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
+const catalogAuthorsStore: Readable<Author[] | undefined> = cachedReadable<Author[] | undefined>(
+  undefined,
+  (set) => onSnapshot(query(collection(db, 'catalogAuthors')), (snapshot) => {
+    const authors = snapshot.docs.map((authorDoc) => decodeStored(
+      () => decodeCatalogAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
+    ));
+    authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
+    set(authors);
+  }, listenError('load the author catalog')),
+);
 
 type StoreStart<T> = (set: (value: T) => void) => Unsubscriber;
 
@@ -349,42 +364,10 @@ interface DeleteReadingSessionInput {
   title: string;
 }
 
-// Existing catalog authors remain fully offline-capable. A genuinely new
-// author needs one bounded callable so clients cannot edit or merge shared
-// catalog documents directly. The response order matches the new-chip order.
-async function resolveBookAuthors(chips: AuthorChip[]): Promise<AuthorChip[]> {
-  if (chips.length > 6) throw new Error('A personal book may have at most six authors.');
-  const newChips = chips.filter((chip) => chip.id === null);
-  if (newChips.length === 0) return chips;
-  const response = await ensureCatalogAuthors({
-    authors: newChips.map((chip) => ({
-      canonicalName: chip.kind === 'person' ? joinPersonName(chip) : chip.name.trim().replace(/\s+/g, ' '),
-      sortName: chip.kind === 'person' ? chip.familyName.trim().replace(/\s+/g, ' ') : chip.name.trim().replace(/\s+/g, ' '),
-      kind: chip.kind,
-    })),
-  });
-  if (response.authorIds.length !== newChips.length) {
-    throw new Error('The catalog returned the wrong number of author IDs.');
-  }
-  let newIndex = 0;
-  const resolved = chips.map((chip): AuthorChip => {
-    if (chip.id !== null) return chip;
-    const authorId = response.authorIds[newIndex];
-    newIndex += 1;
-    if (authorId === undefined) throw new Error('The catalog omitted an author ID.');
-    return {id: authorId, name: chip.name};
-  });
-  const seen = new Set<string>();
-  return resolved.filter((chip) => {
-    if (chip.id === null) throw new Error('The catalog left a new author unresolved.');
-    if (seen.has(chip.id)) return false;
-    seen.add(chip.id);
-    return true;
-  });
-}
-
 function storedAuthorIds(chips: AuthorChip[]): string[] {
-  if (chips.length > 6) throw new Error('A personal book may have at most six authors.');
+  if (chips.length > MAX_BOOK_AUTHORS) {
+    throw new Error(`A personal book may have at most ${MAX_BOOK_AUTHORS} authors.`);
+  }
   const ids = chips.map((chip) => {
     if (chip.id === null) throw new Error('Resolve each new author before saving the book.');
     if ('unresolved' in chip) throw new Error('Replace each unresolved author before saving the book.');
@@ -459,8 +442,37 @@ async function fetchPublicProfile(username: string): Promise<ProfileView | null>
 const ownProfileUsernames = new Map<string, Set<string>>();
 
 class Database {
-  static resolveBookAuthors(chips: AuthorChip[]): Promise<AuthorChip[]> {
-    return resolveBookAuthors(chips);
+  // Existing catalog authors remain fully offline-capable. A genuinely new
+  // author needs one bounded callable so clients cannot edit or merge shared
+  // catalog documents directly. The response order matches the new-chip order
+  // and ensureCatalogAuthors rejects a response of any other length, so the
+  // ids line up positionally. Two chips can name the same author, in which
+  // case the catalog answers with one id twice and the duplicate is dropped.
+  static async resolveBookAuthors(chips: AuthorChip[]): Promise<AuthorChip[]> {
+    if (chips.length > MAX_BOOK_AUTHORS) {
+      throw new Error(`A personal book may have at most ${MAX_BOOK_AUTHORS} authors.`);
+    }
+    const newChips = chips.filter((chip) => chip.id === null);
+    if (newChips.length === 0) return chips;
+    const response = await ensureCatalogAuthors({
+      authors: newChips.map((chip) => ({
+        canonicalName: chip.kind === 'person' ? joinPersonName(chip) : chip.name.trim().replace(/\s+/g, ' '),
+        sortName: chip.kind === 'person' ? chip.familyName.trim().replace(/\s+/g, ' ') : chip.name.trim().replace(/\s+/g, ' '),
+        kind: chip.kind,
+      })),
+    });
+    let newIndex = 0;
+    const seen = new Set<string>();
+    const resolved: AuthorChip[] = [];
+    for (const chip of chips) {
+      const entry: ExistingAuthorChip | UnresolvedAuthorChip = chip.id === null
+        ? {id: response.authorIds[newIndex++], name: chip.name}
+        : chip;
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      resolved.push(entry);
+    }
+    return resolved;
   }
 
   // Returns a Svelte store that listens to the user document.
@@ -520,22 +532,15 @@ class Database {
     });
   }
 
-  // The shared author catalog, for autocomplete and the book-list join. Deliberately
-  // unordered (see getAllBooks for why orderBy is a trap); sorted
-  // client-side. Starts as undefined (loading, getUser convention) so the
-  // join can distinguish "not yet loaded" from an empty collection.
-  static getAuthors(_userId: string): Readable<Author[] | undefined> {
-    return cachedStore(authorsStores, 'shared-catalog', undefined, (set) => {
-      const q = query(collection(db, 'catalogAuthors'));
-
-      return onSnapshot(q, (snapshot) => {
-        const authors = snapshot.docs.map((authorDoc) => decodeStored(
-          () => decodeCatalogAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
-        ));
-        authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
-        set(authors);
-      }, listenError('load your authors'));
-    });
+  // The shared author catalog, for autocomplete and the book-list join. One
+  // store for everyone: the catalog is not per-user, and the whole collection
+  // is listened to on purpose — it is bounded at 5000 documents, and
+  // autocomplete needs all of them locally. Deliberately unordered (see
+  // getAllBooks for why orderBy is a trap); sorted client-side. Starts as
+  // undefined (loading, getUser convention) so the join can distinguish
+  // "not yet loaded" from an empty collection.
+  static getAuthors(): Readable<Author[] | undefined> {
+    return catalogAuthorsStore;
   }
 
   // The signed-in user's own public profile doc, found by uid because the

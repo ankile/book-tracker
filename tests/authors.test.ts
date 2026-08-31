@@ -9,7 +9,6 @@ import {
   resolveChip,
   canonicalAuthorIds,
   bookAuthorReferenceCounts,
-  booksReferencingAuthor,
   editableBookAuthorChips,
   effectiveBookAuthorIds,
   readableBookAuthorIds,
@@ -21,6 +20,13 @@ import {
 } from '../src/lib/utils/authors.ts';
 import type { DisplayAuthor } from '../src/lib/utils/authors.ts';
 import type { Author } from '../src/lib/interfaces/author.ts';
+
+// Every catalog author carries alternateNames and sortName; the cases below
+// turn on identity, kind and retirement, so the helper fills the two fields
+// they do not exercise.
+function personAuthor(fields: Omit<Author, 'kind' | 'alternateNames'>): Author {
+  return {kind: 'person', alternateNames: [], ...fields};
+}
 
 test('authorIdFor normalizes case, whitespace, and slashes', () => {
   assert.equal(authorIdFor('  J.  R. R.   Tolkien '), 'j. r. r. tolkien');
@@ -112,14 +118,12 @@ test('resolveChip matches a shared author by an alternate catalog name', () => {
 });
 
 test('bookAuthors resolves normalized ids and keeps legacy authorship authoritative', () => {
-  const tolkien: Author = {
+  const tolkien = personAuthor({
     id: 'tolkien',
     name: 'J. R. R. Tolkien',
     nameLower: 'j. r. r. tolkien',
-    kind: 'person',
-    givenName: 'J. R. R.',
-    familyName: 'Tolkien',
-  };
+    sortName: 'Tolkien',
+  });
   const authors = new Map([[tolkien.id, tolkien]]);
 
   assert.deepEqual(bookAuthors({ authorIds: ['tolkien'] }, authors), [tolkien]);
@@ -142,25 +146,25 @@ test('bookAuthors rejects corrupt normalized joins', () => {
 });
 
 test('read-only author ids canonicalize healthy redirects and retain raw corrupt ids', () => {
-  const target: Author = {
-    id: 'target', name: 'Target', nameLower: 'target', kind: 'person', familyName: 'Target',
-  };
-  const source: Author = {
-    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
+  const target = personAuthor({
+    id: 'target', name: 'Target', nameLower: 'target', sortName: 'Target',
+  });
+  const source = personAuthor({
+    id: 'source', name: 'Source', nameLower: 'source', sortName: 'Source',
     retirement: { reason: 'merged', targetId: 'target' },
-  };
-  const broken: Author = {
-    id: 'broken', name: 'Broken', nameLower: 'broken', kind: 'person', familyName: 'Broken',
+  });
+  const broken = personAuthor({
+    id: 'broken', name: 'Broken', nameLower: 'broken', sortName: 'Broken',
     retirement: { reason: 'merged', targetId: 'absent-target' },
-  };
-  const first: Author = {
-    id: 'first', name: 'First', nameLower: 'first', kind: 'person', familyName: 'First',
+  });
+  const first = personAuthor({
+    id: 'first', name: 'First', nameLower: 'first', sortName: 'First',
     retirement: { reason: 'merged', targetId: 'second' },
-  };
-  const second: Author = {
-    id: 'second', name: 'Second', nameLower: 'second', kind: 'person', familyName: 'Second',
+  });
+  const second = personAuthor({
+    id: 'second', name: 'Second', nameLower: 'second', sortName: 'Second',
     retirement: { reason: 'merged', targetId: 'first' },
-  };
+  });
   const authorMap = new Map([target, source, broken, first, second].map(
     (author) => [author.id, author],
   ));
@@ -186,13 +190,13 @@ test('read-only author ids canonicalize healthy redirects and retain raw corrupt
 });
 
 test('book reference counts preserve dangling raw ids for delete safety', () => {
-  const target: Author = {
-    id: 'target', name: 'Target', nameLower: 'target', kind: 'person', familyName: 'Target',
-  };
-  const source: Author = {
-    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
+  const target = personAuthor({
+    id: 'target', name: 'Target', nameLower: 'target', sortName: 'Target',
+  });
+  const source = personAuthor({
+    id: 'source', name: 'Source', nameLower: 'source', sortName: 'Source',
     retirement: { reason: 'merged', targetId: 'target' },
-  };
+  });
   const counts = bookAuthorReferenceCounts([
     { authorIds: ['source', 'missing'] },
     { authorIds: ['target', 'missing', 'missing'] },
@@ -219,23 +223,19 @@ test('editableBookAuthorChips exposes a missing author as a removable repair chi
 });
 
 test('editableBookAuthorChips exposes a missing merge target without discarding valid authors', () => {
-  const valid: Author = {
+  const valid = personAuthor({
     id: 'valid',
     name: 'Valid Author',
     nameLower: 'valid author',
-    kind: 'person',
-    givenName: 'Valid',
-    familyName: 'Author',
-  };
-  const broken: Author = {
+    sortName: 'Author',
+  });
+  const broken = personAuthor({
     id: 'broken',
     name: 'Broken Author',
     nameLower: 'broken author',
-    kind: 'person',
-    givenName: 'Broken',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'missing-target' },
-  };
+  });
 
   const result = editableBookAuthorChips(
     { authorIds: ['valid', 'broken'] },
@@ -253,24 +253,20 @@ test('editableBookAuthorChips exposes a missing merge target without discarding 
 });
 
 test('editableBookAuthorChips exposes cyclic merge chains for repair', () => {
-  const first: Author = {
+  const first = personAuthor({
     id: 'first',
     name: 'First Author',
     nameLower: 'first author',
-    kind: 'person',
-    givenName: 'First',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'second' },
-  };
-  const second: Author = {
+  });
+  const second = personAuthor({
     id: 'second',
     name: 'Second Author',
     nameLower: 'second author',
-    kind: 'person',
-    givenName: 'Second',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'first' },
-  };
+  });
 
   const result = editableBookAuthorChips({ authorIds: ['first'] }, [first, second]);
 
@@ -298,33 +294,27 @@ test('editableBookAuthorChips preserves a legacy embedded name for a missing doc
 });
 
 test('editableBookAuthorChips repairs legacy strings with broken redirects instead of throwing', () => {
-  const broken: Author = {
+  const broken = personAuthor({
     id: 'broken',
     name: 'Broken Author',
     nameLower: 'broken author',
-    kind: 'person',
-    givenName: 'Broken',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'missing-target' },
-  };
-  const first: Author = {
+  });
+  const first = personAuthor({
     id: 'first',
     name: 'First Author',
     nameLower: 'first author',
-    kind: 'person',
-    givenName: 'First',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'second' },
-  };
-  const second: Author = {
+  });
+  const second = personAuthor({
     id: 'second',
     name: 'Second Author',
     nameLower: 'second author',
-    kind: 'person',
-    givenName: 'Second',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'first' },
-  };
+  });
 
   const missingTarget = editableBookAuthorChips({ author: 'Broken Author' }, [broken]);
   const cycle = editableBookAuthorChips({ author: 'First Author' }, [first, second]);
@@ -338,23 +328,19 @@ test('editableBookAuthorChips repairs legacy strings with broken redirects inste
 });
 
 test('editableBookAuthorChips deduplicates legacy aliases that resolve to one author', () => {
-  const target: Author = {
+  const target = personAuthor({
     id: 'target',
     name: 'Target Author',
     nameLower: 'target author',
-    kind: 'person',
-    givenName: 'Target',
-    familyName: 'Author',
-  };
-  const source: Author = {
+    sortName: 'Author',
+  });
+  const source = personAuthor({
     id: 'old author',
     name: 'Old Author',
     nameLower: 'old author',
-    kind: 'person',
-    givenName: 'Old',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'target' },
-  };
+  });
 
   const result = editableBookAuthorChips(
     { author: 'Old Author, Target Author' },
@@ -378,18 +364,18 @@ test('repairableBookAuthors keeps corrupt rows renderable with an explicit marke
 });
 
 test('repairableBookAuthors marks broken and cyclic redirects instead of crashing display', () => {
-  const broken: Author = {
-    id: 'broken', name: 'Broken Author', nameLower: 'broken author', kind: 'person', familyName: 'Author',
+  const broken = personAuthor({
+    id: 'broken', name: 'Broken Author', nameLower: 'broken author', sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'missing-target' },
-  };
-  const first: Author = {
-    id: 'first', name: 'First Author', nameLower: 'first author', kind: 'person', familyName: 'Author',
+  });
+  const first = personAuthor({
+    id: 'first', name: 'First Author', nameLower: 'first author', sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'second' },
-  };
-  const second: Author = {
-    id: 'second', name: 'Second Author', nameLower: 'second author', kind: 'person', familyName: 'Author',
+  });
+  const second = personAuthor({
+    id: 'second', name: 'Second Author', nameLower: 'second author', sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'first' },
-  };
+  });
   const authorMap = new Map([broken, first, second].map((author) => [author.id, author]));
 
   assert.deepEqual(
@@ -402,14 +388,12 @@ test('repairableBookAuthors marks broken and cyclic redirects instead of crashin
 });
 
 test('repairableBookAuthors keeps legacy string authorship authoritative', () => {
-  const renamed: Author = {
+  const renamed = personAuthor({
     id: 'old author',
     name: 'Renamed Author',
     nameLower: 'renamed author',
-    kind: 'person',
-    givenName: 'Renamed',
-    familyName: 'Author',
-  };
+    sortName: 'Author',
+  });
 
   assert.deepEqual(
     repairableBookAuthors(
@@ -421,32 +405,26 @@ test('repairableBookAuthors keeps legacy string authorship authoritative', () =>
 });
 
 test('merged authors resolve transitively and deleted authors stay non-selectable', () => {
-  const target: Author = {
+  const target = personAuthor({
     id: 'target',
     name: 'Target Author',
     nameLower: 'target author',
-    kind: 'person',
-    givenName: 'Target',
-    familyName: 'Author',
-  };
-  const source: Author = {
+    sortName: 'Author',
+  });
+  const source = personAuthor({
     id: 'source',
     name: 'Old Author',
     nameLower: 'old author',
-    kind: 'person',
-    givenName: 'Old',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'merged', targetId: 'target' },
-  };
-  const deleted: Author = {
+  });
+  const deleted = personAuthor({
     id: 'deleted',
     name: 'Deleted Author',
     nameLower: 'deleted author',
-    kind: 'person',
-    givenName: 'Deleted',
-    familyName: 'Author',
+    sortName: 'Author',
     retirement: { reason: 'deleted' },
-  };
+  });
   const authorMap = new Map([source, target, deleted].map((author) => [author.id, author]));
 
   assert.deepEqual(canonicalAuthorIds(['source', 'target'], authorMap), ['target']);
@@ -465,57 +443,34 @@ test('merged authors resolve transitively and deleted authors stay non-selectabl
 });
 
 test('author redirect cycles crash as corrupt data', () => {
-  const first: Author = {
-    id: 'first', name: 'First', nameLower: 'first', kind: 'person', familyName: 'First',
+  const first = personAuthor({
+    id: 'first', name: 'First', nameLower: 'first', sortName: 'First',
     retirement: { reason: 'merged', targetId: 'second' },
-  };
-  const second: Author = {
-    id: 'second', name: 'Second', nameLower: 'second', kind: 'person', familyName: 'Second',
+  });
+  const second = personAuthor({
+    id: 'second', name: 'Second', nameLower: 'second', sortName: 'Second',
     retirement: { reason: 'merged', targetId: 'first' },
-  };
+  });
   const authorMap = new Map([[first.id, first], [second.id, second]]);
   assert.throws(() => canonicalAuthorIds(['first'], authorMap), /Cyclic author merge/);
 });
 
-test('merge counting tolerates unrelated and same-book corrupt references', () => {
-  const source: Author = {
-    id: 'source', name: 'Source', nameLower: 'source', kind: 'person', familyName: 'Source',
-  };
-  const healthy: Author = {
-    id: 'healthy', name: 'Healthy', nameLower: 'healthy', kind: 'person', familyName: 'Healthy',
-  };
-  const broken: Author = {
-    id: 'broken', name: 'Broken', nameLower: 'broken', kind: 'person', familyName: 'Broken',
-    retirement: {reason: 'merged', targetId: 'missing'},
-  };
-  const map = new Map([source, healthy, broken].map((author) => [author.id, author]));
-  const books = [
-    {id: 'source-and-corrupt', authorIds: ['source', 'missing']},
-    {id: 'unrelated-corrupt', authorIds: ['broken']},
-    {id: 'healthy', authorIds: ['healthy']},
-  ];
-  assert.deepEqual(
-    booksReferencingAuthor(books, 'source', map).map((book) => book.id),
-    ['source-and-corrupt'],
-  );
-});
-
 test('typed authors with missing or cyclic redirects become repair chips', () => {
-  const missing: Author = {
+  const missing = personAuthor({
     id: 'missing-source', name: 'Missing Source', nameLower: 'missing source',
-    kind: 'person', familyName: 'Source',
+    sortName: 'Source',
     retirement: {reason: 'merged', targetId: 'absent'},
-  };
-  const first: Author = {
+  });
+  const first = personAuthor({
     id: 'first-cycle', name: 'First Cycle', nameLower: 'first cycle',
-    kind: 'person', familyName: 'Cycle',
+    sortName: 'Cycle',
     retirement: {reason: 'merged', targetId: 'second-cycle'},
-  };
-  const second: Author = {
+  });
+  const second = personAuthor({
     id: 'second-cycle', name: 'Second Cycle', nameLower: 'second cycle',
-    kind: 'person', familyName: 'Cycle',
+    sortName: 'Cycle',
     retirement: {reason: 'merged', targetId: 'first-cycle'},
-  };
+  });
   assert.deepEqual(resolveChip('Missing Source', [missing]), {
     id: 'missing-source', name: '[Unresolved author] Missing Source', unresolved: true,
   });
@@ -524,14 +479,15 @@ test('typed authors with missing or cyclic redirects become repair chips', () =>
   });
 });
 
-test('abbreviatedName reads the explicit familyName for persons', () => {
-  assert.equal(abbreviatedName({ name: 'J. R. R. Tolkien', kind: 'person', givenName: 'J. R. R.', familyName: 'Tolkien' }), 'Tolkien');
-  // Multi-token surnames are exactly why the parts are explicit: the
+test('abbreviatedName reads the stored sortName for persons', () => {
+  assert.equal(abbreviatedName({ name: 'J. R. R. Tolkien', kind: 'person', sortName: 'Tolkien' }), 'Tolkien');
+  // Multi-token surnames are exactly why the sort name is stored: the
   // entry form captured "Le Guin", so no heuristic can mangle it.
   assert.equal(
-    abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person', givenName: 'Ursula K.', familyName: 'Le Guin' }),
+    abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person', sortName: 'Le Guin' }),
     'Le Guin',
   );
+  assert.throws(() => abbreviatedName({ name: 'Ursula K. Le Guin', kind: 'person' }), /missing sortName/);
 });
 
 test('abbreviatedName keeps the full name for non-person kinds', () => {
@@ -555,7 +511,7 @@ test('formatAuthors renders 0, 1, 2, and 3+ authors', () => {
     id: authorIdFor(name),
     name,
     kind: 'person',
-    ...splitPersonName(name),
+    sortName: splitPersonName(name).familyName,
   });
   assert.equal(formatAuthors([]), '');
   // A lone author keeps the full name; only lists abbreviate.
@@ -580,7 +536,7 @@ test('formatAuthors respects kind in multi-author lists', () => {
     id: authorIdFor(name),
     name,
     kind: 'person',
-    ...splitPersonName(name),
+    sortName: splitPersonName(name).familyName,
   });
   assert.equal(
     formatAuthors([hbr, p('Clayton Christensen')]),

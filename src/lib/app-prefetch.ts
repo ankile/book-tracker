@@ -9,7 +9,7 @@ const PRIVATE_ROUTES = ['/', '/finished', '/me', '/authors', '/isbns'];
 export function startAppPrefetch(userId: string): Unsubscriber {
   const stores = [
     Database.getAllBooks(userId),
-    Database.getAuthors(userId),
+    Database.getAuthors(),
     Database.getUser(userId),
     Database.getMyProfile(userId),
     Database.getAllReadingSessions(userId),

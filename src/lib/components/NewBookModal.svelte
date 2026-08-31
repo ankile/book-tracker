@@ -61,7 +61,7 @@
   let authorsLoaded = $state(false);
   $effect(() => {
     if (!open || !userId) return;
-    const store = Database.getAuthors(userId);
+    const store = Database.getAuthors();
     const unsubscribeStore = store.subscribe((authors) => {
       if (authors === undefined) return;
       authorList = authors;
@@ -149,7 +149,7 @@
       ? {
         workId: book.workId,
         editionId: book.editionId,
-        // Existing migration/admin links retain their stored provenance
+        // Existing migration/admin links keep their stored matchMethod
         // because prepareBookWrite omits an unchanged link patch.
         matchMethod: 'catalog-choice',
       }
@@ -315,7 +315,9 @@
       lookupError = 'Authors loading.';
       return;
     }
-    let prepared = prepareBookWrite({
+    // Re-run after every step that can change the draft (author resolution,
+    // catalog creation): each one rewrites state the write depends on.
+    const preparedWrite = () => prepareBookWrite({
       userId,
       book,
       authorChips,
@@ -328,6 +330,7 @@
       catalogSelectionTouched: catalogChoiceTouched,
       catalogSelectionIsbn13: automaticSelectionIsbn13,
     });
+    let prepared = preparedWrite();
     if (!prepared.valid) {
       lookupError = prepared.message;
       return;
@@ -352,19 +355,7 @@
       } finally {
         if (request === authorResolutionRequest) resolvingAuthors = false;
       }
-      prepared = prepareBookWrite({
-        userId,
-        book,
-        authorChips,
-        title,
-        pageCount,
-        currentPage,
-        isbn,
-        metadata: $state.snapshot(metadata),
-        catalogSelection: $state.snapshot(catalogSelection),
-        catalogSelectionTouched: catalogChoiceTouched,
-        catalogSelectionIsbn13: automaticSelectionIsbn13,
-      });
+      prepared = preparedWrite();
       if (!prepared.valid) {
         lookupError = prepared.message;
         return;
@@ -400,19 +391,7 @@
         } finally {
           creatingWork = false;
         }
-        prepared = prepareBookWrite({
-          userId,
-          book,
-          authorChips,
-          title,
-          pageCount,
-          currentPage,
-          isbn,
-          metadata: $state.snapshot(metadata),
-          catalogSelection: $state.snapshot(catalogSelection),
-          catalogSelectionTouched: catalogChoiceTouched,
-          catalogSelectionIsbn13: automaticSelectionIsbn13,
-        });
+        prepared = preparedWrite();
         if (!prepared.valid) {
           lookupError = prepared.message;
           return;

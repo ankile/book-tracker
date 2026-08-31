@@ -32,7 +32,6 @@ import {
   type PublishedSuperlatives,
 } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
-import { splitPersonName, joinPersonName } from '../utils/authors.ts';
 import { isFinished } from '../utils/finished.ts';
 
 type Data = Record<string, unknown>;
@@ -368,69 +367,6 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
   return book;
 }
 
-export function decodeAuthor(id: string, value: unknown, path: string): Author {
-  const data = record(value, path);
-  const name = nonEmptyString(data.name, `${path}.name`);
-  const nameLower = string(data.nameLower ?? name.toLowerCase(), `${path}.nameLower`);
-  if (nameLower !== name.toLowerCase()) fail(`${path}.nameLower`, name.toLowerCase());
-  let retirement: AuthorRetirement | undefined;
-  if (data.retirement !== undefined) {
-    const retired = record(data.retirement, `${path}.retirement`);
-    const reason = string(retired.reason, `${path}.retirement.reason`);
-    if (reason === 'deleted') {
-      exactKeys(retired, ['reason'], `${path}.retirement`);
-      retirement = { reason };
-    } else if (reason === 'merged') {
-      exactKeys(retired, ['reason', 'targetId'], `${path}.retirement`);
-      retirement = {
-        reason,
-        targetId: nonEmptyString(retired.targetId, `${path}.retirement.targetId`),
-      };
-    } else {
-      fail(`${path}.retirement.reason`, 'deleted or merged');
-    }
-  }
-  const retirementFields = retirement === undefined ? {} : { retirement };
-
-  if (data.kind === undefined) {
-    const parts = splitPersonName(name);
-    return {
-      id, name, nameLower, alternateNames: [], sortName: parts.familyName,
-      kind: 'person', ...parts, ...retirementFields,
-    };
-  }
-
-  const kindValue = string(data.kind, `${path}.kind`);
-  if (kindValue !== 'person' && kindValue !== 'entity' && kindValue !== 'placeholder') {
-    fail(`${path}.kind`, 'person, entity, or placeholder');
-  }
-  const kind: AuthorKind = kindValue;
-  if (kind === 'person') {
-    const familyName = nonEmptyString(data.familyName, `${path}.familyName`);
-    const givenName = data.givenName === undefined
-      ? undefined
-      : string(data.givenName, `${path}.givenName`);
-    if (joinPersonName({ givenName: givenName ?? '', familyName }) !== name) {
-      fail(path, 'a person name matching its explicit name parts');
-    }
-    return {
-      id,
-      name,
-      nameLower,
-      alternateNames: [],
-      sortName: familyName,
-      kind,
-      familyName,
-      ...(givenName ? { givenName } : {}),
-      ...retirementFields,
-    };
-  }
-  if (data.givenName !== undefined || data.familyName !== undefined) {
-    fail(path, 'a non-person author without person name parts');
-  }
-  return { id, name, nameLower, alternateNames: [], sortName: name, kind, ...retirementFields };
-}
-
 export function decodeCatalogAuthor(id: string, value: unknown, path: string): Author {
   const data = record(value, path);
   const name = nonEmptyString(data.canonicalName, `${path}.canonicalName`);
@@ -452,24 +388,15 @@ export function decodeCatalogAuthor(id: string, value: unknown, path: string): A
   } else if (status !== 'active') {
     fail(`${path}.status`, 'active or merged');
   }
-  const base = {
+  return {
     id,
     name,
     nameLower: name.toLowerCase(),
     alternateNames,
     sortName,
+    kind: kindValue,
     ...(retirement === undefined ? {} : {retirement}),
   };
-  if (kindValue === 'person') {
-    const parts = splitPersonName(name);
-    return {
-      ...base,
-      kind: kindValue,
-      familyName: sortName,
-      ...(parts.givenName === '' ? {} : {givenName: parts.givenName}),
-    };
-  }
-  return {...base, kind: kindValue};
 }
 
 function profileLink(value: unknown, context: string): ProfileLink {

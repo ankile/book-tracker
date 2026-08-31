@@ -37,7 +37,7 @@
     <div>
       <strong>Shared work</strong>
       <div class="catalog-explanation">
-        Connect this reading record to the same admin-curated work across readers. Your personal page count stays editable and authoritative. Reading history is shared only through the separate opt-in.
+        Connect this reading record to the same shared work across readers. Your personal page count stays editable and authoritative. Reading history is shared only through the separate opt-in.
       </div>
     </div>
     {#if loading}<span class="catalog-state">Checking…</span>{/if}
@@ -172,11 +172,6 @@
     color: #24594c;
     background: white;
     cursor: pointer;
-  }
-
-  button:disabled {
-    opacity: 0.55;
-    cursor: default;
   }
 
   .text-button {

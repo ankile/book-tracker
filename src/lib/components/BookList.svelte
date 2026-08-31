@@ -54,13 +54,13 @@
   const showSessions = (book: Book) => (sessionsBookId = book.id);
   const closeSessions = () => (sessionsBookId = null);
 
-  // Books reference authors by id; resolve them against the user's author
-  // docs. undefined = still loading, during which authorIds books render
+  // Books reference authors by id; resolve them against the shared author
+  // catalog. undefined = still loading, during which authorIds books render
   // an empty author line for a frame rather than strict-looking-up into a
   // map that isn't there yet.
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
-    const authorsStore = Database.getAuthors(userId);
+    const authorsStore = Database.getAuthors();
     const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
     return unsubscribe;
   });
@@ -687,13 +687,9 @@
               <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
               <br />
               <span class="title">{book.title}</span>
-              {#if book.workId}
+              {#if workHref}
                 <br />
-                {#if workHref}
-                  <a class="catalog-link" href={workHref}>Linked work</a>
-                {:else}
-                  <span class="catalog-link">Linked</span>
-                {/if}
+                <a class="catalog-link" href={workHref}>Linked work</a>
               {/if}
             </div>
           </div>

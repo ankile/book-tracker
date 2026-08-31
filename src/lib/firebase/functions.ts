@@ -24,6 +24,7 @@ import {
 import {
   decodeCatalogCreateResponse,
   decodeCatalogSearchResponse,
+  decodeEnsureCatalogAuthorsResponse,
   decodeWorkReadersResponse,
 } from '../utils/catalogClient.ts';
 import type { IssueReport } from '../utils/issueReport.ts';
@@ -124,7 +125,7 @@ export const lookupIsbn = httpsCallable<{ isbn: string }, { volume: GoogleVolume
 export const reportIssue = httpsCallable<IssueReport, { recorded: true }>(fns, 'telemetry-reportissue');
 
 const catalogSearchCallable = httpsCallable<CatalogSearchRequest, unknown>(fns, 'catalog-search');
-const ensureCatalogAuthorsCallable = httpsCallable<EnsureCatalogAuthorsRequest, EnsureCatalogAuthorsResponse>(fns, 'catalog-ensureauthors');
+const ensureCatalogAuthorsCallable = httpsCallable<EnsureCatalogAuthorsRequest, unknown>(fns, 'catalog-ensureauthors');
 const workReadersCallable = httpsCallable<WorkReadersRequest, unknown>(fns, 'catalog-workreaders');
 const catalogCreateCallable = httpsCallable<CatalogCreateRequest, unknown>(fns, 'catalog-create');
 const adminCatalogScanCallable = httpsCallable<AdminCatalogScanRequest, unknown>(fns, 'admin-catalogscan');
@@ -138,7 +139,10 @@ export async function catalogSearch(request: CatalogSearchRequest): Promise<Cata
 export async function ensureCatalogAuthors(
   request: EnsureCatalogAuthorsRequest,
 ): Promise<EnsureCatalogAuthorsResponse> {
-  return (await ensureCatalogAuthorsCallable(request)).data;
+  return decodeEnsureCatalogAuthorsResponse(
+    (await ensureCatalogAuthorsCallable(request)).data,
+    request.authors.length,
+  );
 }
 
 export async function catalogCreate(request: CatalogCreateRequest): Promise<CatalogCreateResponse> {

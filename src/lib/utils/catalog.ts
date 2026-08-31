@@ -1,4 +1,4 @@
-export const SUPPORTED_LEADING_TITLE_ARTICLES = ['a', 'an', 'the'] as const;
+const SUPPORTED_LEADING_TITLE_ARTICLES = ['a', 'an', 'the'] as const;
 
 const APOSTROPHES = /['\u2018\u2019\u02bc`\u00b4]/gu;
 const COMBINING_MARKS = /\p{Mark}+/gu;
@@ -49,7 +49,7 @@ export function normalizeCatalogTitle(title: string): string {
 
 export function catalogTitleKeys(
   canonicalTitle: string,
-  alternateTitles: readonly string[] = [],
+  alternateTitles: readonly string[],
 ): string[] {
   return [...new Set(
     [canonicalTitle, ...alternateTitles]

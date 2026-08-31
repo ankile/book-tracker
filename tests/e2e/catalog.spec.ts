@@ -260,9 +260,9 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     const context = await browser.newContext();
     const page = await context.newPage();
     const reloadWorkPage = async (): Promise<void> => {
-      // The lifecycle assertions intentionally exceed the product's five-page
-      // hourly reader quota. Reset only this emulator user's quota so each
-      // reload tests consent convergence rather than quota behavior.
+      // The lifecycle assertions reload the work page more often than the
+      // hourly reader-summary limit allows. Clearing only this emulator
+      // user's counter keeps each reload a test of consent convergence.
       await db.doc(`users/${normalUid}/functionQuotas/workReaders`).delete();
       await page.reload();
     };
@@ -392,7 +392,9 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       expect(tombstonedProfile.get('public')).toBe(true);
       expect(tombstonedProfile.get('givenName')).toBe('Renamed');
       expect(tombstonedProfile.get('familyName')).toBe('Reader');
-      await waitForDocument(db, `users/${readerUid}/settings/bookSharing`, false);
+      // Soft delete: the setting stays like every other document; the profile
+      // tombstone is what withdrew the projection row above.
+      expect((await db.doc(`users/${readerUid}/settings/bookSharing`).get()).exists).toBe(true);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Renamed Reader'})).toHaveCount(0);
 

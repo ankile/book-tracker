@@ -36,7 +36,7 @@ export type PreparedBookWriteResult =
   | { valid: true; write: PreparedBookWrite }
   | { valid: false; message: string };
 
-// Firestore Rules verify every referenced shared author. Eight keeps the
+// Firestore Rules verify every referenced shared author. Six keeps the
 // book write within the Rules document-access and expression budgets.
 export const MAX_BOOK_AUTHORS = 6;
 

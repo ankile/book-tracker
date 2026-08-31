@@ -109,7 +109,7 @@ test('catalog writes are explicit on add and patch-only on edit', () => {
   assert.equal(unlinked.write.input.catalogLink, null);
 });
 
-test('editing ISBN-derived links clears stale provenance or keeps an exact reselection', () => {
+test('editing an ISBN-derived link clears the stale link or keeps an exact reselection', () => {
   const originalIsbn = '9780441478125';
   const replacementIsbn = '9780316769488';
   const linked = {
@@ -118,7 +118,6 @@ test('editing ISBN-derived links clears stale provenance or keeps an exact resel
     workId: 'work',
     editionId: 'edition',
     matchMethod: 'isbn',
-  finished: false,
   } as Book;
   const storedSelection = {
     workId: 'work', editionId: 'edition', matchMethod: 'catalog-choice',
@@ -178,15 +177,18 @@ test('book form rejects more shared authors than Rules can verify', () => {
 
 test('edit seeding exposes missing, broken, and cyclic ids as write-blocking repair chips', () => {
   const broken: Author = {
-    id: 'broken', name: 'Broken Author', nameLower: 'broken author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'broken', name: 'Broken Author', nameLower: 'broken author',
     retirement: { reason: 'merged', targetId: 'missing-target' },
   };
   const first: Author = {
-    id: 'first', name: 'First Author', nameLower: 'first author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'first', name: 'First Author', nameLower: 'first author',
     retirement: { reason: 'merged', targetId: 'second' },
   };
   const second: Author = {
-    id: 'second', name: 'Second Author', nameLower: 'second author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'second', name: 'Second Author', nameLower: 'second author',
     retirement: { reason: 'merged', targetId: 'first' },
   };
   const seeded = editableBookAuthorChips(

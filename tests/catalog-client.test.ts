@@ -11,6 +11,7 @@ import {
   catalogWorkHref,
   createLatestRequestGate,
   decodeCatalogSearchResponse,
+  decodeEnsureCatalogAuthorsResponse,
   decodeWorkReadersResponse,
   displayTrackingCoverage,
   exactEditionPreselection,
@@ -85,6 +86,25 @@ test('strict catalog search decoding checks nested ids and rejects extra fields'
   assert.throws(() => decodeCatalogSearchResponse({results: [null]}), /expected an object/);
 });
 
+test('ensure-authors decoding pairs one id per requested author', () => {
+  assert.deepEqual(
+    decodeEnsureCatalogAuthorsResponse({authorIds: ['first', 'second']}, 2),
+    {authorIds: ['first', 'second']},
+  );
+  // The caller pairs ids with its new chips positionally, so a short, long
+  // or non-string list has to fail here rather than land on the wrong chip.
+  assert.throws(() => decodeEnsureCatalogAuthorsResponse({authorIds: ['only']}, 2), /expected 2 ids/);
+  assert.throws(
+    () => decodeEnsureCatalogAuthorsResponse({authorIds: ['first', 'second', 'extra']}, 2),
+    /expected 2 ids/,
+  );
+  assert.throws(() => decodeEnsureCatalogAuthorsResponse({authorIds: [7]}, 1), /expected a string/);
+  assert.throws(
+    () => decodeEnsureCatalogAuthorsResponse({authorIds: ['first'], created: 1}, 1),
+    /expected only authorIds/,
+  );
+});
+
 test('catalog selection preselects one exact edition and keeps title matches explicit', () => {
   assert.equal(exactEditionPreselection([exact]), exact);
   assert.equal(exactEditionPreselection([exact, {...exact}]), null);
@@ -115,12 +135,10 @@ test('duplicate warnings include books linked through merged aliases', () => {
   assert.deepEqual(linkedBooksForWork(books, work, 'alias').map((book) => book.id), ['canonical']);
 });
 
-test('only owner-selected or migrated links open a work page', () => {
-  assert.equal(catalogWorkHref({workId: 'work/id', matchMethod: 'catalog-choice'}), '/books/work%2Fid');
-  assert.equal(catalogWorkHref({workId: 'work', matchMethod: 'isbn'}), '/books/work');
-  assert.equal(catalogWorkHref({workId: 'work', matchMethod: 'migration'}), '/books/work');
-  assert.equal(catalogWorkHref({workId: 'admin-work', matchMethod: 'admin'}), null);
-  assert.equal(catalogWorkHref({workId: null, matchMethod: null}), null);
+test('every linked book opens its work page and an unlinked one has no href', () => {
+  assert.equal(catalogWorkHref({workId: 'work/id'}), '/books/work%2Fid');
+  assert.equal(catalogWorkHref({workId: 'work'}), '/books/work');
+  assert.equal(catalogWorkHref({workId: null}), null);
 });
 
 test('tracking coverage is a clamped ratio when formatted', () => {
@@ -151,7 +169,6 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
     displayName: username === 'ada' ? 'Ada Lovelace' : 'Grace Hopper',
     status,
     pageCount: 304,
-    editionIsbn13: null,
     firstProgressAt,
     firstReadAt: '2026-01-01',
     finishedAt: status === 'finished' ? '2026-01-03' : null,

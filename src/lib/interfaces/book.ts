@@ -91,10 +91,6 @@ export interface LegacyEmbeddedAuthorsBook extends LegacyBookBase {
 
 export type Book = CurrentBook | LegacyStringAuthorBook | LegacyEmbeddedAuthorsBook;
 
-export function hasCurrentAuthorship(book: Book): book is CurrentBook {
-  return book.author === undefined && book.authors === undefined;
-}
-
 export function isTogglTimer(timer: ActiveTimer): timer is TogglActiveTimer {
   return !('state' in timer) && 'entryId' in timer && timer.entryId !== undefined;
 }
