@@ -23,6 +23,11 @@
     ],
     "redirects": [
       {
+        "source": "/",
+        "destination": "https://book.ankile.com/",
+        "type": 301
+      },
+      {
         "source": "/:path*",
         "destination": "https://book.ankile.com/:path",
         "type": 301

@@ -112,11 +112,11 @@ test('the Firebase Hosting site is retired to a redirect: no rewrites, nothing s
 
   assert.equal(hosting.public, 'hosting-retired');
   assert.equal(hosting.rewrites, undefined);
-  assert.deepEqual(hosting.redirects, [{
-    source: '/:path*',
-    destination: 'https://book.ankile.com/:path',
-    type: 301,
-  }]);
+  // `/:path*` does not match the bare root on Hosting; `/` needs its own entry.
+  assert.deepEqual(hosting.redirects, [
+    {source: '/', destination: 'https://book.ankile.com/', type: 301},
+    {source: '/:path*', destination: 'https://book.ankile.com/:path', type: 301},
+  ]);
   assert.equal(JSON.stringify(hosting).includes('publicweb'), false);
   assert.equal(JSON.stringify(hosting).includes('pinTag'), false);
 
