@@ -253,6 +253,49 @@ firestore:rules,firestore:indexes,functions` for step 1 and `npm run
 pages:deploy` for step 3. They are never one command: the client is served
 from a different platform than Rules and the backend.
 
+### Operator run sheet
+
+One operator session runs the whole rollout start to finish in one sitting.
+There is no scheduling concern: the owner is the only active user and does
+not use the app during the run. The only goal is data integrity — if any
+step's output differs from the reviewed dry run recorded in the operator
+log, stop; the snapshot and PITR are the rollback, and nothing below
+deletes anything.
+
+```bash
+# 0. from merged master, full validation
+nvm use && npm ci && npm --prefix functions ci && npm run validate
+
+# 1. baseline (read-only) + snapshot
+node db-audit.ts --prod
+node db-snapshot.ts --prod
+
+# 2. Rules + indexes + backend, before any data moves
+firebase deploy --only firestore:rules,firestore:indexes,functions
+
+# 3. catalog migration: dry run must match the reviewed numbers exactly,
+#    then apply twice — the second apply must report no writes
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
+
+# 4. finishedAt backfill, same discipline
+npx tsx migrate-finished-at.ts --prod
+npx tsx migrate-finished-at.ts --prod --apply
+npx tsx migrate-finished-at.ts --prod --apply
+
+# 5. audit, then ship the client
+node db-audit.ts --prod
+npm run pages:deploy
+
+# 6. verify by hand: add-book search suggestion, edit an existing book,
+#    a work's reader page, the sharing toggle, /admin/catalog scan
+```
+
+`<N>` and the expected dry-run counts are production observations and live
+in the operator log, not here; the reviewed manifest is
+`reviewed-cross-user-works.json` in this repository.
+
 Legacy per-user author documents and the read-only
 `users/{userId}/authors` compatibility block stay exactly as they are after
 the rollout. No purge script exists and none is scheduled: retained data is
