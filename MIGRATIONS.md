@@ -220,7 +220,9 @@ deployed Rules compatible at every step, with the migration in the middle:
    exist before any admin merge;
 2. run the standard snapshot, dry-run, apply-twice, and audit loop with the
    exact reviewed manifest while the previous Rules are still deployed. The
-   migration writes through the Admin SDK, so Rules do not constrain it. A
+   migration writes through the Admin SDK, so Rules do not constrain it.
+   Do not use the app between the snapshot and step 3: the migration is
+   only atomic against data nothing else is writing. A
    client still running the previous bundle keeps working during this step:
    it reads its retained per-user author documents, and a book it writes with
    a per-user author is picked up by the re-run in step 4;
