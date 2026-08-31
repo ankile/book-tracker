@@ -1,16 +1,40 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {Timestamp} = require("firebase-admin/firestore");
-const {applyQuota} = require("../lib/quota");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 
-function transaction() {
-  const writes = [];
+interface QuotaWrite {
+  type: "set" | "update";
+  data: Record<string, unknown>;
+}
+interface TransactionStub {
+  writes: QuotaWrite[];
+  set(ref: object, data: Record<string, unknown>): void;
+  update(ref: object, data: Record<string, unknown>): void;
+}
+// applyQuota only calls tx.set/tx.update and passes quotaRef through, so a
+// recording stub stands in for the Admin SDK Transaction and reference.
+interface QuotaModule {
+  applyQuota(
+    tx: TransactionStub,
+    quotaRef: object,
+    data: Record<string, unknown> | undefined,
+    limit: number,
+    windowMs: number,
+    now: import("firebase-admin/firestore").Timestamp,
+    amount?: number,
+  ): import("../src/quota").QuotaDecision;
+}
+
+const {applyQuota}: QuotaModule = require("../lib/quota");
+
+function transaction(): TransactionStub {
+  const writes: QuotaWrite[] = [];
   return {
     writes,
-    set: (_ref, data) => writes.push({type: "set", data}),
-    update: (_ref, data) => writes.push({type: "update", data}),
+    set: (_ref: object, data: Record<string, unknown>) => writes.push({type: "set", data}),
+    update: (_ref: object, data: Record<string, unknown>) => writes.push({type: "update", data}),
   };
 }
 

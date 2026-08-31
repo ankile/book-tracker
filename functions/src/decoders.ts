@@ -485,13 +485,6 @@ export interface CatalogEditionInput {
   externalIds: Record<string, string>;
 }
 
-export interface CatalogCreateRequest {
-  confirmSearchable: true;
-  promoteInternalCollision: false;
-  work: CatalogWorkInput;
-  edition: CatalogEditionInput;
-}
-
 export function decodeCatalogWorkInput(
   value: unknown,
   fail: DecodeFailure,
@@ -636,37 +629,6 @@ export function decodeCatalogEditionInput(
     suggestedPageCount,
     coverUrl: optionalHttpsUrl(decoded.coverUrl, "edition.coverUrl", fail),
     externalIds: decodeExternalIds(decoded.externalIds, fail),
-  };
-}
-
-export function decodeCatalogCreateRequest(
-  value: unknown,
-  fail: DecodeFailure = throwDecodeError,
-): CatalogCreateRequest {
-  const decoded = record(value, "request data", fail);
-  exactKeys(
-    decoded,
-    ["confirmSearchable", "promoteInternalCollision", "work", "edition"],
-    "request data",
-    fail,
-  );
-  if (decoded.confirmSearchable !== true) {
-    fail("confirmSearchable must be true.");
-  }
-  const work = decodeCatalogWorkInput(decoded.work, fail);
-  const edition = decodeCatalogEditionInput(decoded.edition, fail);
-  if (boolean(
-    decoded.promoteInternalCollision,
-    "promoteInternalCollision",
-    fail,
-  )) {
-    fail("promoteInternalCollision must be false for ordinary catalog creation.");
-  }
-  return {
-    confirmSearchable: true,
-    promoteInternalCollision: false,
-    work,
-    edition,
   };
 }
 

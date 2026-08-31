@@ -1,11 +1,11 @@
 import { build, files, version } from '$service-worker';
 
-const serviceWorker = self as unknown as ServiceWorkerGlobalScope;
+declare const self: ServiceWorkerGlobalScope;
+const serviceWorker = self;
 const CACHE_PREFIX = 'book-tracker-';
 const CACHE = `${CACHE_PREFIX}${version}`;
 const APP_SHELL = '/';
-const APP_FILES = files.filter((path) => !path.startsWith('/screenshots/'));
-const PRECACHE_ASSETS = [...new Set([...build, ...APP_FILES, APP_SHELL])];
+const PRECACHE_ASSETS = [...new Set([...build, ...files, APP_SHELL])];
 
 const BYPASS_PATHS = [
   '/api',

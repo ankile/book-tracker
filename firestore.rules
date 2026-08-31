@@ -106,6 +106,17 @@ service cloud.firestore {
              && profile.public == true;
     }
 
+    // Rollout compatibility (shared-catalog migration, MIGRATIONS.md): a
+    // client bundle cached by the service worker from before the catalog
+    // release still listens to its per-user author list. Reads stay open so
+    // that tab degrades to stale author names rather than a listener error;
+    // writes are gone — the migration has moved every reference to
+    // catalogAuthors, and a book written by that old bundle is refused by
+    // validBookAuthors. Remove this block once the rollout is verified.
+    match /users/{userId}/authors/{authorId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+    }
+
     // Catalog documents are server-owned. Works and editions stay behind
     // bounded search callables. Authors are the one shared list used by
     // every personal book, so signed-in clients may read and autocomplete
@@ -169,8 +180,13 @@ service cloud.firestore {
              ])
              // Absent on the oldest documents; typed when present.
              && book.get('updatedAt', request.time) is timestamp
+             // The shape cap stays at the pre-catalog 50 so a legacy book
+             // the migration left with 7–50 per-user ids (REVIEW
+             // too-many-personal-authors) can still have its title, page
+             // count or ISBN corrected; the six-author cap is enforced by
+             // validBookAuthors whenever authorIds itself changes.
              && (!book.keys().hasAny(['authorIds'])
-                 || (book.authorIds is list && book.authorIds.size() <= 6
+                 || (book.authorIds is list && book.authorIds.size() <= 50
                      && book.authorIds.toSet().size() == book.authorIds.size()
                      && book.authorIds.join('').size() <= 5000))
              && (!book.keys().hasAny(['coverUrl'])

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -42,20 +41,37 @@ function temporaryDirectory(context: TestContext): string {
   return directory;
 }
 
-function writeTestProductionKey(cwd: string): void {
-  const { privateKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  });
+// A fake `gcloud` first on PATH: records its argv, prints a canned token
+// (or fails). Production scripts must reach Google only through it, and
+// the emulator path must never call it at all.
+function fakeGcloud(context: TestContext, { token = 'fake-token', exitCode = 0 } = {}): {
+  env: NodeJS.ProcessEnv;
+  argvFile: string;
+} {
+  const bin = join(temporaryDirectory(context), 'bin');
+  mkdirSync(bin);
+  const argvFile = join(bin, 'gcloud-argv');
+  const script = join(bin, 'gcloud');
   writeFileSync(
-    join(cwd, 'serviceAccountKey.json'),
-    JSON.stringify({
-      project_id: 'book-tracker-d8f24',
-      client_email: 'migration-test@example.invalid',
-      private_key: privateKey,
-    }),
+    script,
+    [
+      '#!/bin/sh',
+      `printf '%s\\n' "$@" > '${argvFile}'`,
+      `printf '%s\\n' '${token}'`,
+      `exit ${exitCode}`,
+      '',
+    ].join('\n'),
   );
+  chmodSync(script, 0o755);
+  return { env: { ...environmentWithoutEmulator(), PATH: `${bin}:${process.env.PATH}` }, argvFile };
+}
+
+function runCredential(env: NodeJS.ProcessEnv): SpawnSyncReturns<string> {
+  const source = [
+    `const { gcloudCredential } = await import(${JSON.stringify(migrateLibUrl.href)});`,
+    'console.log(JSON.stringify(await gcloudCredential().getAccessToken()));',
+  ].join('\n');
+  return spawnSync(process.execPath, ['--input-type=module', '--eval', source], { env, encoding: 'utf8' });
 }
 
 test('connect refuses the default target when no emulator is configured', () => {
@@ -66,15 +82,43 @@ test('connect refuses the default target when no emulator is configured', () => 
   assert.doesNotMatch(result.stderr, /serviceAccountKey\.json/);
 });
 
-test('connect defaults to the configured emulator without reading production credentials', () => {
+test('connect defaults to the configured emulator without consulting gcloud', (context) => {
+  const { env, argvFile } = fakeGcloud(context);
   const result = runConnect(
     '{ prod: false }',
-    { env: { ...process.env, FIRESTORE_EMULATOR_HOST: '127.0.0.1:1' } },
+    { env: { ...env, FIRESTORE_EMULATOR_HOST: '127.0.0.1:1' } },
   );
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /TARGET: emulator 127\.0\.0\.1:1 \(book-tracker-d8f24\)/);
-  assert.doesNotMatch(result.stderr, /serviceAccountKey\.json/);
+  assert.equal(existsSync(argvFile), false, 'the emulator path must never run gcloud');
+});
+
+test('the production credential is a one-hour token minted by gcloud for the pinned operator account', (context) => {
+  const { env, argvFile } = fakeGcloud(context, { token: 'ya29.test-token' });
+  const result = runCredential(env);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { access_token: 'ya29.test-token', expires_in: 3600 });
+  assert.equal(
+    readFileSync(argvFile, 'utf8'),
+    'auth\nprint-access-token\n--account=lars.ankile@gmail.com\n',
+  );
+});
+
+test('the production credential crashes when gcloud fails or prints nothing', (context) => {
+  const failing = runCredential(fakeGcloud(context, { exitCode: 7 }).env);
+  assert.equal(failing.status, 1, failing.stdout + failing.stderr);
+  assert.doesNotMatch(failing.stdout, /access_token/);
+
+  const empty = runCredential(fakeGcloud(context, { token: '' }).env);
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /empty access token/);
+});
+
+test('no script reads a service account key file any more', () => {
+  const source = readFileSync(fileURLToPath(migrateLibUrl), 'utf8');
+  assert.doesNotMatch(source, /serviceAccountKey|GOOGLE_APPLICATION_CREDENTIALS|cert\(/);
 });
 
 test('connect refuses a non-loopback host presented as an emulator', () => {
@@ -96,35 +140,17 @@ test('connect refuses contradictory production and emulator targets', () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /--prod with FIRESTORE_EMULATOR_HOST set/);
-  assert.doesNotMatch(result.stderr, /serviceAccountKey\.json/);
-});
-
-test('connect rejects a service account for another project before initialization', (context) => {
-  const cwd = temporaryDirectory(context);
-  writeFileSync(
-    join(cwd, 'serviceAccountKey.json'),
-    JSON.stringify({
-      project_id: 'wrong-project',
-      client_email: 'unused@example.invalid',
-      private_key: 'unused',
-    }),
-  );
-
-  const result = runConnect('{ prod: true }', { cwd });
-
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /wrong-project, expected book-tracker-d8f24/);
-  assert.doesNotMatch(result.stdout, /TARGET: PRODUCTION/);
 });
 
 test('connect requires the exact project id before returning a production writer', (context) => {
-  const cwd = temporaryDirectory(context);
-  writeTestProductionKey(cwd);
+  const { env, argvFile } = fakeGcloud(context);
 
   const result = runConnect(
     '{ prod: true, confirmWrite: true }',
-    { cwd, input: 'not-the-project-id\n' },
+    { env, input: 'not-the-project-id\n' },
   );
+
+  assert.equal(existsSync(argvFile), false, 'no token is minted before the operator confirms');
 
   assert.equal(result.status, 1);
   assert.match(result.stdout, /TARGET: PRODUCTION book-tracker-d8f24/);
@@ -155,7 +181,7 @@ test('restore defaults to a credential-free dry run with no emulator writes', (c
   assert.match(result.stdout, /DRY RUN ONLY — NOTHING WRITTEN; NOTHING WILL BE WRITTEN/);
   assert.match(result.stdout, /DRY RUN COMPLETE — NOTHING WRITTEN/);
   assert.match(result.stdout, /1 documents checked/);
-  assert.doesNotMatch(result.stderr, /must-not-be-read|serviceAccountKey/);
+  assert.doesNotMatch(result.stderr, /must-not-be-read/);
 });
 
 test('restore production apply requires typed confirmation before processing', (context) => {
@@ -165,14 +191,13 @@ test('restore production apply requires typed confirmation before processing', (
     projectId: 'book-tracker-d8f24',
     docs: [{ path: 'users/must-not-write', data: { marker: 'blocked' } }],
   }));
-  writeTestProductionKey(cwd);
 
   const result = spawnSync(
     process.execPath,
     [restorePath, snapshot, '--prod', '--apply'],
     {
       cwd,
-      env: environmentWithoutEmulator(),
+      env: fakeGcloud(context).env,
       input: 'not-the-project-id\n',
       encoding: 'utf8',
       timeout: 5_000,

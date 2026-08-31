@@ -225,7 +225,14 @@ const resolvedPersonalAuthors = (
         id = targetId
         continue
       }
-      if (retirement?.reason === 'deleted') break
+      // A retired-as-deleted author is still displayed by the client for a
+      // book that references it (an offline write can trail the deletion),
+      // so dropping it here would silently rewrite the book with fewer
+      // authors. Leave the book for review instead.
+      if (retirement?.reason === 'deleted') {
+        problems.push(`deleted-author:${id}`)
+        break
+      }
       if (typeof author.name !== 'string' || !author.name.trim()) {
         problems.push(`invalid-author-name:${id}`)
         break
@@ -479,10 +486,16 @@ export const planCrossUserCatalog = (
         .filter((author) => normalizeCatalogAuthorName(author.name) === key)
       const provenance = exactSources[0] ?? existing[0]
       const reviewedKind = reviewedGroup?.authorKinds[authorIndex]
+      const kind = reviewedKind ?? provenance?.kind ?? 'person' as const
+      // A manifest corrects spellings but carries no sortName; a person
+      // with no personal-author provenance sorts by the last name token so
+      // "Milan Kundera" files under K, as every legacy person did.
+      const sortName = provenance?.sortName ??
+        (kind === 'person' ? name.trim().split(/\s+/u).at(-1) ?? name : name)
       const canonical = {
         name,
-        kind: reviewedKind ?? provenance?.kind ?? 'person' as const,
-        sortName: provenance?.sortName ?? name,
+        kind,
+        sortName,
         ...(provenance?.catalogId === undefined ? {} : {catalogId: provenance.catalogId}),
       }
       const variants = [canonical, ...exactSources, ...existing].filter((variant, index, all) =>

@@ -202,7 +202,7 @@ test('a reviewed entity spelling correction without kinds is rejected', () => {
     bookPaths: [path],
     canonicalTitle: 'Management Book',
     authorNames: ['Harvard Business Review'],
-  } as unknown as ReviewedWorkGroup
+  } as ReviewedWorkGroup
   const plan = planCrossUserCatalog([
     book(path, {title: 'Management Book', isbn: '', authorIds: ['hbr']}),
   ], authors, [missingKinds])
@@ -324,14 +324,43 @@ test('placeholder and deleted authors never become catalog identity', () => {
   const authors = new Map<string, MigrationAuthor>([
     ['placeholder', { id: 'placeholder', name: 'Various Authors', kind: 'placeholder', retirement: null }],
     ['deleted', { id: 'deleted', name: 'Old Name', kind: 'person', retirement: { reason: 'deleted' } }],
+    ['live', author('live', 'Live Author')],
   ])
   const plan = planCrossUserCatalog([
     book('users/a/books/one', { authorIds: ['placeholder'] }),
     book('users/b/books/two', { isbn: '9781473217386', authorIds: ['deleted'] }),
+    book('users/c/books/three', { isbn: '9780000000002', authorIds: ['live', 'deleted'] }),
   ], authors)
 
   assert.equal(plan.groups.length, 0)
+  // Books one and two resolve no identity at all; book three resolves "Live
+  // Author" and is held only by the deleted reference.
   assert.equal(plan.ambiguities.filter((item) => item.detail.includes('missing-resolved-author')).length, 2)
+  // A deleted author the book still references is a review line, not a
+  // silent drop: the client displays that name, so rewriting the book with
+  // fewer authors would lose data. Both books are held back, including the
+  // one whose other author resolves.
+  const held = plan.ambiguities.filter((item) => item.detail.includes('deleted-author:deleted'))
+  assert.deepEqual(held.map((item) => item.bookPaths).flat().sort(), ['users/b/books/two', 'users/c/books/three'])
+  const three = plan.candidates.find((candidate) => candidate.book.path === 'users/c/books/three')
+  assert.ok(three)
+  assert.equal(three.authorProblems.includes('deleted-author:deleted'), true)
+})
+
+test('a manifest-corrected person with no personal provenance sorts by the last name token', () => {
+  const authors = new Map<string, MigrationAuthor>([['kunder', author('kunder', 'Milan Kunder')]])
+  const plan = planCrossUserCatalog([
+    book('users/a/books/one', { title: 'The Joke', authorIds: ['kunder'] }),
+  ], authors, [{
+    id: 'reviewed-joke',
+    bookPaths: ['users/a/books/one'],
+    canonicalTitle: 'The Joke',
+    authorNames: ['Milan Kundera'],
+    authorKinds: ['person'],
+  }])
+  const corrected = plan.authors.find((entry) => entry.canonicalName === 'Milan Kundera')
+  assert.ok(corrected)
+  assert.equal(corrected.sortName, 'Kundera')
 })
 
 test('merged personal authors resolve to the canonical non-placeholder author', () => {

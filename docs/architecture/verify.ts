@@ -12,14 +12,14 @@ const diagramStems = [
   'site-functionality',
 ];
 
-function filesBelow(directory) {
+function filesBelow(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     return entry.isDirectory() ? filesBelow(path) : [path];
   });
 }
 
-function applicationRoutes() {
+function applicationRoutes(): string[] {
   const routesRoot = join(repositoryRoot, 'src/routes');
   return filesBelow(routesRoot)
     .filter((path) => path.endsWith('/+page.svelte'))
@@ -30,7 +30,7 @@ function applicationRoutes() {
     .sort();
 }
 
-function deployedFunctions() {
+function deployedFunctions(): string[] {
   const functionsRoot = join(repositoryRoot, 'functions/src');
   const indexSource = readFileSync(join(functionsRoot, 'index.ts'), 'utf8');
   const namespaceMatches = [...indexSource.matchAll(
@@ -53,7 +53,7 @@ function deployedFunctions() {
 }
 
 const navigationDiagram = readFileSync(join(architectureDir, 'site-functionality.mmd'), 'utf8');
-const accessSourcePath = join(architectureDir, 'site-access.mjs');
+const accessSourcePath = join(architectureDir, 'site-access.ts');
 const accessSource = readFileSync(accessSourcePath, 'utf8');
 const routes = applicationRoutes();
 const functions = deployedFunctions();
@@ -62,7 +62,7 @@ for (const route of routes) {
   const navigationMarker = route === '/' ? '<code>/</code>' : route;
   const accessMarker = `path: '${route}'`;
   assert(navigationDiagram.includes(navigationMarker), `site-functionality.mmd is missing route ${route}`);
-  assert(accessSource.includes(accessMarker), `site-access.mjs is missing route ${route}`);
+  assert(accessSource.includes(accessMarker), `site-access.ts is missing route ${route}`);
 }
 
 const publicSourcePaths = [
@@ -70,7 +70,9 @@ const publicSourcePaths = [
   ...diagramStems.map((stem) => join(architectureDir, `${stem}.mmd`)),
   accessSourcePath,
 ];
-const projectConfig = JSON.parse(readFileSync(join(repositoryRoot, '.firebaserc'), 'utf8'));
+const projectConfig: unknown = JSON.parse(readFileSync(join(repositoryRoot, '.firebaserc'), 'utf8'));
+assert(typeof projectConfig === 'object' && projectConfig !== null && 'projects' in projectConfig);
+assert(typeof projectConfig.projects === 'object' && projectConfig.projects !== null);
 const projectIdentifiers = Object.values(projectConfig.projects ?? {});
 const implementationIdentifiers = [...functions, ...projectIdentifiers];
 const forbiddenPatterns = [
@@ -83,7 +85,12 @@ const forbiddenPatterns = [
   { description: 'backend resource placeholder', pattern: /\{(?:uid|userId|bookId|queueId)\}/ },
 ];
 
-function assertSanitizedText(path, extraPatterns = []) {
+interface ForbiddenPattern {
+  description: string;
+  pattern: RegExp;
+}
+
+function assertSanitizedText(path: string, extraPatterns: ForbiddenPattern[] = []): void {
   const source = readFileSync(path, 'utf8');
   const disclosureScanSource = source
     .replaceAll('http://www.w3.org/2000/svg', '')

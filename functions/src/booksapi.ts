@@ -73,6 +73,7 @@ exports.lookupisbn = functions
     secrets: [runtimeConfig],
     serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
     maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
   })
   .region("europe-west1")
   .https.onCall(async (

@@ -80,6 +80,13 @@
       ]
     },
     {
+      "collectionGroup": "books",
+      "fieldPath": "authorIds",
+      "indexes": [
+        { "arrayConfig": "CONTAINS", "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
       "collectionGroup": "togglQueue",
       "fieldPath": "expiresAt",
       "ttl": true,

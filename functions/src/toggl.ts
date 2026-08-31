@@ -299,7 +299,11 @@ function timerMatchesClaim(
 
 exports.savetoken = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+  })
   .https.onCall(async (data: unknown, context) => {
     logAppCheckPresence("toggl.savetoken", context);
     const uid = requireUid(context);
@@ -410,7 +414,11 @@ exports.savetoken = functions
 // copy does not invalidate the credential at Toggl — the UI says so.
 exports.cleartoken = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+  })
   .https.onCall(async (data: unknown, context) => {
     logAppCheckPresence("toggl.cleartoken", context);
     const uid = requireUid(context);
@@ -443,7 +451,11 @@ exports.cleartoken = functions
 
 exports.start = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+  })
   .https.onCall(async (data: unknown, context) => {
     logAppCheckPresence("toggl.start", context);
     const uid = requireUid(context);
@@ -618,7 +630,11 @@ async function transitionStartClaim(
 
 exports.stop = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+  })
   .https.onCall(async (data: unknown, context) => {
     logAppCheckPresence("toggl.stop", context);
     const uid = requireUid(context);
@@ -712,7 +728,11 @@ exports.stop = functions
 
 exports.clearstopping = functions
   .region("europe-west1")
-  .runWith({serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT, maxInstances: CALLABLE_MAX_INSTANCES})
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+  })
   .https.onCall(async (data: unknown, context) => {
     logAppCheckPresence("toggl.clearstopping", context);
     const uid = requireUid(context);

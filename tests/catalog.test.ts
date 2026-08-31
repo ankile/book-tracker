@@ -4,11 +4,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  catalogAuthorsEqual,
-  catalogAuthorsOverlap,
   catalogTitleKeys,
-  catalogTitleSimilarity,
-  matchCatalogText,
   normalizeCatalogAuthorName,
   normalizeCatalogAuthorNames,
   normalizeCatalogTitle,
@@ -52,53 +48,5 @@ test('author normalization folds display differences without treating typos as e
     normalizeCatalogAuthorNames([' Zadie Smith ', 'zadie smith', 'Søren Kierkegaard']),
     ['soren kierkegaard', 'zadie smith'],
   );
-  assert.equal(catalogAuthorsEqual(['Milan Kundera'], ['milan kundera']), true);
-  assert.equal(catalogAuthorsEqual(['Milan Kundera'], ['Milan Kunder']), false);
-});
-
-test('author matching distinguishes an exact set from partial overlap', () => {
-  assert.equal(
-    catalogAuthorsEqual(['Terry Pratchett', 'Neil Gaiman'], ['Neil Gaiman', 'Terry Pratchett']),
-    true,
-  );
-  assert.equal(catalogAuthorsEqual(['Neil Gaiman'], ['Neil Gaiman', 'Terry Pratchett']), false);
-  assert.equal(catalogAuthorsOverlap(['Neil Gaiman'], ['Neil Gaiman', 'Terry Pratchett']), true);
-  assert.equal(catalogAuthorsOverlap([], ['Neil Gaiman']), false);
-});
-
-test('text matching uses explicit aliases and never upgrades a different author', () => {
-  const candidate = {
-    canonicalTitle: 'The Unbearable Lightness of Being',
-    alternateTitles: ['Tilværelsens uutholdelige letthet'],
-    authorNames: ['Milan Kundera'],
-  };
-  assert.equal(
-    matchCatalogText('Tilværelsens uutholdelige letthet', ['Milan Kundera'], candidate),
-    'title-author-exact',
-  );
-  assert.equal(
-    matchCatalogText('The Unbearable Lightness of Being', ['Another Author'], candidate),
-    'title-only',
-  );
-  assert.equal(matchCatalogText('A different book', ['Milan Kundera'], candidate), 'none');
-});
-
-test('partial coauthor evidence remains distinct from an exact author match', () => {
-  const candidate = {
-    canonicalTitle: 'Good Omens',
-    authorNames: ['Neil Gaiman', 'Terry Pratchett'],
-  };
-  assert.equal(matchCatalogText('Good Omens', ['Neil Gaiman'], candidate), 'title-author-overlap');
-  assert.equal(
-    matchCatalogText('Good Omens', ['Terry Pratchett', 'Neil Gaiman'], candidate),
-    'title-author-exact',
-  );
-});
-
-test('fuzzy title similarity is deterministic and never supplies identity on its own', () => {
-  assert.equal(catalogTitleSimilarity('The Great Gatsby', 'Great Gatsby'), 1);
-  assert.equal(catalogTitleSimilarity('', ''), 0);
-  const typoScore = catalogTitleSimilarity('The Hitchhikers Guide', 'The Hitchikers Guide');
-  assert.ok(typoScore > 0.9 && typoScore < 1);
-  assert.ok(catalogTitleSimilarity('Gul bok', 'Blue Ocean Strategy') < 0.3);
+  assert.notEqual(normalizeCatalogAuthorName('Milan Kundera'), normalizeCatalogAuthorName('Milan Kunder'));
 });

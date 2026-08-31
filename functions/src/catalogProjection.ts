@@ -1,6 +1,7 @@
 import {createHash} from "node:crypto";
 import {
   DocumentData,
+  DocumentSnapshot,
   FieldPath,
   getFirestore,
   Timestamp,
@@ -8,6 +9,7 @@ import {
 import {logger} from "firebase-functions";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {profileConsents, sharingSetting} from "./sharingConsent";
 
 const MAX_OWNER_WORKS = 200;
 const MAX_LINKED_BOOKS = 500;
@@ -29,19 +31,6 @@ function text(data: DocumentData | undefined, field: string): unknown {
   return data?.[field];
 }
 
-function eligibleSetting(data: DocumentData | undefined): boolean {
-  const username = text(data, "profileUsername");
-  const timeZone = text(data, "timeZone");
-  if (typeof username !== "string" || !/^[a-z0-9-]{3,30}$/.test(username) ||
-      typeof timeZone !== "string") return false;
-  try {
-    new Intl.DateTimeFormat("en-US", {timeZone}).format();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void> {
   if (workId === "" || workId.includes("/")) return;
   const db = getFirestore();
@@ -56,15 +45,11 @@ async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void
       transaction.get(db.collection(`users/${uid}/books`)
         .where("workId", "==", workId).limit(1)),
     ]);
-    const settingData = setting.data();
-    let consent = setting.exists && user.exists &&
-      user.get("deletedAt") === undefined && eligibleSetting(settingData);
-    if (consent) {
-      const username = setting.get("profileUsername") as string;
-      const profile = await transaction.get(db.collection("profiles").doc(username));
-      consent = profile.exists && profile.get("uid") === uid &&
-        profile.get("public") === true && profile.get("deletedAt") === undefined;
-    }
+    const consented = sharingSetting(user, setting);
+    const consent = consented !== null && profileConsents(
+      await transaction.get(db.collection("profiles").doc(consented.username)),
+      uid,
+    );
     if (consent && !linkedBooks.empty) {
       transaction.set(projection, {workId, uid, updatedAt: Timestamp.now()});
     } else {
@@ -73,27 +58,50 @@ async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void
   });
 }
 
+// Withdrawn consent removes every projection row the owner has, however
+// many: the per-link path bounds nothing per owner, so a reader who linked
+// works one at a time can hold more than MAX_OWNER_WORKS rows, and a
+// revoke that refused above the bound would leave them all behind — each a
+// wasted read on every work page, forever. Deleting has no fan-out to
+// bound, so it pages to the end.
+async function withdrawOwner(uid: string): Promise<void> {
+  const db = getFirestore();
+  let cursor: DocumentSnapshot | null = null;
+  for (;;) {
+    let query = db.collection("sharedWorkOwners").where("uid", "==", uid)
+      .orderBy(FieldPath.documentId()).limit(MAX_OWNER_WORKS);
+    if (cursor !== null) query = query.startAfter(cursor);
+    const page = await query.get();
+    if (page.empty) return;
+    for (let index = 0; index < page.size; index += REFRESH_CONCURRENCY) {
+      await Promise.all(page.docs.slice(index, index + REFRESH_CONCURRENCY).map((row) =>
+        refreshSharedWorkOwner(uid, String(row.get("workId"))),
+      ));
+    }
+    if (page.size < MAX_OWNER_WORKS) return;
+    cursor = page.docs[page.size - 1];
+  }
+}
+
 async function refreshOwner(uid: string): Promise<void> {
   const db = getFirestore();
   const [user, setting] = await Promise.all([
     db.collection("users").doc(uid).get(),
     db.doc(`users/${uid}/settings/bookSharing`).get(),
   ]);
-  let consent = user.exists && user.get("deletedAt") === undefined &&
-    setting.exists && eligibleSetting(setting.data());
-  if (consent) {
-    const profile = await db.collection("profiles")
-      .doc(setting.get("profileUsername") as string).get();
-    consent = profile.exists && profile.get("uid") === uid &&
-      profile.get("public") === true && profile.get("deletedAt") === undefined;
+  const consented = sharingSetting(user, setting);
+  const consent = consented !== null && profileConsents(
+    await db.collection("profiles").doc(consented.username).get(),
+    uid,
+  );
+  if (!consent) {
+    await withdrawOwner(uid);
+    return;
   }
-  const candidates = consent ?
-    await db.collection(`users/${uid}/books`).where("workId", "!=", null)
-      .orderBy("workId")
-      .limit(MAX_LINKED_BOOKS + 1).get() :
-    await db.collection("sharedWorkOwners").where("uid", "==", uid)
-      .orderBy(FieldPath.documentId()).limit(MAX_OWNER_WORKS + 1).get();
-  if (consent && candidates.size > MAX_LINKED_BOOKS) {
+  const candidates = await db.collection(`users/${uid}/books`).where("workId", "!=", null)
+    .orderBy("workId")
+    .limit(MAX_LINKED_BOOKS + 1).get();
+  if (candidates.size > MAX_LINKED_BOOKS) {
     logger.error("catalog.shared_work_owner.catalog_bound_exceeded", {
       uid,
       maximum: MAX_LINKED_BOOKS,

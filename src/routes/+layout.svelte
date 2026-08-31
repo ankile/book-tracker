@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import { user } from '$lib/firebase/auth.ts';
   import Navbar from '$lib/components/Navbar.svelte';
+  import EmailVerificationBanner from '$lib/components/EmailVerificationBanner.svelte';
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
@@ -116,6 +117,7 @@
   <div class="app-view">
     {#if $user}
       <Navbar />
+      <EmailVerificationBanner />
       <main>
         {@render children()}
       </main>

@@ -89,8 +89,12 @@ test('every profile batch moves the ownership record the rules require', async (
   const sharing = rename.find((w) => w.collection === 'users' && w.verb === 'set')!;
   assert.ok(sharing, 'renameProfile moves an existing book-sharing setting in the same batch');
   assert.match(sharing.args[1].getText(source), /profileUsername: newUsername/);
-  assert.match(sharing.args[1].getText(source), /createdAt: bookSharing\.createdAt/);
+  // createdAt is never copied: the local copy can be a serverTimestamps
+  // estimate and the update rule requires it unchanged, so the row is
+  // merged instead and the server keeps its own value.
+  assert.doesNotMatch(sharing.args[1].getText(source), /createdAt/);
   assert.match(sharing.args[1].getText(source), /updatedAt: serverTimestamp\(\)/);
+  assert.match(sharing.args[2].getText(source), /merge: true/);
 });
 
 test('profile writes server-pin updatedAt', async () => {

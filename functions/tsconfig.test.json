@@ -9,16 +9,10 @@
     "strict": true,
     "target": "ES2023",
     "types": ["node"],
-    "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
   "include": [
-    "*.ts",
-    "docs/architecture/*.ts",
-    "tests/**/*.ts"
-  ],
-  "exclude": [
-    "functions/**",
-    "node_modules/**"
+    "eslint.config.mts",
+    "test/**/*.cts"
   ]
 }

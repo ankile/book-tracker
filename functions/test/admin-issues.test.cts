@@ -1,14 +1,22 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {Timestamp} = require("firebase-admin/firestore");
-const {ANONYMOUS_ISSUE_LIMIT, assembleIssueFeed, FEED_LIMIT, ISSUES_PER_UID} = require("../lib/adminIssues");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+const {
+  ANONYMOUS_ISSUE_LIMIT,
+  assembleIssueFeed,
+  FEED_LIMIT,
+  ISSUES_PER_UID,
+}: typeof import("../src/adminIssues") = require("../lib/adminIssues");
+
+type IssueGroup = import("../src/adminIssues").IssueGroup;
+type StoredIssueDocument = import("../src/adminIssues").StoredIssueDocument;
 
 const createdAt = Timestamp.fromMillis(1_700_000_000_000);
 const fallbackAt = 1_600_000_000_000;
 
-const validIssue = (overrides = {}) => ({
+const validIssue = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   createdAt,
   level: "warn",
   event: "toggl.sync_stuck",
@@ -19,7 +27,7 @@ const validIssue = (overrides = {}) => ({
   ...overrides,
 });
 
-const document = (id, value, metadataAt = fallbackAt) => ({
+const document = (id: string, value: unknown, metadataAt = fallbackAt): StoredIssueDocument => ({
   id,
   value,
   fallbackAt: metadataAt,
@@ -30,8 +38,8 @@ const identities = new Map([
 ]);
 
 // Rows for one account (or uid-null) as the feed query would return them.
-const group = (uid, documents) => ({uid, documents});
-const feedOf = (documents, limit = 10) =>
+const group = (uid: string | null, documents: readonly StoredIssueDocument[]): IssueGroup => ({uid, documents});
+const feedOf = (documents: readonly StoredIssueDocument[], limit = 10) =>
   assembleIssueFeed([group("owner", documents)], limit, limit, 1000, identities);
 
 test("valid issue rows retain decoded fields and resolve identities", () => {
@@ -241,7 +249,7 @@ test("the round-robin cut keeps every account's newest rows and reports the tota
   const feed = assembleIssueFeed(groups, 10, 25, 200, identities);
   assert.equal(feed.total, 300);
   assert.equal(feed.rows.length, 200);
-  const perAccount = new Map();
+  const perAccount = new Map<string | null, number>();
   for (const row of feed.rows) perAccount.set(row.uid, (perAccount.get(row.uid) ?? 0) + 1);
   assert.equal(perAccount.size, 30);
   // 200 / 30: six full rounds plus twenty of the seventh.
@@ -250,6 +258,7 @@ test("the round-robin cut keeps every account's newest rows and reports the tota
   // What each account shows is its newest rows, not an arbitrary subset.
   for (const [uid, shown] of perAccount) {
     const messages = feed.rows.filter((row) => row.uid === uid).map((row) => row.message);
+    assert.ok(uid !== null);
     const account = uid.replace("account-", "");
     assert.deepEqual(messages, Array.from({length: shown}, (_, index) => `${account}/${index}`));
   }

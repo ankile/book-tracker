@@ -23,12 +23,17 @@ export const app = initializeApp(firebaseConfig);
 // then enforcement makes an anonymous scripted invocation cheap to refuse
 // (SEC-068). The site key is a public identifier, like the API key above.
 // Emulator runs skip App Check (nothing verifies tokens there); plain dev
-// against production uses the SDK's debug provider, which prints a token
-// to the console — register it in App Check before enforcement or dev
-// requests will be refused.
+// against production uses the SDK's debug provider. Enforcement is ON
+// (2026-08-30), so dev must present a debug token that is registered in
+// App Check: `.env.local` (gitignored) carries the registered one as
+// VITE_APPCHECK_DEBUG_TOKEN; without it the SDK mints a fresh token and
+// prints it to the console, and every request is refused until that
+// token is registered too. Never commit a debug token — this repo is
+// public and a registered token bypasses attestation for whoever holds it.
 if (browser && !(import.meta.env.DEV && import.meta.env.VITE_EMULATOR)) {
   if (import.meta.env.DEV) {
-    (globalThis as { FIREBASE_APPCHECK_DEBUG_TOKEN?: boolean }).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+    (globalThis as { FIREBASE_APPCHECK_DEBUG_TOKEN?: boolean | string }).FIREBASE_APPCHECK_DEBUG_TOKEN =
+      import.meta.env.VITE_APPCHECK_DEBUG_TOKEN ?? true;
   }
   initializeAppCheck(app, {
     provider: new ReCaptchaEnterpriseProvider('6Ldbm58tAAAAAGj4KhxJlm4yagS848O6dBg47p8_'),

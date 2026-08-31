@@ -47,7 +47,7 @@ deterministic SVG generator.
 
 ### Route access matrix
 
-[SVG](site-access.svg) · [SVG generator](site-access.mjs) · [PNG](site-access.png)
+[SVG](site-access.svg) · [SVG generator](site-access.ts) · [PNG](site-access.png)
 
 ![Book Tracker route access matrix](site-access.svg)
 
@@ -123,7 +123,7 @@ the public site map. Never rely on an undisclosed path for authorization.
 
 ## Keeping the maps current
 
-Update the relevant `.mmd` or `.mjs` source whenever a change affects system
+Update the relevant `.mmd` or `.ts` source whenever a change affects system
 responsibilities, trust boundaries, data flows, routes, page reachability,
 read access, write access, or external integrations. Regenerate every image in
 the same change:
@@ -142,5 +142,5 @@ The renderer writes SVG and PNG versions, then verifies that:
 Run the verifier directly when checking an existing render:
 
 ```bash
-node docs/architecture/verify.mjs
+node docs/architecture/verify.ts
 ```

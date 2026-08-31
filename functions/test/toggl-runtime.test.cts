@@ -1,23 +1,125 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
-const {logger} = require("firebase-functions");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {FieldValue, getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 const {
   TOGGL_QUEUE_LIMIT,
   TOGGL_QUEUE_MAX_DEFERRALS,
   TOGGL_QUEUE_RETENTION_MS,
   TOGGL_QUEUE_ROW_LIMIT,
   TOGGL_QUEUE_WINDOW_MS,
-} = require("../lib/togglQueueLimits");
+}: typeof import("../src/togglQueueLimits") = require("../lib/togglQueueLimits");
 
-const deployed = require("../lib");
+type TestContext = import("node:test").TestContext;
+interface Snapshot {
+  exists: boolean;
+  data(): unknown;
+}
+interface TransactionStub {
+  get(ref: object): Promise<Snapshot>;
+  update(ref: object, patch: QueuePatch): void;
+  set(ref: object, value: Record<string, unknown>): void;
+  delete?(ref: object): void;
+}
+interface QueueItem {
+  type: string;
+  bookId?: string;
+  bookTitle: unknown;
+  start: string;
+  stop: string;
+  status: string;
+  createdAt: import("firebase-admin/firestore").Timestamp;
+  entryId?: number;
+  timerClaimVersion?: number;
+  attempts?: number;
+  claimedAt?: import("firebase-admin/firestore").Timestamp;
+  expiresAt?: unknown;
+  retryRequestedAt?: import("firebase-admin/firestore").Timestamp;
+  deferredUntil?: unknown;
+  deferrals?: number;
+  error?: string;
+}
+interface QueuePatch {
+  status?: string;
+  entryId?: number;
+  attempts?: number;
+  claimedAt?: unknown;
+  expiresAt?: unknown;
+  retryRequestedAt?: unknown;
+  deferredUntil?: unknown;
+  deferrals?: number;
+  error?: string;
+  [key: string]: unknown;
+}
+interface Counter {
+  windowStartedAt: import("firebase-admin/firestore").Timestamp;
+  count: unknown;
+  [key: string]: unknown;
+}
+interface StoreWrite {
+  type: "set" | "update";
+  value: Record<string, unknown>;
+}
+interface LoggedIssue {
+  event: string;
+  message: string;
+  [key: string]: unknown;
+}
+interface TogglSecret {
+  apiToken: string;
+  workspaceId: number;
+  projectId: number;
+  updatedAt: import("firebase-admin/firestore").Timestamp;
+}
+interface SecretWrite {
+  type: "set" | "delete";
+  value?: TogglSecret;
+}
+interface ActiveTimer {
+  state?: string;
+  operationId?: string;
+  entryId?: number;
+  start?: string;
+  error?: string;
+  claimedAt?: import("firebase-admin/firestore").Timestamp;
+  queueId?: string;
+  [key: string]: unknown;
+}
+interface Book {
+  title?: string;
+  activeTimer: ActiveTimer | null;
+  [key: string]: unknown;
+}
+interface BookRef {
+  id: string;
+  get(): Promise<Snapshot>;
+  update(patch: Record<string, unknown>): Promise<void>;
+}
+interface BookTransactionStub {
+  get(ref: object): Promise<Snapshot>;
+  update(ref: object, patch: Record<string, unknown>): void;
+  set(ref: object, value: Record<string, unknown>): void;
+  delete(ref: object): void;
+}
+interface Deployed {
+  toggl: {
+    syncqueue: {run(event: unknown): Promise<void>};
+    start: {run(data: unknown, context: unknown): Promise<{entryId: number; start: string}>};
+    stop: {run(data: unknown, context: unknown): Promise<{seconds: number; minutes: number}>};
+    savetoken: {run(data: unknown, context: unknown): Promise<{workspaceId: number; projectId: number}>};
+    clearstopping: {run(data: unknown, context: unknown): Promise<unknown>};
+    cleartoken: {run(data: unknown, context: unknown): Promise<unknown>};
+  };
+}
+
+const deployed: Deployed = require("../lib");
 const db = getFirestore();
 const secretsDb = getFirestore("secrets");
 const authContext = {auth: {uid: "owner", token: {}}};
 
-function snapshot(data, exists = true) {
+function snapshot(data: unknown, exists = true): Snapshot {
   return {exists, data: () => data};
 }
 
@@ -25,12 +127,20 @@ function snapshot(data, exists = true) {
 // secrets:togglTokens/{uid}, savetoken sets it, cleartoken and the
 // deletion trigger delete it. `data: undefined` models a disconnected
 // account.
-function installTogglSecret(t, data = {apiToken: "token", workspaceId: 3, projectId: 4, updatedAt: Timestamp.fromMillis(1)}) {
-  const writes = [];
-  let stored = data;
+function installTogglSecret(
+  t: TestContext,
+  data: TogglSecret | undefined = {
+    apiToken: "token",
+    workspaceId: 3,
+    projectId: 4,
+    updatedAt: Timestamp.fromMillis(1),
+  },
+): {writes: SecretWrite[]; readonly stored: TogglSecret | undefined} {
+  const writes: SecretWrite[] = [];
+  let stored: TogglSecret | undefined = data;
   const tokenRef = {
     get: async () => snapshot(stored, stored !== undefined),
-    set: async (value) => {
+    set: async (value: TogglSecret) => {
       stored = value;
       writes.push({type: "set", value});
     },
@@ -39,7 +149,7 @@ function installTogglSecret(t, data = {apiToken: "token", workspaceId: 3, projec
       writes.push({type: "delete"});
     },
   };
-  t.mock.method(secretsDb, "doc", (path) => {
+  t.mock.method(secretsDb, "doc", (path: string) => {
     assert.equal(path, "togglTokens/owner");
     return tokenRef;
   });
@@ -51,7 +161,7 @@ function installTogglSecret(t, data = {apiToken: "token", workspaceId: 3, projec
   };
 }
 
-function enableFunctionsEmulator(t) {
+function enableFunctionsEmulator(t: TestContext): void {
   const previous = process.env.FUNCTIONS_EMULATOR;
   process.env.FUNCTIONS_EMULATOR = "true";
   t.after(() => {
@@ -66,8 +176,8 @@ function enableFunctionsEmulator(t) {
   });
 }
 
-function queueItem(overrides = {}) {
-  return {
+function queueItem(overrides: Record<string, unknown> = {}): QueueItem {
+  const item: QueueItem = {
     type: "create",
     bookId: "book",
     bookTitle: "The Book",
@@ -75,23 +185,28 @@ function queueItem(overrides = {}) {
     stop: "2026-08-24T12:20:00Z",
     status: "pending",
     createdAt: Timestamp.now(),
-    ...overrides,
   };
+  Object.assign(item, overrides);
+  return item;
 }
 
-function installQueueStore(t, item, {quota, rows} = {}) {
-  const queueUpdates = [];
-  const transactionUpdates = [];
-  const quotaWrites = [];
-  const rowsWrites = [];
-  const issues = [];
+function installQueueStore(
+  t: TestContext,
+  item: QueueItem,
+  {quota, rows}: {quota?: Counter; rows?: Counter} = {},
+) {
+  const queueUpdates: QueuePatch[] = [];
+  const transactionUpdates: QueuePatch[] = [];
+  const quotaWrites: StoreWrite[] = [];
+  const rowsWrites: StoreWrite[] = [];
+  const issues: LoggedIssue[] = [];
   let queueDeleted = false;
   let configReads = 0;
-  let quotaValue = quota;
-  let rowsValue = rows;
+  let quotaValue: Record<string, unknown> | undefined = quota;
+  let rowsValue: Record<string, unknown> | undefined = rows;
   let rowsReads = 0;
   const queueRef = {
-    update: async (patch) => {
+    update: async (patch: QueuePatch) => {
       queueUpdates.push(patch);
     },
     delete: async () => {
@@ -107,14 +222,14 @@ function installQueueStore(t, item, {quota, rows} = {}) {
   installTogglSecret(t);
   const quotaRef = {};
   const rowsRef = {};
-  t.mock.method(db, "doc", (path) => {
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner") return userRef;
     if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       if (ref === queueRef) return snapshot(item);
       if (ref === rowsRef) {
         rowsReads += 1;
@@ -123,7 +238,7 @@ function installQueueStore(t, item, {quota, rows} = {}) {
       assert.equal(ref, quotaRef);
       return snapshot(quotaValue, quotaValue !== undefined);
     },
-    update: (ref, patch) => {
+    update: (ref: object, patch: QueuePatch) => {
       if (ref === queueRef) {
         transactionUpdates.push(patch);
       } else if (ref === rowsRef) {
@@ -135,7 +250,7 @@ function installQueueStore(t, item, {quota, rows} = {}) {
         quotaWrites.push({type: "update", value: patch});
       }
     },
-    set: (ref, value) => {
+    set: (ref: object, value: Record<string, unknown>) => {
       if (ref === rowsRef) {
         rowsValue = value;
         rowsWrites.push({type: "set", value});
@@ -146,9 +261,9 @@ function installQueueStore(t, item, {quota, rows} = {}) {
       quotaWrites.push({type: "set", value});
     },
   }));
-  t.mock.method(db, "collection", (path) => {
+  t.mock.method(db, "collection", (path: string) => {
     assert.equal(path, "logEvents");
-    return {add: async (issue) => issues.push(issue)};
+    return {add: async (issue: LoggedIssue) => issues.push(issue)};
   });
   return {
     event: {
@@ -170,10 +285,10 @@ function installQueueStore(t, item, {quota, rows} = {}) {
       return queueDeleted;
     },
     get quota() {
-      return quotaValue;
+      return counter(quotaValue);
     },
     get rows() {
-      return rowsValue;
+      return counter(rowsValue);
     },
     get rowsReads() {
       return rowsReads;
@@ -185,7 +300,18 @@ function installQueueStore(t, item, {quota, rows} = {}) {
   };
 }
 
-function installCorrelatedStopStore(t, mode, {quota} = {}) {
+type CorrelatedStopMode =
+  | "final-delete-fails"
+  | "lost-ack"
+  | "lost-ack-delete-fails"
+  | "quota-full"
+  | "recovery-write-fails";
+
+function installCorrelatedStopStore(
+  t: TestContext,
+  mode: CorrelatedStopMode,
+  {quota}: {quota?: Counter} = {},
+) {
   const start = "2026-08-24T12:00:00Z";
   const queueId = `book_${start}`;
   const item = queueItem({
@@ -213,9 +339,9 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
     get: async () => snapshot({uid: "owner"}),
   };
   installTogglSecret(t);
-  const issues = [];
+  const issues: LoggedIssue[] = [];
   let transactionNumber = 0;
-  t.mock.method(db, "doc", (path) => {
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner") return userRef;
     if (path === "users/owner/functionQuotas/togglQueue") return quotaRef;
     if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
@@ -223,22 +349,22 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
     if (path === "users/owner/timerLifecycle/current") return claimRef;
     throw new Error(`Unexpected document path ${path}`);
   });
-  t.mock.method(db, "collection", (path) => {
+  t.mock.method(db, "collection", (path: string) => {
     assert.equal(path, "logEvents");
-    return {add: async (issue) => issues.push(issue)};
+    return {add: async (issue: LoggedIssue) => issues.push(issue)};
   });
-  t.mock.method(db, "runTransaction", async (handler) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => {
     transactionNumber += 1;
     if (transactionNumber === 1) {
       return handler({
-        get: async (ref) => {
+        get: async (ref: object) => {
           if (ref === queueRef) return snapshot(item);
           if (ref === rowsRef) return snapshot(undefined, false);
           assert.equal(ref, quotaRef);
           return snapshot(quota, quota !== undefined);
         },
         set: () => {},
-        update: (ref, patch) => {
+        update: (ref: object, patch: QueuePatch) => {
           if (ref === queueRef) Object.assign(item, patch);
         },
       });
@@ -246,7 +372,7 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
     if (transactionNumber === 2) {
       if (mode === "recovery-write-fails") {
         return handler({
-          get: async (ref) => {
+          get: async (ref: object) => {
             if (ref === queueRef) return snapshot(item);
             if (ref === bookRef) {
               return snapshot({
@@ -268,7 +394,7 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
         });
       }
       await handler({
-        get: async (ref) => {
+        get: async (ref: object) => {
           if (ref === queueRef) return snapshot(item);
           if (ref === bookRef) {
             return snapshot({
@@ -286,7 +412,7 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
             queueId,
           });
         },
-        update: (ref, patch) => {
+        update: (ref: object, patch: QueuePatch) => {
           if (ref === queueRef) Object.assign(item, patch);
         },
         set: () => {},
@@ -300,11 +426,12 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
       throw new Error("recovery storage unavailable");
     }
     return handler({
-      get: async (ref) => {
+      get: async (ref: object) => {
         assert.equal(ref, queueRef);
         return snapshot(item);
       },
       update: () => {},
+      set: () => {},
     });
   });
   return {
@@ -316,6 +443,61 @@ function installCorrelatedStopStore(t, mode, {quota} = {}) {
     item,
     queueRef,
   };
+}
+
+function counter(value: Record<string, unknown> | undefined): Counter {
+  assert.ok(value);
+  assert.ok(value.windowStartedAt instanceof Timestamp);
+  return {windowStartedAt: value.windowStartedAt, count: value.count};
+}
+
+function lastPatch(patches: QueuePatch[]): QueuePatch {
+  const patch = patches.at(-1);
+  assert.ok(patch);
+  return patch;
+}
+
+function activeTimer(book: Book): ActiveTimer {
+  assert.ok(book.activeTimer);
+  return book.activeTimer;
+}
+
+function hasError(error: unknown, code: string, message?: RegExp): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code &&
+    (message === undefined ||
+      ("message" in error && typeof error.message === "string" && message.test(error.message)));
+}
+
+function errorDetails(error: unknown): error is {code: string; message: string} {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    "message" in error &&
+    typeof error.message === "string";
+}
+
+function secretValue(write: SecretWrite | undefined): TogglSecret {
+  assert.ok(write);
+  assert.equal(write.type, "set");
+  assert.ok(write.value);
+  return write.value;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  assert.ok(typeof value === "object" && value !== null);
+  return Object.fromEntries(Object.entries(value));
+}
+
+function firstUserWrite(
+  writes: Array<{value: Record<string, unknown>}>,
+): {value: Record<string, unknown>} {
+  const write = writes[0];
+  assert.ok(write);
+  return write;
 }
 
 test("queued creates pass through outcome-unknown before synced", async (t) => {
@@ -349,7 +531,7 @@ test("the Functions emulator syncs a queued create without outbound fetch", asyn
     store.queueUpdates.map((patch) => patch.status),
     ["outcome-unknown", "synced"],
   );
-  assert.equal(store.queueUpdates.at(-1).entryId, 900003);
+  assert.equal(lastPatch(store.queueUpdates).entryId, 900003);
   assert.equal(store.queueDeleted, true);
 });
 
@@ -361,7 +543,7 @@ test("the Functions emulator still syncs a legacy queue row without bookId", asy
 
   await deployed.toggl.syncqueue.run(store.event);
 
-  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.equal(lastPatch(store.queueUpdates).status, "synced");
   assert.equal(store.queueDeleted, true);
 });
 
@@ -378,7 +560,7 @@ test("the handler repairs legacy pending retry metadata and oversized errors", a
   assert.equal(store.transactionUpdates[0].status, "processing");
   assert.equal(store.transactionUpdates[0].attempts, 2);
   assert.ok(Object.hasOwn(store.transactionUpdates[0], "error"));
-  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.equal(lastPatch(store.queueUpdates).status, "synced");
   assert.equal(store.queueDeleted, true);
 });
 
@@ -388,8 +570,8 @@ test("the Functions emulator syncs a queued stop without outbound fetch", async 
 
   await deployed.toggl.syncqueue.run(store.event);
 
-  assert.equal(store.queueUpdates.at(-1).status, "synced");
-  assert.equal(store.queueUpdates.at(-1).entryId, 52);
+  assert.equal(lastPatch(store.queueUpdates).status, "synced");
+  assert.equal(lastPatch(store.queueUpdates).entryId, 52);
   assert.equal(store.queueDeleted, true);
 });
 
@@ -418,8 +600,8 @@ test("a failed correlated-stop cleanup retains a finite terminal expiry", async 
 
 test("a lost acknowledgement plus failed cleanup retains terminal expiry", async (t) => {
   const store = installCorrelatedStopStore(t, "lost-ack-delete-fails");
-  const consoleErrors = [];
-  t.mock.method(console, "error", (...args) => consoleErrors.push(args));
+  const consoleErrors: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => consoleErrors.push(args));
   t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
 
   await assert.rejects(
@@ -434,8 +616,8 @@ test("a lost acknowledgement plus failed cleanup retains terminal expiry", async
 
 test("a failed correlated-stop recovery logs and preserves the original error", async (t) => {
   const store = installCorrelatedStopStore(t, "recovery-write-fails");
-  const consoleErrors = [];
-  t.mock.method(console, "error", (...args) => consoleErrors.push(args));
+  const consoleErrors: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => consoleErrors.push(args));
   t.mock.method(global, "fetch", async () => new Response("", {status: 200}));
 
   await assert.rejects(
@@ -574,7 +756,7 @@ test("queued stop failures are retryable errors", async (t) => {
   );
 
   assert.equal(fetchCalls, 1);
-  assert.equal(store.queueUpdates.at(-1).status, "error");
+  assert.equal(lastPatch(store.queueUpdates).status, "error");
   assert.equal(store.issues.length, 1);
 });
 
@@ -596,6 +778,7 @@ test("the fifth claimed queue item becomes terminal without fetch", async (t) =>
 
   assert.equal(fetchCalls, 0);
   assert.equal(store.transactionUpdates[0].status, "error");
+  assert.ok(store.transactionUpdates[0].error);
   assert.match(store.transactionUpdates[0].error, /retry limit/);
   assert.equal(store.queueUpdates.length, 0);
 });
@@ -626,8 +809,9 @@ test("a malformed correlated stop still keeps its recovery row TTL-immune", asyn
     bookTitle: 42,
   });
   const store = installQueueStore(t, item);
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: Array<[string, {message: string}]> = [];
+  t.mock.method(logger, "error", (event: string, detail: {message: string}) =>
+    errors.push([event, detail]));
 
   await deployed.toggl.syncqueue.run(store.event);
   assert.equal(errors.length, 1);
@@ -672,8 +856,8 @@ test("a redelivered event for an already-touched row is not counted again", asyn
 });
 
 test("the row bound refuses past the limit, warns once, and never blocks the row", async (t) => {
-  const warnings = [];
-  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  const warnings: unknown[][] = [];
+  t.mock.method(logger, "warn", (...args: unknown[]) => warnings.push(args));
   t.mock.method(global, "fetch", async () =>
     new Response(JSON.stringify({id: 85}), {status: 200}),
   );
@@ -766,7 +950,9 @@ test("a forward-dated row's deferral expiry is measured from now, not its claime
   });
   const before = Date.now();
   await deployed.toggl.syncqueue.run(store.event);
-  const expiresAt = store.transactionUpdates[0].expiresAt.toMillis() - TOGGL_QUEUE_RETENTION_MS;
+  const expiry = store.transactionUpdates[0].expiresAt;
+  assert.ok(expiry instanceof Timestamp);
+  const expiresAt = expiry.toMillis() - TOGGL_QUEUE_RETENTION_MS;
   assert.ok(expiresAt >= before && expiresAt <= Date.now());
 });
 
@@ -841,6 +1027,7 @@ test("a row deferred for a whole day becomes terminal instead of a delivery per 
   assert.equal(terminal.status, "error");
   assert.equal(terminal.attempts, 5);
   assert.equal(terminal.deferrals, TOGGL_QUEUE_MAX_DEFERRALS + 1);
+  assert.ok(terminal.error);
   assert.match(terminal.error, /consecutive hours/);
   assert.ok(terminal.claimedAt instanceof Timestamp);
   assert.ok(terminal.expiresAt instanceof Timestamp);
@@ -860,8 +1047,8 @@ test("a malformed row over quota is terminal at once, never parked behind a stam
     throw new Error("fetch must not run");
   });
 
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: unknown[][] = [];
+  t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
   await deployed.toggl.syncqueue.run(store.event);
   assert.equal(errors.length, 1);
   assert.equal(errors[0][0], "toggl.queue_malformed");
@@ -877,16 +1064,16 @@ test("an SDK transaction retry that early-returns does not report the first atte
   // The Admin SDK re-runs the callback on contention. The first attempt
   // sees a fresh row past the bound (sets the refusal flag); the retry
   // sees the row already claimed by another worker and returns early.
-  const warnings = [];
-  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  const warnings: unknown[][] = [];
+  t.mock.method(logger, "warn", (...args: unknown[]) => warnings.push(args));
   const store = installQueueStore(t, queueItem(), {
     rows: {windowStartedAt: Timestamp.now(), count: TOGGL_QUEUE_ROW_LIMIT},
   });
-  const handlers = [];
-  t.mock.method(db, "runTransaction", async (handler) => {
+  const handlers: Array<(transaction: TransactionStub) => Promise<unknown>> = [];
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => {
     handlers.push(handler);
     const firstAttempt = {
-      get: async (ref) => ref === store.queueRef ?
+      get: async (ref: object) => ref === store.queueRef ?
         snapshot(queueItem()) :
         snapshot({windowStartedAt: Timestamp.now(), count: TOGGL_QUEUE_ROW_LIMIT}, true),
       update: () => {},
@@ -965,8 +1152,8 @@ test("a correlated stop is claimed even when the quota window is full", async (t
 test("a malformed queue quota document is repaired into a fresh window and logged", async (t) => {
   // Only the Admin SDK writes it, so this is a server bug; throwing here was
   // an Eventarc redelivery storm that also skipped the row count.
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: unknown[][] = [];
+  t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
   const store = installQueueStore(t, queueItem(), {
     quota: {windowStartedAt: Timestamp.now(), count: "ten"},
   });
@@ -992,46 +1179,46 @@ test("a failed terminal cleanup leaves a durable synced queue item", async (t) =
   );
 
   await assert.rejects(deployed.toggl.syncqueue.run(store.event), /delete failed/);
-  assert.equal(store.queueUpdates.at(-1).status, "synced");
+  assert.equal(lastPatch(store.queueUpdates).status, "synced");
   assert.ok(store.transactionUpdates[0].expiresAt instanceof Timestamp);
 });
 
-function installBooksStore(t, books) {
+function installBooksStore(t: TestContext, books: Record<string, Book>) {
   const userRef = {
     get: async () => snapshot({uid: "owner"}),
   };
   installTogglSecret(t);
   const active = Object.entries(books).find(([, book]) => book.activeTimer !== null);
-  let claim = active === undefined ?
-    {version: 1, state: "idle", cleared: null} :
-    {version: 1, bookId: active[0], ...active[1].activeTimer};
-  if (active !== undefined && !("state" in active[1].activeTimer)) {
-    claim = active[1].activeTimer.entryId === undefined ? {
-      version: 1,
-      state: "local",
-      bookId: active[0],
-      operationId: active[1].activeTimer.operationId,
-      start: active[1].activeTimer.start,
-    } : {
-      version: 1,
-      state: "remote",
-      bookId: active[0],
-      entryId: active[1].activeTimer.entryId,
-      start: active[1].activeTimer.start,
-    };
+  let claim: Record<string, unknown> | null = {version: 1, state: "idle", cleared: null};
+  if (active !== undefined) {
+    const [bookId, activeBook] = active;
+    const timer = activeBook.activeTimer;
+    assert.ok(timer);
+    claim = "state" in timer ?
+      {version: 1, bookId, ...timer} :
+      timer.entryId === undefined ? {
+        version: 1,
+        state: "local",
+        bookId,
+        operationId: timer.operationId,
+        start: timer.start,
+      } : {
+        version: 1,
+        state: "remote",
+        bookId,
+        entryId: timer.entryId,
+        start: timer.start,
+      };
   }
   const claimRef = {id: "current"};
-  const bookRefs = new Map(Object.entries(books).map(([id, book]) => [id, {
+  const bookRefs = new Map<string, BookRef>(Object.entries(books).map(([id, book]) => [id, {
     id,
     get: async () => snapshot(book),
-    update: async (patch) => Object.assign(book, patch),
+    update: async (patch: Record<string, unknown>) => {
+      Object.assign(book, patch);
+    },
   }]));
-  const bookSnapshot = (id) => ({
-    ...snapshot(books[id]),
-    id,
-    ref: bookRefs.get(id),
-  });
-  t.mock.method(db, "doc", (path) => {
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner") return userRef;
     if (path === "users/owner/timerLifecycle/current") return claimRef;
     const prefix = "users/owner/books/";
@@ -1040,23 +1227,23 @@ function installBooksStore(t, books) {
     assert.ok(ref);
     return ref;
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: BookTransactionStub) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       if (ref === claimRef) return snapshot(claim, claim !== null);
       const entry = [...bookRefs.entries()].find(([, bookRef]) => bookRef === ref);
       assert.ok(entry);
       return snapshot(books[entry[0]]);
     },
-    update: (ref, patch) => {
+    update: (ref: object, patch: Record<string, unknown>) => {
       const entry = [...bookRefs.entries()].find(([, bookRef]) => bookRef === ref);
       assert.ok(entry);
       Object.assign(books[entry[0]], patch);
     },
-    set: (ref, value) => {
+    set: (ref: object, value: Record<string, unknown>) => {
       assert.equal(ref, claimRef);
       claim = value;
     },
-    delete: (ref) => {
+    delete: (ref: object) => {
       assert.equal(ref, claimRef);
       claim = null;
     },
@@ -1064,7 +1251,7 @@ function installBooksStore(t, books) {
   return {books, bookRefs, get claim() { return claim; }};
 }
 
-function installBookStore(t, book) {
+function installBookStore(t: TestContext, book: Book) {
   const store = installBooksStore(t, {book});
   return {book, bookRef: store.bookRefs.get("book")};
 }
@@ -1072,12 +1259,13 @@ function installBookStore(t, book) {
 test("concurrent starts share a transactional claim and issue one POST", async (t) => {
   const store = installBookStore(t, {title: "The Book", activeTimer: null});
   let fetchCalls = 0;
-  let announceFetch;
-  let releaseFetch;
-  const fetchStarted = new Promise((resolve) => {
+  let announceFetch: () => void = () => assert.fail("fetch start resolver was not installed");
+  let releaseFetch: (response: Response) => void = () =>
+    assert.fail("fetch response resolver was not installed");
+  const fetchStarted = new Promise<void>((resolve) => {
     announceFetch = resolve;
   });
-  const fetchResponse = new Promise((resolve) => {
+  const fetchResponse = new Promise<Response>((resolve) => {
     releaseFetch = resolve;
   });
   t.mock.method(global, "fetch", async () => {
@@ -1090,7 +1278,7 @@ test("concurrent starts share a transactional claim and issue one POST", async (
   await fetchStarted;
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   releaseFetch(new Response(JSON.stringify({
     id: 91,
@@ -1114,12 +1302,13 @@ test("starts on different books share the user-wide claim", async (t) => {
     second: {title: "Second", activeTimer: null},
   });
   let fetchCalls = 0;
-  let announceFetch;
-  let releaseFetch;
-  const fetchStarted = new Promise((resolve) => {
+  let announceFetch: () => void = () => assert.fail("fetch start resolver was not installed");
+  let releaseFetch: (response: Response) => void = () =>
+    assert.fail("fetch response resolver was not installed");
+  const fetchStarted = new Promise<void>((resolve) => {
     announceFetch = resolve;
   });
-  const fetchResponse = new Promise((resolve) => {
+  const fetchResponse = new Promise<Response>((resolve) => {
     releaseFetch = resolve;
   });
   t.mock.method(global, "fetch", async () => {
@@ -1132,8 +1321,7 @@ test("starts on different books share the user-wide claim", async (t) => {
   await fetchStarted;
   await assert.rejects(
     deployed.toggl.start.run({bookId: "second"}, authContext),
-    (error) => error.code === "failed-precondition" &&
-      /another book/.test(error.message),
+    (error) => hasError(error, "failed-precondition", /another book/),
   );
   releaseFetch(new Response(JSON.stringify({
     id: 92,
@@ -1142,7 +1330,7 @@ test("starts on different books share the user-wide claim", async (t) => {
   await first;
 
   assert.equal(fetchCalls, 1);
-  assert.equal(store.books.first.activeTimer.entryId, 92);
+  assert.equal(activeTimer(store.books.first).entryId, 92);
   assert.equal(store.books.second.activeTimer, null);
 });
 
@@ -1164,11 +1352,11 @@ test("a stale start claim becomes terminal without another POST", async (t) => {
 
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
 
   assert.equal(fetchCalls, 0);
-  assert.equal(store.book.activeTimer.state, "outcome-unknown");
+  assert.equal(activeTimer(store.book).state, "outcome-unknown");
 });
 
 test("an explicit start rejection clears its claim", async (t) => {
@@ -1198,11 +1386,13 @@ test("a start 5xx becomes outcome-unknown", async (t) => {
     /start failed with status 503/,
   );
 
-  assert.equal(store.book.activeTimer.state, "outcome-unknown");
-  assert.match(store.book.activeTimer.error, /status 503/);
+  const failedTimer = activeTimer(store.book);
+  assert.equal(failedTimer.state, "outcome-unknown");
+  assert.ok(failedTimer.error);
+  assert.match(failedTimer.error, /status 503/);
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   assert.equal(fetchCalls, 1);
 });
@@ -1220,11 +1410,13 @@ test("an ambiguous start network failure becomes outcome-unknown", async (t) => 
     /socket closed/,
   );
 
-  assert.equal(store.book.activeTimer.state, "outcome-unknown");
-  assert.match(store.book.activeTimer.error, /socket closed/);
+  const failedTimer = activeTimer(store.book);
+  assert.equal(failedTimer.state, "outcome-unknown");
+  assert.ok(failedTimer.error);
+  assert.match(failedTimer.error, /socket closed/);
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   assert.equal(fetchCalls, 1);
 });
@@ -1241,10 +1433,10 @@ test("an invalid start response becomes outcome-unknown and blocks replay", asyn
     deployed.toggl.start.run({bookId: "book"}, authContext),
     /entry id/,
   );
-  assert.equal(store.book.activeTimer.state, "outcome-unknown");
+  assert.equal(activeTimer(store.book).state, "outcome-unknown");
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   assert.equal(fetchCalls, 1);
 });
@@ -1289,7 +1481,7 @@ test("a 404 does not claim the timer was cleared after its identity changed", as
     deployed.toggl.stop.run({bookId: "book"}, authContext),
     /entry is gone, but its local timer claim changed/,
   );
-  assert.equal(store.book.activeTimer.entryId, 13);
+  assert.equal(activeTimer(store.book).entryId, 13);
 });
 
 test("the Functions emulator starts and stops using Firestore state only", async (t) => {
@@ -1312,26 +1504,30 @@ const verifiedContext = {auth: {uid: "owner", token: {email_verified: true}}};
 // savetoken meters itself through users/owner/functionQuotas/togglToken
 // (consumeQuota's own transaction); the mock serves that document and
 // records what the quota transaction writes.
-function installTokenQuota(t, userRef, {quota} = {}) {
+function installTokenQuota(
+  t: TestContext,
+  userRef: object,
+  {quota}: {quota?: Counter} = {},
+) {
   const quotaRef = {};
-  let quotaValue = quota;
-  const quotaWrites = [];
-  t.mock.method(db, "doc", (path) => {
+  let quotaValue: Record<string, unknown> | undefined = quota;
+  const quotaWrites: StoreWrite[] = [];
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner/functionQuotas/togglToken") return quotaRef;
     assert.equal(path, "users/owner");
     return userRef;
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (ref) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+    get: async (ref: object) => {
       assert.equal(ref, quotaRef);
       return snapshot(quotaValue, quotaValue !== undefined);
     },
-    set: (ref, value) => {
+    set: (ref: object, value: Record<string, unknown>) => {
       assert.equal(ref, quotaRef);
       quotaValue = value;
       quotaWrites.push({type: "set", value});
     },
-    update: (ref, patch) => {
+    update: (ref: object, patch: QueuePatch) => {
       assert.equal(ref, quotaRef);
       quotaValue = {...quotaValue, ...patch};
       quotaWrites.push({type: "update", value: patch});
@@ -1339,19 +1535,19 @@ function installTokenQuota(t, userRef, {quota} = {}) {
   }));
   return {
     get quota() {
-      return quotaValue;
+      return counter(quotaValue);
     },
     quotaWrites,
   };
 }
 
 test("savetoken validates Toggl responses and stores the selected project", async (t) => {
-  const writes = [];
+  const writes: Array<{value: Record<string, unknown>}> = [];
   let exists = true;
   const secret = installTogglSecret(t, undefined);
   const userRef = {
     get: async () => ({exists, data: () => ({})}),
-    update: async (value) => {
+    update: async (value: Record<string, unknown>) => {
       // Credential first, mirror second: if the mirror write is lost the
       // account merely shows disconnected.
       assert.equal(secret.writes.length, 1, "the credential is stored before the mirror");
@@ -1360,10 +1556,10 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
     set: async () => assert.fail("savetoken must not create a user document"),
   };
   const quota = installTokenQuota(t, userRef);
-  const requested = [];
-  t.mock.method(global, "fetch", async (url) => {
+  const requested: Array<string | URL | Request> = [];
+  t.mock.method(global, "fetch", async (url: string | URL | Request) => {
     requested.push(url);
-    if (url.endsWith("/me")) return new Response("{}", {status: 200});
+    if (String(url).endsWith("/me")) return new Response("{}", {status: 200});
     return new Response(JSON.stringify([{
       id: 7,
       workspace_id: 6,
@@ -1378,13 +1574,13 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
   // The credential goes only to the secrets store; the user document gets
   // the status mirror and never the token (SEC-004).
   assert.equal(secret.writes.length, 1);
-  assert.equal(secret.writes[0].type, "set");
-  assert.deepEqual(Object.keys(secret.writes[0].value).sort(), ["apiToken", "projectId", "updatedAt", "workspaceId"]);
-  assert.equal(secret.writes[0].value.apiToken, "valid-token");
-  assert.equal(secret.writes[0].value.workspaceId, 6);
-  assert.equal(secret.writes[0].value.projectId, 7);
+  const savedSecret = secretValue(secret.writes[0]);
+  assert.deepEqual(Object.keys(savedSecret).sort(), ["apiToken", "projectId", "updatedAt", "workspaceId"]);
+  assert.equal(savedSecret.apiToken, "valid-token");
+  assert.equal(savedSecret.workspaceId, 6);
+  assert.equal(savedSecret.projectId, 7);
   assert.equal(writes.length, 1);
-  const mirror = writes[0].value.toggl;
+  const mirror = recordValue(firstUserWrite(writes).value.toggl);
   assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
   assert.equal(mirror.workspaceId, 6);
   assert.equal(mirror.projectId, 7);
@@ -1395,7 +1591,7 @@ test("savetoken validates Toggl responses and stores the selected project", asyn
   exists = false;
   await assert.rejects(
     deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   assert.equal(writes.length, 1);
   assert.equal(secret.writes.length, 1);
@@ -1419,7 +1615,7 @@ test("savetoken refuses unverified accounts before any Toggl call or quota spend
   ]) {
     await assert.rejects(
       deployed.toggl.savetoken.run({token: "valid-token"}, context),
-      (error) => error.code === "failed-precondition" && /verified email address/.test(error.message),
+      (error) => hasError(error, "failed-precondition", /verified email address/),
     );
   }
   assert.equal(fetchCalls, 0);
@@ -1427,8 +1623,8 @@ test("savetoken refuses unverified accounts before any Toggl call or quota spend
 });
 
 test("savetoken is metered per user and warns once per window", async (t) => {
-  const warnings = [];
-  t.mock.method(logger, "warn", (...args) => warnings.push(args));
+  const warnings: unknown[][] = [];
+  t.mock.method(logger, "warn", (...args: unknown[]) => warnings.push(args));
   const userRef = {
     get: async () => ({exists: true, data: () => ({})}),
     update: async () => {},
@@ -1444,11 +1640,11 @@ test("savetoken is metered per user and warns once per window", async (t) => {
   // Sixth attempt in the window: refused, the credential never leaves.
   await assert.rejects(
     deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => error.code === "resource-exhausted",
+    (error) => hasError(error, "resource-exhausted"),
   );
   await assert.rejects(
     deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => error.code === "resource-exhausted",
+    (error) => hasError(error, "resource-exhausted"),
   );
   assert.equal(fetchCalls, 0);
   assert.equal(quota.quota.count, 6);
@@ -1457,11 +1653,11 @@ test("savetoken is metered per user and warns once per window", async (t) => {
 
 test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
   enableFunctionsEmulator(t);
-  const writes = [];
+  const writes: Array<{value: Record<string, unknown>}> = [];
   const secret = installTogglSecret(t, undefined);
   const userRef = {
     get: async () => ({exists: true, data: () => ({})}),
-    update: async (value) => writes.push({value}),
+    update: async (value: Record<string, unknown>) => writes.push({value}),
   };
   installTokenQuota(t, userRef);
 
@@ -1469,32 +1665,32 @@ test("the Functions emulator saves a deterministic Toggl project without outboun
     await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, verifiedContext),
     {workspaceId: 900001, projectId: 900002},
   );
-  assert.equal(secret.writes[0].value.apiToken, "snapshot-production-token");
+  assert.equal(secretValue(secret.writes[0]).apiToken, "snapshot-production-token");
   assert.equal(writes.length, 1);
-  const mirror = writes[0].value.toggl;
+  const mirror = recordValue(firstUserWrite(writes).value.toggl);
   assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
   assert.equal(mirror.workspaceId, 900001);
   assert.equal(mirror.projectId, 900002);
 });
 
 test("cleartoken removes the stored Toggl credential and nothing else", async (t) => {
-  const writes = [];
+  const writes: Record<string, unknown>[] = [];
   let exists = true;
   let claimState = "idle";
   const secret = installTogglSecret(t);
   const userRef = {
     get: async () => ({exists, data: () => ({})}),
-    update: async (value) => {
+    update: async (value: Record<string, unknown>) => {
       // Withdrawal first: the credential must be gone before the mirror.
       assert.deepEqual(secret.writes, [{type: "delete"}], "the credential is deleted before the mirror");
       writes.push(value);
     },
   };
-  const claimRef = {get: async () => ({exists: true, get: (field) => {
+  const claimRef = {get: async () => ({exists: true, get: (field: string) => {
     assert.equal(field, "state");
     return claimState;
   }})};
-  t.mock.method(db, "doc", (path) => {
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner/timerLifecycle/current") return claimRef;
     assert.equal(path, "users/owner");
     return userRef;
@@ -1506,18 +1702,18 @@ test("cleartoken removes the stored Toggl credential and nothing else", async (t
   claimState = "claimed";
   await assert.rejects(
     deployed.toggl.cleartoken.run(undefined, authContext),
-    (error) => error.code === "failed-precondition" && /running timer/.test(error.message),
+    (error) => hasError(error, "failed-precondition", /running timer/),
   );
   assert.equal(writes.length, 1);
   claimState = "idle";
   await assert.rejects(
     deployed.toggl.cleartoken.run({extra: 1}, authContext),
-    (error) => error.code === "invalid-argument",
+    (error) => hasError(error, "invalid-argument"),
   );
   exists = false;
   await assert.rejects(
     deployed.toggl.cleartoken.run(undefined, authContext),
-    (error) => error.code === "failed-precondition",
+    (error) => hasError(error, "failed-precondition"),
   );
   assert.equal(writes.length, 1);
   // Every refusal above stopped before touching the credential store.
@@ -1541,13 +1737,13 @@ test("savetoken written during account deletion removes its own credential", asy
     update: async () => assert.fail("no status mirror may be written for a deleted account"),
   };
   installTokenQuota(t, userRef);
-  t.mock.method(global, "fetch", async (url) => {
+  t.mock.method(global, "fetch", async (url: string | URL | Request) => {
     if (String(url).endsWith("/me")) return new Response("{}", {status: 200});
     return new Response(JSON.stringify([{id: 7, workspace_id: 6, name: "Reading"}]), {status: 200});
   });
   await assert.rejects(
     deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => error.code === "failed-precondition" && /account has been deleted/.test(error.message),
+    (error) => hasError(error, "failed-precondition", /account has been deleted/),
   );
   // The credential was written and then removed by the compensation.
   assert.deepEqual(secret.writes.map((w) => w.type), ["set", "delete"]);
@@ -1573,12 +1769,14 @@ test("a tombstoned account cannot use, save or clear a Toggl token", async (t) =
   installTokenQuota(t, userRef);
   t.mock.method(global, "fetch", async () => assert.fail("no Toggl request for a deleted account"));
   const context = {auth: {uid: "owner", token: {email_verified: true}}};
-  for (const [name, call] of [
+  const rejectedCalls: Array<[string, () => Promise<unknown>]> = [
     ["savetoken", () => deployed.toggl.savetoken.run({token: "x".repeat(32)}, context)],
     ["cleartoken", () => deployed.toggl.cleartoken.run({}, context)],
     ["start", () => deployed.toggl.start.run({bookId: "book"}, context)],
-  ]) {
+  ];
+  for (const [name, call] of rejectedCalls) {
     await assert.rejects(call(), (error) => {
+      assert.ok(errorDetails(error));
       assert.equal(error.code, "failed-precondition", name);
       assert.match(error.message, /account has been deleted/, name);
       return true;

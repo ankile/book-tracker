@@ -21,6 +21,7 @@ import {
   CatalogWorkInput,
 } from "./decoders";
 import {externalIndexId, normalizeCatalogText, normalizeCatalogTitle} from "./catalog";
+import {profileConsents, sharingSetting} from "./sharingConsent";
 
 const MAX_WORKS = 200;
 const MAX_CATALOG_AUTHORS = 500;
@@ -35,7 +36,6 @@ const MAX_LINKED_EDITION_BOOKS = 100;
 const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_AUDIT_BYTES = 700_000;
 const ADMIN_UID = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
-const VALID_TIME_ZONES = new Set(["UTC", ...Intl.supportedValuesOf("timeZone")]);
 
 type Visibility = "internal" | "searchable";
 type WorkStatus = "active" | "merged";
@@ -790,16 +790,10 @@ async function promotionEligible(
       one(reader, db.collection("users").doc(uid)),
       one(reader, db.doc(`users/${uid}/settings/bookSharing`)),
     ]);
-    if (!user.exists || user.get("deletedAt") !== undefined || !setting.exists) continue;
-    const username = setting.get("profileUsername");
-    const timeZone = setting.get("timeZone");
-    if (typeof username !== "string" || !/^[a-z0-9-]{3,30}$/.test(username) ||
-        typeof timeZone !== "string" || !VALID_TIME_ZONES.has(timeZone)) continue;
-    const profile = await one(reader, db.collection("profiles").doc(username));
-    if (profile.exists && profile.get("uid") === uid &&
-        profile.get("public") === true && profile.get("deletedAt") === undefined) {
-      return true;
-    }
+    const consented = sharingSetting(user, setting);
+    if (consented === null) continue;
+    const profile = await one(reader, db.collection("profiles").doc(consented.username));
+    if (profileConsents(profile, uid)) return true;
   }
   return false;
 }
@@ -1229,6 +1223,21 @@ async function planOperation(
         .where("editionId", "==", operation.editionId)
         .limit(MAX_LINKED_EDITION_BOOKS + 1));
       if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
+      // Moving an edition under a searchable work makes it readable
+      // (editions/{id} get rule follows the work's visibility), so an
+      // edition seeded under an internal work needs the same consent
+      // provenance as editWork and mergeWorks promotion. Anything but a
+      // searchable source counts as internal, fail-closed.
+      const oldWork = await one(reader, db.collection("works").doc(old.workId));
+      catalog.push(versionOf("work", oldWork));
+      if (oldWork.get("visibility") !== "searchable" &&
+          work.work.visibility === "searchable" &&
+          (linked.empty || !await promotionEligible(reader, db, linked.docs))) {
+        failedPrecondition(
+          "This edition has no consent-eligible linked book for searchable disclosure.",
+          "catalog-invariant",
+        );
+      }
       await validateLinkOwners(reader, db, linked.docs);
       books = linked.docs.map((book) => {
         const path = book.ref.path.split("/");
@@ -1426,21 +1435,6 @@ export async function applyAdminCatalogOperation(
   });
 }
 
-function isbn13(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const digits = value.replace(/[^0-9X]/gi, "").toUpperCase();
-  let candidate = digits;
-  if (/^\d{9}[\dX]$/.test(digits)) candidate = `978${digits.slice(0, 9)}`;
-  if (!/^\d{12,13}$/.test(candidate)) return null;
-  const body = candidate.slice(0, 12);
-  let sum = 0;
-  for (let index = 0; index < 12; index += 1) {
-    sum += Number(body[index]) * (index % 2 === 0 ? 1 : 3);
-  }
-  const normalized = `${body}${(10 - sum % 10) % 10}`;
-  return normalized === candidate ? normalized : null;
-}
-
 function tokenAgreement(left: string, right: string): number {
   const leftTokens = new Set(normalizeCatalogText(left).split(" ").filter(Boolean));
   const rightTokens = new Set(normalizeCatalogText(right).split(" ").filter(Boolean));
@@ -1515,6 +1509,19 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     if (author.mergedInto === undefined) return null;
     return catalogAuthorById.get(author.mergedInto)?.status === "active" ?
       author.mergedInto : null;
+  };
+  const catalogAuthorKeySets = (work: WorkData): Array<Set<string>> =>
+    work.authorIds.flatMap((authorId) => {
+      const resolvedId = resolvedCatalogAuthorId(authorId);
+      const author = resolvedId === null ? undefined : catalogAuthorById.get(resolvedId);
+      return author === undefined || author.kind === "placeholder" ? [] :
+        [new Set([normalizeCatalogText(author.canonicalName), ...author.nameKeys])];
+    });
+  const exactAuthorSet = (work: WorkData, bookKeys: ReadonlySet<string>): boolean => {
+    const sets = catalogAuthorKeySets(work);
+    return sets.length > 0 && sets.length === bookKeys.size &&
+      sets.every((keys) => [...bookKeys].some((bookKey) => keys.has(bookKey))) &&
+      [...bookKeys].every((bookKey) => sets.some((keys) => keys.has(bookKey)));
   };
   const catalogAuthorNames = (work: WorkData): string[] =>
     [...new Set(work.authorIds.flatMap((authorId) => {
@@ -1639,8 +1646,10 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
       bookId: snapshot.id,
       title,
       authorNames: names,
-      isbn13: isbn13(rawIsbn),
-      rawIsbn: isbn13(rawIsbn) === null && rawIsbn !== "" ? rawIsbn : null,
+      // The same normalizer the link/apply path uses, so an ISBN-10 that
+      // apply would happily link is also reported as a candidate here.
+      isbn13: normalizedBookIsbn(rawIsbn),
+      rawIsbn: normalizedBookIsbn(rawIsbn) === null && rawIsbn !== "" ? rawIsbn : null,
       pageCount,
       publisher: optionalText(snapshot.get("publisher")),
       publishedDate: optionalText(snapshot.get("publishedDate")),
@@ -1667,11 +1676,13 @@ export async function scanAdminCatalog(db: Firestore, bookCursor: string | null)
     }
     const key = normalizeCatalogTitle(book.title);
     const normalizedAuthors = new Set(book.authorNames.map(normalizeCatalogText));
+    // "Exact" is the migration contract: the complete normalized author
+    // identity agrees, aliases included. A book by [A, B] against a work by
+    // [A, C] is partial overlap and stays in the similarity path below —
+    // the admin UI offers this label as a one-click link.
     const candidates = [...workById].filter(([, work]) =>
       work.status === "active" && work.titleKeys.includes(key) &&
-      catalogAuthorNames(work).some((name) =>
-        normalizedAuthors.has(normalizeCatalogText(name)),
-      ),
+      exactAuthorSet(work, normalizedAuthors),
     );
     if (candidates.length > 0) findings.push({
       code: "unmatched-title-author-candidate",

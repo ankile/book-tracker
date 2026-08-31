@@ -209,17 +209,41 @@ provide positional `authorNames` and `authorKinds`. The decoder keeps each
 name/kind pair together while normalizing, sorting, and deduplicating, and
 rejects omitted kinds or conflicting classifications.
 
-The compatible release sequence is:
+The release is not additive at the Rules layer — the personal author
+collection loses its write rules and every book write must reference
+`catalogAuthors` — so the order below keeps the deployed client and the
+deployed Rules compatible at every step, with the migration in the middle:
 
-1. deploy backend author resolution, catalog search/read services, projection
-   workers, additive indexes, and additive Rules;
-2. deploy the client that understands shared authors and optional Work/Edition
-   links;
-3. follow the standard snapshot, dry-run, apply-twice, and audit loop with the
-   exact reviewed manifest;
-4. verify catalog suggestions, personal-book edits, sharing convergence, Work
-   reader summaries, and restricted catalog curation before tightening or
-   deleting compatibility data.
+1. deploy the backend only (`functions` and `firestore:indexes`): the new
+   callables and projection workers are unused until the client ships, the
+   migration needs nothing from them, and the collection-group indexes must
+   exist before any admin merge;
+2. run the standard snapshot, dry-run, apply-twice, and audit loop with the
+   exact reviewed manifest while the previous Rules are still deployed. The
+   migration writes through the Admin SDK, so Rules do not constrain it. A
+   client still running the previous bundle keeps working during this step:
+   it reads its retained per-user author documents, and a book it writes with
+   a per-user author is picked up by the re-run in step 4;
+3. deploy the client, Rules and Functions together (`firebase deploy`, one
+   Hosting release). From this point a browser tab still holding the
+   previous bundle can read its per-user authors but cannot create one, so
+   an add/edit in that tab fails until it reloads; the service worker
+   installs the new bundle on the next navigation. Tell users to reload if a
+   save is refused;
+4. re-run the dry run; apply again only if step 2's window produced new
+   personal-author references (the apply is idempotent and prints them as
+   REVIEW lines otherwise), then audit;
+5. verify catalog suggestions, personal-book edits, sharing convergence, Work
+   reader summaries, and restricted catalog curation. Only after that,
+   remove the read-only `users/{userId}/authors` compatibility block from
+   `firestore.rules` in a follow-up release.
+
+The migration never deletes a document. Legacy per-user author records are
+retained once no book references them (they are unreachable for the new
+client and counted by `db-audit.ts`), a book that still references a
+retired-as-deleted author is a REVIEW line rather than a rewrite, and
+tombstoned accounts are skipped entirely so the private deletion runbook
+stays the only path that touches them.
 
 The migration header documents its flags. Keep reviewed manifests and
 production rehearsal evidence in the approved private runbook, not in Git.
@@ -231,7 +255,7 @@ or integrations, update the relevant files under `docs/architecture/`, render
 new SVG and PNG artifacts, and run:
 
 ```bash
-node docs/architecture/verify.mjs
+node docs/architecture/verify.ts
 ```
 
 When a migration completes, update this status ledger in the same commit that

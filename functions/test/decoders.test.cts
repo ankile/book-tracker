@@ -1,12 +1,30 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {FieldValue, getFirestore, Timestamp} = require("firebase-admin/firestore");
-const {logger} = require("firebase-functions");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {FieldValue, getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
-const decoders = require("../lib/decoders");
-const deployed = require("../lib");
+interface Runnable {
+  run(data: unknown, context?: unknown): Promise<unknown>;
+}
+interface Deployed {
+  booksapi: {lookupisbn: Runnable};
+  toggl: {
+    savetoken: Runnable;
+    start: Runnable;
+    stop: Runnable;
+    syncqueue: Runnable;
+  };
+}
+interface TransactionStub {
+  get(target: object): Promise<{exists: boolean; data(): unknown}>;
+  update(target: object, value: Record<string, unknown>): void;
+  set(target: object, value: Record<string, unknown>): void;
+}
+
+const decoders: typeof import("../src/decoders") = require("../lib/decoders");
+const deployed: Deployed = require("../lib");
 const db = getFirestore();
 
 const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
@@ -59,56 +77,6 @@ test("catalog request decoders are exact and bounded", () => {
     {title: "Book", authorNames: Array(21).fill("Author")},
   ]) {
     assert.throws(() => decoders.decodeCatalogSearchRequest(broken));
-  }
-  const request = {
-    confirmSearchable: true,
-    promoteInternalCollision: false,
-    work: {
-      canonicalTitle: "The Book",
-      alternateTitles: [],
-      authorIds: ["ada-lovelace"],
-      coverUrl: "https://example.test/work.jpg",
-      subjects: [],
-      fiction: null,
-    },
-    edition: {
-      isbn13: "9780000000002",
-      title: "The Book",
-      publisher: "Publisher",
-      publishedDate: "2026",
-      language: "en",
-      translatorNames: [],
-      format: "full",
-      suggestedPageCount: 320,
-      coverUrl: "https://example.test/edition.jpg",
-      externalIds: {"google-books": "volume-123"},
-    },
-  };
-  assert.deepEqual(decoders.decodeCatalogCreateRequest(request), request);
-  assert.throws(
-    () => decoders.decodeCatalogCreateRequest({
-      ...request,
-      work: {...request.work, coverUrl: "http://example.test/cover.jpg"},
-    }),
-    /HTTPS URL/,
-  );
-  assert.throws(
-    () => decoders.decodeCatalogCreateRequest({...request, confirmSearchable: false}),
-    /confirmSearchable/,
-  );
-  for (const broken of [
-    {...request, work: {...request.work, canonicalTitle: "!!!"}},
-    {...request, edition: {...request.edition, title: "!!!"}},
-    {...request, work: {...request.work, authorIds: []}},
-    {...request, edition: {...request.edition, authorNames: []}},
-    {...request, edition: {...request.edition, authorNames: ["Grace Hopper"]}},
-    {...request, promoteInternalCollision: true},
-    {...request, edition: {
-      ...request.edition,
-      externalIds: {untrusted: "opaque-id"},
-    }},
-  ]) {
-    assert.throws(() => decoders.decodeCatalogCreateRequest(broken));
   }
   assert.deepEqual(decoders.decodeEnsureCatalogAuthorsRequest({authors: [{
     canonicalName: "Ada Lovelace", sortName: "Lovelace", kind: "person",
@@ -535,7 +503,9 @@ test("queue decoding enforces payload and lifecycle discriminants", () => {
     type: "stop",
     entryId: 42,
   };
-  assert.equal(decoders.decodeTogglQueueDocument(stop).entryId, 42);
+  const decodedStop = decoders.decodeTogglQueueDocument(stop);
+  assert.ok(decodedStop.type === "stop");
+  assert.equal(decodedStop.entryId, 42);
   assert.equal(decoders.decodeTogglQueueDocument({
     ...create,
     status: "processing",
@@ -651,7 +621,7 @@ test("issue reports are shaped, allowlisted and bounded before storage", () => {
       "toggl.sync_stuck",
     ],
   );
-  for (const [label, broken] of [
+  const invalidReports: ReadonlyArray<readonly [string, unknown]> = [
     ["server-only event", {...valid, event: "toggl.sync_failed"}],
     ["retired anonymous event", {...valid, event: "auth.sign_in_failed"}],
     ["unknown event", {...valid, event: "anything"}],
@@ -668,7 +638,8 @@ test("issue reports are shaped, allowlisted and bounded before storage", () => {
     ["createdAt field", {...valid, createdAt: "2999-01-01T00:00:00Z"}],
     ["array", [valid]],
     ["null", null],
-  ]) {
+  ];
+  for (const [label, broken] of invalidReports) {
     assert.throws(
       () => decoders.decodeIssueReport(broken),
       decoders.DataDecodeError,
@@ -725,19 +696,19 @@ test("malformed callable data is rejected before external requests", async (t) =
 
   await assert.rejects(
     deployed.toggl.savetoken.run({token: ""}, authContext),
-    (error) => error.code === "invalid-argument",
+    (error) => hasCode(error, "invalid-argument"),
   );
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book/updates/x"}, authContext),
-    (error) => error.code === "invalid-argument",
+    (error) => hasCode(error, "invalid-argument"),
   );
   await assert.rejects(
     deployed.toggl.stop.run({bookId: 7}, authContext),
-    (error) => error.code === "invalid-argument",
+    (error) => hasCode(error, "invalid-argument"),
   );
   await assert.rejects(
     deployed.booksapi.lookupisbn.run({isbn: "bad"}, authContext),
-    (error) => error.code === "invalid-argument",
+    (error) => hasCode(error, "invalid-argument"),
   );
   assert.equal(fetchCalls, 0);
 });
@@ -748,9 +719,9 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     fetchCalls += 1;
     throw new Error("fetch must not run");
   });
-  const updates = [];
+  const updates: Record<string, unknown>[] = [];
   const quotaRef = {};
-  let quota = {windowStartedAt: Timestamp.now(), count: 9};
+  let quota: Record<string, unknown> = {windowStartedAt: Timestamp.now(), count: 9};
   const item = {
     type: "create",
     bookTitle: "Malformed Clock",
@@ -761,24 +732,24 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
   };
   const ref = {};
   const rowsRef = {};
-  let rows;
-  t.mock.method(db, "doc", (path) => {
+  let rows: Record<string, unknown> | undefined;
+  t.mock.method(db, "doc", (path: string) => {
     if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (target) => {
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+    get: async (target: object) => {
       if (target === ref) return {exists: true, data: () => item};
       if (target === rowsRef) return {exists: rows !== undefined, data: () => rows};
       return {exists: true, data: () => quota};
     },
-    update: (target, value) => {
+    update: (target: object, value: Record<string, unknown>) => {
       if (target === ref) updates.push(value);
       else if (target === rowsRef) rows = {...rows, ...value};
       else quota = {...quota, ...value};
     },
-    set: (target, value) => {
+    set: (target: object, value: Record<string, unknown>) => {
       if (target === rowsRef) {
         rows = value;
         return;
@@ -798,8 +769,8 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     params: {uid: "owner", queueId: "bad"},
   };
 
-  const errors = [];
-  t.mock.method(logger, "error", (...args) => errors.push(args));
+  const errors: unknown[][] = [];
+  t.mock.method(logger, "error", (...args: unknown[]) => errors.push(args));
   // Terminal and logged, not thrown: a throw is an Eventarc redelivery.
   await deployed.toggl.syncqueue.run(event);
   assert.deepEqual(errors, [["toggl.queue_malformed", {
@@ -820,6 +791,7 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
   }]);
   assert.deepEqual(updates[0].deferredUntil, FieldValue.delete());
   // Malformed rows are rows: counted against the per-user row bound.
+  assert.ok(rows);
   assert.equal(rows.count, 1);
   assert.ok(updates[0].claimedAt instanceof Timestamp);
   assert.ok(updates[0].expiresAt instanceof Timestamp);
@@ -829,3 +801,10 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
   );
   assert.ok(updates[0].retryRequestedAt);
 });
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code;
+}

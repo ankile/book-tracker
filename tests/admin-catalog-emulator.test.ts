@@ -13,6 +13,20 @@ const ADMIN_UID = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2';
 const PASSWORD = 'valid-test-password';
 const FUNCTIONS_ORIGIN = `http://127.0.0.1:5001/${PROJECT_ID}/europe-west1`;
 
+// Every callable enforces App Check (SEC-068). The Functions emulator skips
+// token verification and unsafe-decodes whatever JWT the header carries, so
+// an unsigned emulator token stands in for the attested one a browser sends.
+function emulatorAppCheckToken(): string {
+  const encode = (value: object): string =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({alg: 'none', typ: 'JWT'})}.${encode({
+    sub: '1:emulator:web:admin-catalog-test',
+    aud: [`projects/${PROJECT_ID}`],
+    iss: 'https://firebaseappcheck.googleapis.com/emulator',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}.`;
+}
+
 function requireLocalEmulators(): void {
   assert.match(process.env.FIRESTORE_EMULATOR_HOST ?? '', /^(?:127\.0\.0\.1|localhost):8080$/);
   assert.match(process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '', /^(?:127\.0\.0\.1|localhost):9099$/);
@@ -69,7 +83,11 @@ test('all admin catalog operations use real callable transactions and preserve p
     const token = await clientAuth.currentUser!.getIdToken();
     const response = await fetch(`${FUNCTIONS_ORIGIN}/${name}`, {
       method: 'POST',
-      headers: {'authorization': `Bearer ${token}`, 'content-type': 'application/json'},
+      headers: {
+        'authorization': `Bearer ${token}`,
+        'content-type': 'application/json',
+        'x-firebase-appcheck': emulatorAppCheckToken(),
+      },
       body: JSON.stringify({data}),
     });
     const payload = await response.json() as {result?: T; error?: unknown};

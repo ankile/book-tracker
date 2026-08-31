@@ -8,9 +8,7 @@
 //
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
-import { getApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
-import { parseFlags, connect } from './migrate-lib.ts';
+import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
 import { createHash } from 'node:crypto';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
@@ -48,7 +46,7 @@ const users = await db.collection('users').listDocuments();
 // Integration credentials (SEC-004) live in the `secrets` database; this
 // audit reads their shape and linkage but NEVER their values — no finding
 // detail below may carry a token.
-const togglTokens = await getFirestore(getApp(), 'secrets').collection('togglTokens').get();
+const togglTokens = await openDatabase('secrets').collection('togglTokens').get();
 const publicProfiles = await db.collection('profiles').get();
 const profileDiscoveries = await db.collection('profileDiscovery').get();
 const profileOwners = await db.collection('profileOwners').get();
@@ -636,12 +634,21 @@ for (const user of users) {
     found(finding.cls, lifecycle.ref.path, finding.detail);
   }
 
-  // Personal author subcollections are retired. Any remaining document is
-  // a migration straggler because every book now points at catalogAuthors.
+  // Personal author subcollections are retired but retained (the migration
+  // never deletes; SEC-006). A retained document is a count, not drift;
+  // one a book still points at is the straggler the migration left for
+  // review, and that book cannot be edited until it is resolved.
   const authorDocs = await user.collection('authors').get();
   legacyAuthorDocCount += authorDocs.size;
-  for (const authorDoc of authorDocs.docs) {
-    found('catalog.author.legacy-personal-doc', authorDoc.ref.path);
+  const legacyAuthorIds = new Set(authorDocs.docs.map((authorDoc) => authorDoc.id));
+  for (const book of books.docs) {
+    const ids = book.data().authorIds;
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      if (typeof id === 'string' && legacyAuthorIds.has(id)) {
+        found('catalog.author.legacy-personal-doc-referenced', book.ref.path, id);
+      }
+    }
   }
 
   for (const book of books.docs) {

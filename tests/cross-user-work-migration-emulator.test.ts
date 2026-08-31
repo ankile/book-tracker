@@ -296,8 +296,17 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     assert.deepEqual(snapshot?.authorIds, [leGuinAuthorId])
   }
   for (const snapshot of [unmatched, conflict, privateConflict]) assert.deepEqual(snapshot?.authorIds, [butlerAuthorId])
-  assert.equal((await sharingUser.collection('authors').get()).empty, true)
-  assert.equal((await privateUser.collection('authors').get()).empty, true)
+  // Legacy per-user author documents are retained (soft-delete policy);
+  // the migration only proves no book references them any more.
+  for (const user of [sharingUser, privateUser]) {
+    const legacy = await user.collection('authors').get()
+    assert.equal(legacy.empty, false)
+    const legacyIds = new Set(legacy.docs.map((snapshot) => snapshot.id))
+    for (const bookSnapshot of (await user.collection('books').get()).docs) {
+      const ids = bookSnapshot.get('authorIds') as string[]
+      assert.equal(ids.some((id) => legacyIds.has(id)), false, bookSnapshot.ref.path)
+    }
+  }
   assert.equal(shared?.workId, workId)
   assert.equal(shared?.editionId, editionId)
   assert.equal(shared?.matchMethod, 'isbn')

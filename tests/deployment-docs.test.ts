@@ -78,10 +78,12 @@ test('the README documents the current routine release without completed migrati
   const deployment = section(readme, '## Deployment', '## Project layout');
 
   assertOrdered(deployment, [
-    'npm run validate',
+    'npm test',
     'npm run build',
-    'node docs/architecture/verify.mjs',
+    'node docs/architecture/verify.ts',
     'Commit the source and generated artifacts',
+    'npm run validate',
+    'artifact checks compare',
     'firebase-tools@15.24.0',
   ]);
   assert.match(deployment, /Hosting and the public profile renderer are coupled/i);
@@ -124,7 +126,7 @@ test('catalog queries have the required collection-group and pagination indexes'
     fieldOverrides: Array<{
       collectionGroup: string;
       fieldPath: string;
-      indexes: Array<{order?: string; queryScope?: string}>;
+      indexes: Array<{order?: string; arrayConfig?: string; queryScope?: string}>;
     }>;
   };
 
@@ -135,6 +137,17 @@ test('catalog queries have the required collection-group and pagination indexes'
     assert.equal(override.indexes.some((entry) =>
       entry.order === 'ASCENDING' && entry.queryScope === 'COLLECTION_GROUP'), true);
   }
+  // mergeAuthors rewrites every personal book that references an absorbed
+  // author through a collection-group array-contains-any query. Firestore's
+  // automatic single-field indexes are collection-scoped only, and the
+  // emulator does not enforce indexes, so without this override the first
+  // production merge fails with FAILED_PRECONDITION after its reads.
+  const authorIds = parsed.fieldOverrides.find((entry) =>
+    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds');
+  assert.ok(authorIds, 'missing books.authorIds field override');
+  assert.equal(authorIds.indexes.some((entry) =>
+    entry.arrayConfig === 'CONTAINS' && entry.queryScope === 'COLLECTION_GROUP'), true,
+  'missing collection-group CONTAINS index for books.authorIds');
 
   assert.equal(parsed.indexes.some((index) =>
     index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&

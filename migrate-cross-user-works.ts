@@ -93,6 +93,7 @@ const users = await db.collection('users').listDocuments()
 const profiles = await db.collection('profiles').get()
 const profilesByUsername = new Map(profiles.docs.map((profile) => [profile.id, profile.data()]))
 const books: MigrationBook[] = []
+const liveUsers: DocumentReference[] = []
 const authors = new Map<string, MigrationAuthor>()
 for (const [authorId, data] of existing.authors) {
   authors.set(authorId, {
@@ -148,6 +149,14 @@ for (const userRef of users) {
   ])
   const userData = user.data()
   const liveUser = user.exists && userData?.deletedAt === undefined
+  // A tombstoned account (SEC-006 soft delete) is frozen for the purge
+  // script: its books are neither seeds nor rewrite targets, and its legacy
+  // author documents are left exactly as they are.
+  if (!liveUser) {
+    console.log(`SKIP tombstoned-account ${userRef.path}`)
+    continue
+  }
+  liveUsers.push(userRef)
   const sharingData = sharing.data()
   const sharedProfile = typeof sharingData?.profileUsername === 'string'
     ? profilesByUsername.get(sharingData.profileUsername)
@@ -220,6 +229,25 @@ if (expectedOverlapGroups !== null && overlapGroups.length !== expectedOverlapGr
   throw new Error(`expected ${expectedOverlapGroups} migratable cross-user overlap groups, planner found ${overlapGroups.length}`)
 }
 if (expectedOverlapGroups !== null) console.log(`ACCEPT ${overlapGroups.length} cross-user overlap groups`)
+
+// An active catalog author that already carries a planned name key under a
+// different document id (admin-renamed, or minted by ensureauthors under its
+// random-id fallback) would leave the catalog with two active identities for
+// one name, and every later ensureauthors call for that name would refuse as
+// ambiguous. Nothing here can choose between them; stop for the operator.
+const activeKeyOwners = new Map<string, string>()
+for (const [authorId, data] of existing.authors) {
+  if (data.status !== 'active' || !Array.isArray(data.nameKeys)) continue
+  for (const key of data.nameKeys) if (typeof key === 'string') activeKeyOwners.set(key, authorId)
+}
+for (const author of plan.authors) {
+  for (const key of author.nameKeys) {
+    const owner = activeKeyOwners.get(key)
+    if (owner !== undefined && owner !== author.authorId) {
+      throw new Error(`catalogAuthors/${owner} already owns name key "${key}" planned for ${author.authorId}; merge or rename it before migrating`)
+    }
+  }
+}
 
 const createSets: CreateSpec[][] = []
 const authorSpecs = plan.authors.filter((author) => !existing.authors.has(author.authorId)).map((author) => {
@@ -357,36 +385,34 @@ for (const book of books.sort((left, right) => left.path.localeCompare(right.pat
   }
 }
 
-let legacyAuthorDeletes = 0
-for (const userRef of users) {
+// Legacy per-user author documents are retained, not deleted (soft-delete
+// policy, SEC-006): once no book references them they are unreachable —
+// Rules keep them owner-readable only, the client no longer lists them —
+// and db-audit counts them so the drift stays visible until a purge is
+// decided separately. The migration only proves that nothing still points
+// at them; a lingering reference is a REVIEW line, never a deletion.
+let legacyAuthorsRetained = 0
+let legacyAuthorsStillReferenced = 0
+for (const userRef of liveUsers) {
   const plannedBooks = plan.candidates.filter((candidate) => candidate.book.uid === userRef.id)
   const localAuthors = await userRef.collection('authors').get()
   if (localAuthors.empty) continue
+  legacyAuthorsRetained += localAuthors.size
   if (plannedBooks.some((candidate) => candidate.authorProblems.length > 0)) {
-    console.log(`REVIEW legacy-author-cleanup-blocked ${userRef.path} :: unresolved personal author reference`)
+    legacyAuthorsStillReferenced += localAuthors.size
+    console.log(`REVIEW legacy-authors-still-referenced ${userRef.path} :: unresolved personal author reference keeps ${localAuthors.size} legacy author documents live`)
     continue
   }
-  legacyAuthorDeletes += localAuthors.size
-  console.log(`${tag}  delete ${localAuthors.size} legacy author documents under ${userRef.path}`)
   if (flags.apply) {
-    await db.runTransaction(async (transaction) => {
-      const [currentBooks, currentAuthors] = await Promise.all([
-        transaction.get(userRef.collection('books')),
-        transaction.get(userRef.collection('authors')),
-      ])
-      if (currentBooks.size + currentAuthors.size > 450) {
-        throw new Error(`${userRef.path} is too large for atomic legacy-author cleanup`)
+    const currentBooks = await userRef.collection('books').get()
+    const localIds = new Set(localAuthors.docs.map((snapshot) => snapshot.id))
+    for (const snapshot of currentBooks.docs) {
+      const data = snapshot.data()
+      if (data.author !== undefined || data.authors !== undefined ||
+          !Array.isArray(data.authorIds) || data.authorIds.some((id) => localIds.has(id))) {
+        throw new Error(`${snapshot.ref.path} still references the legacy author collection after apply`)
       }
-      const localIds = new Set(currentAuthors.docs.map((snapshot) => snapshot.id))
-      for (const snapshot of currentBooks.docs) {
-        const data = snapshot.data()
-        if (data.author !== undefined || data.authors !== undefined ||
-            !Array.isArray(data.authorIds) || data.authorIds.some((id) => localIds.has(id))) {
-          throw new Error(`${snapshot.ref.path} still references the legacy author collection`)
-        }
-      }
-      for (const snapshot of currentAuthors.docs) transaction.delete(snapshot.ref)
-    })
+    }
   }
 }
 
@@ -419,7 +445,7 @@ for (const ambiguity of ambiguities.sort((left, right) => left.type.localeCompar
 }
 console.log(`${catalogWrites} catalog documents ${flags.apply ? 'created' : '(dry run, nothing written)'}`)
 console.log(`${bookWrites} personal books ${flags.apply ? 'updated' : '(dry run, nothing written)'}`)
-console.log(`${legacyAuthorDeletes} legacy author documents ${flags.apply ? 'deleted' : '(dry run, nothing deleted)'}`)
+console.log(`${legacyAuthorsRetained} legacy author documents retained (${legacyAuthorsStillReferenced} still referenced by unresolved books); nothing is ever deleted`)
 console.log(`${ambiguities.length} reviewed ambiguities; ${bookConflicts} existing-link conflicts`)
 
 function decodeReviewedManifest(value: unknown): ReviewedWorkGroup[] {

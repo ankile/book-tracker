@@ -23,11 +23,9 @@
 //   node migrate-purge-deleted-accounts.ts <uid> --apply          # emulator apply
 //   node migrate-purge-deleted-accounts.ts <uid> --prod           # prod dry-run
 //   node migrate-purge-deleted-accounts.ts <uid> --prod --apply   # prod apply (typed confirm)
-import { getApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore } from 'firebase-admin/firestore';
 import type { DocumentReference } from 'firebase-admin/firestore';
-import { parseFlags, connect, batcher } from './migrate-lib.ts';
+import { parseFlags, connect, batcher, openDatabase } from './migrate-lib.ts';
 
 const flags = parseFlags(process.argv.slice(2));
 if (flags.rest.length !== 1) throw new Error('usage: migrate-purge-deleted-accounts.ts <uid> [--prod] [--apply]');
@@ -85,7 +83,7 @@ await writes.flush();
 // The credential in the secrets database (SEC-004). The deletion trigger
 // removes it at deletion time, so this is normally absent; a batcher is
 // bound to one database, hence the direct delete.
-const tokenRef = getFirestore(getApp(), 'secrets').collection('togglTokens').doc(uid);
+const tokenRef = openDatabase('secrets').collection('togglTokens').doc(uid);
 let credentials = 0;
 if ((await tokenRef.get()).exists) {
   console.log(`${tag} secrets:${tokenRef.path}`);

@@ -1,11 +1,84 @@
-require("./setup.cjs");
+require("./setup.cts");
 
-const assert = require("node:assert/strict");
-const test = require("node:test");
-const {getFirestore, Timestamp} = require("firebase-admin/firestore");
-const {logger} = require("firebase-functions");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const test: typeof import("node:test").test = require("node:test");
+const {getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
+const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
-const deployed = require("../lib");
+type TestContext = import("node:test").TestContext;
+type Row = Record<string, unknown>;
+interface Reference {
+  path: string;
+  id: string;
+  get(): Promise<Snapshot>;
+}
+interface Snapshot {
+  exists: boolean;
+  id: string;
+  ref: Reference;
+  data(): Row | undefined;
+  get(field: string): unknown;
+  updateTime: import("firebase-admin/firestore").Timestamp | undefined;
+}
+interface QuerySnapshot {
+  docs: Snapshot[];
+  size: number;
+}
+type Filter = [field: string, operator: string, value: unknown];
+interface Query {
+  _query: true;
+  name: string;
+  collectionGroup: boolean;
+  filters: Filter[];
+  maximum: number;
+  where(field: string, operator: string, value: unknown): Query;
+  limit(maximum: number): Query;
+  orderBy(): Query;
+  get(): Promise<QuerySnapshot>;
+  doc?(id: string): Reference;
+  add?(): Promise<{id: string}>;
+}
+interface TransactionStub {
+  get(value: Query | Reference): Promise<QuerySnapshot | Snapshot>;
+  create(reference: Reference, data: Row): void;
+  set(reference: Reference, data: Row, options?: {merge?: boolean}): void;
+  delete(reference: Reference): void;
+}
+interface CatalogStore {
+  rows: Map<string, Row>;
+  ref(path: string): Reference;
+  write(reference: Reference, data: Row, merge?: boolean): void;
+}
+interface PreviewResult {
+  operationId: string;
+  touchedDocuments: number;
+  expected: {
+    catalog: Array<{kind: string; exists: boolean}>;
+    books: unknown[];
+  };
+  changes: Array<{kind: string; action: string; after: Row | null}>;
+}
+interface ApplyResult {
+  operationId: string;
+  applied: boolean;
+  touchedDocuments: number;
+}
+interface ScanResult {
+  books: Array<{uid: string; bookId: string; isbn13: string | null; rawIsbn: string | null}>;
+  findings: Array<{code: string; workIds: string[]; books: Array<{uid: string; bookId: string}>}>;
+}
+interface Deployed {
+  admin: {
+    catalogapply: {run(data: unknown, context: unknown): Promise<ApplyResult>};
+    catalogpreview: {run(data: unknown, context: unknown): Promise<PreviewResult>};
+    catalogscan: {run(data: unknown, context: unknown): Promise<ScanResult>};
+  };
+}
+
+const deployed: Deployed = require("../lib");
+// After the bundle: catalog.js calls getFirestore() at load, which needs
+// the app that ../lib initializes.
+const {externalIndexId}: typeof import("../src/catalog") = require("../lib/catalog");
 const db = getFirestore();
 const adminUid = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
 const recentAdmin = () => ({
@@ -20,7 +93,7 @@ const recentAdmin = () => ({
 
 test("the hidden admin gate and recent-auth check run before decoding or reads", async (t) => {
   let touched = false;
-  t.mock.method(db, "collection", (name) => {
+  t.mock.method(db, "collection", (name: string) => {
     touched = true;
     assert.equal(name, "users");
     return {doc: () => ({
@@ -32,7 +105,7 @@ test("the hidden admin gate and recent-auth check run before decoding or reads",
     deployed.admin.catalogapply.run({attacker: true}, {
       auth: {uid: "stranger", token: {email_verified: true}},
     }),
-    (error) => error.code === "not-found",
+    (error) => hasCode(error, "not-found"),
   );
   assert.equal(touched, false);
   await assert.rejects(
@@ -45,44 +118,48 @@ test("the hidden admin gate and recent-auth check run before decoding or reads",
         },
       },
     }),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "recent-auth-required" &&
-      error.details.maxAgeSeconds === 900,
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "recent-auth-required" &&
+      detail(error, "maxAgeSeconds") === 900,
   );
   assert.equal(touched, true);
   touched = false;
   await assert.rejects(
     deployed.admin.catalogapply.run({attacker: true}, recentAdmin()),
-    (error) => error.code === "invalid-argument",
+    (error) => hasCode(error, "invalid-argument"),
   );
   assert.equal(touched, true);
 });
 
-function installCatalogStore(t) {
-  const rows = new Map();
-  const references = new Map();
-  const updateTimes = new Map();
+function installCatalogStore(t: TestContext): CatalogStore {
+  const rows = new Map<string, Row>();
+  const references = new Map<string, Reference>();
+  const updateTimes = new Map<string, import("firebase-admin/firestore").Timestamp>();
   let clock = 1;
-  const snapshot = (reference) => ({
+  const snapshot = (reference: Reference): Snapshot => ({
     exists: rows.has(reference.path),
     id: reference.id,
     ref: reference,
     data: () => rows.get(reference.path),
-    get: (field) => rows.get(reference.path)?.[field],
+    get: (field: string) => rows.get(reference.path)?.[field],
     updateTime: rows.has(reference.path) ? updateTimes.get(reference.path) : undefined,
   });
-  const querySnapshot = (query) => {
+  const querySnapshot = (query: Query): QuerySnapshot => {
     const prefix = `${query.name}/`;
     const docs = [...rows.keys()].filter((path) => query.collectionGroup ?
       path.split("/").at(-2) === query.name : path.startsWith(prefix))
-      .map((path) => references.get(path))
+      .map((path) => ref(path))
       .filter((reference) => query.filters.every(([field, operator, value]) => {
         const actual = rows.get(reference.path)?.[field];
         if (operator === "==") return actual === value;
-        if (operator === "in") return value.includes(actual);
+        if (operator === "in") {
+          assert.ok(Array.isArray(value));
+          return value.includes(actual);
+        }
         if (operator === "array-contains") return Array.isArray(actual) && actual.includes(value);
         if (operator === "array-contains-any") {
-          return Array.isArray(actual) && value.some((candidate) => actual.includes(candidate));
+          assert.ok(Array.isArray(value));
+          return Array.isArray(actual) && value.some((candidate: unknown) => actual.includes(candidate));
         }
         assert.fail(`unsupported query operator ${operator}`);
       }))
@@ -90,56 +167,59 @@ function installCatalogStore(t) {
       .map(snapshot);
     return {docs, size: docs.length};
   };
-  const makeQuery = (name, collectionGroup = false) => {
-    const query = {
+  const makeQuery = (name: string, collectionGroup = false): Query => {
+    const query: Query = {
       _query: true,
       name,
       collectionGroup,
       filters: [],
       maximum: Infinity,
-      where: (field, operator, value) => {
+      where: (field: string, operator: string, value: unknown) => {
         query.filters.push([field, operator, value]);
         return query;
       },
-      limit: (maximum) => {
+      limit: (maximum: number) => {
         query.maximum = maximum;
         return query;
       },
+      orderBy: () => query,
       get: async () => querySnapshot(query),
     };
     return query;
   };
-  const ref = (path) => {
-    if (!references.has(path)) {
-      const reference = {
-        path,
-        id: path.slice(path.lastIndexOf("/") + 1),
-      };
-      reference.get = async () => snapshot(reference);
-      references.set(path, reference);
-    }
-    return references.get(path);
+  const ref = (path: string): Reference => {
+    const existing = references.get(path);
+    if (existing !== undefined) return existing;
+    const reference: Reference = {
+      path,
+      id: path.slice(path.lastIndexOf("/") + 1),
+      get: async () => snapshot(reference),
+    };
+    references.set(path, reference);
+    return reference;
   };
-  const write = (reference, data, merge = false) => {
+  const write = (reference: Reference, data: Row, merge = false): void => {
     rows.set(reference.path, merge ? {...rows.get(reference.path), ...data} : data);
     updateTimes.set(reference.path, Timestamp.fromMillis(clock++));
   };
-  t.mock.method(db, "collection", (name) => {
+  t.mock.method(db, "collection", (name: string) => {
     const query = makeQuery(name);
-    query.doc = (id) => ref(`${name}/${id}`);
+    query.doc = (id: string) => ref(`${name}/${id}`);
     if (name === "adminAudit") query.add = async () => ({id: "view-audit"});
     return query;
   });
-  t.mock.method(db, "collectionGroup", (name) => makeQuery(name, true));
-  t.mock.method(db, "doc", (path) => ref(path));
-  t.mock.method(db, "runTransaction", async (handler) => handler({
-    get: async (value) => value._query ? querySnapshot(value) : snapshot(value),
-    create: (reference, data) => {
+  t.mock.method(db, "collectionGroup", (name: string) => makeQuery(name, true));
+  t.mock.method(db, "doc", (path: string) => ref(path));
+  t.mock.method(db, "getAll", async (...references: Reference[]) => references.map(snapshot));
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+    get: async (value: Query | Reference) => "_query" in value ? querySnapshot(value) : snapshot(value),
+    create: (reference: Reference, data: Row) => {
       assert.equal(rows.has(reference.path), false, reference.path);
       write(reference, data);
     },
-    set: (reference, data, options) => write(reference, data, options?.merge === true),
-    delete: (reference) => {
+    set: (reference: Reference, data: Row, options?: {merge?: boolean}) =>
+      write(reference, data, options?.merge === true),
+    delete: (reference: Reference) => {
       rows.delete(reference.path);
       updateTimes.delete(reference.path);
     },
@@ -154,7 +234,7 @@ function installCatalogStore(t) {
   return {rows, ref, write};
 }
 
-function activeWork(title, overrides = {}) {
+function activeWork(title: string, overrides: Row = {}): Row {
   const now = Timestamp.fromMillis(1000);
   return {
     canonicalTitle: title,
@@ -173,7 +253,7 @@ function activeWork(title, overrides = {}) {
   };
 }
 
-function edition(workId, overrides = {}) {
+function edition(workId: string, overrides: Row = {}): Row {
   const now = Timestamp.fromMillis(1000);
   return {
     workId,
@@ -236,12 +316,15 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
     touchedDocuments: 3,
   });
   assert.deepEqual(second, first);
-  assert.equal(store.rows.get("works/new-work").canonicalTitle, "The New Work");
+  assert.equal(store.rows.get("works/new-work")?.canonicalTitle, "The New Work");
   const audit = store.rows.get(`adminAudit/${preview.operationId}`);
+  assert.ok(audit);
   assert.equal(audit.type, "catalog-mutation");
   assert.equal(audit.operationType, "createWork");
   assert.equal(audit.uid, adminUid);
-  assert.equal(audit.beforeAfter.some((row) => row.kind === "work"), true);
+  const beforeAfter = audit.beforeAfter;
+  assert.ok(Array.isArray(beforeAfter));
+  assert.equal(beforeAfter.some((row: unknown) => isRow(row) && row.kind === "work"), true);
   assert.doesNotMatch(JSON.stringify(audit), /session|currentPage|activeTimer|pagesRead/);
 });
 
@@ -266,9 +349,9 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
   };
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation: create}, recentAdmin()),
-    (error) => error.code === "resource-exhausted" &&
-      error.details.reason === "catalog-capacity" &&
-      error.details.collection === "works" && error.details.maximum === 200,
+    (error) => hasCode(error, "resource-exhausted") &&
+      detail(error, "reason") === "catalog-capacity" &&
+      detail(error, "collection") === "works" && detail(error, "maximum") === 200,
   );
   const repair = {
     type: "editWork",
@@ -315,8 +398,8 @@ test("book relinking detects link races but ignores unrelated personal edits", a
     operation,
     expected: preview.expected,
   }, recentAdmin());
-  assert.equal(store.rows.get(bookRef.path).title, "Edited after preview");
-  assert.equal(store.rows.get(bookRef.path).workId, "target-work");
+  assert.equal(store.rows.get(bookRef.path)?.title, "Edited after preview");
+  assert.equal(store.rows.get(bookRef.path)?.workId, "target-work");
 
   const stalePreview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
   store.write(bookRef, {workId: "other-work"}, true);
@@ -324,8 +407,8 @@ test("book relinking detects link races but ignores unrelated personal edits", a
     operationId: stalePreview.operationId,
     operation,
     expected: stalePreview.expected,
-  }, recentAdmin()), (error) => error.code === "aborted" &&
-    error.details.reason === "stale-preview");
+  }, recentAdmin()), (error) => hasCode(error, "aborted") &&
+    detail(error, "reason") === "stale-preview");
 });
 
 test("non-null admin links require a live self-owned book while unlink repairs remain available", async (t) => {
@@ -340,18 +423,18 @@ test("non-null admin links require a live self-owned book while unlink repairs r
   };
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation: link}, recentAdmin()),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "catalog-invariant",
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "catalog-invariant",
   );
   store.write(bookRef, {owner: store.ref("users/other")}, true);
   store.write(store.ref("users/reader"), {uid: "reader", deletedAt: Timestamp.fromMillis(1)});
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation: link}, recentAdmin()),
-    (error) => error.code === "failed-precondition",
+    (error) => hasCode(error, "failed-precondition"),
   );
   const unlink = {...link, target: null};
   const preview = await deployed.admin.catalogpreview.run({operation: unlink}, recentAdmin());
-  assert.equal(preview.changes[0].after.workId, null);
+  assert.equal(preview.changes[0].after?.workId, null);
 });
 
 test("searchable promotion requires consent provenance and rejects private work fields", async (t) => {
@@ -379,8 +462,8 @@ test("searchable promotion requires consent provenance and rejects private work 
   };
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation: create}, recentAdmin()),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "catalog-invariant",
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "catalog-invariant",
   );
 
   store.write(store.ref("works/internal-work"), activeWork("Internal Work", {
@@ -408,9 +491,9 @@ test("searchable promotion requires consent provenance and rejects private work 
   };
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation: edit}, recentAdmin()),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "catalog-invariant" &&
-      /unsupported field sourceUid/.test(error.message),
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "catalog-invariant" &&
+      messageMatches(error, /unsupported field sourceUid/),
   );
 });
 
@@ -426,7 +509,7 @@ test("moving an edition atomically relinks its books and identifier indexes", as
     workId: "old-work",
     editionId: "shared-edition",
   });
-  const externalId = require("../lib/catalog").externalIndexId({
+  const externalId = externalIndexId({
     provider: "google-books",
     id: "volume-one",
   });
@@ -472,7 +555,7 @@ test("moving an edition atomically relinks its books and identifier indexes", as
     operation,
     expected: preview.expected,
   }, recentAdmin());
-  assert.equal(store.rows.get("editions/shared-edition").workId, "new-work");
+  assert.equal(store.rows.get("editions/shared-edition")?.workId, "new-work");
   assert.deepEqual(store.rows.get(`externalIdIndex/${externalId}`), {
     workId: "new-work",
     editionId: "shared-edition",
@@ -483,8 +566,62 @@ test("moving an edition atomically relinks its books and identifier indexes", as
     workId: "new-work",
     editionId: "shared-edition",
   });
-  assert.equal(store.rows.get(bookRef.path).workId, "new-work");
-  assert.equal(store.rows.get(bookRef.path).title, "Keep this title");
+  assert.equal(store.rows.get(bookRef.path)?.workId, "new-work");
+  assert.equal(store.rows.get(bookRef.path)?.title, "Keep this title");
+});
+
+// editions/{id} is readable exactly when its work is searchable, so moving
+// an edition from an internal work under a searchable one discloses it;
+// that needs the same consent provenance editWork and mergeWorks demand.
+test("moving an edition out of an internal work needs consent-eligible provenance", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/internal-work"), activeWork("Internal Work", {visibility: "internal"}));
+  store.write(store.ref("works/public-work"), activeWork("Public Work"));
+  store.write(store.ref("editions/private-edition"), edition("internal-work"));
+  const operation = {
+    type: "upsertEdition",
+    editionId: "private-edition",
+    workId: "public-work",
+    edition: {
+      isbn13: null,
+      title: "Edition Title",
+      publisher: "",
+      publishedDate: "",
+      language: "en",
+      translatorNames: [],
+      format: "full",
+      suggestedPageCount: 300,
+      coverUrl: "",
+      externalIds: {},
+    },
+  };
+  const refused = (error: unknown): boolean => hasCode(error, "failed-precondition") &&
+    detail(error, "reason") === "catalog-invariant" &&
+    messageMatches(error, /consent-eligible/);
+  // No linked book at all: nothing proves consent, fail closed.
+  await assert.rejects(deployed.admin.catalogpreview.run({operation}, recentAdmin()), refused);
+  // A private reader's book seeded it: still refused.
+  store.write(store.ref("users/private-reader"), {uid: "private-reader"});
+  store.write(store.ref("users/private-reader/books/seed"), {
+    owner: store.ref("users/private-reader"),
+    workId: "internal-work",
+    editionId: "private-edition",
+    matchMethod: "catalog-choice",
+    linkedAt: Timestamp.fromMillis(100),
+  });
+  await assert.rejects(deployed.admin.catalogpreview.run({operation}, recentAdmin()), refused);
+  // The reader opts in (Asia/Kolkata is a browser-reported zone the old
+  // supportedValuesOf validator refused): the move is allowed.
+  store.write(store.ref("users/private-reader/settings/bookSharing"), {
+    profileUsername: "reader-name", timeZone: "Asia/Kolkata",
+  });
+  store.write(store.ref("profiles/reader-name"), {uid: "private-reader", public: true});
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.equal(preview.expected.books.length, 1);
+  // A move between two searchable works never needs provenance.
+  store.write(store.ref("works/internal-work"), activeWork("Now Public", {visibility: "searchable"}));
+  store.write(store.ref("profiles/reader-name"), {uid: "private-reader", public: false});
+  assert.equal((await deployed.admin.catalogpreview.run({operation}, recentAdmin())).expected.books.length, 1);
 });
 
 test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
@@ -506,16 +643,16 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
   };
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation}, recentAdmin()),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "catalog-invariant",
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "catalog-invariant",
   );
   store.write(store.ref("isbnIndex/9780000000002"), {
     workId: "old-work", editionId: "another-edition",
   });
   await assert.rejects(
     deployed.admin.catalogpreview.run({operation}, recentAdmin()),
-    (error) => error.code === "failed-precondition" &&
-      error.details.reason === "catalog-invariant",
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "catalog-invariant",
   );
 });
 
@@ -541,8 +678,8 @@ test("each internal source needs its own provenance before a searchable merge", 
   });
   await assert.rejects(deployed.admin.catalogpreview.run({operation: {
     type: "mergeWorks", sourceWorkIds: ["consented", "private"], targetWorkId: "target",
-  }}, recentAdmin()), (error) => error.code === "failed-precondition" &&
-    error.details.reason === "catalog-invariant" && /private/.test(error.message));
+  }}, recentAdmin()), (error) => hasCode(error, "failed-precondition") &&
+    detail(error, "reason") === "catalog-invariant" && messageMatches(error, /private/));
 });
 
 test("merging works keeps old personal links one-hop while moving editions and indexes", async (t) => {
@@ -557,7 +694,7 @@ test("merging works keeps old personal links one-hop while moving editions and i
     workId: "source-work",
     editionId: "source-edition",
   });
-  const externalId = require("../lib/catalog").externalIndexId({
+  const externalId = externalIndexId({
     provider: "google-books",
     id: "source-volume",
   });
@@ -584,11 +721,71 @@ test("merging works keeps old personal links one-hop while moving editions and i
     operation,
     expected: preview.expected,
   }, recentAdmin());
-  assert.equal(store.rows.get("works/source-work").status, "merged");
-  assert.equal(store.rows.get("works/source-work").mergedInto, "target-work");
-  assert.deepEqual(store.rows.get("works/target-work").mergedFrom, ["source-work"]);
-  assert.equal(store.rows.get("editions/source-edition").workId, "target-work");
-  assert.equal(store.rows.get("isbnIndex/9780000000002").workId, "target-work");
-  assert.equal(store.rows.get(`externalIdIndex/${externalId}`).workId, "target-work");
-  assert.equal(store.rows.get("users/reader/books/old-link").workId, "source-work");
+  assert.equal(store.rows.get("works/source-work")?.status, "merged");
+  assert.equal(store.rows.get("works/source-work")?.mergedInto, "target-work");
+  assert.deepEqual(store.rows.get("works/target-work")?.mergedFrom, ["source-work"]);
+  assert.equal(store.rows.get("editions/source-edition")?.workId, "target-work");
+  assert.equal(store.rows.get("isbnIndex/9780000000002")?.workId, "target-work");
+  assert.equal(store.rows.get(`externalIdIndex/${externalId}`)?.workId, "target-work");
+  assert.equal(store.rows.get("users/reader/books/old-link")?.workId, "source-work");
+});
+
+function isRow(value: unknown): value is Row {
+  return typeof value === "object" && value !== null;
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return isRow(error) && error.code === code;
+}
+
+function detail(error: unknown, key: string): unknown {
+  if (!isRow(error) || !isRow(error.details)) return undefined;
+  return error.details[key];
+}
+
+function messageMatches(error: unknown, pattern: RegExp): boolean {
+  return error instanceof Error && pattern.test(error.message);
+}
+
+// The scan's link suggestions: "exact" means the complete normalized author
+// identity agrees (the migration contract), and an ISBN-10 normalizes the
+// same way the link/apply path normalizes it.
+test("scan suggestions need the complete author set and read ISBN-10 books", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(2000);
+  store.write(store.ref("catalogAuthors/grace-author"), {
+    canonicalName: "Grace Author", alternateNames: ["G. Author"],
+    nameKeys: ["grace author", "g author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  store.write(store.ref("works/pair-work"), activeWork("Pair Work", {
+    authorIds: ["ada-author", "grace-author"],
+  }));
+  store.write(store.ref("editions/pair-edition"), edition("pair-work", {isbn13: "9780441478125"}));
+  store.write(store.ref("isbnIndex/9780441478125"), {workId: "pair-work", editionId: "pair-edition"});
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  const book = (id: string, overrides: Row): void => store.write(store.ref(`users/reader/books/${id}`), {
+    title: "Pair Work", pageCount: 100, isbn: "",
+    workId: null, editionId: null, matchMethod: null, linkedAt: null,
+    createdAt: now, updatedAt: now, ...overrides,
+  });
+  book("partial", {authorIds: ["ada-author"]});
+  book("complete", {authorIds: ["ada-author", "grace-author"]});
+  book("superset", {authorIds: ["ada-author", "grace-author", "extra-author"]});
+  book("isbn-ten", {title: "Some Other Title", isbn: "0-441-47812-3"});
+  store.write(store.ref("catalogAuthors/extra-author"), {
+    canonicalName: "Extra Author", alternateNames: [], nameKeys: ["extra author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  const scan = await deployed.admin.catalogscan.run({}, recentAdmin());
+  const exact = scan.findings.filter(({code}) => code === "unmatched-title-author-candidate");
+  assert.deepEqual(exact.map(({books, workIds}) => [books[0].bookId, workIds]), [["complete", ["pair-work"]]]);
+  const isbnTen = scan.books.find(({bookId}) => bookId === "isbn-ten");
+  assert.deepEqual({isbn13: isbnTen?.isbn13, rawIsbn: isbnTen?.rawIsbn}, {isbn13: "9780441478125", rawIsbn: null});
+  assert.deepEqual(
+    scan.findings.filter(({code}) => code === "unmatched-isbn-candidate").map(({books}) => books[0].bookId),
+    ["isbn-ten"],
+  );
 });

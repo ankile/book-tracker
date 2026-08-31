@@ -50,6 +50,7 @@ import {
   stoppingTimer,
 } from '../utils/timerClaim.ts';
 import {
+  createReadingSessionWriteStore,
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from './readingSessionWrites.ts';
@@ -87,6 +88,7 @@ import { ensureCatalogAuthors } from './functions.ts';
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
+const readingSessionWriteStore = createReadingSessionWriteStore(db);
 
 // Migration-rehearsal hook (MIGRATIONS.md): VITE_EMULATOR=1 npm run dev
 // points the dev client at the local emulators to exercise real client
@@ -727,13 +729,16 @@ class Database {
     });
     batch.delete(doc(db, 'profiles', oldUsername));
     batch.set(doc(db, 'profileOwners', userId), { username: newUsername });
+    // A merge so createdAt stays whatever the server holds: the local copy
+    // may be an estimate (sharing enabled offline in this session), and the
+    // update rule requires createdAt unchanged — a copied estimate would
+    // reject the whole rename batch, which /me reports as a taken name.
     if (bookSharing !== null) {
       batch.set(doc(db, 'users', userId, 'settings', 'bookSharing'), {
         profileUsername: newUsername,
         timeZone: bookSharing.timeZone,
-        createdAt: bookSharing.createdAt,
         updatedAt: serverTimestamp(),
-      });
+      }, { merge: true });
     }
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
@@ -1145,7 +1150,7 @@ class Database {
     // Rules correlate these deltas with the server's current session; a
     // stale cross-device edit rejects atomically on reconnect.
     return queueReadingSessionUpdate({
-      firestore: db,
+      firestore: readingSessionWriteStore,
       userId,
       bookId,
       sessionId: session.id,
@@ -1163,7 +1168,7 @@ class Database {
     previousProgressUpdate,
   }: DeleteReadingSessionInput): Promise<void> {
     return queueReadingSessionDelete({
-      firestore: db,
+      firestore: readingSessionWriteStore,
       userId,
       bookId,
       sessionId: session.id,

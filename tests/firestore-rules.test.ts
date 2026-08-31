@@ -25,7 +25,6 @@ import {
   updateDoc,
   where,
   writeBatch,
-  type Firestore,
 } from 'firebase/firestore';
 import { FirebaseError } from 'firebase/app';
 import { togglQueueId } from '../src/lib/utils/toggl.ts';
@@ -37,6 +36,7 @@ import {
 import {
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
+  type ReadingSessionWriteStore,
 } from '../src/lib/firebase/readingSessionWrites.ts';
 
 let environment: RulesTestEnvironment;
@@ -77,6 +77,12 @@ const profile = (uid: string, overrides: Record<string, unknown> = {}) => ({
 // ownership record (SEC-032). These helpers are that shape.
 const verified = (uid: string) =>
   environment.authenticatedContext(uid, { email_verified: true }).firestore();
+const readingSessionWriteStore = (
+  firestore: ReturnType<RulesTestContext['firestore']>,
+): ReadingSessionWriteStore => ({
+  document: (path, ...pathSegments) => doc(firestore, path, ...pathSegments),
+  batch: () => writeBatch(firestore),
+});
 const seedAccount = (uid: string) =>
   environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     await setDoc(doc(context.firestore(), 'users', uid), { uid, email: `${uid}@example.test` });
@@ -841,7 +847,9 @@ test('the shared author catalog is readable only to verified live accounts and i
   await assertFails(updateDoc(doc(db, 'catalogAuthors', 'ada'), {sortName: 'Byron'}));
   await assertFails(deleteDoc(doc(db, 'catalogAuthors', 'ada')));
   await assertFails(setDoc(doc(db, 'users', uid, 'authors', 'legacy'), {name: 'Legacy'}));
-  await assertFails(getDoc(doc(db, 'users', uid, 'authors', 'legacy')));
+  // Reads of the retired per-user list stay open for the rollout window
+  // (a cached pre-catalog bundle); see the compatibility block in the rules.
+  await assertSucceeds(getDoc(doc(db, 'users', uid, 'authors', 'legacy')));
 });
 
 test('book author references must exist while one-hop shared aliases remain usable', async () => {
@@ -893,6 +901,39 @@ test('book author references must exist while one-hop shared aliases remain usab
     doc(db, 'users', uid, 'books', 'duplicate-authors'),
     fullBook(db, uid, {authorIds: ['author', 'author']}),
   ));
+});
+
+// A legacy book the migration left with more than six per-user author ids
+// (REVIEW too-many-personal-authors) is not frozen: a metadata edit that
+// leaves authorIds untouched passes the 50-id shape cap, while any change
+// to authorIds itself meets the six-author catalog check. The retained
+// per-user author documents stay readable for a cached pre-catalog bundle
+// and are otherwise sealed.
+test('legacy over-limit author lists stay editable without touching authorIds', async () => {
+  const uid = 'legacy-anthology-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'anthology'), fullBook(adminDb, uid, {
+      authorIds: Array.from({length: 8}, (_, index) => `legacy-${index}`),
+    }));
+    await setDoc(doc(adminDb, 'users', uid, 'authors', 'legacy-0'), {
+      name: 'Legacy Author', nameLower: 'legacy author', kind: 'person', updatedAt: Timestamp.now(),
+    });
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const book = doc(db, 'users', uid, 'books', 'anthology');
+  await assertSucceeds(updateDoc(book, { title: 'Corrected title', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(book, { pageCount: 450, updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(book, {
+    authorIds: Array.from({length: 7}, (_, index) => `legacy-${index}`),
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(getDoc(doc(db, 'users', uid, 'authors', 'legacy-0')));
+  await assertFails(updateDoc(doc(db, 'users', uid, 'authors', 'legacy-0'), { name: 'Renamed' }));
+  await assertFails(setDoc(doc(db, 'users', uid, 'authors', 'legacy-new'), {
+    name: 'New Legacy', nameLower: 'new legacy', kind: 'person', updatedAt: Timestamp.now(),
+  }));
+  await assertFails(deleteDoc(doc(db, 'users', uid, 'authors', 'legacy-0')));
 });
 
 // The read-only audit (db-audit.ts) reports stored documents the rules
@@ -1817,7 +1858,7 @@ test('stale and missing session batches fail without double-applying aggregates'
   const uid = 'reading-stale';
   const bookId = 'book';
   const db = environment.authenticatedContext(uid).firestore();
-  const writerDb = db as unknown as Firestore;
+  const writerDb = readingSessionWriteStore(db);
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seed = context.firestore();
     await setDoc(doc(seed, 'users', uid, 'books', bookId), readingBook());
@@ -1878,7 +1919,7 @@ test('session deletion cannot drive aggregate totals negative', async () => {
   const uid = 'reading-nonnegative';
   const bookId = 'book';
   const db = environment.authenticatedContext(uid).firestore();
-  const writerDb = db as unknown as Firestore;
+  const writerDb = readingSessionWriteStore(db);
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seed = context.firestore();
     await setDoc(
@@ -1905,7 +1946,7 @@ test('session update and delete enter the local cache while Firestore is offline
   const uid = 'reading-offline';
   const bookId = 'book';
   const db = environment.authenticatedContext(uid).firestore();
-  const writerDb = db as unknown as Firestore;
+  const writerDb = readingSessionWriteStore(db);
   const bookRef = doc(db, 'users', uid, 'books', bookId);
   const sessionRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'session');
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
@@ -1976,7 +2017,7 @@ test('session update and delete enter the local cache while Firestore is offline
 test('deleting progress owners hands off to surviving reading and correction rows', async () => {
   const uid = 'reading-delete-handoff';
   const db = environment.authenticatedContext(uid).firestore();
-  const writerDb = db as unknown as Firestore;
+  const writerDb = readingSessionWriteStore(db);
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seed = context.firestore();
     for (const [bookId, priorType] of [['reading-prior', 'reading'], ['correction-prior', 'update']] as const) {
@@ -2031,7 +2072,7 @@ test('deleting progress owners hands off to surviving reading and correction row
 test('session deletion rejects missing, wrong-page, and cross-book progress predecessors', async () => {
   const uid = 'reading-delete-invalid-predecessor';
   const db = environment.authenticatedContext(uid).firestore();
-  const writerDb = db as unknown as Firestore;
+  const writerDb = readingSessionWriteStore(db);
   await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
     const seed = context.firestore();
     for (const bookId of ['missing', 'wrong-page', 'cross-book', 'other']) {
@@ -2219,7 +2260,7 @@ test('same-endpoint later correction prevents an older session from owning progr
   });
 
   await assertSucceeds(queueReadingSessionUpdate({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId,
     sessionId: 'session',
@@ -2232,7 +2273,7 @@ test('same-endpoint later correction prevents an older session from owning progr
   assert.equal(saved?.currentPageUpdateId, 'correction');
 
   await assertSucceeds(queueReadingSessionDelete({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId,
     sessionId: 'session',
@@ -2262,7 +2303,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
   const sourceBook = { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 };
 
   await assertSucceeds(queueReadingSessionUpdate({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId: 'edit-first',
     sessionId: 'session',
@@ -2271,7 +2312,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   }));
   await assertFails(queueReadingSessionDelete({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId: 'edit-first',
     sessionId: 'session',
@@ -2281,7 +2322,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
   }));
 
   await assertSucceeds(queueReadingSessionDelete({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId: 'delete-first',
     sessionId: 'session',
@@ -2290,7 +2331,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     previousProgressUpdate: null,
   }));
   await assertFails(queueReadingSessionUpdate({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId: 'delete-first',
     sessionId: 'session',
@@ -2299,7 +2340,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   }));
   await assertFails(queueReadingSessionDelete({
-    firestore: db as unknown as Firestore,
+    firestore: readingSessionWriteStore(db),
     userId: uid,
     bookId: 'delete-first',
     sessionId: 'session',
@@ -2333,7 +2374,7 @@ test('an offline session batch flushes successfully without priming the local ca
   );
   await disableNetwork(offlineDb);
   const completion = queueReadingSessionUpdate({
-    firestore: offlineDb as unknown as Firestore,
+    firestore: readingSessionWriteStore(offlineDb),
     userId: uid,
     bookId,
     sessionId: 'session',
@@ -2371,7 +2412,7 @@ test('a stale offline session write rolls its optimistic cache back after reconn
 
   const winnerDb = environment.authenticatedContext(uid).firestore();
   await assertSucceeds(queueReadingSessionUpdate({
-    firestore: winnerDb as unknown as Firestore,
+    firestore: readingSessionWriteStore(winnerDb),
     userId: uid,
     bookId,
     sessionId: 'session',
@@ -2381,7 +2422,7 @@ test('a stale offline session write rolls its optimistic cache back after reconn
   }));
 
   const staleCompletion = queueReadingSessionUpdate({
-    firestore: staleDb as unknown as Firestore,
+    firestore: readingSessionWriteStore(staleDb),
     userId: uid,
     bookId,
     sessionId: 'session',

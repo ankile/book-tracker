@@ -26,7 +26,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
   }
-  return value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(value));
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[], label: string): void {
@@ -221,7 +221,7 @@ export function planTimerClaim(books: StoredBook[]): TimerClaimMigrationPlan {
     return { claim: { version: 1, state: 'idle', cleared: null }, bookPatch: null };
   }
   const claim = claimForStoredTimer(active[0].id, active[0].data.activeTimer);
-  const timer = active[0].data.activeTimer as Record<string, unknown>;
+  const timer = record(active[0].data.activeTimer, `books/${active[0].id}.activeTimer`);
   const bookPatch = claim.state === 'local' && timer.operationId === undefined
     ? { bookId: active[0].id, activeTimer: { start: claim.start, operationId: claim.operationId } }
     : null;
@@ -233,21 +233,40 @@ export function timerClaimsEqual(
   right: MigratedTimerClaim | null,
 ): boolean {
   if (left === null || right === null) return left === right;
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  if (leftKeys.length !== rightKeys.length || leftKeys.some((key, index) => key !== rightKeys[index])) {
-    return false;
+  if (left.state !== right.state) return false;
+  switch (left.state) {
+    case 'idle':
+      return right.state === 'idle' && timerClaimsEqual(left.cleared, right.cleared);
+    case 'local':
+      return right.state === 'local' &&
+        left.bookId === right.bookId &&
+        left.operationId === right.operationId &&
+        left.start === right.start;
+    case 'remote':
+      return right.state === 'remote' &&
+        left.bookId === right.bookId &&
+        left.entryId === right.entryId &&
+        left.start === right.start;
+    case 'starting':
+      return right.state === 'starting' &&
+        left.bookId === right.bookId &&
+        left.operationId === right.operationId &&
+        left.start === right.start &&
+        left.claimedAt.isEqual(right.claimedAt);
+    case 'outcome-unknown':
+      return right.state === 'outcome-unknown' &&
+        left.bookId === right.bookId &&
+        left.operationId === right.operationId &&
+        left.start === right.start &&
+        left.claimedAt.isEqual(right.claimedAt) &&
+        left.error === right.error;
+    case 'stopping':
+      return right.state === 'stopping' &&
+        left.bookId === right.bookId &&
+        left.entryId === right.entryId &&
+        left.start === right.start &&
+        left.queueId === right.queueId;
   }
-  return leftKeys.every((key) => {
-    const leftValue: unknown = (left as unknown as Record<string, unknown>)[key];
-    const rightValue: unknown = (right as unknown as Record<string, unknown>)[key];
-    if (leftValue instanceof Timestamp && rightValue instanceof Timestamp) return leftValue.isEqual(rightValue);
-    if (typeof leftValue === 'object' && leftValue !== null &&
-        typeof rightValue === 'object' && rightValue !== null) {
-      return timerClaimsEqual(leftValue as MigratedTimerClaim, rightValue as MigratedTimerClaim);
-    }
-    return leftValue === rightValue;
-  });
 }
 
 export function timerClaimPlanIsApplied(
