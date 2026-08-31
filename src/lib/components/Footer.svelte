@@ -24,6 +24,35 @@
     margin: 0 auto;
   }
 
+  .footer-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem 2rem;
+    width: min(100%, 1100px);
+    margin: 1.25rem auto 0;
+    padding-top: 1rem;
+    color: #bed2d3;
+    font-size: 0.82rem;
+    border-top: 1px solid rgba(220, 233, 233, 0.22);
+  }
+
+  .footer-meta p {
+    margin: 0;
+  }
+
+  .footer-meta a {
+    color: #edf5f5;
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: rgba(237, 245, 245, 0.5);
+    text-underline-offset: 0.2rem;
+  }
+
+  .footer-meta a:hover {
+    color: white;
+    text-decoration-color: white;
+  }
+
   .identity {
     text-align: left;
   }
@@ -62,6 +91,7 @@
   }
 
   nav a:focus-visible,
+  .footer-meta a:focus-visible,
   .brand:focus-visible {
     outline: 2px solid white;
     outline-offset: 4px;
@@ -84,6 +114,11 @@
       justify-content: flex-start;
       gap: 0.65rem 1.1rem;
     }
+
+    .footer-meta {
+      flex-direction: column;
+      gap: 0.35rem;
+    }
   }
 </style>
 
@@ -104,5 +139,10 @@
         <a href="/me">Dashboard</a>
       {/if}
     </nav>
+  </div>
+
+  <div class="footer-meta">
+    <p>Made by <a href="https://ankile.com">Lars Ankile</a>.</p>
+    <p>Questions or feedback? <a href="mailto:lars@ankile.com">lars@ankile.com</a></p>
   </div>
 </footer>
