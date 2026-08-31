@@ -164,7 +164,7 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
     }],
     books: [{
       uid: "owner", bookId: "book", workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null, decisionAuthorIds: null,
+      matchMethod: null, linkedAt: null, decisionIsbn13: null,
     }],
   };
   assert.deepEqual(decoders.decodeAdminCatalogApplyRequest({

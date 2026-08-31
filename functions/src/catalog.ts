@@ -5,6 +5,8 @@ import {
   DocumentSnapshot,
   FieldPath,
   getFirestore,
+  Query,
+  QueryDocumentSnapshot,
   QuerySnapshot,
   Timestamp,
 } from "firebase-admin/firestore";
@@ -33,6 +35,12 @@ const db = getFirestore();
 
 const SEARCH_LIMIT = 10;
 const TITLE_CANDIDATE_LIMIT = 25;
+// Total index rows one search may examine across pages. Identical
+// normalized titles ("Collected Works") can outnumber a single page, and
+// the author filter only runs on hydrated candidates — a lone capped query
+// would exhaust before the requested author's work ever surfaced. Six
+// pages cost ~150 index reads plus their hydrations, well under a cent.
+const TITLE_SCAN_LIMIT = 150;
 const BOOKS_PER_UID_LIMIT = 5;
 const SHARED_OWNER_LIMIT = 10;
 const EDITION_LIMIT = 100;
@@ -540,47 +548,75 @@ async function titleResults(
 ): Promise<CatalogSearchResult[]> {
   const key = normalizeCatalogTitle(title);
   if (key === "") return [];
-  const indexRows = await db.collection("workTitleIndex")
+  const baseQuery = db.collection("workTitleIndex")
     .where("status", "==", "active")
     .where("titleKey", ">=", key)
     .where("titleKey", "<", `${key}\uf8ff`)
-    .orderBy("titleKey")
-    .limit(TITLE_CANDIDATE_LIMIT)
-    .get();
-  const candidateIds = [...new Set(indexRows.docs.map((row) => row.get("workId")))]
-    .filter((id): id is string => typeof id === "string");
-  const resolved = await Promise.all(candidateIds.map(async (id) =>
-    resolveWork(readSnapshot, await db.collection("works").doc(id).get()),
-  ));
-  const byId = new Map<string, ResolvedWork>();
-  for (const candidate of resolved) {
-    if (candidate.work.status === "active") byId.set(candidate.id, candidate);
-  }
+    .orderBy("titleKey");
+  // Pages are scanned until a strong candidate (exact title, full author
+  // agreement) turns up, the rows run out, or TITLE_SCAN_LIMIT rows have
+  // been examined \u2014 the usual search still costs one page.
+  const seenRowWorkIds = new Set<string>();
+  const scoredWorkIds = new Set<string>();
   const authorCache = new Map<string, Promise<ResolvedAuthor>>();
-  const hydrated = await Promise.all([...byId.values()].map(async (candidate) => ({
-    candidate,
-    authors: await workAuthors(candidate.work, authorCache),
-  })));
-  const scored = hydrated.map(({candidate, authors: candidateAuthors}) => {
-    const bestTitle = Math.max(...candidate.work.titleKeys.map((candidateKey) =>
-      tokenSimilarity(key, candidateKey),
+  const scored: Array<{
+    candidate: ResolvedWork;
+    candidateAuthors: ResolvedAuthor[];
+    exactTitle: boolean;
+    authorsMatch: number;
+    score: number;
+  }> = [];
+  let scanned = 0;
+  let cursor: QueryDocumentSnapshot | null = null;
+  while (scanned < TITLE_SCAN_LIMIT) {
+    const pageLimit = Math.min(TITLE_CANDIDATE_LIMIT, TITLE_SCAN_LIMIT - scanned);
+    const pageQuery: Query = cursor === null ? baseQuery : baseQuery.startAfter(cursor);
+    const indexRows: QuerySnapshot = await pageQuery.limit(pageLimit).get();
+    scanned += indexRows.docs.length;
+    const candidateIds = [...new Set(indexRows.docs.map((row) => row.get("workId")))]
+      .filter((id): id is string => typeof id === "string" && !seenRowWorkIds.has(id));
+    for (const id of candidateIds) seenRowWorkIds.add(id);
+    const resolved = await Promise.all(candidateIds.map(async (id) =>
+      resolveWork(readSnapshot, await db.collection("works").doc(id).get()),
     ));
-    const authorsMatch = authorAgreement(authors, candidateAuthors);
-    const exactTitle = candidate.work.titleKeys.includes(key);
-    return {
+    // Two rows (or a merge redirect met on a later page) can resolve to the
+    // same work; a work is scored once.
+    const byId = new Map<string, ResolvedWork>();
+    for (const candidate of resolved) {
+      if (candidate.work.status === "active" && !scoredWorkIds.has(candidate.id)) {
+        byId.set(candidate.id, candidate);
+      }
+    }
+    for (const id of byId.keys()) scoredWorkIds.add(id);
+    const hydrated = await Promise.all([...byId.values()].map(async (candidate) => ({
       candidate,
-      candidateAuthors,
-      exactTitle,
-      authorsMatch,
-      score: bestTitle * 0.75 + authorsMatch * 0.25,
-    };
-  }).filter(({score, exactTitle, authorsMatch}) =>
+      authors: await workAuthors(candidate.work, authorCache),
+    })));
+    for (const {candidate, authors: candidateAuthors} of hydrated) {
+      const bestTitle = Math.max(...candidate.work.titleKeys.map((candidateKey) =>
+        tokenSimilarity(key, candidateKey),
+      ));
+      const authorsMatch = authorAgreement(authors, candidateAuthors);
+      const exactTitle = candidate.work.titleKeys.includes(key);
+      scored.push({
+        candidate,
+        candidateAuthors,
+        exactTitle,
+        authorsMatch,
+        score: bestTitle * 0.75 + authorsMatch * 0.25,
+      });
+    }
+    if (scored.some(({exactTitle, authorsMatch}) => exactTitle && authorsMatch === 1)) break;
+    if (indexRows.docs.length < pageLimit) break;
+    cursor = indexRows.docs[indexRows.docs.length - 1];
+  }
+  const results = scored.filter(({score, exactTitle, authorsMatch}) =>
     authorsMatch > 0 && (exactTitle || score >= 0.55),
   )
     .sort((left, right) => right.score - left.score)
     .slice(0, SEARCH_LIMIT);
 
-  return Promise.all(scored.map(async ({candidate, candidateAuthors, exactTitle, authorsMatch}) => {
+  return Promise.all(results.map(async ({candidate, candidateAuthors, exactTitle, authorsMatch}) => {
     const strong = exactTitle && authors.length > 0 && authorsMatch === 1;
     return {
       workId: candidate.id,
@@ -636,7 +672,15 @@ export async function createCatalogEntry(
       id,
       ref: db.collection("externalIdIndex").doc(externalIndexId({provider, id})),
     }));
-    const [isbnSnapshot, externalSnapshots, authorSnapshots, workCount, editionCount] =
+    const [
+      isbnSnapshot,
+      externalSnapshots,
+      authorSnapshots,
+      workCount,
+      editionCount,
+      isbnCount,
+      externalCount,
+    ] =
       await Promise.all([
         isbnRef === null ? Promise.resolve(null) : tx.get(isbnRef),
         Promise.all(externalRefs.map(({ref}) => tx.get(ref))),
@@ -645,6 +689,10 @@ export async function createCatalogEntry(
         )),
         tx.get(db.collection("works").count()),
         tx.get(db.collection("editions").count()),
+        isbnRef === null ? Promise.resolve(null) :
+          tx.get(db.collection("isbnIndex").count()),
+        externalRefs.length === 0 ? Promise.resolve(null) :
+          tx.get(db.collection("externalIdIndex").count()),
       ]);
     for (const snapshot of authorSnapshots) {
       if (storedCatalogAuthor(snapshot).status !== "active") {
@@ -668,8 +716,16 @@ export async function createCatalogEntry(
       );
       return {workId: resolved.id, editionId: indexedEditionId, created: false};
     }
+    // Every collection this transaction appends to is checked against its
+    // bound: the admin scan reads them whole and hard-fails past the caps,
+    // so a creation path that skipped one (a request carries up to two
+    // external IDs, so that index outpaces works) could disable catalog
+    // administration.
     if (workCount.data().count >= CATALOG_LIMITS.works ||
-        editionCount.data().count >= CATALOG_LIMITS.editions) {
+        editionCount.data().count >= CATALOG_LIMITS.editions ||
+        (isbnCount !== null && isbnCount.data().count >= CATALOG_LIMITS.isbnIndexes) ||
+        (externalCount !== null && externalCount.data().count + externalRefs.length >
+          CATALOG_LIMITS.externalIdIndexes)) {
       throw new functions.https.HttpsError(
         "resource-exhausted",
         "The shared catalog has reached its size bound. Ask an administrator to raise it.",
@@ -795,14 +851,18 @@ export function summarizeReadingAttempt(
     left.createdAt.toMillis() - right.createdAt.toMillis(),
   );
   const reading = ordered.filter((event) => event.type === "reading");
-  const firstProgress = ordered[0]?.createdAt ?? null;
+  // Progress means forward progress: a page-count correction is an update
+  // event with zero or negative pagesRead, and a book added already
+  // finished may carry only such corrections. Taking the raw first row as
+  // "first progress" would put a later correction after finishedAt and make
+  // calendarDays negative, which the client decoder rejects.
+  const progressed = ordered.filter((event) => event.pagesRead > 0);
+  const firstProgress = progressed[0]?.createdAt ?? null;
   const firstRead = reading[0]?.createdAt ?? null;
   // The book's own finishedAt stamp (written when finished flipped,
   // backfilled by migrate-finished-at.ts) is the finish date. The fallback
   // covers a finished book a pre-stamp client wrote: its last forward
-  // progress, not its last row — a page-count correction months later is
-  // an update event with zero or negative pagesRead.
-  const progressed = ordered.filter((event) => event.pagesRead > 0);
+  // progress, not its last row.
   const finishedAt = !book.finished ? null :
     book.finishedAt ?? (progressed.at(-1) ?? ordered.at(-1))?.createdAt ?? null;
   const activeDayKeys = new Set(reading.map((event) => dayParts(event.createdAt, timeZone).key));

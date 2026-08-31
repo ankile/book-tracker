@@ -327,7 +327,6 @@ export interface AdminCatalogExpectedBook extends AdminCatalogBookTarget {
   matchMethod: CatalogMatchMethod | null;
   linkedAt: number | null;
   decisionIsbn13: string | null;
-  decisionAuthorIds: string[] | null;
 }
 
 export interface AdminCatalogExpectedState {

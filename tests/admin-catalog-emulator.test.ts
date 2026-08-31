@@ -245,8 +245,10 @@ test('all admin catalog operations use real callable transactions and preserve p
     sourceAuthorId: catalogAuthorAliasId,
     targetAuthorId: catalogAuthorId,
   };
+  // A concurrent edit to any catalog document the plan read (here the work
+  // carrying the absorbed author) must abort the apply as stale.
   const staleAuthorPreview = await preview(mergeAuthorOperation);
-  await personalRef.update({authorIds: [catalogAuthorAliasId, catalogAuthorOtherId]});
+  await db.doc(`works/${sourceWorkId}`).update({subjects: ['touched between preview and apply']});
   await assert.rejects(
     callable('admin-catalogapply', {
       operationId: staleAuthorPreview.operationId,
@@ -258,9 +260,12 @@ test('all admin catalog operations use real callable transactions and preserve p
       return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
     },
   );
-  await personalRef.update({authorIds: [catalogAuthorAliasId]});
   await previewAndApply(mergeAuthorOperation);
-  assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorId]);
+  // The personal book is deliberately untouched: its alias id resolves
+  // through the merged record, so the merge never fans out into (possibly
+  // tombstoned) user libraries. Catalog works do get rewritten.
+  assert.deepEqual((await personalRef.get()).get('authorIds'), [catalogAuthorAliasId]);
+  assert.equal((await personalRef.get()).get('updatedAt').toMillis(), personalUpdatedAt.toMillis());
   assert.deepEqual((await db.doc(`works/${sourceWorkId}`).get()).get('authorIds'), [catalogAuthorId]);
   assert.equal((await db.doc(`catalogAuthors/${catalogAuthorAliasId}`).get()).get('mergedInto'), catalogAuthorId);
 

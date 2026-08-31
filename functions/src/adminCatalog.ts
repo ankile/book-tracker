@@ -140,13 +140,6 @@ function catalogCapacity(collection: string, maximum: number): never {
 const catalogInvariant: CatalogDataFail = (message) =>
   failedPrecondition(message, "catalog-invariant");
 
-function strings(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new Error(`${label} must be a string array.`);
-  }
-  return value;
-}
-
 function storedTimestamp(snapshot: DocumentSnapshot, field: string): Timestamp {
   const value = snapshot.get(field);
   if (!(value instanceof Timestamp)) {
@@ -429,7 +422,6 @@ function bookVersion(
   snapshot: DocumentSnapshot,
   target: AdminBookTarget,
   decisionIsbn13: string | null = null,
-  decisionAuthorIds: string[] | null = null,
 ) {
   if (!snapshot.exists) failedPrecondition("Personal book no longer exists.", "catalog-invariant");
   return {
@@ -437,7 +429,6 @@ function bookVersion(
     bookId: target.bookId,
     ...linkFrom(snapshot),
     decisionIsbn13,
-    decisionAuthorIds,
   };
 }
 
@@ -879,25 +870,13 @@ async function planOperation(
         {type: "set", data: next},
       ));
     }
-    const affectedBooks = await many(reader, db.collectionGroup("books")
-      .where("authorIds", "array-contains-any", absorbed)
-      .limit(MAX_TOUCHED_DOCUMENTS + 1));
-    if (affectedBooks.size > MAX_TOUCHED_DOCUMENTS) operationTooLarge();
-    books = affectedBooks.docs.map((snapshot) => {
-      const path = snapshot.ref.path.split("/");
-      if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
-        failedPrecondition("Catalog author is referenced outside a personal book.", "catalog-invariant");
-      }
-      const ids = strings(snapshot.get("authorIds"), `${snapshot.ref.path}.authorIds`);
-      const nextIds = [...new Set(ids.map((authorId) =>
-        absorbed.includes(authorId) ? target.snapshot.id : authorId,
-      ))];
-      changes.push(change(
-        "book", snapshot.ref, "update", {authorIds: ids}, {authorIds: nextIds},
-        {type: "set", data: {authorIds: nextIds}},
-      ));
-      return bookVersion(snapshot, {uid: path[1], bookId: path[3]}, null, ids);
-    });
+    // Personal books that reference an absorbed author are deliberately
+    // left alone: the alias stays behind as a one-hop merged record, and
+    // the client, the admin scan, and db-audit all resolve that redirect
+    // (merging flattens chains, so one hop always suffices). Rewriting
+    // them would make a merge scale with an author's readership — and
+    // fail for a popular author — and would mutate books inside
+    // tombstoned accounts, which every other path leaves frozen.
   } else if (operation.type === "createWork") {
     const ref = db.collection("works").doc(operation.workId);
     const snapshot = await one(reader, ref);

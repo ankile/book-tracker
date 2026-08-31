@@ -147,7 +147,9 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
   const result = catalog.summarizeReadingAttempt(
     {finished: true, finishedAt: null, pageCount: 300},
     [
-      event("update", "2024-03-10T09:30:00.000Z", 0),
+      // 01:30 local, before the 3 AM boundary: first (positive) progress
+      // lands on the previous calendar day.
+      event("update", "2024-03-10T09:30:00.000Z", 5),
       event("reading", "2024-03-10T10:30:00.000Z", 30, 30),
       event("reading", "2024-03-10T22:00:00.000Z", 45, 30),
       event("update", "2024-03-11T08:30:00.000Z", 0),
@@ -232,6 +234,31 @@ test("a later page-count correction does not move the finish date", () => {
   assert.equal(result.finishedAt, "2026-03-02");
   assert.equal(result.calendarDays, 2);
   assert.equal(result.activeDays, 2);
+});
+
+// A book added already finished carries a finishedAt stamp and no reading
+// history; a later page-count correction is its only event. Were that
+// correction taken as "first progress", calendarDays would go negative
+// and the client decoder would reject the whole reader response.
+test("a correction-only finished attempt has no first progress and no negative span", () => {
+  const result = catalog.summarizeReadingAttempt(
+    {
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("2026-03-05T20:00:00.000Z")),
+      pageCount: 180,
+    },
+    [{
+      type: "update",
+      createdAt: Timestamp.fromDate(new Date("2026-06-01T10:00:00.000Z")),
+      pagesRead: -20,
+      timeRead: 0,
+    }],
+    "UTC",
+  );
+  assert.equal(result.firstProgressAt, null);
+  assert.equal(result.calendarDays, null);
+  assert.equal(result.finishedAt, "2026-03-05");
+  assert.equal(result.activeDays, 0);
 });
 
 // Browsers report these verbatim and Rules accept them; the validator
@@ -670,6 +697,86 @@ test("an exact title with the wrong author is not returned", async (t) => {
   assert.equal(authorReads, 3);
 });
 
+// More works than one index page can share a normalized title ("Collected
+// Works"); the author filter runs on hydrated candidates, so search must
+// page past the first window or the exact title/author match is invisible
+// and the add flow creates a duplicate.
+test("a title shared by more than one index page still finds the requested author", async (t) => {
+  interface TitleQuery {
+    where(...args: unknown[]): TitleQuery;
+    orderBy(): TitleQuery;
+    startAfter(cursor: {ref: {path: string}}): TitleQuery;
+    limit(limit: number): TitleQuery;
+    get(): Promise<{docs: unknown[]}>;
+  }
+  const snap = (path: string, data: Row) => ({
+    exists: true,
+    id: path.slice(path.lastIndexOf("/") + 1),
+    ref: {path},
+    data: () => data,
+    get: (field: string) => data[field],
+  });
+  // 26 works, all with the identical key; the wanted author's work sorts
+  // last, past the 25-row first page.
+  const indexRows = Array.from({length: 26}, (_, position) =>
+    snap(`workTitleIndex/row-${String(position).padStart(2, "0")}`, {
+      workId: `work-${String(position).padStart(2, "0")}`,
+      status: "active",
+    }),
+  );
+  const workData = (position: number): Row => ({
+    canonicalTitle: "Collected Works",
+    alternateTitles: [],
+    titleKeys: ["collected works"],
+    authorIds: [position === 25 ? "wanted-author" : "other-author"],
+    coverUrl: "",
+    subjects: [],
+    fiction: null,
+    status: "active",
+    mergedFrom: [],
+  });
+  const pageLimits: number[] = [];
+  t.mock.method(db, "doc", (path: string): never => assert.fail(`search read ${path}`));
+  t.mock.method(db, "runTransaction", (): never =>
+    assert.fail("search runs no quota transaction"));
+  t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return liveUserCollection();
+    if (name === "workTitleIndex") {
+      const makeQuery = (start: number): TitleQuery => ({
+        where: () => makeQuery(start),
+        orderBy: () => makeQuery(start),
+        startAfter: (cursor: {ref: {path: string}}) => makeQuery(
+          indexRows.findIndex((row) => row.ref.path === cursor.ref.path) + 1,
+        ),
+        limit: (limit: number) => {
+          pageLimits.push(limit);
+          return makeQuery(start);
+        },
+        get: async () => ({docs: indexRows.slice(start, start + pageLimits[pageLimits.length - 1])}),
+      });
+      return makeQuery(0);
+    }
+    if (name === "works") {
+      return {doc: (id: string) => ({get: async () =>
+        snap(`works/${id}`, workData(Number(id.slice("work-".length)))),
+      })};
+    }
+    if (name === "catalogAuthors") {
+      return {doc: (id: string) => ({get: async () => snap(
+        `catalogAuthors/${id}`,
+        activeAuthor(id === "wanted-author" ? "Wanted Author" : "Other Author"),
+      )})};
+    }
+    assert.fail(`unexpected collection ${name}`);
+  });
+  const found = await deployed.catalog.search.run({
+    title: "Collected Works",
+    authorNames: ["Wanted Author"],
+  }, authContext);
+  assert.equal(found.results.some(({workId}) => workId === "work-25"), true);
+  assert.equal(pageLimits.length, 2);
+});
+
 // Any verified user creates the work and edition a book lacks (catalog
 // data is public); an identifier already in the catalog resolves to the
 // existing entry so retries and races never duplicate one.
@@ -753,6 +860,78 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   await assert.rejects(
     deployed.catalog.create.run({work, edition}, authContext),
     (error) => hasCode(error, "failed-precondition") && messageMatches(error, /no longer active/),
+  );
+});
+
+// The admin scan reads the index collections whole and hard-fails past
+// their caps, so creation must refuse before an ISBN or external-id row
+// would cross a bound — works and editions staying under theirs is not
+// enough (one request may carry two external IDs, so the external index
+// can reach its cap while works sit at half theirs).
+test("creation refuses when an index collection would cross its bound", async (t) => {
+  const rows = new Map<string, Row>([["catalogAuthors/ada", activeAuthor("Ada Lovelace")]]);
+  for (let position = 0; position < 999; position += 1) {
+    rows.set(`externalIdIndex/pad-${position}`, {});
+    rows.set(`isbnIndex/${9780000000000 + position}`, {});
+  }
+  const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snap = (reference: Ref) => ({
+    exists: rows.has(reference.path), id: reference.id, ref: reference,
+    data: () => rows.get(reference.path),
+    get: (field: string) => rows.get(reference.path)?.[field],
+  });
+  let created = 0;
+  t.mock.method(db, "doc", (path: string) => ref(path));
+  t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return liveUserCollection();
+    return {
+      doc: (id: string) => ref(`${name}/${id}`),
+      count: () => ({kind: "count", name}),
+    };
+  });
+  t.mock.method(db, "runTransaction", async (handler: Handler<{
+    get(value: {kind: string; name: string} | Ref): Promise<unknown>;
+    create(): void;
+  }>) => handler({
+    get: async (value: {kind: string; name: string} | Ref) => {
+      if ("kind" in value) {
+        return {data: () => ({count: [...rows.keys()].filter((path) => path.startsWith(`${value.name}/`)).length})};
+      }
+      return snap(value);
+    },
+    create: () => {
+      created += 1;
+    },
+  }));
+  const work = {
+    canonicalTitle: "A New Book", alternateTitles: [], authorIds: ["ada"],
+    coverUrl: "", subjects: [], fiction: null,
+  };
+  const edition = {
+    isbn13: null, title: "A New Book", publisher: "", publishedDate: "", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+  };
+  // 999 external rows + 2 new IDs would cross the 1000 bound.
+  await assert.rejects(
+    deployed.catalog.create.run({work, edition: {...edition, externalIds: {
+      "open-library": "OL1", "google-books": "GB1",
+    }}}, authContext),
+    (error) => hasCode(error, "resource-exhausted"),
+  );
+  // One new ID fits exactly; the same request must go through.
+  const fits = await deployed.catalog.create.run({work, edition: {...edition, externalIds: {
+    "open-library": "OL1",
+  }}}, authContext);
+  assert.equal(fits.created, true);
+  assert.ok(created > 0);
+  // The ISBN index is one row from its bound: fill it and the next
+  // ISBN-carrying creation must refuse.
+  rows.set(`isbnIndex/${9780000000999}`, {});
+  await assert.rejects(
+    deployed.catalog.create.run({
+      work, edition: {...edition, isbn13: "9780306406157"},
+    }, authContext),
+    (error) => hasCode(error, "resource-exhausted"),
   );
 });
 

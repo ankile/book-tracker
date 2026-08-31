@@ -534,8 +534,10 @@ class Database {
 
   // The shared author catalog, for autocomplete and the book-list join. One
   // store for everyone: the catalog is not per-user, and the whole collection
-  // is listened to on purpose — it is bounded at 5000 documents, and
-  // autocomplete needs all of them locally. Deliberately unordered (see
+  // is listened to on purpose — it is bounded at 1000 documents (a few
+  // hundred KB at realistic sizes; see catalogLimits.ts), and autocomplete
+  // needs all of them locally. If the bound ever rises with scan
+  // pagination, this listener must become lazy. Deliberately unordered (see
   // getAllBooks for why orderBy is a trap); sorted client-side. Starts as
   // undefined (loading, getUser convention) so the join can distinguish
   // "not yet loaded" from an empty collection.

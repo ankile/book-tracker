@@ -778,7 +778,6 @@ export interface AdminCatalogExpected {
     matchMethod: MatchMethod | null;
     linkedAt: number | null;
     decisionIsbn13: string | null;
-    decisionAuthorIds: string[] | null;
   }>;
 }
 
@@ -993,7 +992,7 @@ function decodeAdminCatalogExpected(
       book,
       [
         "uid", "bookId", "workId", "editionId", "matchMethod", "linkedAt",
-        "decisionIsbn13", "decisionAuthorIds",
+        "decisionIsbn13",
       ],
       `expected.books[${index}]`,
       fail,
@@ -1017,14 +1016,6 @@ function decodeAdminCatalogExpected(
         book.decisionIsbn13,
         `expected.books[${index}].decisionIsbn13`,
         fail,
-      ),
-      decisionAuthorIds: book.decisionAuthorIds === null ? null : boundedStringArray(
-        book.decisionAuthorIds,
-        `expected.books[${index}].decisionAuthorIds`,
-        fail,
-        20,
-        100,
-        2000,
       ),
     };
   });

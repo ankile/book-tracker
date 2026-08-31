@@ -118,7 +118,7 @@ test('admin preview and apply decoders retain exact before/after differences', (
     catalog: [{kind: 'work', id: 'work', exists: true, updatedAt: 1000}],
     books: [{
       uid: 'user', bookId: 'book', workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null, decisionAuthorIds: null,
+      matchMethod: null, linkedAt: null, decisionIsbn13: null,
     }],
   };
   const preview = decodeAdminCatalogPreviewResponse({

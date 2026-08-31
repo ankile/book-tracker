@@ -337,7 +337,7 @@ function decodeExpectedBook(value: unknown, context: string): AdminCatalogExpect
   const data = record(value, context);
   exactKeys(data, [
     'uid', 'bookId', 'workId', 'editionId', 'matchMethod', 'linkedAt',
-    'decisionIsbn13', 'decisionAuthorIds',
+    'decisionIsbn13',
   ], context);
   return {
     ...decodeBookTarget({uid: data.uid, bookId: data.bookId}, `${context}.target`),
@@ -346,8 +346,6 @@ function decodeExpectedBook(value: unknown, context: string): AdminCatalogExpect
     matchMethod: catalogMatchMethod(data.matchMethod, `${context}.matchMethod`),
     linkedAt: nullableNumber(data.linkedAt, `${context}.linkedAt`),
     decisionIsbn13: nullableString(data.decisionIsbn13, `${context}.decisionIsbn13`),
-    decisionAuthorIds: data.decisionAuthorIds === null ? null :
-      strings(data.decisionAuthorIds, `${context}.decisionAuthorIds`),
   };
 }
 
