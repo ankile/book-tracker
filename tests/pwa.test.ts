@@ -112,11 +112,17 @@ test('the Firebase Hosting site is retired to a redirect: no rewrites, nothing s
 
   assert.equal(hosting.public, 'hosting-retired');
   assert.equal(hosting.rewrites, undefined);
-  // `/:path*` does not match the bare root on Hosting; `/` needs its own entry.
-  assert.deepEqual(hosting.redirects, [
-    {source: '/', destination: 'https://book.ankile.com/', type: 301},
-    {source: '/:path*', destination: 'https://book.ankile.com/:path', type: 301},
-  ]);
+  // Two rules: the bare root (a glob catch-all does not match `/` on
+  // Hosting) and a regex catch-all that keeps the reserved /__/ namespace
+  // for Firebase Auth's hosted action page — its behaviour is pinned in
+  // tests/hosting-redirect.test.ts; this pins the shape.
+  assert.equal(hosting.redirects.length, 2);
+  assert.deepEqual(hosting.redirects[0], {source: '/', destination: 'https://book.ankile.com/', type: 301});
+  const catchAll = hosting.redirects[1];
+  assert.equal(catchAll.source, undefined, 'the catch-all must be a regex, not a glob');
+  assert.match(catchAll.regex, /^\^\//);
+  assert.equal(catchAll.destination, 'https://book.ankile.com/:path');
+  assert.equal(catchAll.type, 301);
   assert.equal(JSON.stringify(hosting).includes('publicweb'), false);
   assert.equal(JSON.stringify(hosting).includes('pinTag'), false);
 
