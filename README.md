@@ -298,9 +298,6 @@ book-tracker/
 
 ## Troubleshooting
 
-Lost account, stale CLI login, or a credential you no longer trust:
-follow [docs/RECOVERY.md](docs/RECOVERY.md).
-
 If the Node version is wrong:
 
 ```bash

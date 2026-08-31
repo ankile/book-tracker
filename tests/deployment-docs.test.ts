@@ -4,7 +4,6 @@ import test from 'node:test';
 
 const readmeUrl = new URL('../README.md', import.meta.url);
 const migrationsUrl = new URL('../MIGRATIONS.md', import.meta.url);
-const recoveryUrl = new URL('../docs/RECOVERY.md', import.meta.url);
 const packageUrl = new URL('../package.json', import.meta.url);
 const functionsPackageUrl = new URL('../functions/package.json', import.meta.url);
 const firebaseRcUrl = new URL('../.firebaserc', import.meta.url);
@@ -51,14 +50,13 @@ async function deployedFunctionNames(indexSource: string): Promise<string[]> {
 }
 
 test('public operational docs omit deployment and operator identifiers', async () => {
-  const [readme, migrations, recovery, firebaseRc, functionsIndex] = await Promise.all([
+  const [readme, migrations, firebaseRc, functionsIndex] = await Promise.all([
     readFile(readmeUrl, 'utf8'),
     readFile(migrationsUrl, 'utf8'),
-    readFile(recoveryUrl, 'utf8'),
     readFile(firebaseRcUrl, 'utf8'),
     readFile(functionsIndexUrl, 'utf8'),
   ]);
-  const publicDocs = `${readme}\n${migrations}\n${recovery}`;
+  const publicDocs = `${readme}\n${migrations}`;
   const projects = Object.values(
     (JSON.parse(firebaseRc) as { projects?: Record<string, string> }).projects ?? {},
   );
