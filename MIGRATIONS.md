@@ -236,9 +236,13 @@ deployed Rules compatible at every step, with the migration in the middle:
    personal-author references (the apply is idempotent and prints them as
    REVIEW lines otherwise), then audit;
 5. verify catalog suggestions, personal-book edits, sharing convergence, Work
-   reader summaries, and restricted catalog curation. Only after that,
-   remove the read-only `users/{userId}/authors` compatibility block from
-   `firestore.rules` in a follow-up release.
+   reader summaries, and restricted catalog curation.
+
+Legacy per-user author documents and the read-only
+`users/{userId}/authors` compatibility block stay exactly as they are after
+the rollout. No purge script exists and none is scheduled: retained data is
+moved or removed only on an explicit owner request (owner decision
+2026-08-31).
 
 The migration never deletes a document. Legacy per-user author records are
 retained once no book references them (they are unreachable for the new
