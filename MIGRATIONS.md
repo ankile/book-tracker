@@ -208,7 +208,10 @@ reviewed JSON manifest may join exact personal-book paths when an operator has
 resolved a translation or spelling difference. Every reviewed group must
 provide positional `authorNames` and `authorKinds`. The decoder keeps each
 name/kind pair together while normalizing, sorting, and deduplicating, and
-rejects omitted kinds or conflicting classifications.
+rejects omitted kinds or conflicting classifications. The reviewed kind is
+authoritative: an author the heuristics would treat as a placeholder
+("Various Authors") is minted when the manifest classifies it as an entity,
+and only a reviewed `placeholder` drops the name.
 
 The release is not additive at the Rules layer — the personal author
 collection loses its write rules and every book write must reference the

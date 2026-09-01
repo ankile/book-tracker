@@ -344,6 +344,62 @@ test('placeholder and deleted authors never become catalog identity', () => {
   assert.equal(three.authorProblems.includes('deleted-author:deleted'), true)
 })
 
+// Production 2026-09-01: the Holy Bible's only personal author was the
+// placeholder "Various Authors", the manifest named that same name as an
+// entity, and the planner dropped it by name — the work and the book were
+// migrated with no author at all. The reviewed kind decides: an entity is
+// minted and attached even under the placeholder name, and a placeholder
+// provenance elsewhere is reclassified rather than reported as a conflict.
+test('a reviewed entity under the placeholder name is minted and attached', () => {
+  const uid = 'u1'
+  const legacyId = `${uid}:various authors`
+  const authors = new Map<string, MigrationAuthor>([
+    [legacyId, { id: legacyId, name: 'Various Authors', kind: 'placeholder', retirement: null }],
+    ['u2:various authors', { id: 'u2:various authors', name: 'Various Authors', kind: 'placeholder', retirement: null }],
+  ])
+  const path = `users/${uid}/books/bible`
+  const plan = planCrossUserCatalog([
+    book(path, { title: 'Holy Bible', isbn: '9780834004269', authorIds: [legacyId] }),
+    book('users/u2/books/anthology', { title: 'Some Anthology', isbn: '', authorIds: ['u2:various authors'] }),
+  ], authors, [{
+    id: 'holy-bible',
+    bookPaths: [path],
+    canonicalTitle: 'Holy Bible',
+    authorNames: ['Various Authors'],
+    authorKinds: ['entity'],
+  }])
+  const entity = plan.authors.find((item) => item.canonicalName === 'Various Authors')
+  assert.ok(entity, 'the reviewed entity must be minted')
+  assert.equal(entity.kind, 'entity')
+  assert.equal(entity.authorId, deterministicCatalogId('author', 'various authors'))
+  assert.equal(plan.groups.length, 1)
+  assert.deepEqual(plan.groups[0].authorNames, ['Various Authors'])
+  assert.deepEqual(plan.groups[0].authorIds, [entity.authorId])
+  const bible = plan.candidates.find((candidate) => candidate.book.path === path)
+  assert.ok(bible)
+  assert.deepEqual(bible.personalAuthorIds, [entity.authorId])
+  assert.deepEqual(plan.ambiguities.filter((item) => item.type === 'author-kind-conflict'), [])
+  // The unreviewed anthology under the same placeholder name resolves no
+  // identity and stays unlinked, as before.
+  const anthology = plan.candidates.find((candidate) => candidate.book.path === 'users/u2/books/anthology')
+  assert.ok(anthology)
+  assert.equal(anthology.problems.includes('missing-resolved-author'), true)
+  assert.equal(plan.groups.some((group) => group.candidates.includes(anthology)), false)
+
+  // A reviewed placeholder still means "no identity".
+  const dropped = planCrossUserCatalog([
+    book(path, { title: 'Holy Bible', isbn: '9780834004269', authorIds: [legacyId] }),
+  ], authors, [{
+    id: 'holy-bible',
+    bookPaths: [path],
+    canonicalTitle: 'Holy Bible',
+    authorNames: ['Various Authors'],
+    authorKinds: ['placeholder'],
+  }])
+  assert.deepEqual(dropped.groups[0]?.authorIds ?? [], [])
+  assert.equal(dropped.authors.some((item) => item.canonicalName === 'Various Authors'), false)
+})
+
 test('a manifest-corrected person with no personal provenance sorts by the last name token', () => {
   const authors = new Map<string, MigrationAuthor>([['kunder', author('kunder', 'Milan Kunder')]])
   const plan = planCrossUserCatalog([

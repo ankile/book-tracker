@@ -164,7 +164,11 @@ const cleanReviewedAuthors = (group: ReviewedWorkGroup): { authors: ReviewedAuth
     if (kind !== 'person' && kind !== 'entity' && kind !== 'placeholder') {
       return { authors: [], problem: `authorKinds[${index}] is invalid` }
     }
-    if (key === 'various authors') continue
+    // The reviewed kind is authoritative. The migration's own heuristic
+    // reads the name "Various Authors" as a placeholder, but a manifest
+    // that classifies it as an entity means the operator decided that name
+    // is the work's identity; only a reviewed placeholder is dropped.
+    if (kind === 'placeholder') continue
     const existing = byKey.get(key)
     if (existing && existing.kind !== kind) {
       return { authors: [], problem: `Conflicting kinds for reviewed author ${name}` }
@@ -530,11 +534,16 @@ export const planCrossUserCatalog = (
         sortName,
         ...(provenance?.catalogId === undefined ? {} : {catalogId: provenance.catalogId}),
       }
-      const variants = [canonical, ...exactSources, ...existing].filter((variant, index, all) =>
-        all.findIndex((candidate) => candidate.name === variant.name &&
-          candidate.kind === variant.kind && candidate.sortName === variant.sortName &&
-          candidate.catalogId === variant.catalogId) === index,
-      )
+      // A placeholder personal author carries no identity, so a reviewed
+      // kind reclassifies it rather than conflicting with it; person and
+      // entity provenance still has to agree with the manifest.
+      const variants = [canonical, ...exactSources, ...existing]
+        .filter((variant) => reviewedKind === undefined || variant.kind !== 'placeholder')
+        .filter((variant, index, all) =>
+          all.findIndex((candidate) => candidate.name === variant.name &&
+            candidate.kind === variant.kind && candidate.sortName === variant.sortName &&
+            candidate.catalogId === variant.catalogId) === index,
+        )
       authorVariants.set(key, variants)
     }
   }
