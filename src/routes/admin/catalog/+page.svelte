@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { reauthenticateWithPassword } from '$lib/firebase/auth.ts';
   import { scanCache } from '$lib/admin.ts';
   import {
@@ -18,6 +18,7 @@
     EditionFormat,
   } from '$lib/interfaces/catalog.ts';
   import {
+    appendAdminScanPage,
     classifyAdminCatalogFailure,
     adminCatalogCandidatesForBook,
     parseAdminBookTargets,
@@ -160,48 +161,63 @@
       selectedWork?.mergedFrom.includes(book.workId ?? '')) ?? [],
   );
 
+  // Runs once: the mount decision reads scanLoadedAt, which loadScan
+  // writes, so an effect here re-ran itself after every load.
   const SCAN_FRESH_MS = 60_000;
-  $effect(() => {
+  onMount(() => {
     const age = scanLoadedAt === null ? Infinity : Date.now() - scanLoadedAt;
-    void loadScan(null, age > SCAN_FRESH_MS);
+    void loadScan(age > SCAN_FRESH_MS);
   });
 
-  async function loadScan(bookCursor: string | null = null, force = true): Promise<void> {
-    if (bookCursor === null) loading = true;
-    else loadingMore = true;
+  // The server pages personal books a hundred at a time, and every count and
+  // finding on this page is stated against the books scanned so far. A
+  // first-page load therefore leaves the page partial; the notice under the
+  // toolbar says so and scanRemaining pages through the rest. The notice does
+  // not depend on what the first page contained — until 2026-09-01 the
+  // continuation control lived inside the unmatched-books table, and a first
+  // page with no unlinked book hid it, so 122 of 222 books went unscanned
+  // behind "0 unlinked books, 0 findings".
+  async function loadScan(force = true): Promise<void> {
+    const wasComplete = scan?.bookCountsComplete ?? false;
+    loading = true;
     errorMessage = '';
     try {
-      const page = bookCursor === null ? await scanCache.fetch(force) : await adminCatalogScan(bookCursor);
-      if (bookCursor === null) scanLoadedAt = scanCache.read().loadedAt;
-      if (bookCursor === null || scan === null) scan = page;
-      else {
-        const priorCounts = new Map(scan.works.map((work) => [work.workId, work.linkedBookCount]));
-        scan = {
-          ...page,
-          // A continuation page answers for its own hundred books only: the
-          // author and edition inventories came with the first page and are
-          // empty here, so they are kept rather than overwritten. Linked
-          // book counts accumulate across pages.
-          authors: scan.authors,
-          editions: scan.editions,
-          works: page.works.map((work) => ({
-            ...work,
-            linkedBookCount: (priorCounts.get(work.workId) ?? 0) + work.linkedBookCount,
-          })),
-          books: [...scan.books, ...page.books],
-          findings: [...scan.findings, ...page.findings],
-          bookCountsComplete: page.nextBookCursor === null,
-        };
-      }
-      if (selectedWorkId && !scan.works.some((work) => work.workId === selectedWorkId)) {
-        selectedWorkId = '';
-      }
+      scan = await scanCache.fetch(force);
+      scanLoadedAt = scanCache.read().loadedAt;
+      dropMissingSelection();
     } catch (error) {
       console.error('Admin catalog scan failed', error);
       errorMessage = 'The catalog scan could not be loaded. No catalog data was changed.';
+      return;
     } finally {
       loading = false;
+    }
+    // A reload replaces a complete scan with its first page alone; finish
+    // the job it undid rather than leave the page partial again.
+    if (wasComplete) await scanRemaining();
+  }
+
+  async function scanRemaining(): Promise<void> {
+    if (scan === null || loadingMore) return;
+    loadingMore = true;
+    errorMessage = '';
+    try {
+      while (scan.nextBookCursor !== null) {
+        const page = await adminCatalogScan(scan.nextBookCursor);
+        scan = appendAdminScanPage(scan, page);
+      }
+      dropMissingSelection();
+    } catch (error) {
+      console.error('Admin catalog scan continuation failed', error);
+      errorMessage = `The scan stopped after ${scan.books.length} books; the page is partial. No catalog data was changed.`;
+    } finally {
       loadingMore = false;
+    }
+  }
+
+  function dropMissingSelection(): void {
+    if (scan !== null && selectedWorkId && !scan.works.some((work) => work.workId === selectedWorkId)) {
+      selectedWorkId = '';
     }
   }
 
@@ -576,13 +592,19 @@
     <a href="/admin">← Admin overview</a>
     <h1>Catalog curation</h1>
     <p class="toolbar">
-      <button type="button" disabled={loading} onclick={() => void loadScan()}>{loading ? 'Scanning…' : 'Refresh'}</button>
+      <button type="button" disabled={loading || loadingMore} onclick={() => void loadScan()}>{loading ? 'Scanning…' : 'Refresh'}</button>
       {#if scanLoadedAt !== null}<small>as of {new Date(scanLoadedAt).toLocaleTimeString()}</small>{/if}
     </p>
   </header>
 
   {#if errorMessage}<div class="notice error" role="alert">{errorMessage}</div>{/if}
   {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
+  {#if scan && !scan.bookCountsComplete}
+    <div class="notice partial" role="status">
+      <span>Only the first {scan.books.length} personal books are scanned. Every count and finding below is partial until the rest are.</span>
+      <button type="button" disabled={loading || loadingMore} onclick={() => void scanRemaining()}>{loadingMore ? `Scanning… ${scan.books.length} books so far` : 'Scan the remaining books'}</button>
+    </div>
+  {/if}
 
   {#if loading && scan === null}
     <p class="loading">Scanning the catalog…</p>
@@ -673,7 +695,7 @@
     </section>
 
     <details class="card all-data" bind:open={allDataOpen}>
-      <summary>All catalog data — {scan.authors.length} authors, {scan.works.length} works, {unmatchedBooks.length} unlinked books, {scan.findings.length} findings</summary>
+      <summary>All catalog data — {scan.authors.length} authors, {scan.works.length} works, {unmatchedBooks.length} unlinked of {scan.books.length} scanned books, {scan.findings.length} findings</summary>
     <section aria-labelledby="catalog-authors-heading">
       <h2 id="catalog-authors-heading">Catalog authors <span>{scan.authors.length}/{scan.limits.catalogAuthors}</span></h2>
       <p>Works reference these entities by ID. Editing a canonical author updates every catalog display without rewriting personal books.</p>
@@ -717,7 +739,7 @@
     </section>
 
     <section aria-labelledby="unmatched-heading">
-      <h2 id="unmatched-heading">Unmatched books <span>{unmatchedBooks.length} loaded · {scan.limits.books} per page</span></h2>
+      <h2 id="unmatched-heading">Unmatched books <span>{unmatchedBooks.length} of {scan.books.length} scanned{scan.bookCountsComplete ? '' : ' so far'}</span></h2>
       <p>Only identity metadata needed for curation is shown. Anomalous owners require manual review.</p>
       {#if unmatchedBooks.length === 0}
         <p class="empty">No unmatched books.</p>
@@ -749,9 +771,6 @@
           </table>
         </div>
         <button type="button" disabled={selectedBookKeys.length === 0} onclick={useSelectedBooks}>Use selected books in link operation</button>
-        {#if scan.nextBookCursor}
-          <button type="button" disabled={loadingMore} onclick={() => void loadScan(scan?.nextBookCursor ?? null)}>{loadingMore ? 'Loading…' : 'Load next 100 books'}</button>
-        {/if}
       {/if}
     </section>
 
@@ -920,6 +939,7 @@
   .dupe p { margin: 0 0 .3rem; } .dupe ul { margin: 0; padding-left: 1.1rem; } .dupe li small { display: block; color: #697572; }
   .all-data summary { cursor: pointer; font-weight: 600; color: #244f49; } .all-data > section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #dfe5e3; } h2 span { color: #71807d; font-size: .85rem; font-weight: 500; } .card > p { color: #64706d; }
   .notice { margin: 1rem 0; padding: .8rem; border-radius: 5px; } .error { color: #842029; background: #f8d7da; } .success { color: #15583c; background: #ddefe4; }
+  .partial { display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: #6b4a0e; background: #fff8e9; border-left: 4px solid #c68a23; } .partial button { flex-shrink: 0; }
   .table-scroll { overflow-x: auto; margin: .75rem 0; } table { width: 100%; min-width: 840px; border-collapse: collapse; }
   th, td { padding: .55rem; border-bottom: 1px solid #dfe5e3; text-align: left; vertical-align: top; } th { color: #697572; font-size: .76rem; text-transform: uppercase; }
   td small, td strong { display: block; } td small { color: #697572; } code { font-size: .82rem; overflow-wrap: anywhere; }

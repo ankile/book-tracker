@@ -3,6 +3,7 @@ import test from 'node:test';
 import { FunctionsError } from 'firebase/functions';
 
 import {
+  appendAdminScanPage,
   classifyAdminCatalogFailure,
   adminCatalogCandidatesForBook,
   decodeAdminCatalogApplyResponse,
@@ -167,4 +168,41 @@ test('admin form parsers accept bounded line-oriented targets and metadata', () 
     openlibrary: 'OL1M', google: 'abc=def',
   });
   assert.throws(() => parseAdminExternalIds('missing-separator'), /provider=id/);
+});
+
+test('appending a scan page keeps the first-page inventories, accumulates link counts, and completes only when the cursor ends', () => {
+  const finding = (message: string) => ({
+    code: 'book-link-anomaly', severity: 'error', message, workIds: [], editionIds: [], books: [],
+  } as const);
+  const first = decodeAdminCatalogScanResponse({
+    authors: [author], works: [work], editions: [edition], books: [book],
+    nextBookCursor: 'users/user/books/book', bookCountsComplete: false,
+    findings: [finding('first')], limits,
+  });
+  const second = decodeAdminCatalogScanResponse({
+    authors: [], works: [{...work, linkedBookCount: 2}], editions: [],
+    books: [{...book, bookId: 'second'}], nextBookCursor: 'users/user/books/second',
+    bookCountsComplete: false, findings: [finding('second')], limits,
+  });
+  const merged = appendAdminScanPage(first, second);
+  assert.deepEqual(merged.authors, first.authors);
+  assert.deepEqual(merged.editions, first.editions);
+  assert.deepEqual(merged.works.map(({workId, linkedBookCount}) => [workId, linkedBookCount]), [['work', 3]]);
+  assert.deepEqual(merged.books.map(({bookId}) => bookId), ['book', 'second']);
+  assert.deepEqual(merged.findings.map(({message}) => message), ['first', 'second']);
+  assert.equal(merged.nextBookCursor, 'users/user/books/second');
+  // A first page with no unlinked book is still an incomplete scan.
+  assert.equal(merged.books.filter(({workId}) => workId === null).length, 0);
+  assert.equal(merged.bookCountsComplete, false);
+
+  const last = decodeAdminCatalogScanResponse({
+    authors: [], works: [{...work, linkedBookCount: 1}], editions: [],
+    books: [{...book, bookId: 'third', workId: null, editionId: null}], nextBookCursor: null,
+    bookCountsComplete: false, findings: [], limits,
+  });
+  const complete = appendAdminScanPage(merged, last);
+  assert.equal(complete.bookCountsComplete, true);
+  assert.deepEqual(complete.works.map(({linkedBookCount}) => linkedBookCount), [4]);
+  assert.equal(complete.books.length, 3);
+  assert.deepEqual(complete.authors, first.authors);
 });

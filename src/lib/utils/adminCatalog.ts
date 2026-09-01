@@ -272,6 +272,29 @@ export function decodeAdminCatalogScanResponse(value: unknown): AdminCatalogScan
   };
 }
 
+// A continuation page answers for its own hundred books only: the author
+// and edition inventories came with the first page and are empty here, so
+// they are kept rather than overwritten. Linked book counts accumulate
+// across pages, and the scan is complete only once a page has no cursor.
+export function appendAdminScanPage(
+  prior: AdminCatalogScanResponse,
+  page: AdminCatalogScanResponse,
+): AdminCatalogScanResponse {
+  const priorCounts = new Map(prior.works.map((work) => [work.workId, work.linkedBookCount]));
+  return {
+    ...page,
+    authors: prior.authors,
+    editions: prior.editions,
+    works: page.works.map((work) => ({
+      ...work,
+      linkedBookCount: (priorCounts.get(work.workId) ?? 0) + work.linkedBookCount,
+    })),
+    books: [...prior.books, ...page.books],
+    findings: [...prior.findings, ...page.findings],
+    bookCountsComplete: page.nextBookCursor === null,
+  };
+}
+
 export interface AdminCatalogCandidate {
   workId: string;
   editionId: string | null;
