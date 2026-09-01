@@ -75,7 +75,8 @@ async function chooseExistingAuthor(page: Page, name: string): Promise<void> {
 
 async function openNewBook(page: Page): Promise<void> {
   await page.goto('/me');
-  await page.getByRole('button', {name: 'Add New Book', exact: true}).click();
+  await page.getByRole('navigation', {name: 'Primary navigation'})
+    .getByRole('button', {name: '+ Add book', exact: true}).click();
   await expect(page.getByRole('dialog', {name: 'Add new book'})).toBeVisible();
 }
 
@@ -223,7 +224,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     ]);
     await readerBookRef.set({
       owner: readerRef, authorIds: [leGuinAuthorId], title: 'Personal Left Hand', activeTimer: null,
-      currentPage: 304, currentPageUpdateId: null, pageCount: 304, finished: true,
+      currentPage: 304, currentPageUpdateId: null, pageCount: 304, finished: true, finishedAt: now,
       pagesRead: 304, timeRead: 240, isbn, coverUrl: '', publisher: 'Ace', publishedDate: '1987',
       subjects: [], fiction: true, workId, editionId, matchMethod: 'migration', linkedAt: now,
       createdAt: now, updatedAt: now,
