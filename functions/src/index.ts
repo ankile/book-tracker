@@ -6,7 +6,7 @@ import type {QueryDocumentSnapshot} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
 import {
   syncbooksharingprojection,
-  syncsharingprofileprojection,
+  syncsharingaccountprojection,
   syncsharingsettingprojection,
 } from "./catalogProjection";
 import {AUTH_TRIGGER_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
@@ -199,7 +199,7 @@ exports.deleteUserDocument = functions
 
 exports.syncbooksharingprojection = syncbooksharingprojection;
 exports.syncsharingsettingprojection = syncsharingsettingprojection;
-exports.syncsharingprofileprojection = syncsharingprofileprojection;
+exports.syncsharingaccountprojection = syncsharingaccountprojection;
 
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");

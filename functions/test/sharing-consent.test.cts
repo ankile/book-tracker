@@ -27,35 +27,50 @@ test("time zone validation accepts the aliases browsers report", () => {
   }
 });
 
-test("a sharing setting counts only for a live account with a well-formed row", () => {
+// Sharing is on by default: a live account with no setting shares in UTC;
+// only an explicit opt-out (or a setting too malformed to read as consent)
+// withdraws it, and a tombstoned or missing account never shares.
+test("a live account shares unless it opted out; the setting only refines the time zone", () => {
   const live = snapshot({uid: "reader"});
-  const setting = snapshot({profileUsername: "ada-reader", timeZone: "Asia/Kolkata"});
-  assert.deepEqual(consent.sharingSetting(live, setting), {
-    username: "ada-reader",
-    timeZone: "Asia/Kolkata",
-  });
-  assert.equal(consent.sharingSetting(snapshot(undefined), setting), null);
-  assert.equal(consent.sharingSetting(snapshot({deletedAt: 1}), setting), null);
-  assert.equal(consent.sharingSetting(live, snapshot(undefined)), null);
-  for (const broken of [
-    {profileUsername: "Ada Reader", timeZone: "UTC"},
-    {profileUsername: "ab", timeZone: "UTC"},
-    {profileUsername: "ada-reader", timeZone: "Nowhere/Land"},
-    {profileUsername: "ada-reader"},
+  assert.deepEqual(consent.sharingConsent(live, snapshot(undefined)), {timeZone: "UTC"});
+  assert.deepEqual(
+    consent.sharingConsent(live, snapshot({enabled: true, timeZone: "Asia/Kolkata"})),
+    {timeZone: "Asia/Kolkata"},
+  );
+  assert.deepEqual(
+    consent.sharingConsent(live, snapshot({enabled: true, timeZone: "Nowhere/Land"})),
     {timeZone: "UTC"},
-  ]) {
-    assert.equal(consent.sharingSetting(live, snapshot(broken)), null, JSON.stringify(broken));
+  );
+  assert.equal(consent.sharingConsent(live, snapshot({enabled: false, timeZone: "UTC"})), null);
+  for (const malformed of [{timeZone: "UTC"}, {enabled: "true", timeZone: "UTC"}, {enabled: 1}]) {
+    assert.equal(consent.sharingConsent(live, snapshot(malformed)), null, JSON.stringify(malformed));
   }
+  assert.equal(consent.sharingConsent(snapshot(undefined), snapshot(undefined)), null);
+  assert.equal(consent.sharingConsent(snapshot({deletedAt: 1}), snapshot(undefined)), null);
+  assert.equal(
+    consent.sharingConsent(snapshot({deletedAt: 1}), snapshot({enabled: true, timeZone: "UTC"})),
+    null,
+  );
 });
 
-test("the named profile must still be the account's and public", () => {
-  assert.equal(consent.profileConsents(snapshot({uid: "reader", public: true}), "reader"), true);
-  assert.equal(consent.profileConsents(snapshot(undefined), "reader"), false);
-  assert.equal(consent.profileConsents(snapshot({uid: "other", public: true}), "reader"), false);
-  assert.equal(consent.profileConsents(snapshot({uid: "reader", public: false}), "reader"), false);
-  assert.equal(consent.profileConsents(snapshot({uid: "reader", public: "true"}), "reader"), false);
+// Identity is separate from consent: a public profile the account still
+// owns names the reader; anything else leaves them anonymous, not hidden.
+test("a reader is named only by a public profile the account still owns", () => {
+  const profile = {uid: "reader", public: true, givenName: "Ada", familyName: "Reader"};
+  assert.deepEqual(consent.readerIdentity(snapshot(profile), "reader", "ada-reader"), {
+    username: "ada-reader",
+    displayName: "Ada Reader",
+  });
+  assert.equal(consent.readerIdentity(snapshot(profile), "reader", undefined), null);
+  assert.equal(consent.readerIdentity(snapshot(profile), "reader", "Ada Reader"), null);
+  assert.equal(consent.readerIdentity(snapshot(undefined), "reader", "ada-reader"), null);
+  assert.equal(consent.readerIdentity(snapshot({...profile, uid: "other"}), "reader", "ada-reader"), null);
+  assert.equal(consent.readerIdentity(snapshot({...profile, public: false}), "reader", "ada-reader"), null);
+  assert.equal(consent.readerIdentity(snapshot({...profile, public: "true"}), "reader", "ada-reader"), null);
+  assert.equal(consent.readerIdentity(snapshot({...profile, deletedAt: 1}), "reader", "ada-reader"), null);
+  assert.equal(consent.readerIdentity(snapshot({...profile, givenName: 7}), "reader", "ada-reader"), null);
   assert.equal(
-    consent.profileConsents(snapshot({uid: "reader", public: true, deletedAt: 1}), "reader"),
-    false,
+    consent.readerIdentity(snapshot({...profile, givenName: " ", familyName: ""}), "reader", "ada-reader"),
+    null,
   );
 });

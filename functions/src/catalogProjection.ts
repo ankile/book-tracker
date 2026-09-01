@@ -8,7 +8,7 @@ import {
 } from "firebase-admin/firestore";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
-import {profileConsents, sharingSetting} from "./sharingConsent";
+import {sharingConsent} from "./sharingConsent";
 
 // Page size only, not a bound on the owner: both directions page to the end
 // (see withdrawOwner and refreshOwner).
@@ -27,10 +27,6 @@ export function sharedWorkOwnerId(workId: string, uid: string): string {
   return createHash("sha256").update(`${workId}\0${uid}`).digest("hex");
 }
 
-function text(data: DocumentData | undefined, field: string): unknown {
-  return data?.[field];
-}
-
 async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void> {
   if (workId === "" || workId.includes("/")) return;
   const db = getFirestore();
@@ -45,12 +41,7 @@ async function refreshSharedWorkOwner(uid: string, workId: string): Promise<void
       transaction.get(db.collection(`users/${uid}/books`)
         .where("workId", "==", workId).limit(1)),
     ]);
-    const consented = sharingSetting(user, setting);
-    const consent = consented !== null && profileConsents(
-      await transaction.get(db.collection("profiles").doc(consented.username)),
-      uid,
-    );
-    if (consent && !linkedBooks.empty) {
+    if (sharingConsent(user, setting) !== null && !linkedBooks.empty) {
       transaction.set(projection, {workId, uid, updatedAt: Timestamp.now()});
     } else {
       transaction.delete(projection);
@@ -88,12 +79,7 @@ async function refreshOwner(uid: string): Promise<void> {
     db.collection("users").doc(uid).get(),
     db.doc(`users/${uid}/settings/bookSharing`).get(),
   ]);
-  const consented = sharingSetting(user, setting);
-  const consent = consented !== null && profileConsents(
-    await db.collection("profiles").doc(consented.username).get(),
-    uid,
-  );
-  if (!consent) {
+  if (sharingConsent(user, setting) === null) {
     await withdrawOwner(uid);
     return;
   }
@@ -143,6 +129,12 @@ export const syncbooksharingprojection = onDocumentWritten(
   },
 );
 
+// Only the opt-out moves rows: an absent setting and an enabled one both
+// mean on, and the time zone is read at summary time, not projected.
+function sharingOn(data: DocumentData | undefined): boolean {
+  return data === undefined || data.enabled === true;
+}
+
 export const syncsharingsettingprojection = onDocumentWritten(
   {
     ...TRIGGER_OPTIONS,
@@ -151,26 +143,26 @@ export const syncsharingsettingprojection = onDocumentWritten(
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
-    if (text(before, "profileUsername") === text(after, "profileUsername") &&
-        text(before, "timeZone") === text(after, "timeZone")) return;
+    if (sharingOn(before) === sharingOn(after)) return;
     await refreshOwner(event.params.userId);
   },
 );
 
-export const syncsharingprofileprojection = onDocumentWritten(
+// A tombstoned account (deleteUserDocument, SEC-006) stops sharing; the
+// profile no longer decides consent, so the account document is the
+// trigger. Nothing else on users/{uid} matters here.
+function tombstoneMillis(data: DocumentData | undefined): number | undefined {
+  const value = data?.deletedAt;
+  return value instanceof Timestamp ? value.toMillis() : undefined;
+}
+
+export const syncsharingaccountprojection = onDocumentWritten(
   {
     ...TRIGGER_OPTIONS,
-    document: "profiles/{username}",
+    document: "users/{userId}",
   },
   async (event) => {
-    const before = event.data?.before.data();
-    const after = event.data?.after.data();
-    const uids = new Set([text(before, "uid"), text(after, "uid")].filter(
-      (value): value is string => typeof value === "string",
-    ));
-    if (text(before, "uid") === text(after, "uid") &&
-        text(before, "public") === text(after, "public") &&
-        text(before, "deletedAt") === text(after, "deletedAt")) return;
-    for (const uid of uids) await refreshOwner(uid);
+    if (tombstoneMillis(event.data?.before.data()) === tombstoneMillis(event.data?.after.data())) return;
+    await refreshOwner(event.params.userId);
   },
 );

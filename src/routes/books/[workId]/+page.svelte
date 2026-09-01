@@ -140,9 +140,6 @@
 
     <section aria-labelledby="readers-heading">
       <h2 id="readers-heading">Readers</h2>
-      <p class="privacy-note">
-        Only people who separately opted into book-level sharing appear here. Page counts are each reader's own choice.
-      </p>
       {#if response.incomplete}
         <p class="partial-note" role="status">
           This is a partial summary. {response.omittedAttempts > 0
@@ -151,14 +148,20 @@
         </p>
       {/if}
       {#if readers.length === 0}
-        <p class="empty">No readers have shared an attempt for this work yet.</p>
+        <p class="empty">No readers yet.</p>
       {:else}
         <div class="reader-list">
-          {#each readers as reader (reader.username)}
+          {#each readers as reader (reader.readerKey)}
             <article class="reader-card">
-              <h3><a href={`/profiles/${encodeURIComponent(reader.username)}`}>{reader.displayName}</a></h3>
+              <h3>
+                {#if reader.username !== null && reader.displayName !== null}
+                  <a href={`/profiles/${encodeURIComponent(reader.username)}`}>{reader.displayName}</a>
+                {:else}
+                  A reader
+                {/if}
+              </h3>
               <div class="attempt-list">
-                {#each reader.attempts as attempt, index (`${reader.username}:${index}`)}
+                {#each reader.attempts as attempt, index (`${reader.readerKey}:${index}`)}
                   <section class="attempt">
                     <div class="attempt-heading">
                       <strong>{attempt.status === 'finished' ? 'Finished' : 'Reading'}</strong>
@@ -220,7 +223,7 @@
   h1 { margin: 0.35rem 0 0.25rem; }
   h2 { margin-top: 2rem; }
   .authors { margin: 0; font-size: 1.1rem; }
-  .aliases, .privacy-note, .edition span { color: #65716e; font-size: 0.9rem; }
+  .aliases, .edition span { color: #65716e; font-size: 0.9rem; }
   .partial-note { padding: 0.75rem; border-left: 4px solid #a56712; background: #fff4d9; color: #5f410f; }
   .back { color: #35686a; text-decoration: none; }
 

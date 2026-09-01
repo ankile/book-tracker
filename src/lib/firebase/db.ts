@@ -240,27 +240,30 @@ interface ProfileWrite extends ProfilePayload {
   links: ProfileLink[];
   isPublic: boolean;
   removeDiscovery?: boolean;
-  removeBookSharing?: boolean;
 }
 
 interface RenameProfileWrite extends Omit<ProfileWrite, 'username'> {
   oldUsername: string;
   newUsername: string;
   isDiscoverable: boolean;
-  bookSharing: BookSharingSettings | null;
 }
 
+// Sharing is on by default (owner decision 2026-09-01); this document
+// records an opt-out and the reader's time zone. Absent means on, in UTC.
 export interface BookSharingSettings {
-  profileUsername: string;
+  enabled: boolean;
   timeZone: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
 
-interface EnableBookSharingInput {
+interface SetBookSharingInput {
   userId: string;
-  profileUsername: string;
+  enabled: boolean;
   timeZone: string;
+  // Whether the document already exists: an update keeps createdAt (the
+  // rules require it unchanged), a create stamps it.
+  existing: boolean;
 }
 
 interface ProfileDiscoveryWrite {
@@ -274,12 +277,12 @@ function decodeBookSharingSettings(value: unknown, path: string): BookSharingSet
   }
   const data = value as Record<string, unknown>;
   const keys = Object.keys(data).sort();
-  const expected = ['createdAt', 'profileUsername', 'timeZone', 'updatedAt'];
+  const expected = ['createdAt', 'enabled', 'timeZone', 'updatedAt'];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new TypeError(`${path}: expected only ${expected.join(', ')}.`);
   }
-  if (typeof data.profileUsername !== 'string' || !/^[a-z0-9-]{3,30}$/.test(data.profileUsername)) {
-    throw new TypeError(`${path}.profileUsername: expected a profile username.`);
+  if (typeof data.enabled !== 'boolean') {
+    throw new TypeError(`${path}.enabled: expected a boolean.`);
   }
   if (typeof data.timeZone !== 'string' || data.timeZone.length === 0 || data.timeZone.length > 100) {
     throw new TypeError(`${path}.timeZone: expected a non-empty string of at most 100 characters.`);
@@ -288,7 +291,7 @@ function decodeBookSharingSettings(value: unknown, path: string): BookSharingSet
     throw new TypeError(`${path}: expected Firestore timestamps.`);
   }
   return {
-    profileUsername: data.profileUsername,
+    enabled: data.enabled,
     timeZone: data.timeZone,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
@@ -643,8 +646,8 @@ class Database {
   }
 
   // Per-book sharing is separate from the profile document because cached
-  // clients replace profiles wholesale. The setting's existence is consent;
-  // the work-readers callable still checks that the named profile is public.
+  // clients replace profiles wholesale. null means no document: sharing on,
+  // day boundaries in UTC until a time zone is stored.
   static getBookSharingSettings(userId: string): Readable<BookSharingSettings | null | undefined> {
     return cachedStore(bookSharingStores, userId, undefined, (set) => (
       onSnapshot(doc(db, 'users', userId, 'settings', 'bookSharing'), (snapshot) => {
@@ -658,17 +661,15 @@ class Database {
     ));
   }
 
-  static enableBookSharing({ userId, profileUsername, timeZone }: EnableBookSharingInput): Promise<void> {
-    return setDoc(doc(db, 'users', userId, 'settings', 'bookSharing'), {
-      profileUsername,
+  static setBookSharing({ userId, enabled, timeZone, existing }: SetBookSharingInput): Promise<void> {
+    const ref = doc(db, 'users', userId, 'settings', 'bookSharing');
+    if (existing) return updateDoc(ref, { enabled, timeZone, updatedAt: serverTimestamp() });
+    return setDoc(ref, {
+      enabled,
       timeZone,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
-  }
-
-  static disableBookSharing(userId: string): Promise<void> {
-    return deleteDoc(doc(db, 'users', userId, 'settings', 'bookSharing'));
   }
 
   // setDoc, not addDoc: the username is the doc id. If the username is
@@ -701,7 +702,7 @@ class Database {
   // Full overwrite with the freshly computed payload (the Me page keeps the
   // published doc in step with live stats whenever it differs, and the
   // profile-edit form and visibility checkbox write through here too).
-  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, removeBookSharing = false, stats, records, years, days }: ProfileWrite): Promise<void> {
+  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, stats, records, years, days }: ProfileWrite): Promise<void> {
     const profileRef = doc(db, 'profiles', username);
     const profile = {
       uid: userId,
@@ -722,9 +723,6 @@ class Database {
     batch.set(profileRef, profile);
     batch.set(doc(db, 'profileOwners', userId), { username });
     if (removeDiscovery) batch.delete(doc(db, 'profileDiscovery', username));
-    if (removeBookSharing) {
-      batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
-    }
     await batch.commit();
   }
 
@@ -762,10 +760,7 @@ class Database {
   // profile is never gone or doubled — offline included. A taken new
   // username rejects the whole batch (see createProfile), which is why
   // this, like createProfile, stays out of writeLabels and reports inline.
-  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, bookSharing, stats, records, years, days }: RenameProfileWrite): Promise<void> {
-    if (bookSharing !== null && bookSharing.profileUsername !== oldUsername) {
-      throw new Error('Book-sharing settings do not match the profile being renamed.');
-    }
+  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, stats, records, years, days }: RenameProfileWrite): Promise<void> {
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newUsername), {
       uid: userId,
@@ -781,17 +776,6 @@ class Database {
     });
     batch.delete(doc(db, 'profiles', oldUsername));
     batch.set(doc(db, 'profileOwners', userId), { username: newUsername });
-    // A merge so createdAt stays whatever the server holds: the local copy
-    // may be an estimate (sharing enabled offline in this session), and the
-    // update rule requires createdAt unchanged — a copied estimate would
-    // reject the whole rename batch, which /me reports as a taken name.
-    if (bookSharing !== null) {
-      batch.set(doc(db, 'users', userId, 'settings', 'bookSharing'), {
-        profileUsername: newUsername,
-        timeZone: bookSharing.timeZone,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
-    }
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
         uid: userId,
@@ -809,7 +793,6 @@ class Database {
     batch.delete(doc(db, 'profiles', username));
     batch.delete(doc(db, 'profileDiscovery', username));
     batch.delete(doc(db, 'profileOwners', userId));
-    batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
     await batch.commit();
   }
 

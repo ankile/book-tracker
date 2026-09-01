@@ -54,7 +54,7 @@ interface ReaderBookStub {
     finishedAt: import("firebase-admin/firestore").Timestamp | null;
     pageCount: number;
   };
-  shared: {username: string; displayName: string; timeZone: string};
+  shared: {readerKey: string; username: string | null; displayName: string | null; timeZone: string};
 }
 interface CreateResult {
   status: string;
@@ -334,6 +334,7 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
       pageCount: 300,
     },
     shared: {
+      readerKey: `reader-${index}`,
       username: `reader-${index}`,
       displayName: `Reader ${index}`,
       timeZone: "UTC",
@@ -379,6 +380,7 @@ test("the largest possible owner page is summarized in full", async () => {
       pageCount: 300,
     },
     shared: {
+      readerKey: `reader-${String(Math.floor(index / 5)).padStart(2, "0")}`,
       username: `reader-${String(Math.floor(index / 5)).padStart(2, "0")}`,
       displayName: `Reader ${Math.floor(index / 5)}`,
       timeZone: "UTC",
@@ -1055,11 +1057,18 @@ test("work readers resolve aliases and return only consented redacted summaries"
   });
   const books = [bookSnap("shared-reader", sharedOwner, "reread")];
   const quotaRef = {path: "users/owner/functionQuotas/workReaders"};
+  // Sharing is on by default; the setting only carries the time zone and
+  // an opt-out. The stale projection rows below belong to readers who
+  // opted out, so consent must be re-checked live to exclude them.
   const settings: Record<string, Row | undefined> = {
     "users/shared-reader/settings/bookSharing": {
-      profileUsername: "ada-reader",
+      enabled: true,
       timeZone: "America/Los_Angeles",
     },
+    ...Object.fromEntries(Array.from({length: 10}, (_, index) => [
+      `users/revoked-reader-${String(index).padStart(2, "0")}/settings/bookSharing`,
+      {enabled: false, timeZone: "UTC"},
+    ])),
   };
   let projectionOverflow = false;
   let malformedProjection = false;
@@ -1157,6 +1166,9 @@ test("work readers resolve aliases and return only consented redacted summaries"
     if (name === "users") return {doc: (uid: string) => ({
       get: async () => snap(`users/${uid}`, {uid}),
     })};
+    if (name === "profileOwners") return {doc: (uid: string) => ({
+      get: async () => snap(`profileOwners/${uid}`, uid === "shared-reader" ? {username: "ada-reader"} : undefined),
+    })};
     if (name === "profiles") return {doc: (username: string) => ({
       get: async () => snap(`profiles/${username}`, username === "ada-reader" ? {
         uid: "shared-reader",
@@ -1216,6 +1228,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
     "translatorNames", "workId",
   ]);
   assert.deepEqual(result.attempts, [{
+    readerKey: "ada-reader",
     username: "ada-reader",
     displayName: "Ada Reader",
     status: "finished",

@@ -26,7 +26,7 @@ import {
 import {consumeQuota} from "./quota";
 import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
 import {sharedWorkOwnerId} from "./catalogProjection";
-import {profileConsents, sharingSetting, validTimeZone} from "./sharingConsent";
+import {readerIdentity, sharingConsent, validTimeZone} from "./sharingConsent";
 import {CATALOG_LIMITS} from "./catalogLimits";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logAppCheckPresence} from "./appCheck";
@@ -171,9 +171,14 @@ interface ReadingAttemptMetrics {
   trackingCoverage: number | null;
 }
 
+// readerKey groups one reader's attempts (rereads) on the page: the
+// username when the reader has a public profile, otherwise an opaque key
+// derived from the projection row id, so an anonymous reader is still one
+// card and nothing identifying leaves the server.
 interface WorkReaderAttemptSummary extends ReadingAttemptMetrics {
-  username: string;
-  displayName: string;
+  readerKey: string;
+  username: string | null;
+  displayName: string | null;
 }
 
 class CatalogDataError extends Error {}
@@ -965,8 +970,9 @@ interface ReaderBook {
   snapshot: DocumentSnapshot;
   identity: ReturnType<typeof personalBookIdentity>;
   shared: {
-    username: string;
-    displayName: string;
+    readerKey: string;
+    username: string | null;
+    displayName: string | null;
     timeZone: string;
   };
 }
@@ -1005,6 +1011,7 @@ export async function summarizeReaderBooks(
     }
     try {
       rows.push({
+        readerKey: shared.readerKey,
         username: shared.username,
         displayName: shared.displayName,
         ...summarizeReadingAttempt(
@@ -1024,9 +1031,12 @@ export async function summarizeReaderBooks(
       incomplete = true;
     }
   }
+  // Named readers first, alphabetically; anonymous readers after them in
+  // their opaque-key order.
   return {
     attempts: rows.sort((left, right) =>
-      left.username.localeCompare(right.username),
+      (left.username === null ? 1 : 0) - (right.username === null ? 1 : 0) ||
+      left.readerKey.localeCompare(right.readerKey),
     ),
     incomplete,
     omittedAttempts,
@@ -1108,21 +1118,29 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
     }
     owners.add(uid);
   }
+  // Consent is re-checked live (the projection is a candidate index, never
+  // the authority); identity is the public profile the account owns, if
+  // any, and otherwise anonymous.
   const consentPairs = await Promise.all(
     [...owners].map(async (uid) => {
-      const [user, setting] = await Promise.all([
+      const [user, setting, owner] = await Promise.all([
         db.collection("users").doc(uid).get(),
         db.doc(`users/${uid}/settings/bookSharing`).get(),
+        db.collection("profileOwners").doc(uid).get(),
       ]);
-      const consented = sharingSetting(user, setting);
+      const consented = sharingConsent(user, setting);
       if (consented === null) return null;
-      const profile = await db.collection("profiles").doc(consented.username).get();
-      if (!profileConsents(profile, uid) ||
-          typeof profile.get("givenName") !== "string" ||
-          typeof profile.get("familyName") !== "string") return null;
-      const displayName = `${profile.get("givenName")} ${profile.get("familyName")}`.trim();
-      if (displayName === "") return null;
-      return {uid, username: consented.username, displayName, timeZone: consented.timeZone};
+      const username = owner.get("username");
+      const identity = typeof username === "string" ?
+        readerIdentity(await db.collection("profiles").doc(username).get(), uid, username) :
+        null;
+      return {
+        uid,
+        readerKey: identity?.username ?? `reader-${sharedWorkOwnerId(resolved.id, uid).slice(0, 16)}`,
+        username: identity?.username ?? null,
+        displayName: identity?.displayName ?? null,
+        timeZone: consented.timeZone,
+      };
     }),
   );
   const consent = consentPairs.filter((entry) => entry !== null);
@@ -1383,7 +1401,7 @@ exports.workreaders = callable.https.onCall(async (
   const resolved = await publicWorkOrNotFound(request.workId);
   const result = await workReaders(resolved, request.cursor);
   const readerCount = new Set(
-    result.response.attempts.map((attempt) => attempt.username),
+    result.response.attempts.map((attempt) => attempt.readerKey),
   ).size;
   logger.info("catalog.work_readers", {
     workId: result.response.work.workId,

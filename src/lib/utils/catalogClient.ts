@@ -201,7 +201,7 @@ export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, me
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {
   const data = record(value, context);
   exactKeys(data, [
-    'username', 'displayName', 'status', 'pageCount', 'firstProgressAt',
+    'readerKey', 'username', 'displayName', 'status', 'pageCount', 'firstProgressAt',
     'firstReadAt', 'finishedAt', 'calendarDays', 'activeDays', 'trackedMinutes',
     'sessionCount', 'qualifiedPagesPerHour', 'percentPerHour', 'trackingCoverage',
   ], context);
@@ -226,9 +226,13 @@ function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummar
     .some((metric) => metric !== null && metric < 0)) {
     throw new TypeError(`${context}: optional metrics must be null or non-negative`);
   }
+  if ((data.username === null) !== (data.displayName === null)) {
+    throw new TypeError(`${context}: username and displayName must be null together`);
+  }
   return {
-    username: nonEmptyString(data.username, `${context}.username`),
-    displayName: nonEmptyString(data.displayName, `${context}.displayName`),
+    readerKey: nonEmptyString(data.readerKey, `${context}.readerKey`),
+    username: data.username === null ? null : nonEmptyString(data.username, `${context}.username`),
+    displayName: data.displayName === null ? null : nonEmptyString(data.displayName, `${context}.displayName`),
     status: data.status,
     pageCount,
     firstProgressAt: calendarDate(data.firstProgressAt, `${context}.firstProgressAt`),
@@ -337,22 +341,24 @@ export function appendDistinctReaderPage(
   current: readonly WorkReaderAttemptSummary[],
   next: readonly WorkReaderAttemptSummary[],
 ): WorkReaderAttemptSummary[] {
-  const currentUsernames = new Set(current.map((attempt) => attempt.username));
-  return [...current, ...next.filter((attempt) => !currentUsernames.has(attempt.username))];
+  const currentKeys = new Set(current.map((attempt) => attempt.readerKey));
+  return [...current, ...next.filter((attempt) => !currentKeys.has(attempt.readerKey))];
 }
 
 interface ReaderAttemptGroup {
-  username: string;
-  displayName: string;
+  readerKey: string;
+  username: string | null;
+  displayName: string | null;
   attempts: WorkReaderAttemptSummary[];
 }
 
 export function groupReaderAttempts(attempts: readonly WorkReaderAttemptSummary[]): ReaderAttemptGroup[] {
   const groups = new Map<string, ReaderAttemptGroup>();
   for (const attempt of attempts) {
-    const group = groups.get(attempt.username);
+    const group = groups.get(attempt.readerKey);
     if (group) group.attempts.push(attempt);
-    else groups.set(attempt.username, {
+    else groups.set(attempt.readerKey, {
+      readerKey: attempt.readerKey,
       username: attempt.username,
       displayName: attempt.displayName,
       attempts: [attempt],
@@ -368,11 +374,16 @@ export function groupReaderAttempts(attempts: readonly WorkReaderAttemptSummary[
       return leftDate < rightDate ? -1 : 1;
     });
   }
+  // Named readers first, by name; anonymous readers after them in their
+  // opaque-key order.
   return [...groups.values()].sort((left, right) => {
-    if (left.displayName !== right.displayName) {
+    if ((left.displayName === null) !== (right.displayName === null)) {
+      return left.displayName === null ? 1 : -1;
+    }
+    if (left.displayName !== null && right.displayName !== null && left.displayName !== right.displayName) {
       return left.displayName < right.displayName ? -1 : 1;
     }
-    return left.username < right.username ? -1 : left.username > right.username ? 1 : 0;
+    return left.readerKey < right.readerKey ? -1 : left.readerKey > right.readerKey ? 1 : 0;
   });
 }
 

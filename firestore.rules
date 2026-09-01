@@ -64,10 +64,11 @@ service cloud.firestore {
       }
     }
 
-    // Consent for title-level reader summaries lives outside the cached
-    // profile document. Older clients replace profile documents wholesale,
-    // so storing this switch there would let an unrelated stats sync erase
-    // or recreate consent. Only the owner can read the setting.
+    // Sharing is on by default (owner decision 2026-09-01); this setting
+    // records an opt-out and the reader's time zone. It lives outside the
+    // cached profile document: older clients replace profiles wholesale, so
+    // a switch stored there could be erased by an unrelated stats sync.
+    // Only the owner can read it. Deleting it returns to the default (on).
     match /users/{userId}/settings/{settingId} {
       allow get: if request.auth != null
                  && userId == request.auth.uid
@@ -88,22 +89,14 @@ service cloud.firestore {
 
     function validBookSharingSetting(userId) {
       let setting = request.resource.data;
-      let username = setting.get('profileUsername', '');
-      let profile = getAfter(/databases/$(database)/documents/profiles/$(username)).data;
-      return setting.keys().hasAll([
-               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
-             ])
-             && setting.keys().hasOnly([
-               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
-             ])
-             && username is string
-             && username.matches('[a-z0-9-]{3,30}')
+      return userId == request.auth.uid
+             && setting.keys().hasAll(['enabled', 'timeZone', 'createdAt', 'updatedAt'])
+             && setting.keys().hasOnly(['enabled', 'timeZone', 'createdAt', 'updatedAt'])
+             && setting.enabled is bool
              && setting.timeZone is string
              && setting.timeZone.matches('[A-Za-z0-9_+./-]{1,100}')
              && setting.createdAt is timestamp
-             && setting.updatedAt is timestamp
-             && profile.uid == userId
-             && profile.public == true;
+             && setting.updatedAt is timestamp;
     }
 
     // Rollout compatibility (shared-catalog migration, MIGRATIONS.md): a
@@ -1211,10 +1204,7 @@ service cloud.firestore {
       allow update: if request.auth != null
                     && verifiedAccount()
                     && resource.data.uid == request.auth.uid
-                    && validProfile()
-                    && (resource.data.public == true && request.resource.data.public == false
-                        ? validBookSharingRelease(username)
-                        : true);
+                    && validProfile();
       // A tombstoned profile is the record of a deleted account; only an
       // operator purge removes it. accountLive() closes the window in
       // which deleteUserDocument has tombstoned users/{uid} but not yet
@@ -1226,8 +1216,7 @@ service cloud.firestore {
                     && resource.data.uid == request.auth.uid
                     && resource.data.get('deletedAt', null) == null
                     && accountLive()
-                    && validProfileRelease(username)
-                    && validBookSharingRelease(username);
+                    && validProfileRelease(username);
     }
 
     // The batch that creates profiles/{username} must leave
@@ -1255,18 +1244,6 @@ service cloud.firestore {
              && (exists(marker)
                  ? (!existsAfter(marker) || get(marker).data.uid != request.auth.uid)
                  : true);
-    }
-
-    // A cached client may predate book-sharing UI. It must not be able to
-    // leave dormant consent behind when the selected profile becomes private
-    // or is deleted, because recreating that public profile would silently
-    // reactivate title-level sharing. A rename may atomically repoint the
-    // setting to the new owned public profile instead of deleting it.
-    function validBookSharingRelease(username) {
-      let setting = /databases/$(database)/documents/users/$(request.auth.uid)/settings/bookSharing;
-      return exists(setting) && get(setting).data.profileUsername == username
-             ? (!existsAfter(setting) || getAfter(setting).data.profileUsername != username)
-             : true;
     }
 
     // Owner-only, and only ever moved inside a profile batch: it may name

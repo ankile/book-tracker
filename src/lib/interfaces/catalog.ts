@@ -138,8 +138,11 @@ export interface WorkReadersRequest {
 }
 
 export interface WorkReaderAttemptSummary {
-  username: string;
-  displayName: string;
+  // One key per reader: the username when a public profile names them,
+  // otherwise an opaque key the server derives, so rereads still group.
+  readerKey: string;
+  username: string | null;
+  displayName: string | null;
   status: 'reading' | 'finished';
   pageCount: number;
   firstProgressAt: string | null;

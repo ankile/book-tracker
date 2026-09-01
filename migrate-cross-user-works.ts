@@ -163,11 +163,7 @@ for (const userRef of users) {
     continue
   }
   liveUsers.push(userRef)
-  const sharingData = sharing.data()
-  const sharedProfile = typeof sharingData?.profileUsername === 'string'
-    ? profilesByUsername.get(sharingData.profileUsername)
-    : undefined
-  const consented = sharingConsentIsValid(userRef.id, userData, sharingData, sharedProfile)
+  const consented = sharingConsentIsValid(userData, sharing.data())
   const seedPriority = userRef.id === OPERATOR_UID ? 0 : 1
   const localAuthorDocs = new Map(authorDocs.docs.map((author) => [author.id, {
     path: author.ref.path,

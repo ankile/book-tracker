@@ -298,6 +298,14 @@ in the operator log, not here. The reviewed manifest is
 the reviewed change (which books form a group and under which author), not
 rehearsal evidence.
 
+Sharing became on-by-default on 2026-09-01 (owner decision): consent is a
+live account without an opt-out (`users/{uid}/settings/bookSharing.enabled
+== false`), independent of profiles. The reader projections for accounts
+that never had a setting are created by re-running the same migration
+after that deploy — `sharedWorkOwners` rows are the one thing it adds for
+an already-linked book, and it never deletes — and the one pre-existing
+setting was rewritten to the new shape by hand.
+
 Legacy per-user author documents and the read-only
 `users/{userId}/authors` compatibility block stay exactly as they are after
 the rollout. No purge script exists and none is scheduled: retained data is

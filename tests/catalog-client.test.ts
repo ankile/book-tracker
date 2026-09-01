@@ -165,8 +165,9 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
     status: 'reading' | 'finished',
     firstProgressAt = '2026-01-01',
   ): WorkReaderAttemptSummary => ({
-    username,
-    displayName: username === 'ada' ? 'Ada Lovelace' : 'Grace Hopper',
+    readerKey: username,
+    username: username.startsWith('reader-') ? null : username,
+    displayName: username === 'ada' ? 'Ada Lovelace' : username === 'grace' ? 'Grace Hopper' : null,
     status,
     pageCount: 304,
     firstProgressAt,
@@ -188,17 +189,19 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
     nextCursor: null,
     attempts: [
       attempt('grace', 'finished'),
+      attempt('reader-1a2b', 'reading'),
       attempt('ada', 'finished', '2026-02-01'),
       attempt('ada', 'reading', '2026-01-01'),
     ],
   });
-  assert.equal(decoded.attempts.length, 3);
+  assert.equal(decoded.attempts.length, 4);
   assert.equal(decoded.incomplete, false);
   assert.equal(decoded.omittedAttempts, 0);
   assert.equal(decoded.nextCursor, null);
   const groups = groupReaderAttempts(decoded.attempts);
-  assert.deepEqual(groups.map((group) => [group.username, group.attempts.length]), [
-    ['ada', 2], ['grace', 1],
+  // Named readers first by name; the anonymous reader last, grouped by key.
+  assert.deepEqual(groups.map((group) => [group.readerKey, group.username, group.attempts.length]), [
+    ['ada', 'ada', 2], ['grace', 'grace', 1], ['reader-1a2b', null, 1],
   ]);
   assert.deepEqual(groups[0].attempts.map((attempt) => attempt.firstProgressAt), [
     '2026-01-01', '2026-02-01',

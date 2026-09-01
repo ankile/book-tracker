@@ -427,7 +427,7 @@ test('deleting a profile releases its record and takes its own marker with it', 
   await assertSucceeds(setDoc(doc(db, 'profileDiscovery', 'released'), marker('releaser')));
   const sharingRef = doc(db, 'users', 'releaser', 'settings', 'bookSharing');
   await assertSucceeds(setDoc(sharingRef, {
-    profileUsername: 'released', timeZone: 'UTC',
+    enabled: true, timeZone: 'UTC',
     createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
   }));
   // Alone: the record still names it and the marker would be orphaned.
@@ -442,19 +442,14 @@ test('deleting a profile releases its record and takes its own marker with it', 
   keepMarker.delete(doc(db, 'profiles', 'released'));
   keepMarker.delete(doc(db, 'profileOwners', 'releaser'));
   await assertFails(keepMarker.commit());
-  // A stale client that sends only the historical three-document batch may
-  // not leave dormant sharing consent behind.
+  // Profile, marker and record together; the sharing setting is not part of
+  // the profile (sharing is independent of profiles) and stays.
   const all = writeBatch(db);
   all.delete(doc(db, 'profiles', 'released'));
   all.delete(doc(db, 'profileDiscovery', 'released'));
   all.delete(doc(db, 'profileOwners', 'releaser'));
-  await assertFails(all.commit());
-  const allWithSharing = writeBatch(db);
-  allWithSharing.delete(doc(db, 'profiles', 'released'));
-  allWithSharing.delete(doc(db, 'profileDiscovery', 'released'));
-  allWithSharing.delete(doc(db, 'profileOwners', 'releaser'));
-  allWithSharing.delete(sharingRef);
-  await assertSucceeds(allWithSharing.commit());
+  await assertSucceeds(all.commit());
+  await assertSucceeds(getDoc(sharingRef));
   // The freed name is first-writer-wins again, with a clean marker slot.
   await seedAccount('next-owner');
   await assertSucceeds(createProfileBatch(verified('next-owner'), 'next-owner', 'released'));
@@ -1199,32 +1194,33 @@ test('a page-count clamp may carry an explicit catalog link but a reading batch 
   await assertFails(reading.commit());
 });
 
-test('book sharing settings require an owned public profile and remain owner-only', async () => {
+// Sharing is on by default; the setting records an opt-out and a time
+// zone, owner-only, with no coupling to any profile.
+test('book sharing settings are owner-only, typed, and independent of profiles', async () => {
   const uid = 'sharing-owner';
   await seedAccount(uid);
   const db = verified(uid);
-  await createProfileBatch(db, uid, 'sharing-reader');
   const settingRef = doc(db, 'users', uid, 'settings', 'bookSharing');
   const setting = {
-    profileUsername: 'sharing-reader',
+    enabled: false,
     timeZone: 'America/Los_Angeles',
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   };
   await assertSucceeds(setDoc(settingRef, setting));
   await assertSucceeds(getDoc(settingRef));
+  await assertSucceeds(updateDoc(settingRef, { enabled: true, updatedAt: Timestamp.now() }));
+  await assertSucceeds(deleteDoc(settingRef));
+  await assertSucceeds(setDoc(settingRef, { ...setting, enabled: true }));
   const stranger = environment.authenticatedContext('sharing-stranger').firestore();
   await assertFails(getDoc(doc(stranger, 'users', uid, 'settings', 'bookSharing')));
+  await assertFails(setDoc(doc(stranger, 'users', uid, 'settings', 'bookSharing'), setting));
   await assertFails(getDocs(collection(db, 'users', uid, 'settings')));
   await assertFails(updateDoc(settingRef, { createdAt: Timestamp.now(), updatedAt: Timestamp.now() }));
-
-  await assertFails(setDoc(doc(db, 'profiles', 'sharing-reader'), profile(uid, { public: false })));
-  const privateProfile = writeBatch(db);
-  privateProfile.set(doc(db, 'profiles', 'sharing-reader'), profile(uid, { public: false }));
-  privateProfile.set(doc(db, 'profileOwners', uid), { username: 'sharing-reader' });
-  privateProfile.delete(settingRef);
-  await privateProfile.commit();
-  await assertFails(setDoc(settingRef, { ...setting, updatedAt: Timestamp.now() }));
+  await assertFails(setDoc(settingRef, { ...setting, enabled: 'yes' }));
+  await assertFails(setDoc(settingRef, { ...setting, timeZone: 7 }));
+  await assertFails(setDoc(settingRef, { ...setting, profileUsername: 'sharing-reader' }));
+  await assertFails(setDoc(settingRef, { enabled: true, createdAt: Timestamp.now(), updatedAt: Timestamp.now() }));
 });
 
 // Firestore evaluates at most 1000 expressions per request, and the timer

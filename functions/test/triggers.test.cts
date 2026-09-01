@@ -52,7 +52,7 @@ interface FunctionsBundle {
   deletebookupdates: DeployedFunction;
   publicweb: EndpointFunction;
   syncbooksharingprojection: DeployedFunction;
-  syncsharingprofileprojection: DeployedFunction;
+  syncsharingaccountprojection: DeployedFunction;
   syncsharingsettingprojection: DeployedFunction;
   telemetry: {reportissue: DeployedFunction};
   toggl: {
@@ -90,7 +90,7 @@ test("preserves the deployed function export names", () => {
     "deletebookupdates",
     "publicweb",
     "syncbooksharingprojection",
-    "syncsharingprofileprojection",
+    "syncsharingaccountprojection",
     "syncsharingsettingprojection",
     "telemetry",
     "toggl",
@@ -149,7 +149,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
   const gen2Functions = [
     functions.deletebookupdates,
     functions.syncbooksharingprojection,
-    functions.syncsharingprofileprojection,
+    functions.syncsharingaccountprojection,
     functions.syncsharingsettingprojection,
     functions.toggl.syncqueue,
   ];
@@ -209,7 +209,7 @@ test("preserves the Firestore and Authentication event contracts", () => {
   const projectionTriggers: Array<[DeployedFunction, string]> = [
     [functions.syncbooksharingprojection, "users/{userId}/books/{bookId}"],
     [functions.syncsharingsettingprojection, "users/{userId}/settings/bookSharing"],
-    [functions.syncsharingprofileprojection, "profiles/{username}"],
+    [functions.syncsharingaccountprojection, "users/{userId}"],
   ];
   for (const [deployedFunction, path] of projectionTriggers) {
     assert.equal(
@@ -224,7 +224,7 @@ test("preserves the Firestore and Authentication event contracts", () => {
   }
 });
 
-test("a linked book write creates only the consented work-owner projection", async (t) => {
+test("a linked book write creates the work-owner projection for a live account", async (t) => {
   interface Ref {
     path: string;
     id: string;
@@ -245,11 +245,11 @@ test("a linked book write creates only the consented work-owner projection", asy
     return created;
   };
   const query = {kind: "books-query"};
-  const sharing: Row = {profileUsername: "reader-name", timeZone: "UTC"};
-  const profile: Row = {uid: "reader", public: true};
+  // No setting at all: sharing is on by default, so nothing but the
+  // account and the linked book decides the row.
   t.mock.method(db, "doc", (path: string) => ref(path));
   t.mock.method(db, "collection", (name: string) => {
-    if (name === "sharedWorkOwners" || name === "users" || name === "profiles") {
+    if (name === "sharedWorkOwners" || name === "users") {
       return {doc: (id: string) => ref(`${name}/${id}`)};
     }
     if (name === "users/reader/books") {
@@ -271,17 +271,13 @@ test("a linked book write creates only the consented work-owner projection", asy
     get: async (value: {path?: string; kind: string}) => {
       if (value === query) return {empty: false};
       if (value.path === "users/reader/settings/bookSharing") return {
-        exists: true,
-        data: () => sharing,
-        get: (field: string) => sharing[field],
+        exists: false,
+        data: () => undefined,
+        get: () => undefined,
       };
       if (value.path === "users/reader") return {
         exists: true,
         get: () => undefined,
-      };
-      if (value.path === "profiles/reader-name") return {
-        exists: true,
-        get: (field: string) => profile[field],
       };
       assert.fail(`unexpected transaction read ${value.path}`);
     },
@@ -303,7 +299,7 @@ test("a linked book write creates only the consented work-owner projection", asy
   assert.equal(writes[0].data?.updatedAt instanceof Timestamp, true);
 });
 
-test("projection handlers converge across consent, profile, retry, and last-book changes", async (t) => {
+test("projection handlers converge across opt-out, tombstone, retry, and last-book changes", async (t) => {
   interface Reference {
     path: string;
     id: string;
@@ -409,19 +405,13 @@ test("projection handlers converge across consent, profile, retry, and last-book
   const uid = "reader";
   const workId = "work-one";
   const projectionPath = `sharedWorkOwners/${sharedWorkOwnerId(workId, uid)}`;
-  const setting = {profileUsername: "reader-name", timeZone: "UTC"};
+  const on = {enabled: true, timeZone: "UTC"};
+  const off = {enabled: false, timeZone: "UTC"};
   rows.set(`users/${uid}`, {uid});
-  rows.set("profiles/reader-name", {uid, public: true});
-  rows.set(`users/${uid}/settings/bookSharing`, setting);
   rows.set(`works/${workId}`, {status: "active"});
 
-  // Consent may arrive before a book. The later book event and its retry
-  // both converge on the same deterministic row.
-  await functions.syncsharingsettingprojection.run({
-    params: {userId: uid},
-    data: change(undefined, setting),
-  });
-  assert.equal(rows.has(projectionPath), false);
+  // Sharing is on by default: with no setting at all, the book event and
+  // its retry both converge on the same deterministic row.
   rows.set(`users/${uid}/books/book-one`, {workId});
   const linkEvent = {
     params: {userId: uid, bookId: "book-one"},
@@ -434,25 +424,48 @@ test("projection handlers converge across consent, profile, retry, and last-book
     uid: rows.get(projectionPath)?.uid,
   }, {workId, uid});
 
-  // A profile privacy change removes it; restoring the profile and renaming
-  // the selected public profile recreates it from the setting handler.
-  rows.set("profiles/reader-name", {uid, public: false});
-  await functions.syncsharingprofileprojection.run({
-    params: {username: "reader-name"},
-    data: change({uid, public: true}, {uid, public: false}),
-  });
-  assert.equal(rows.has(projectionPath), false);
-  const renamed = {profileUsername: "renamed-reader", timeZone: "UTC"};
-  rows.set("profiles/renamed-reader", {uid, public: true});
-  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  // Opting out removes it; opting back in recreates it from the setting
+  // handler. A time-zone-only edit is not a consent change.
+  rows.set(`users/${uid}/settings/bookSharing`, off);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(setting, renamed),
+    data: change(undefined, off),
+  });
+  assert.equal(rows.has(projectionPath), false);
+  rows.set(`users/${uid}/settings/bookSharing`, on);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(off, on),
   });
   assert.equal(rows.has(projectionPath), true);
+  rows.delete(projectionPath);
+  await functions.syncsharingsettingprojection.run({
+    params: {userId: uid},
+    data: change(on, {enabled: true, timeZone: "Asia/Kolkata"}),
+  });
+  assert.equal(rows.has(projectionPath), false, "a time-zone edit must not refresh");
+  rows.set(projectionPath, {workId, uid, updatedAt: Timestamp.now()});
 
-  // Removing the final reread deletes membership, and disabling consent
-  // also deletes a recreated row even when the linked book still exists.
+  // A tombstoned account stops sharing through the account handler; other
+  // account writes (the Toggl mirror, sign-up) are ignored.
+  rows.set(`users/${uid}`, {uid, deletedAt: Timestamp.fromMillis(5)});
+  await functions.syncsharingaccountprojection.run({
+    params: {userId: uid},
+    data: change({uid}, {uid, deletedAt: Timestamp.fromMillis(5)}),
+  });
+  assert.equal(rows.has(projectionPath), false);
+  rows.set(`users/${uid}`, {uid});
+  rows.set(projectionPath, {workId, uid, updatedAt: Timestamp.now()});
+  rows.delete(projectionPath);
+  await functions.syncsharingaccountprojection.run({
+    params: {userId: uid},
+    data: change({uid}, {uid, toggl: {status: "connected"}}),
+  });
+  assert.equal(rows.has(projectionPath), false, "an unrelated account write must not refresh");
+
+  // Removing the final reread deletes membership, and opting out also
+  // deletes a recreated row even when the linked book still exists.
+  rows.set(projectionPath, {workId, uid, updatedAt: Timestamp.now()});
   rows.delete(`users/${uid}/books/book-one`);
   await functions.syncbooksharingprojection.run({
     params: {userId: uid, bookId: "book-one"},
@@ -464,16 +477,17 @@ test("projection handlers converge across consent, profile, retry, and last-book
     params: {userId: uid, bookId: "book-two"},
     data: change(undefined, {workId}),
   });
-  rows.delete(`users/${uid}/settings/bookSharing`);
+  assert.equal(rows.has(projectionPath), true);
+  rows.set(`users/${uid}/settings/bookSharing`, off);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(renamed, undefined),
+    data: change(on, off),
   });
   assert.equal(rows.has(projectionPath), false);
 
   // Owner-wide refreshes query only linked books and converge beyond the old
   // 100-row boundary; unlinked attacker rows add no reads to this query.
-  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  rows.set(`users/${uid}/settings/bookSharing`, on);
   for (let index = 0; index < 105; index += 1) {
     rows.set(`works/bulk-work-${String(index).padStart(3, "0")}`, {status: "active"});
     rows.set(`users/${uid}/books/bulk-${String(index).padStart(3, "0")}`, {
@@ -482,14 +496,14 @@ test("projection handlers converge across consent, profile, retry, and last-book
   }
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(undefined, renamed),
+    data: change(off, on),
   });
   assert.equal([...rows.keys()].filter((path) =>
     path.startsWith("sharedWorkOwners/")).length, 106);
-  rows.delete(`users/${uid}/settings/bookSharing`);
+  rows.set(`users/${uid}/settings/bookSharing`, off);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(renamed, undefined),
+    data: change(on, off),
   });
   assert.equal([...rows.keys()].some((path) => path.startsWith("sharedWorkOwners/")), false);
 
@@ -497,16 +511,16 @@ test("projection handlers converge across consent, profile, retry, and last-book
   for (let index = 0; index < 300; index += 1) {
     rows.set(`users/${uid}/books/reread-${String(index).padStart(3, "0")}`, {workId});
   }
-  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  rows.set(`users/${uid}/settings/bookSharing`, on);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(undefined, renamed),
+    data: change(off, on),
   });
   assert.equal(rows.has(projectionPath), true);
-  rows.delete(`users/${uid}/settings/bookSharing`);
+  rows.set(`users/${uid}/settings/bookSharing`, off);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(renamed, undefined),
+    data: change(on, off),
   });
   for (let index = 0; index < 300; index += 1) {
     rows.delete(`users/${uid}/books/reread-${String(index).padStart(3, "0")}`);
@@ -522,10 +536,10 @@ test("projection handlers converge across consent, profile, retry, and last-book
       workId: `bulk-work-${String(index).padStart(3, "0")}`,
     });
   }
-  rows.set(`users/${uid}/settings/bookSharing`, renamed);
+  rows.set(`users/${uid}/settings/bookSharing`, on);
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(undefined, renamed),
+    data: change(off, on),
   });
   // 201 bulk works plus the still-linked book-two.
   assert.equal([...rows.keys()].filter((path) =>
@@ -535,7 +549,7 @@ test("projection handlers converge across consent, profile, retry, and last-book
   // Withdrawn consent is not bounded: a reader who accumulated more rows
   // than the fan-out bound, one link at a time, loses every one of them,
   // not none (the old revoke path refused above 200 and left them all).
-  rows.delete(`users/${uid}/settings/bookSharing`);
+  rows.set(`users/${uid}/settings/bookSharing`, off);
   for (let index = 0; index < 201; index += 1) {
     const staleWorkId = `stale-work-${String(index).padStart(3, "0")}`;
     rows.set(`sharedWorkOwners/${sharedWorkOwnerId(staleWorkId, uid)}`, {
@@ -545,7 +559,7 @@ test("projection handlers converge across consent, profile, retry, and last-book
   errors.length = 0;
   await functions.syncsharingsettingprojection.run({
     params: {userId: uid},
-    data: change(renamed, undefined),
+    data: change(on, off),
   });
   assert.equal([...rows.keys()].some((path) => path.startsWith("sharedWorkOwners/")), false);
   assert.deepEqual(errors, []);
@@ -882,7 +896,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     functions.deleteUserDocument,
     functions.deletebookupdates,
     functions.syncbooksharingprojection,
-    functions.syncsharingprofileprojection,
+    functions.syncsharingaccountprojection,
     functions.syncsharingsettingprojection,
     functions.publicweb,
     functions.telemetry.reportissue,
@@ -917,7 +931,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
   const authenticated = {
     deletebookupdates: functions.deletebookupdates,
     syncbooksharingprojection: functions.syncbooksharingprojection,
-    syncsharingprofileprojection: functions.syncsharingprofileprojection,
+    syncsharingaccountprojection: functions.syncsharingaccountprojection,
     syncsharingsettingprojection: functions.syncsharingsettingprojection,
     createUserDocument: functions.createUserDocument,
     deleteUserDocument: functions.deleteUserDocument,
@@ -989,7 +1003,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
   const internalOnly = new Set([
     "functions.deletebookupdates",
     "functions.syncbooksharingprojection",
-    "functions.syncsharingprofileprojection",
+    "functions.syncsharingaccountprojection",
     "functions.syncsharingsettingprojection",
     "functions.toggl.syncqueue",
   ]);
@@ -1028,7 +1042,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.toggl.syncqueue": 5,
     "functions.deletebookupdates": 5,
     "functions.syncbooksharingprojection": 5,
-    "functions.syncsharingprofileprojection": 5,
+    "functions.syncsharingaccountprojection": 5,
     "functions.syncsharingsettingprojection": 5,
     "functions.publicweb": 2,
   };

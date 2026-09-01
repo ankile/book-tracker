@@ -654,11 +654,7 @@ export async function assertMigrationProjectionSourcesConsented(
     transaction.get(db.doc(`users/${uid}/settings/bookSharing`)),
     ...uniqueSources.map((source) => transaction.get(db.doc(source.bookPath))),
   ])
-  const settingData = setting.data()
-  const profile = typeof settingData?.profileUsername === 'string'
-    ? await transaction.get(db.doc(`profiles/${settingData.profileUsername}`))
-    : null
-  if (!sharingConsentIsValid(uid, user.data(), settingData, profile?.data())) {
+  if (!sharingConsentIsValid(user.data(), setting.data())) {
     throw new Error(`sharing projection source user ${uid} is no longer opted in`)
   }
   if (!books.some((book) => book.exists && book.get('workId') === workId)) {

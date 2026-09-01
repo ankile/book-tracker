@@ -20,7 +20,6 @@ import {
 } from './cross-user-work-migration.ts';
 import {
   SHARING_SETTING_KEYS,
-  SHARING_USERNAME,
   sharingConsentIsValid,
   validTimeZone,
 } from './sharing-consent.ts';
@@ -594,8 +593,10 @@ const consentedSharingUsers = new Set<string>();
 
 // The backend judges consent with sharing-consent.ts; the audit adds one
 // assertion the backend deliberately does not make, that the setting
-// document carries exactly its four keys with both timestamps. A row that
-// fails the shape is reported once and not restated as a consent finding.
+// document carries exactly its four keys, a boolean enabled, a valid time
+// zone and both timestamps. A row that fails the shape is reported once
+// and not restated as a consent finding (the backend reads it as an
+// opt-out either way).
 const auditSharingSetting = (
   userId: string,
   path: string,
@@ -604,8 +605,7 @@ const auditSharingSetting = (
   if (
     Object.keys(setting).sort().join(',') !== [...SHARING_SETTING_KEYS].join(',') ||
     !(setting.createdAt instanceof Timestamp) || !(setting.updatedAt instanceof Timestamp) ||
-    typeof setting.profileUsername !== 'string' ||
-    !SHARING_USERNAME.test(setting.profileUsername) ||
+    typeof setting.enabled !== 'boolean' ||
     !validTimeZone(setting.timeZone)
   ) {
     found('book-sharing.bad-shape', path, JSON.stringify(setting));
@@ -615,16 +615,7 @@ const auditSharingSetting = (
     found('book-sharing.user-missing', path, userId);
     return false;
   }
-  const profile = publicProfilesByUsername.get(setting.profileUsername);
-  if (profile === undefined) {
-    found('book-sharing.profile-missing', path, setting.profileUsername);
-    return false;
-  }
-  if (profile.uid !== userId || profile.public !== true) {
-    found('book-sharing.profile-not-public-owner', path, setting.profileUsername);
-    return false;
-  }
-  return sharingConsentIsValid(userId, userProfilesById.get(userId), setting, profile);
+  return sharingConsentIsValid(userProfilesById.get(userId), setting);
 };
 const linkedOwnerWorkPairs = new Set<string>();
 
@@ -633,11 +624,14 @@ for (const user of users) {
   const lifecycle = await user.collection('timerLifecycle').doc('current').get();
   const bookSharing = await user.collection('settings').doc('bookSharing').get();
   const setting = bookSharing.data();
+  // Sharing is on by default: a live account with no setting is consented.
   if (setting !== undefined) {
     bookSharingSettingCount += 1;
     if (auditSharingSetting(user.id, bookSharing.ref.path, setting)) {
       consentedSharingUsers.add(user.id);
     }
+  } else if (sharingConsentIsValid(userProfilesById.get(user.id), undefined)) {
+    consentedSharingUsers.add(user.id);
   }
   for (const finding of auditTimerClaimState(
     books.docs.map((book) => ({id: book.id, data: book.data()})),

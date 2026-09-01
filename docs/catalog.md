@@ -68,29 +68,40 @@ reader (the client's in-memory author map, the callables, the admin scan,
   documents are retained, and tombstoned accounts are skipped entirely.
 - **Admins.** Curation after the fact, never a precondition for creation.
 
-## Sharing consent
+## Sharing
 
-`users/{uid}/settings/bookSharing` (`profileUsername`, `timeZone`) plus a
-public `profiles/{username}` owned by that live account is consent, judged by
-one predicate on each side: `functions/src/sharingConsent.ts` for the backend,
-`sharing-consent.ts` for the migration and the audit.
+Sharing is on by default (owner decision 2026-09-01): every live account's
+linked books feed the reader list of their works unless the account opted
+out. `users/{uid}/settings/bookSharing` (`enabled`, `timeZone`) records the
+opt-out and the reader's time zone; an absent document means on, with day
+boundaries taken in UTC until the client stores a zone (it does so on the
+first visit to /me). One predicate on each side judges it —
+`functions/src/sharingConsent.ts` for the backend, `sharing-consent.ts` for
+the migration and the audit — from the account document and the setting
+alone.
 
-Consent governs exactly two things: the `sharedWorkOwners` rows and the reader
-list they feed. It does not gate catalog creation, search, linking a personal
-book, or the Work page's bibliographic half. Withdrawing it — unsetting the
-setting, making the profile private, renaming it, deleting the account —
-deletes the projection rows on the next trigger run.
+Who a reader is shown as is a separate question. The public profile the
+account owns (`profileOwners/{uid}` → `profiles/{username}`, public and not
+tombstoned) names them and links their card; otherwise the card says "A
+reader". A private, renamed or deleted profile changes the name, never the
+listing.
+
+Consent governs exactly two things: the `sharedWorkOwners` rows and the
+reader list they feed. It does not gate catalog creation, search, linking a
+personal book, or the Work page's bibliographic half. Opting out — or the
+account being tombstoned — deletes the projection rows on the next trigger
+run.
 
 Three Firestore triggers keep the projection true: a book whose `workId`
-changes, a changed `bookSharing` setting, and a changed profile. Each
-re-derives the row from consent plus "does this account still have a book
-linked to this work", and deletes it when either half fails. The reader
-callable re-checks consent live, so the projection is a candidate index, never
-the authority.
+changes, a changed `bookSharing` setting, and a tombstoned account
+document. Each re-derives the row from consent plus "does this account
+still have a book linked to this work", and deletes it when either half
+fails. The reader callable re-checks consent live, so the projection is a
+candidate index, never the authority.
 
 ## Reader metrics
 
-`/books/[workId]` shows one row per consenting reader's attempt at the work:
+`/books/[workId]` shows one row per sharing reader's attempt at the work:
 reading or finished, page count, first-progress, first-read and finished day
 keys in that reader's time zone, calendar days, active days, tracked minutes,
 session count, qualified pages per hour, percent per hour and tracking

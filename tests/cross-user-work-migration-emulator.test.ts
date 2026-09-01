@@ -200,8 +200,16 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       createdAt: now, updatedAt: now,
     }),
     sharingUser.collection('settings').doc('bookSharing').set({
-      profileUsername: username,
+      enabled: true,
       timeZone: 'America/Los_Angeles',
+      createdAt: now,
+      updatedAt: now,
+    }),
+    // Sharing is on by default, so the account that must produce no reader
+    // row is the one that opted out.
+    nonSharingUser.collection('settings').doc('bookSharing').set({
+      enabled: false,
+      timeZone: 'UTC',
       createdAt: now,
       updatedAt: now,
     }),
@@ -385,7 +393,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     revokedAlternateSource.set({title: 'Translated Seed', authorIds: [leGuinAuthorId], pageCount: 110}),
     db.doc(`profiles/${secondUsername}`).set({uid: nonSharingUid, public: true}),
     nonSharingUser.collection('settings').doc('bookSharing').set({
-      profileUsername: secondUsername,
+      enabled: true,
       timeZone: 'America/Los_Angeles',
       createdAt: now,
       updatedAt: now,
@@ -393,7 +401,9 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   ])
   const eligibleRaceSource = await migrationSource(sharingUid, raceSource)
   const revokedRaceSource = await migrationSource(nonSharingUid, revokedAlternateSource)
-  await nonSharingUser.collection('settings').doc('bookSharing').delete()
+  await nonSharingUser.collection('settings').doc('bookSharing').set({
+    enabled: false, timeZone: 'UTC', createdAt: now, updatedAt: now,
+  })
 
   await raceSource.update({title: 'Concurrent identity edit'})
   await assert.rejects(
@@ -414,7 +424,9 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   )
   await ursulaRef.update({name: 'Ursula K. Le Guin'})
 
-  await sharingUser.collection('settings').doc('bookSharing').delete()
+  await sharingUser.collection('settings').doc('bookSharing').set({
+    enabled: false, timeZone: 'America/Los_Angeles', createdAt: now, updatedAt: now,
+  })
   await raceSource.update({workId})
   await assert.rejects(
     db.runTransaction(async (transaction) => {
@@ -435,7 +447,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   assert.equal((await db.doc(`sharedWorkOwners/race-${suffix}`).get()).exists, false)
 
   await sharingUser.collection('settings').doc('bookSharing').set({
-    profileUsername: username,
+    enabled: true,
     timeZone: 'America/Los_Angeles',
     createdAt: now,
     updatedAt: now,

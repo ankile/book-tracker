@@ -215,10 +215,14 @@
     }
   });
 
-  // This owner-scoped document is the per-book consent boundary. It stays
-  // outside profiles so the full-document profile sync below cannot erase a
-  // newer sharing choice made by another client.
+  // Sharing is on by default; this owner-scoped document records an opt-out
+  // and the reader's time zone. It stays outside profiles so the
+  // full-document profile sync below cannot erase a newer choice made by
+  // another client. An account with no document yet gets one, enabled,
+  // carrying this browser's time zone so its reading days are bucketed
+  // correctly; until then the backend uses UTC.
   let bookSharing = $state<BookSharingSettings | null | undefined>(undefined);
+  let bookSharingSeeded = false;
   $effect(() => {
     const userId = $user?.uid;
     if (!userId) {
@@ -226,8 +230,23 @@
       return;
     }
     const sharingStore = Database.getBookSharingSettings(userId);
-    return sharingStore.subscribe((data) => (bookSharing = data));
+    return sharingStore.subscribe((data) => {
+      bookSharing = data;
+      if (data === null && !bookSharingSeeded) {
+        bookSharingSeeded = true;
+        void Database.setBookSharing({
+          userId, enabled: true, timeZone: browserTimeZone(), existing: false,
+        }).catch((error: unknown) => { profileError = errorMessage(error); });
+      }
+    });
   });
+  const bookSharingOn = $derived(bookSharing === null || bookSharing?.enabled === true);
+
+  function browserTimeZone(): string {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!timeZone) throw new Error('Your browser did not report a reading timezone.');
+    return timeZone;
+  }
 
   // Search discovery is a separate marker so old cached clients cannot
   // overwrite it during their full profile-stat sync. Only the owner reads
@@ -306,13 +325,10 @@
           ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       } else {
-        if (bookSharing === undefined) {
-          throw new Error('Profile rename requires the book-sharing setting to finish loading.');
-        }
         await Database.renameProfile({
           userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
-          isDiscoverable: profileDiscoverable, bookSharing,
+          isDiscoverable: profileDiscoverable,
           ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       }
@@ -364,7 +380,6 @@
     isPublic?: boolean;
     links?: ProfileLink[];
     removeDiscovery?: boolean;
-    removeBookSharing?: boolean;
   }
 
   function persistProfile(overrides: ProfileOverrides = {}) {
@@ -405,7 +420,6 @@
     const saved = await persistProfileWithFeedback({
       isPublic: input.checked,
       removeDiscovery: !input.checked,
-      removeBookSharing: !input.checked,
     });
     if (!saved) input.checked = myProfile?.public ?? false;
   }
@@ -439,37 +453,26 @@
 
   async function setBookSharing(input: HTMLInputElement) {
     const currentUser = $user;
-    const profile = myProfile;
-    if (currentUser === null || currentUser === undefined || !profile) {
-      throw new Error('Book sharing requires an authenticated user and loaded profile.');
+    if (currentUser === null || currentUser === undefined || bookSharing === undefined) {
+      throw new Error('Book sharing requires an authenticated user and a loaded setting.');
     }
-    if (input.checked && !profile.public) {
-      input.checked = false;
-      profileError = 'Make the profile public before sharing book-level reading summaries.';
-      return;
-    }
-
     bookSharingPending = true;
-    profileError = '';
+    sharingError = '';
     try {
-      if (input.checked) {
-        const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (!timeZone) throw new Error('Your browser did not report a reading timezone.');
-        await Database.enableBookSharing({
-          userId: currentUser.uid,
-          profileUsername: profile.username,
-          timeZone,
-        });
-      } else {
-        await Database.disableBookSharing(currentUser.uid);
-      }
+      await Database.setBookSharing({
+        userId: currentUser.uid,
+        enabled: input.checked,
+        timeZone: browserTimeZone(),
+        existing: bookSharing !== null,
+      });
     } catch (error) {
-      profileError = errorMessage(error);
-      input.checked = bookSharing !== null && bookSharing !== undefined;
+      sharingError = errorMessage(error);
+      input.checked = bookSharingOn;
     } finally {
       bookSharingPending = false;
     }
   }
+  let sharingError = $state('');
 
   // Handle editor: the plus opens the picker, choosing a platform reveals
   // the value field, Add writes immediately (like the visibility checkbox).
@@ -1238,7 +1241,7 @@
                 autocomplete="off"
                 bind:value={profileSlug} />
             </div>
-            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined || (myProfile !== null && (profileDiscovery === undefined || bookSharing === undefined))}>
+            <button class="primary-button" type="submit" disabled={savingProfile || !profileSlug || allBooks === undefined || allSessions === undefined || authorList === undefined || (myProfile !== null && profileDiscovery === undefined)}>
               {myProfile ? (profileSaved ? 'Saved!' : 'Save') : 'Create Profile'}
             </button>
           </form>
@@ -1340,30 +1343,29 @@
                     <span class="visibility-detail">List this profile in the public sitemap and allow indexing.</span>
                   </span>
                 </label>
-                <label class="visibility-control">
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={bookSharing !== null && bookSharing !== undefined}
-                    disabled={bookSharing === undefined || bookSharingPending || (!myProfile.public && bookSharing === null)}
-                    onchange={(event) => void setBookSharing(event.currentTarget)} />
-                  <span class="visibility-copy">
-                    <span class="visibility-title">Share books with other readers</span>
-                    <span class="visibility-detail">
-                      {myProfile.public
-                        ? 'Any signed-in account can then see which shared works you read, day-level first and finish dates, your page count, tracked time and session count, and derived reading speed beside your public profile name. Turn this off at any time to hide those rows.'
-                        : bookSharing
-                          ? 'Nothing is shared while your profile is private. Turn this off to clear the saved consent.'
-                          : 'Make your profile public first. This separate consent covers book titles, day-level dates, page count, tracked time, session count, and derived speed for signed-in viewers.'}
-                    </span>
-                  </span>
-                </label>
               </div>
               <button class="danger-button" type="button" onclick={deleteProfile} disabled={savingProfile || profileDiscovery === undefined}>
                 Delete profile
               </button>
             </div>
           {/if}
+        </div>
+
+        <div class="toggl-card">
+          <h2>Sharing</h2>
+          <label class="visibility-control">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={bookSharingOn}
+              disabled={bookSharing === undefined || bookSharingPending}
+              onchange={(event) => void setBookSharing(event.currentTarget)} />
+            <span class="visibility-copy">
+              <span class="visibility-title">Share what you read</span>
+              <span class="visibility-detail">Other signed-in readers see your reading of each shared book on its page. You are named only if your profile is public.</span>
+            </span>
+          </label>
+          {#if sharingError}<p class="error" role="alert">{sharingError}</p>{/if}
         </div>
 
         <div class="toggl-card">

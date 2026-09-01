@@ -28,16 +28,6 @@ async function waitForDocument(
   throw new Error(`${path} did not converge to exists=${expectedExists}.`);
 }
 
-async function assertDocumentRemainsAbsent(
-  db: ReturnType<typeof getFirestore>,
-  path: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    expect((await db.doc(path).get()).exists).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
 async function waitForBookByTitle(
   db: ReturnType<typeof getFirestore>,
   uid: string,
@@ -214,11 +204,18 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       db.doc(`profiles/${readerUsername}`).set({
         uid: readerUid, givenName: 'Shared', familyName: 'Reader', public: true,
       }),
+      db.doc(`profileOwners/${readerUid}`).set({username: readerUsername}),
       db.doc(`profiles/${revokedUsername}`).set({
         uid: revokedUid, givenName: 'Revoked', familyName: 'Reader', public: true,
       }),
+      db.doc(`profileOwners/${revokedUid}`).set({username: revokedUsername}),
       db.doc(`users/${readerUid}/settings/bookSharing`).set({
-        profileUsername: readerUsername, timeZone: 'America/Los_Angeles',
+        enabled: true, timeZone: 'America/Los_Angeles',
+        createdAt: now, updatedAt: now,
+      }),
+      // Sharing is on by default; the revoked reader opted out.
+      db.doc(`users/${revokedUid}/settings/bookSharing`).set({
+        enabled: false, timeZone: 'UTC',
         createdAt: now, updatedAt: now,
       }),
     ]);
@@ -242,7 +239,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     });
     // The projection is only a bounded lookup accelerator. The callable
     // must re-check live consent, so this deliberately stale row for an
-    // owner with no book-sharing setting can never produce a reader.
+    // owner who opted out can never produce a reader.
     await db.doc(`sharedWorkOwners/${sharedWorkOwnerId(workId, revokedUid)}`).set({
         uid: revokedUid, workId, updatedAt: now,
     });
@@ -318,73 +315,72 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.getByRole('link', {name: 'Linked work'}).first().click();
       await expect(page.getByRole('heading', {name: 'Readers'})).toBeVisible();
       await expect(page.getByRole('link', {name: 'Shared Reader'})).toBeVisible();
-      await expect(page.locator('.reader-card')).toHaveCount(1);
+      // Two cards: the named shared reader and the signed-in user's own
+      // anonymous card (sharing is on by default; no profile yet). The
+      // opted-out reader's stale row produces nothing.
+      await expect(page.locator('.reader-card')).toHaveCount(2);
+      await expect(page.getByRole('heading', {name: 'A reader'})).toHaveCount(1);
       await expect(page.getByText('Revoked Reader')).toHaveCount(0);
-      await expect(page.getByText('304', {exact: true})).toBeVisible();
-      await expect(page.getByText(/pages\/hour/)).toBeVisible();
+      await expect(page.getByText('304', {exact: true}).first()).toBeVisible();
+      await expect(page.getByText(/pages\/hour/).first()).toBeVisible();
 
+      // Identity is separate from consent: a private profile makes the
+      // reader anonymous, not absent — the row stays.
       await db.doc(`profiles/${readerUsername}`).update({public: false});
-      await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, false);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Shared Reader'})).toHaveCount(0);
+      await expect(page.getByRole('heading', {name: 'A reader'})).toHaveCount(2);
+      await expect(page.locator('.reader-card')).toHaveCount(2);
+      expect((await db.doc(`sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`).get()).exists).toBe(true);
 
       await db.doc(`profiles/${readerUsername}`).update({public: true});
-      await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, true);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Shared Reader'})).toBeVisible();
 
-      await db.doc(`users/${readerUid}/settings/bookSharing`).delete();
+      // Opting out withdraws the row; opting back in restores it.
+      await db.doc(`users/${readerUid}/settings/bookSharing`).update({enabled: false});
       await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, false);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Shared Reader'})).toHaveCount(0);
+      await expect(page.locator('.reader-card')).toHaveCount(1);
 
-      const sharingNow = Timestamp.now();
-      await db.doc(`users/${readerUid}/settings/bookSharing`).set({
-        profileUsername: readerUsername,
-        timeZone: 'America/Los_Angeles',
-        createdAt: sharingNow,
-        updatedAt: sharingNow,
-      });
+      await db.doc(`users/${readerUid}/settings/bookSharing`).update({enabled: true});
       await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, true);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Shared Reader'})).toBeVisible();
 
-      const renamedAt = Timestamp.now();
+      // A rename follows the ownership record; deleting the profile leaves
+      // an anonymous reader; recreating it names them again.
       const rename = db.batch();
       rename.set(db.doc(`profiles/${renamedReaderUsername}`), {
         uid: readerUid, givenName: 'Renamed', familyName: 'Reader', public: true,
       });
-      rename.set(db.doc(`users/${readerUid}/settings/bookSharing`), {
-        profileUsername: renamedReaderUsername, timeZone: 'America/Los_Angeles',
-        createdAt: sharingNow, updatedAt: renamedAt,
-      });
+      rename.set(db.doc(`profileOwners/${readerUid}`), {username: renamedReaderUsername});
       rename.delete(db.doc(`profiles/${readerUsername}`));
       await rename.commit();
-      await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, true);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Renamed Reader'})).toBeVisible();
 
       const deleteProfile = db.batch();
       deleteProfile.delete(db.doc(`profiles/${renamedReaderUsername}`));
-      deleteProfile.delete(db.doc(`users/${readerUid}/settings/bookSharing`));
+      deleteProfile.delete(db.doc(`profileOwners/${readerUid}`));
       await deleteProfile.commit();
-      await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, false);
-      await db.doc(`profiles/${renamedReaderUsername}`).set({
-        uid: readerUid, givenName: 'Renamed', familyName: 'Reader', public: true,
-      });
-      await assertDocumentRemainsAbsent(
-        db,
-        `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`,
-      );
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Renamed Reader'})).toHaveCount(0);
+      await expect(page.getByRole('heading', {name: 'A reader'})).toHaveCount(2);
+      expect((await db.doc(`sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`).get()).exists).toBe(true);
 
-      const restoredAt = Timestamp.now();
-      await db.doc(`users/${readerUid}/settings/bookSharing`).set({
-        profileUsername: renamedReaderUsername, timeZone: 'America/Los_Angeles',
-        createdAt: restoredAt, updatedAt: restoredAt,
+      const recreate = db.batch();
+      recreate.set(db.doc(`profiles/${renamedReaderUsername}`), {
+        uid: readerUid, givenName: 'Renamed', familyName: 'Reader', public: true,
       });
-      await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, true);
+      recreate.set(db.doc(`profileOwners/${readerUid}`), {username: renamedReaderUsername});
+      await recreate.commit();
+      await reloadWorkPage();
+      await expect(page.getByRole('link', {name: 'Renamed Reader'})).toBeVisible();
+
+      // A tombstoned account stops sharing: the account trigger withdraws
+      // the row and the callable hides the reader even before it lands.
       await auth.deleteUser(readerUid);
       await waitForDocument(db, `sharedWorkOwners/${sharedWorkOwnerId(workId, readerUid)}`, false);
       await waitForDocument(db, `profiles/${renamedReaderUsername}`, true);
@@ -393,11 +389,13 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       expect(tombstonedProfile.get('public')).toBe(true);
       expect(tombstonedProfile.get('givenName')).toBe('Renamed');
       expect(tombstonedProfile.get('familyName')).toBe('Reader');
-      // Soft delete: the setting stays like every other document; the profile
-      // tombstone is what withdrew the projection row above.
+      // Soft delete: the setting stays like every other document; the
+      // account tombstone is what withdrew the projection row above.
       expect((await db.doc(`users/${readerUid}/settings/bookSharing`).get()).exists).toBe(true);
       await reloadWorkPage();
       await expect(page.getByRole('link', {name: 'Renamed Reader'})).toHaveCount(0);
+      await expect(page.locator('.reader-card')).toHaveCount(1);
+
 
       await openNewBook(page);
       await chooseExistingAuthor(page, 'Roald Dahl');

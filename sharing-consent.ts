@@ -5,10 +5,19 @@
 // converges, and one the backend writes and the audit refuses is a false
 // drift report on every run.
 //
-// Consent governs only the reader projections (sharedWorkOwners) and the
-// public profile. Catalog documents — authors, works, editions and their
-// indexes — are public bibliographic data whoever contributed them, so
-// nothing here gates their creation.
+// Sharing is on by default (owner decision 2026-09-01): every live
+// account's linked books feed the reader list unless the account opted
+// out. The users/{uid}/settings/bookSharing document records only that
+// opt-out and the reader's time zone; absent means on, in UTC. A setting
+// whose `enabled` is anything but `true` is an opt-out, so a malformed
+// document never shares more than an absent one. Who the reader is shown
+// as (a public profile, or anonymous) is not consent and is not judged
+// here.
+//
+// Consent governs only the reader projections (sharedWorkOwners). Catalog
+// documents — authors, works, editions and their indexes — are public
+// bibliographic data whoever contributed them, so nothing here gates their
+// creation.
 //
 // This is the Admin-SDK side of the same predicate, so it reads plain
 // document data rather than snapshots: an absent document is `undefined`,
@@ -16,14 +25,12 @@
 
 export type ConsentDoc = Record<string, unknown>;
 
-export const SHARING_USERNAME = /^[a-z0-9-]{3,30}$/;
+export const DEFAULT_TIME_ZONE = 'UTC';
 
 // The keys a bookSharing setting document may carry. The backend does not
 // check them (an extra key cannot forge consent), so this is an audit-only
 // shape assertion, not part of the predicate below.
-export const SHARING_SETTING_KEYS = [
-  'createdAt', 'profileUsername', 'timeZone', 'updatedAt',
-] as const;
+export const SHARING_SETTING_KEYS = ['createdAt', 'enabled', 'timeZone', 'updatedAt'] as const;
 
 // Constructing a formatter is the validator, not Intl.supportedValuesOf():
 // the list omits aliases browsers report verbatim (Asia/Kolkata), while the
@@ -38,39 +45,23 @@ export function validTimeZone(value: unknown): value is string {
   }
 }
 
-export interface SharingSetting {
-  username: string;
+export interface SharingConsent {
   timeZone: string;
 }
 
-// Phase one: a live account and a well-formed setting. null on any
-// disagreement; the profile it names is read by the caller (the migration
-// needs it inside a transaction) and judged by profileConsents.
-export function sharingSetting(
+export function sharingConsent(
   user: ConsentDoc | undefined,
   setting: ConsentDoc | undefined,
-): SharingSetting | null {
-  if (user === undefined || user.deletedAt !== undefined || setting === undefined) return null;
-  const username = setting.profileUsername;
-  const timeZone = setting.timeZone;
-  if (typeof username !== 'string' || !SHARING_USERNAME.test(username) ||
-      !validTimeZone(timeZone)) return null;
-  return {username, timeZone};
-}
-
-// Phase two: the named profile is still this account's and public. A
-// renamed, privatised or tombstoned profile withdraws consent even while
-// the setting document lingers.
-export function profileConsents(profile: ConsentDoc | undefined, uid: string): boolean {
-  return profile !== undefined && profile.uid === uid &&
-    profile.public === true && profile.deletedAt === undefined;
+): SharingConsent | null {
+  if (user === undefined || user.deletedAt !== undefined) return null;
+  if (setting === undefined) return {timeZone: DEFAULT_TIME_ZONE};
+  if (setting.enabled !== true) return null;
+  return {timeZone: validTimeZone(setting.timeZone) ? setting.timeZone : DEFAULT_TIME_ZONE};
 }
 
 export function sharingConsentIsValid(
-  uid: string,
   user: ConsentDoc | undefined,
   setting: ConsentDoc | undefined,
-  profile: ConsentDoc | undefined,
 ): boolean {
-  return sharingSetting(user, setting) !== null && profileConsents(profile, uid);
+  return sharingConsent(user, setting) !== null;
 }
