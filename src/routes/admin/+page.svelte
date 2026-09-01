@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import { CATALOG_LIMITS } from '../../../shared/catalogLimits.ts';
   import { reauthenticateWithPassword } from '$lib/firebase/auth.ts';
-  import { adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import { adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import { adminCatalogApply, adminCatalogPreview } from '$lib/firebase/functions.ts';
   import type {
     AdminCatalogOperation,
@@ -31,6 +31,8 @@
   // Nothing here fetches; an applied operation shows up when its writes
   // land, the same way anyone else's would.
   const scan = $derived($adminCatalogScan ?? null);
+  const progress = $derived($adminCatalogProgress);
+  const loadedSources = $derived(progress.filter((source) => source.count !== null).length);
   let updatedAt = $state<Date | null>(null);
   $effect(() => {
     if (scan !== null) updatedAt = new Date();
@@ -564,7 +566,7 @@
     <h1>Catalog</h1>
     <p class="toolbar">
       {#if scan === null}
-        <small>Connecting to the catalog…</small>
+        <small>Connecting to the catalog… {loadedSources} of {progress.length} sources loaded</small>
       {:else}
         <small><span class="live"></span>Live · {scan.books.length} books across {scan.works.length} works · updated {updatedAt?.toLocaleTimeString() ?? ''}</small>
       {/if}
@@ -573,7 +575,17 @@
   </header>
 
   {#if scan === null}
-    <p class="loading">Waiting for the first catalog snapshot…</p>
+    <section class="card loading" aria-live="polite">
+      <p>Waiting for the first snapshot from every source. A fresh device fills its local cache once; later opens are served from it.</p>
+      <ul class="progress">
+        {#each progress as source (source.label)}
+          <li class:done={source.count !== null}>
+            <span class="mark" aria-hidden="true">{source.count === null ? '…' : '✓'}</span>
+            {source.label}{#if source.count !== null} · {source.count}{/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
   {:else}
     <section class="card" aria-labelledby="new-works-heading">
       <h2 id="new-works-heading">New works from readers <span>{userCreatedWorks.length}</span></h2>
@@ -937,6 +949,8 @@
   .preview { margin-top: 1.2rem; padding: 1rem; border: 2px solid #27685e; border-radius: 6px; } .preview ol { padding-left: 1.4rem; }
   .preview li { margin: 1rem 0; } .diff { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; } pre { max-height: 320px; overflow: auto; padding: .6rem; background: #17201f; color: #e9f1ef; font-size: .75rem; white-space: pre-wrap; }
   dialog { max-width: 500px; border: 0; border-radius: 7px; box-shadow: 0 10px 40px #0006; } dialog::backdrop { background: #0008; } dialog form { display: grid; gap: .8rem; } .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
-  .empty { color: #3d6d58; } .loading { padding: 2rem; color: #697572; } .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  .empty { color: #3d6d58; } .loading { color: #697572; } .loading p { margin: 0 0 .75rem; }
+  .progress { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin: 0; padding: 0; list-style: none; }
+  .progress li { color: #8a9693; } .progress li.done { color: #244f49; } .progress .mark { display: inline-block; width: 1.1rem; } .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   @media (max-width: 700px) { .admin-catalog { padding: 1rem; } .form-grid, .diff, .work-card, .dupe { grid-template-columns: 1fr; } .wide { grid-column: auto; } .detail-heading { flex-wrap: wrap; } .detail-heading button { margin-left: 0; } }
 </style>

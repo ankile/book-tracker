@@ -86,6 +86,28 @@ const liveUserIds: Readable<ReadonlySet<string> | undefined> =
     }, listenError('load the account list for curation')),
   );
 
+// What has arrived so far, for the console's loading line: a fresh device
+// fills the persistent cache from seven listeners, and the operator should
+// see which are still on their way rather than a bare spinner.
+export interface CatalogSourceProgress {
+  label: string;
+  // null until the source's first snapshot arrives.
+  count: number | null;
+}
+
+export const adminCatalogProgress: Readable<CatalogSourceProgress[]> = derived(
+  [authors, works, editions, isbnIndex, externalIdIndex, books, liveUserIds],
+  ([$authors, $works, $editions, $isbnIndex, $externalIdIndex, $books, $liveUserIds]) => [
+    { label: 'authors', count: $authors?.length ?? null },
+    { label: 'works', count: $works?.length ?? null },
+    { label: 'editions', count: $editions?.length ?? null },
+    { label: 'ISBN index', count: $isbnIndex?.length ?? null },
+    { label: 'external IDs', count: $externalIdIndex?.length ?? null },
+    { label: 'books', count: $books?.length ?? null },
+    { label: 'accounts', count: $liveUserIds?.size ?? null },
+  ],
+);
+
 // undefined until every source has delivered its first snapshot.
 export const adminCatalogScan: Readable<CatalogScan | undefined> = derived(
   [authors, works, editions, isbnIndex, externalIdIndex, books, liveUserIds],
