@@ -181,7 +181,7 @@ current deployment instructions.
 | `migrate-timer-claims.ts` | Add server-owned timer claim state | Completed historical rollout. Do not rerun during deployment. |
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
-| `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Implemented; production rollout pending (see below) |
+| `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -192,7 +192,7 @@ The strict-TypeScript, timer-claim, progress-source, profile-publication, and
 credential-storage rollouts are complete. They are historical context, not
 steps in the current deployment procedure.
 
-## finishedAt rollout
+## finishedAt rollout (completed 2026-09-01)
 
 Books carry an explicit `finishedAt` (a timestamp exactly when `finished`
 is true, null otherwise). Before the field existed, the finished list
