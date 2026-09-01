@@ -60,7 +60,7 @@ export function queueReadingSessionUpdate({
 }: ReadingSessionUpdateWrite): Promise<void> {
   const sessionRef = firestore.document('users', userId, 'books', bookId, 'updates', sessionId);
   const bookRef = firestore.document('users', userId, 'books', bookId);
-  const mutation = planReadingSessionUpdate(previous, next, book, sessionId);
+  const mutation = planReadingSessionUpdate(previous, next, book, sessionId, Timestamp.now());
   const batch = firestore.batch();
   batch.update(sessionRef, {
     ...next,
@@ -92,6 +92,7 @@ export function queueReadingSessionDelete({
     book,
     sessionId,
     previousProgressUpdate,
+    Timestamp.now(),
   );
   const batch = firestore.batch();
   batch.delete(sessionRef);

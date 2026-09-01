@@ -10,7 +10,6 @@ import type {
 
 import {
   buildBookTimelines,
-  finishedAtByBook,
   monthlyAggregates,
   lifetimePagesPerHour,
   minutesByHour,
@@ -76,20 +75,6 @@ test("buildBookTimelines spans every update type and counts active days", () => 
   assert.equal(a.totalMinutes, 120);
   assert.equal(a.totalPages, 80);
   assert.equal(a.sessionCount, 3);
-});
-
-test("finishedAtByBook maps finished books to their last update", () => {
-  const books = [
-    { id: "a", finished: true },
-    { id: "b", finished: false },
-    { id: "no-sessions", finished: true },
-  ];
-  const finishedAt = finishedAtByBook(books, buildBookTimelines(sessions));
-  const finishedA = finishedAt.get("a");
-  assert.ok(finishedA);
-  assert.equal(finishedA.getTime(), new Date("2026-01-08T09:00:00").getTime());
-  assert.equal(finishedAt.has("b"), false);
-  assert.equal(finishedAt.has("no-sessions"), false);
 });
 
 test("monthlyAggregates fills gap months and withholds jittery speeds", () => {

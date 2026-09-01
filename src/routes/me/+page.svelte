@@ -32,7 +32,6 @@
     buildBookTimelines,
     computeMomentum,
     computeSuperlatives,
-    finishedAtByBook,
     monthlyAggregates,
   } from '$lib/utils/sessions.ts';
   import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.ts';
@@ -116,13 +115,11 @@
   // widened listener now carries.
   const sessionDays = $derived(aggregateSessionsByDay(allSessions ?? []));
 
-  // Session-derived finish dates (a book finishes at its last update of
-  // any type): feed the per-year table, the card ranges, and the published
-  // payload, so a book read across a year boundary counts in the year it
-  // was actually finished. timelines and months are computed once here and
-  // passed to the sections — each is a full pass over ~3.5k session docs.
+  // Finish dates come from each book's own finishedAt stamp (finishedDateOf
+  // in utils/stats.ts), never from its sessions. timelines and months are
+  // computed once here and passed to the sections — each is a full pass
+  // over ~3.5k session docs.
   const timelines = $derived(buildBookTimelines(allSessions ?? []));
-  const finishedAt = $derived(finishedAtByBook(analyticsBooks, timelines));
   const months = $derived(monthlyAggregates(allSessions ?? []));
   const profileRecords = $derived.by((): ProfileRecords | null => {
     const momentum = computeMomentum(allSessions ?? [], new Date());
@@ -190,8 +187,8 @@
   }
 
   // Statistics (shared with the public-profile payload, see utils/stats.ts)
-  const stats = $derived(computeStats(analyticsBooks, finishedAt));
-  const booksByYear = $derived(computeBooksByYear(analyticsBooks, finishedAt));
+  const stats = $derived(computeStats(analyticsBooks));
+  const booksByYear = $derived(computeBooksByYear(analyticsBooks));
 
   // Extract username from email
   const username = $derived(($user?.email ?? '').split('@')[0]);
@@ -274,20 +271,20 @@
         // explicit visibility checkbox below.
         await Database.createProfile({
           userId: currentUser.uid, username: chosenSlug, ...names, links: [],
-          isPublic: false, ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          isPublic: false, ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: currentUser.uid, username: chosenSlug, ...names,
           links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       } else {
         await Database.renameProfile({
           userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
           isDiscoverable: profileDiscoverable,
-          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       }
       profileGivenName = chosenGiven;
@@ -356,7 +353,7 @@
       familyName: myProfile.familyName ?? '',
       links: myProfile.links ?? [],
       isPublic: myProfile.public,
-      ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+      ...buildProfilePayload(books, sessionDays, profileRecords),
       ...overrides,
     });
   }
@@ -483,7 +480,7 @@
   // as clean and the effect settles instead of looping.
   $effect(() => {
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined || authorList === undefined) return;
-    const payload = buildProfilePayload(analyticsBooks, sessionDays, finishedAt, profileRecords);
+    const payload = buildProfilePayload(analyticsBooks, sessionDays, profileRecords);
     if (profilePayloadEqual(myProfile, payload)) return;
     void persistProfileWithFeedback();
   });

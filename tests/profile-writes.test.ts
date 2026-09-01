@@ -113,7 +113,7 @@ test('client caps mirror the rules literals for books', async () => {
   assert.ok(exempt, 'the progress exemption is guarded by validBookProgressFields()');
   assert.deepEqual(
     exempt![1].split(',').map((field) => field.trim().replace(/'/g, '')).filter(Boolean).sort(),
-    ['activeTimer', 'currentPage', 'currentPageUpdateId', 'finished', 'pagesRead', 'timeRead', 'updatedAt'],
+    ['activeTimer', 'currentPage', 'currentPageUpdateId', 'finished', 'finishedAt', 'pagesRead', 'timeRead', 'updatedAt'],
   );
   // The pre-migration author fields stay out of the allowlist.
   assert.equal(/'author'|'authors'/.test(body), false);

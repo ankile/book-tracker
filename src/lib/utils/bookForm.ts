@@ -15,6 +15,9 @@ interface BookWriteInput {
 
 interface UpdateBookWriteInput extends BookWriteInput {
   bookId: string;
+  // The stored flag before this edit, so finishedAt is stamped only when
+  // the edit is what finishes the book (a shrunk page count can).
+  previouslyFinished: boolean;
   pageCountClampFrom: number | null;
 }
 
@@ -165,6 +168,7 @@ export function prepareBookWrite({
         input: {
           ...input,
           bookId: book.id,
+          previouslyFinished: book.finished,
           pageCountClampFrom: pages.currentPage < book.currentPage
             ? book.currentPage
             : null,

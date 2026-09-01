@@ -34,7 +34,7 @@ import { reportIssue } from './functions.ts';
 import { issueReportPayload, type IssueInput } from '../utils/issueReport.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
-import { isFinished } from '../utils/finished.ts';
+import { finishedAtPatch, isFinished } from '../utils/finished.ts';
 import {
   isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
@@ -274,6 +274,7 @@ interface AddBookInput {
 
 interface UpdateBookInput extends AddBookInput {
   bookId: string;
+  previouslyFinished: boolean;
   pageCountClampFrom: number | null;
 }
 
@@ -300,7 +301,7 @@ interface UpdateReadingSessionInput {
   userId: string;
   bookId: string;
   session: ReadingSession;
-  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount' | 'finished'>;
   timeRead: number;
   fromPage: number;
   toPage: number;
@@ -311,7 +312,7 @@ interface DeleteReadingSessionInput {
   userId: string;
   bookId: string;
   session: ReadingSession;
-  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount' | 'finished'>;
   previousProgressUpdate: Pick<BookUpdate, 'id' | 'toPage'> | null;
   title: string;
 }
@@ -744,6 +745,11 @@ class Database {
       currentPage,
       currentPageUpdateId: updateRef.id,
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(
+        isFinished(previousPage, pageCount),
+        isFinished(currentPage, pageCount),
+        Timestamp.now(),
+      ),
       updatedAt: Timestamp.now(),
     });
 
@@ -777,6 +783,11 @@ class Database {
       currentPage,
       currentPageUpdateId: sessionRef.id,
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(
+        isFinished(previousPage, pageCount),
+        isFinished(currentPage, pageCount),
+        Timestamp.now(),
+      ),
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
       updatedAt: Timestamp.now(),
@@ -800,6 +811,7 @@ class Database {
       currentPage,
       currentPageUpdateId: null,
       finished: isFinished(currentPage, pageCount),
+      finishedAt: isFinished(currentPage, pageCount) ? Timestamp.now() : null,
       owner: ownerRef,
       pageCount,
       pagesRead: 0,
@@ -816,7 +828,7 @@ class Database {
     return batch.commit();
   }
 
-  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, pageCountClampFrom, isbn, metadata }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, previouslyFinished, pageCountClampFrom, isbn, metadata }: UpdateBookInput): Promise<void> {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
     let correctionId: string | null = null;
@@ -850,6 +862,7 @@ class Database {
         currentPageUpdateId: correctionId,
       }),
       finished: isFinished(currentPage, pageCount),
+      ...finishedAtPatch(previouslyFinished, isFinished(currentPage, pageCount), Timestamp.now()),
       isbn,
       ...metadata,
       updatedAt: Timestamp.now(),

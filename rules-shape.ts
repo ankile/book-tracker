@@ -15,7 +15,7 @@
 
 export const BOOK_FIELDS = [
   'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
-  'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'isbn',
+  'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
   'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
   'publisher', 'subjects', 'title', 'updatedAt',
 ] as const;
@@ -90,6 +90,12 @@ function unknownKeys(data: Record<string, unknown>, allowed: readonly string[]):
 export function bookShapeViolations(book: Record<string, unknown>, ownerPath: string): string[] {
   const v: string[] = unknownKeys(book, BOOK_FIELDS);
   if ('updatedAt' in book && !isTimestamp(book.updatedAt)) v.push('updatedAt.not-timestamp');
+  // finished <=> finishedAt is a timestamp (validBookFinishedAt).
+  if (book.finished === true) {
+    if (!isTimestamp(book.finishedAt)) v.push('finishedAt.missing');
+  } else if ('finishedAt' in book && book.finishedAt !== null) {
+    v.push('finishedAt.unfinished');
+  }
   if ('authorIds' in book) v.push(...stringListViolations('authorIds', book.authorIds, 50, 5000));
   if ('coverUrl' in book) v.push(...cappedString('coverUrl', book.coverUrl, 2048));
   if ('publisher' in book) v.push(...cappedString('publisher', book.publisher, 500));

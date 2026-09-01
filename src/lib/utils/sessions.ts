@@ -152,18 +152,6 @@ export function buildBookTimelines(
   );
 }
 
-export function finishedAtByBook(
-  allBooks: readonly FinishedBookView[],
-  timelines: ReadonlyMap<string, BookTimeline>,
-): Map<string, Date> {
-  const finishedAt = new Map<string, Date>();
-  for (const book of allBooks) {
-    const timeline = timelines.get(book.id);
-    if (book.finished && timeline !== undefined) finishedAt.set(book.id, timeline.lastAt);
-  }
-  return finishedAt;
-}
-
 interface MonthlyAccumulator {
   month: string;
   pages: number;

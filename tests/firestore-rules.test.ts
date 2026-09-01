@@ -1147,6 +1147,7 @@ test('an offline page-count shrink writes a correlated correction and clamps ato
     currentPage: 320,
     currentPageUpdateId: correctionRef.id,
     finished: true,
+    finishedAt: Timestamp.now(),
     isbn: '',
     coverUrl: '',
     publisher: '',
@@ -1175,15 +1176,18 @@ test('an offline page-count shrink writes a correlated correction and clamps ato
   assert.equal(saved?.currentPageUpdateId, 'page-count-clamp');
   assert.equal((await getDoc(priorRef)).exists(), true);
 
+  // Growing the count un-finishes the book, which must clear the stamp.
   await assertSucceeds(updateDoc(bookRef, {
     pageCount: 500,
     finished: false,
+    finishedAt: null,
     updatedAt: Timestamp.now(),
   }));
   assert.equal((await getDoc(bookRef)).data()?.currentPageUpdateId, 'page-count-clamp');
   await assertSucceeds(updateDoc(bookRef, {
     pageCount: 320,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   }));
   assert.equal((await getDoc(bookRef)).data()?.currentPageUpdateId, 'page-count-clamp');
@@ -1196,6 +1200,7 @@ test('an offline page-count shrink writes a correlated correction and clamps ato
   await assertFails(updateDoc(bookRef, {
     pageCount: 500,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   }));
   await assertFails(updateDoc(bookRef, {
@@ -1203,12 +1208,14 @@ test('an offline page-count shrink writes a correlated correction and clamps ato
     currentPage: 0,
     currentPageUpdateId: null,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   }));
 
   await assertSucceeds(updateDoc(bookRef, {
     pageCount: 500,
     finished: false,
+    finishedAt: null,
     updatedAt: Timestamp.now(),
   }));
   const extraRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'extra-field-clamp');
@@ -1223,10 +1230,65 @@ test('an offline page-count shrink writes a correlated correction and clamps ato
     currentPage: 300,
     currentPageUpdateId: extraRef.id,
     finished: true,
+    finishedAt: Timestamp.now(),
     unexpectedField: 'not editable metadata',
     updatedAt: Timestamp.now(),
   });
   await assertFails(extra.commit());
+});
+
+// finished <=> finishedAt is a timestamp (validBookFinishedAt): the client
+// stamps it in the batch that flips finished and migrate-finished-at.ts
+// backfilled every older book, so an unstamped finished book is refused on
+// create and frozen on update until it is stamped.
+test('finishedAt is a timestamp exactly when the book is finished', async () => {
+  const uid = 'finished-at-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'done'), fullBook(adminDb, uid, {
+      currentPage: 100, pageCount: 100, finished: true, finishedAt: Timestamp.now(),
+    }));
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'reading'), fullBook(adminDb, uid, {
+      currentPage: 10, pageCount: 100, finished: false,
+    }));
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'unstamped'), fullBook(adminDb, uid, {
+      currentPage: 100, pageCount: 100, finished: true,
+    }));
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'new-unfinished'), creatableBook({ finishedAt: null })));
+  await assertSucceeds(setDoc(doc(books, 'new-unfinished-absent'), creatableBook()));
+  await assertFails(setDoc(doc(books, 'new-reading-stamped'), creatableBook({ finishedAt: Timestamp.now() })));
+  await assertSucceeds(setDoc(doc(books, 'new-finished'), creatableBook({
+    currentPage: 100, pageCount: 100, finished: true, finishedAt: Timestamp.now(),
+  })));
+  await assertFails(setDoc(doc(books, 'new-finished-unstamped'), creatableBook({
+    currentPage: 100, pageCount: 100, finished: true,
+  })));
+  await assertFails(setDoc(doc(books, 'new-finished-misdated'), creatableBook({
+    currentPage: 100, pageCount: 100, finished: true, finishedAt: 'yesterday',
+  })));
+
+  // A metadata edit keeps the stored stamp (the client sends no finishedAt).
+  await assertSucceeds(updateDoc(doc(books, 'done'), { title: 'Done and dated', updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(doc(books, 'done'), {
+    title: 'Done and misdated', finishedAt: 'yesterday', updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(doc(books, 'done'), {
+    title: 'Done and undated', finishedAt: null, updatedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(doc(books, 'reading'), {
+    title: 'Reading but dated', finishedAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(updateDoc(doc(books, 'reading'), {
+    title: 'Reading, explicitly undated', finishedAt: null, updatedAt: Timestamp.now(),
+  }));
+  // A finished book the backfill missed is frozen until the edit stamps it.
+  await assertFails(updateDoc(doc(books, 'unstamped'), { title: 'Still unstamped', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(doc(books, 'unstamped'), {
+    title: 'Stamped now', finishedAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  }));
 });
 
 test('a page-count clamp establishes progress provenance on a legacy book', async () => {
@@ -1261,6 +1323,7 @@ test('a page-count clamp establishes progress provenance on a legacy book', asyn
     currentPage: 320,
     currentPageUpdateId: correctionRef.id,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
   await assertSucceeds(batch.commit());
@@ -1307,6 +1370,7 @@ test('a title-only edit repairs legacy progress beyond an unchanged page count',
     currentPage: 320,
     currentPageUpdateId: correctionRef.id,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
   await assertSucceeds(batch.commit());
@@ -1367,6 +1431,7 @@ test('a stale offline page-count clamp rejects and rolls back after a newer read
     currentPage: 320,
     currentPageUpdateId: staleCorrectionRef.id,
     finished: true,
+    finishedAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
   const staleCompletion = stale.commit();
@@ -1573,7 +1638,7 @@ test('stale and missing session batches fail without double-applying aggregates'
     bookId,
     sessionId: 'session',
     previous,
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   }));
   await assertFails(queueReadingSessionUpdate({
@@ -1582,7 +1647,7 @@ test('stale and missing session batches fail without double-applying aggregates'
     bookId,
     sessionId: 'session',
     previous,
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 30, timeRead: 60 },
   }));
   await assertFails(queueReadingSessionUpdate({
@@ -1591,7 +1656,7 @@ test('stale and missing session batches fail without double-applying aggregates'
     bookId,
     sessionId: 'missing-session',
     previous,
-    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 30, timeRead: 60 },
   }));
   await assertFails(queueReadingSessionUpdate({
@@ -1600,7 +1665,7 @@ test('stale and missing session batches fail without double-applying aggregates'
     bookId: 'missing-book',
     sessionId: 'orphan',
     previous,
-    book: { currentPage: 20, currentPageUpdateId: 'orphan', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'orphan', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   }));
 
@@ -1632,7 +1697,7 @@ test('session deletion cannot drive aggregate totals negative', async () => {
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     previousProgressUpdate: null,
   }));
 });
@@ -1668,7 +1733,7 @@ test('session update and delete enter the local cache while Firestore is offline
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   });
   const [localSession, localBook] = await Promise.all([
@@ -1692,7 +1757,7 @@ test('session update and delete enter the local cache while Firestore is offline
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 25, pagesRead: 15, timeRead: 45 },
-    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     previousProgressUpdate: {id: 'prior', toPage: 10},
   });
   const [deletedSession, deletedBook] = await Promise.all([
@@ -1738,7 +1803,7 @@ test('deleting progress owners hands off to surviving reading and correction row
       bookId,
       sessionId: 'latest',
       previous: {fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30},
-      book: {currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100},
+      book: { currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100, finished: false },
       previousProgressUpdate: {id: 'prior', toPage: 10},
     }));
     const saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
@@ -1754,7 +1819,7 @@ test('deleting progress owners hands off to surviving reading and correction row
     bookId: 'reading-prior',
     sessionId: 'prior',
     previous: {fromPage: 0, toPage: 10, pagesRead: 10, timeRead: 30},
-    book: {currentPage: 10, currentPageUpdateId: 'prior', pageCount: 100},
+    book: { currentPage: 10, currentPageUpdateId: 'prior', pageCount: 100, finished: false },
     previousProgressUpdate: null,
   }));
   const emptied = (await getDoc(doc(db, 'users', uid, 'books', 'reading-prior'))).data();
@@ -1799,7 +1864,7 @@ test('session deletion rejects missing, wrong-page, and cross-book progress pred
       bookId,
       sessionId: 'latest',
       previous: {fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30},
-      book: {currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100},
+      book: { currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100, finished: false },
       // The local candidate claims the right endpoint; rules verify the
       // actual same-book row exists and agrees.
       previousProgressUpdate: {id: 'predecessor', toPage: 10},
@@ -1960,7 +2025,7 @@ test('same-endpoint later correction prevents an older session from owning progr
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 18, timeRead: 25 },
   }));
   let saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
@@ -1973,7 +2038,7 @@ test('same-endpoint later correction prevents an older session from owning progr
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 18, pagesRead: 8, timeRead: 25 },
-    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100, finished: false },
     previousProgressUpdate: null,
   }));
   saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
@@ -1995,7 +2060,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     }
   });
   const previous = { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 };
-  const sourceBook = { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 };
+  const sourceBook = { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false };
 
   await assertSucceeds(queueReadingSessionUpdate({
     firestore: readingSessionWriteStore(db),
@@ -2074,7 +2139,7 @@ test('an offline session batch flushes successfully without priming the local ca
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   });
   await enableNetwork(offlineDb);
@@ -2112,7 +2177,7 @@ test('a stale offline session write rolls its optimistic cache back after reconn
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 25, timeRead: 45 },
   }));
 
@@ -2122,7 +2187,7 @@ test('a stale offline session write rolls its optimistic cache back after reconn
     bookId,
     sessionId: 'session',
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
-    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100 },
+    book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     next: { fromPage: 10, toPage: 30, timeRead: 60 },
   });
   const optimistic = await getDocFromCache(staleBookRef);

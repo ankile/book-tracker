@@ -22,6 +22,7 @@ const baseBook = {
   currentPage: 5,
   pageCount: 100,
   isbn: '',
+  finished: false,
 } as Book;
 
 function prepare(authorChips: AuthorChip[]) {
@@ -111,6 +112,7 @@ test('removing an unresolved chip and selecting a replacement enables the update
     title: 'Book',
     pageCount: 100,
     currentPage: 5,
+    previouslyFinished: false,
     pageCountClampFrom: null,
     isbn: '',
     metadata: EMPTY_METADATA,
@@ -155,6 +157,8 @@ test('shrinking below an inflated current page prepares an atomic page correctio
   assert.equal(result.write.input.pageCount, 320);
   assert.equal(result.write.input.currentPage, 320);
   assert.equal(result.write.input.pageCountClampFrom, 350);
+  // The clamp finishes the book, so updateBook stamps finishedAt.
+  assert.equal(result.write.input.previouslyFinished, false);
 });
 
 test('shrinking a finished book prepares the same explicit correction', () => {
@@ -171,6 +175,8 @@ test('shrinking a finished book prepares the same explicit correction', () => {
   assert.equal(result.write.kind, 'update');
   assert.equal(result.write.input.currentPage, 320);
   assert.equal(result.write.input.pageCountClampFrom, 350);
+  // Already finished: the stored stamp must survive this edit.
+  assert.equal(result.write.input.previouslyFinished, true);
 });
 
 test('a title-only edit repairs legacy progress already beyond the unchanged page count', () => {
@@ -199,6 +205,7 @@ test('a title-only edit repairs legacy progress already beyond the unchanged pag
   assert.equal(result.write.input.pageCount, 320);
   assert.equal(result.write.input.currentPage, 320);
   assert.equal(result.write.input.pageCountClampFrom, 350);
+  assert.equal(result.write.input.previouslyFinished, false);
 });
 
 test('unchanged, growing, and non-clamping page counts preserve progress', () => {

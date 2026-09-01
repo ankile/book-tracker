@@ -8,6 +8,7 @@
   import { Database } from "../firebase/db.ts";
   import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
+  import { finishedDateOf } from "../utils/finished.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { FirebaseError } from "firebase/app";
   import type { Author } from "../interfaces/author.ts";
@@ -710,8 +711,8 @@
                 <span class="label">{finished ? 'Finished' : 'Est left'}</span>
                 <br />
                 <span class="page-number">
-                  {#if finished && book.updatedAt}
-                    {book.updatedAt.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {#if finished}
+                    {finishedDateOf(book).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                   {:else if hasEstimate(book)}
                     {formatTime(Math.round((book.pageCount - book.currentPage) * (book.timeRead / book.pagesRead)))}
                   {:else}NA{/if}
