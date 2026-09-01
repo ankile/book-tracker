@@ -170,13 +170,16 @@ test("each account is capped at the per-account limit, uid-null rows at their ow
     document(`flood-${index}`, validIssue({uid: "flooder", message: `flood ${index}`})));
   const anonymous = Array.from({length: 4}, (_, index) =>
     document(`anon-${index}`, validIssue({uid: null, message: `anon ${index}`})));
-  const {rows, cappedAccounts, anonymousCapped} = assembleIssueFeed([
+  const {rows, cappedAccounts, cappedUids, anonymousCapped} = assembleIssueFeed([
     group("flooder", flood.slice(0, 11)),
     group("owner", [document("owner-1", validIssue({message: "owner"}))]),
     group(null, anonymous),
   ], 10, 3, 1000, identities);
 
   assert.equal(cappedAccounts, 1);
+  // Exactly the capped accounts are named: not the honest one, not the
+  // uid-null group, and the count is that list's length.
+  assert.deepEqual(cappedUids, ["flooder"]);
   assert.equal(anonymousCapped, true);
   assert.equal(rows.filter((row) => row.uid === "flooder").length, 10);
   assert.equal(rows.filter((row) => row.uid === null).length, 3);
@@ -192,7 +195,15 @@ test("each account is capped at the per-account limit, uid-null rows at their ow
     document("bad", validIssue({level: "attacker-level", uid: "flooder"})),
   ])], 10, 3, 1000, identities);
   assert.equal(capped.cappedAccounts, 1);
+  assert.deepEqual(capped.cappedUids, ["flooder"]);
   assert.equal(capped.rows.length, 10);
+  // Two floods name two accounts, in group order, and nobody else.
+  assert.deepEqual(assembleIssueFeed([
+    group("owner", [document("owner-1", validIssue({message: "owner"}))]),
+    group("flooder", flood.slice(0, 11)),
+    group("second", flood.slice(0, 11).map((entry, index) =>
+      document(`second-${index}`, validIssue({uid: "second", message: `second ${index}`})))),
+  ], 10, 3, 1000, identities).cappedUids, ["flooder", "second"]);
 });
 
 test("the shipped feed caps are the documented ones", () => {
@@ -291,6 +302,6 @@ test("above feedLimit groups the tail is dropped and the feed says how many acco
   assert.equal(roomy.rows.length, 200);
   // Degenerate inputs neither throw nor claim anything.
   const empty = assembleIssueFeed([], 10, 25, 200, identities);
-  assert.deepEqual(empty, {rows: [], total: 0, groupsWithRows: 0, groupsShown: 0, cappedAccounts: 0, anonymousCapped: false});
+  assert.deepEqual(empty, {rows: [], total: 0, groupsWithRows: 0, groupsShown: 0, cappedAccounts: 0, cappedUids: [], anonymousCapped: false});
   assert.equal(assembleIssueFeed(groups, 10, 25, 0, identities).rows.length, 0);
 });

@@ -90,6 +90,8 @@ export interface AdminOverview {
   issueCaps: {
     perAccount: number;
     cappedAccounts: number;
+    // The capped accounts by email ("(deleted user)" when no auth record).
+    cappedAccountEmails: string[];
     anonymous: number;
     anonymousCapped: boolean;
     // Rows shown of the rows that passed the per-account caps.

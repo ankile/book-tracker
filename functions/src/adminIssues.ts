@@ -58,8 +58,10 @@ export interface IssueFeed {
   // vanish from the feed silently.
   groupsWithRows: number;
   groupsShown: number;
-  // Accounts whose rows in the window exceeded the per-account cap.
+  // Accounts whose rows in the window exceeded the per-account cap, and
+  // which ones, so the page can name them.
   cappedAccounts: number;
+  cappedUids: string[];
   // Whether the uid-null group exceeded its own cap.
   anonymousCapped: boolean;
 }
@@ -159,13 +161,13 @@ export function assembleIssueFeed(
   feedLimit: number,
   identities: ReadonlyMap<string, IssueIdentity>,
 ): IssueFeed {
-  let cappedAccounts = 0;
+  const cappedUids: string[] = [];
   let anonymousCapped = false;
   const perGroup = groups.map((group) => {
     const limit = group.uid === null ? anonymousLimit : perAccountLimit;
     if (group.documents.length > limit) {
       if (group.uid === null) anonymousCapped = true;
-      else cappedAccounts += 1;
+      else cappedUids.push(group.uid);
     }
     return group.documents.slice(0, limit)
       .map((document) => mapIssueDocument(document, identities))
@@ -188,5 +190,8 @@ export function assembleIssueFeed(
     }
   }
   rows.sort((a, b) => b.at - a.at);
-  return {rows, total, groupsWithRows, groupsShown, cappedAccounts, anonymousCapped};
+  return {
+    rows, total, groupsWithRows, groupsShown,
+    cappedAccounts: cappedUids.length, cappedUids, anonymousCapped,
+  };
 }

@@ -152,6 +152,13 @@ function adminCallable<Request>(
     .runWith({
       serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
       maxInstances: ADMIN_MAX_INSTANCES,
+      // Gen-1 memory buys CPU: the overview decodes ~160 concurrent
+      // aggregate responses and the catalog operations re-plan whole
+      // transactions, both CPU-bound at the 256 MB default (~0.4 vCPU).
+      // Two instances at 1 GB is the same spend ceiling as eight at the
+      // default. The timeout only has to outlast a slow overview.
+      memory: "1GB",
+      timeoutSeconds: 120,
       enforceAppCheck: true,
     })
     .https.onCall(async (data: unknown, context) => {
@@ -263,13 +270,16 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
   // listUsers returns one capped page; stopping there would silently
   // truncate the table and undercount every total, so follow pageToken
   // until the API stops handing one back.
-  const authUsers: UserRecord[] = [];
-  let pageToken: string | undefined;
-  do {
-    const page = await getAuth().listUsers(1000, pageToken);
-    authUsers.push(...page.users);
-    pageToken = page.pageToken;
-  } while (pageToken);
+  const listAuthUsers = async (): Promise<UserRecord[]> => {
+    const records: UserRecord[] = [];
+    let pageToken: string | undefined;
+    do {
+      const page = await getAuth().listUsers(1000, pageToken);
+      records.push(...page.users);
+      pageToken = page.pageToken;
+    } while (pageToken);
+    return records;
+  };
 
   // Render off the union of auth users and profile docs: the
   // createUserDocument/deleteUserDocument triggers keep them in sync but
@@ -279,9 +289,13 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
   // leaves its books subcollection behind, and only listDocuments()
   // reports those phantom parents — a get() would show nothing at all
   // while the orphaned reading data sat in the database unnoticed.
-  const profiles = await db.collection("users").get();
-  const profileIds = (await db.collection("users").listDocuments())
-    .map((ref) => ref.id);
+  // The three reads are independent and run together.
+  const [authUsers, profiles, profileRefs] = await Promise.all([
+    listAuthUsers(),
+    db.collection("users").get(),
+    db.collection("users").listDocuments(),
+  ]);
+  const profileIds = profileRefs.map((ref) => ref.id);
   const authByUid = new Map(authUsers.map((user) => [user.uid, user]));
   const profileByUid = new Map(profiles.docs.map((snap) => [snap.id, snap]));
   const uids = [...new Set([...authByUid.keys(), ...profileIds])];
@@ -362,6 +376,8 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
     issueCaps: {
       perAccount: ISSUES_PER_UID,
       cappedAccounts: feed.cappedAccounts,
+      cappedAccountEmails: feed.cappedUids.map((uid) =>
+        identities.get(uid)?.email ?? "(deleted user)"),
       anonymous: ANONYMOUS_ISSUE_LIMIT,
       anonymousCapped: feed.anonymousCapped,
       shown: feed.rows.length,

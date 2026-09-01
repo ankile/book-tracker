@@ -21,6 +21,8 @@ interface Endpoint {
   httpsTrigger?: {invoker?: unknown};
   callableTrigger?: unknown;
   maxInstances?: number;
+  availableMemoryMb?: number;
+  timeoutSeconds?: number;
   concurrency?: number;
   serviceAccountEmail?: unknown;
   ingressSettings?: unknown;
@@ -1042,6 +1044,22 @@ test("runs every function as its dedicated least-privilege identity", () => {
   };
   for (const [name, deployedFunction] of exported) {
     assert.equal(deployedFunction.__endpoint.maxInstances, caps[name], `${name} maxInstances`);
+  }
+  // The admin callables are CPU-bound (gen-1 CPU scales with memory) and
+  // the overview is the slowest call in the project; everything else keeps
+  // the defaults so a stranger-invokable function never costs more.
+  for (const adminFunction of [
+    functions.admin.overview,
+    functions.admin.catalogapply,
+    functions.admin.catalogpreview,
+  ]) {
+    assert.equal(adminFunction.__endpoint.availableMemoryMb, 1024);
+    assert.equal(adminFunction.__endpoint.timeoutSeconds, 120);
+  }
+  for (const [name, deployedFunction] of exported) {
+    if (name.startsWith("functions.admin.") || deployedFunction.__endpoint.platform !== "gcfv1") continue;
+    // Unset memory is a ResetValue sentinel, never a number.
+    assert.notEqual(typeof deployedFunction.__endpoint.availableMemoryMb, "number", `${name} memory`);
   }
 });
 

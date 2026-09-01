@@ -37,6 +37,7 @@ interface OverviewResult {
   issueCaps: {
     perAccount: number;
     cappedAccounts: number;
+    cappedAccountEmails: string[];
     anonymous: number;
     anonymousCapped: boolean;
     shown: number;
@@ -211,6 +212,7 @@ test("the issue feed reads one uid-pinned, cap+1 query per account", async (t) =
   assert.deepEqual(result.issueCaps, {
     perAccount: ISSUES_PER_UID,
     cappedAccounts: 0,
+    cappedAccountEmails: [],
     anonymous: ANONYMOUS_ISSUE_LIMIT,
     anonymousCapped: false,
     shown: 0,
@@ -239,6 +241,12 @@ test("the callable applies the shipped caps and the shipped feed limit to the wi
   assert.equal(result.issueCaps.shown, FEED_LIMIT);
   assert.equal(result.issueCaps.total, uids.length * ISSUES_PER_UID);
   assert.equal(result.issueCaps.cappedAccounts, uids.length);
+  // The capped accounts are named on the wire by their auth email, so the
+  // page can say whose rows were cut rather than how many accounts'.
+  assert.deepEqual(
+    [...result.issueCaps.cappedAccountEmails].sort(),
+    uids.map((uid) => `${uid}@example.test`).sort(),
+  );
   assert.equal(result.issueCaps.anonymousCapped, false);
   assert.equal(result.issueCaps.groupsWithRows, uids.length);
   assert.equal(result.issueCaps.groupsShown, uids.length);
