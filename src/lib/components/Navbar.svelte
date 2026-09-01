@@ -1,5 +1,6 @@
 <script lang="ts">
   import { user } from '$lib/firebase/auth.ts';
+  import { ADMIN_UID } from '$lib/admin-uid.ts';
   import NavLink from './NavLink.svelte';
   import NewBookModal from './NewBookModal.svelte';
 
@@ -144,6 +145,9 @@
       <NavLink to="/">{#snippet children()}Reading{/snippet}</NavLink>
       <NavLink to="/finished">{#snippet children()}Finished{/snippet}</NavLink>
       <NavLink to="/me">{#snippet children()}Dashboard{/snippet}</NavLink>
+      {#if $user?.uid === ADMIN_UID}
+        <NavLink to="/admin">{#snippet children()}Admin{/snippet}</NavLink>
+      {/if}
     </div>
 
     <button class="add-book" type="button" onclick={() => (addBookModal = true)}>

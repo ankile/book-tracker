@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { feedNotes as feedNotesFor, readFailed as readFailedFor } from '$lib/utils/adminFeed.ts';
+  import { groupIssues } from '$lib/utils/adminFeed.ts';
   import { overviewCache } from '$lib/admin.ts';
   import type { AdminOverview } from '$lib/firebase/functions.ts';
   import { addError } from '$lib/stores/errors.ts';
@@ -46,6 +47,7 @@
   const caps = $derived(overview?.issueCaps ?? null);
   const feedNotes = $derived(feedNotesFor(caps));
   const readFailed = $derived(readFailedFor(caps));
+  const issueGroups = $derived(groupIssues(overview?.issues ?? []));
 
   // All times render in UTC: the sources mix ISO offsets and local-time
   // formatting would shift signups/activity across day boundaries.
@@ -58,20 +60,25 @@
     if (ms == null) return '—';
     return new Date(ms).toISOString().slice(0, 10);
   }
+
+  // The feed keeps seconds: repeated failures a few seconds apart are
+  // otherwise indistinguishable rows.
+  function utcSeconds(ms: number) {
+    return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+  }
 </script>
 
 <style lang="scss">
   .admin-container {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto;
     padding: 2rem;
     text-align: left;
+    color: #273331;
   }
 
   h1 {
-    font-size: 2rem;
-    color: #333;
-    margin-bottom: 1.5rem;
+    margin: 0.5rem 0;
   }
 
   .toolbar {
@@ -105,21 +112,20 @@
 
   .card {
     background: white;
-    padding: 2rem;
-    border-radius: 5px;
-    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
-    margin-bottom: 2rem;
+    padding: 1.25rem;
+    border-radius: 7px;
+    box-shadow: 0 2px 10px #0002;
+    margin: 1.25rem 0;
 
     h2 {
       font-size: 1.5rem;
-      color: #333;
       margin: 0 0 0.25rem 0;
     }
 
     .card-subtext {
       font-size: 0.9rem;
-      color: #999;
-      margin-bottom: 1.5rem;
+      color: #64706d;
+      margin-bottom: 1.25rem;
     }
   }
 
@@ -127,30 +133,38 @@
     overflow-x: auto;
   }
 
+  /* Ten columns must fit the 1280px container without a hidden horizontal
+     scroll: compact cells, and the email column truncates with the full
+     address on hover. Narrow screens still scroll the wrapper. */
   table {
     width: 100%;
-    min-width: 720px;
     border-collapse: collapse;
 
     th,
     td {
-      padding: 0.6rem 0.75rem;
+      padding: 0.5rem 0.55rem;
       text-align: left;
-      border-bottom: 1px solid #e0e0e0;
+      border-bottom: 1px solid #dfe5e3;
       white-space: nowrap;
     }
 
     th {
-      font-size: 0.85rem;
-      color: #666;
+      font-size: 0.76rem;
+      color: #697572;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       font-weight: 600;
     }
 
     td {
-      font-size: 0.95rem;
-      color: #333;
+      font-size: 0.9rem;
+      color: #273331;
+    }
+
+    td.email {
+      max-width: 230px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     tr:last-child td {
@@ -221,9 +235,21 @@
   }
 
   .empty {
-    color: #198754;
+    color: #3d6d58;
     font-size: 1.1rem;
     margin: 0;
+  }
+
+  .repeat {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: #e9ecef;
+    color: #495057;
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
   .unreadable {
     color: #b02a37;
@@ -253,7 +279,7 @@
   <h1>Accounts and issues</h1>
   <p class="toolbar">
     <button type="button" disabled={refreshing} onclick={() => void load(true)}>{refreshing && overview ? 'Refreshing…' : refreshing ? 'Loading…' : 'Refresh'}</button>
-    {#if loadedAt !== null}<small>as of {new Date(loadedAt).toLocaleTimeString()}</small>{/if}
+    {#if loadedAt !== null}<small>as of {utc(loadedAt)} UTC</small>{/if}
   </p>
 
   {#if overview}
@@ -284,7 +310,7 @@
           <tbody>
             {#each overview.users as u (u.uid)}
               <tr>
-                <td>
+                <td class="email" title={u.email ?? u.uid}>
                   {u.email ?? u.uid}
                   {#if u.anomaly}
                     <span class="badge-anomaly">{u.anomaly}</span>
@@ -347,9 +373,12 @@
               </tr>
             </thead>
             <tbody>
-              {#each overview.issues as issue (issue.id)}
+              {#each issueGroups as {row: issue, count, earliestAt} (issue.id)}
                 <tr>
-                  <td>{utc(issue.at)}</td>
+                  <td>
+                    {utcSeconds(issue.at)}
+                    {#if count > 1}<span class="repeat" title={`${count} identical rows, the earliest at ${utcSeconds(earliestAt)} UTC`}>×{count} since {utcSeconds(earliestAt).slice(11)}</span>{/if}
+                  </td>
                   <td>
                     {issue.email}
                     {#if issue.malformed}

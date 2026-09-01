@@ -132,6 +132,13 @@
   });
 
   const unmatchedBooks = $derived(scan?.books.filter((book) => book.workId === null) ?? []);
+  // A selection outlives the rows it named only while they are still
+  // unmatched: a book another update linked drops out of the selection.
+  $effect(() => {
+    const live = new Set(unmatchedBooks.map((book) => `${book.uid}/${book.bookId}`));
+    const kept = selectedBookKeys.filter((key) => live.has(key));
+    if (kept.length !== selectedBookKeys.length) selectedBookKeys = kept;
+  });
   // The two jobs this console exists for: works other accounts created
   // through the add-book flow (review: keep, edit, hide, or merge), and
   // things the scan thinks are the same book twice (merge works, or link a

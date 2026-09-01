@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { feedNotes, readFailed, type IssueCaps } from '../src/lib/utils/adminFeed.ts';
+import { feedNotes, groupIssues, readFailed, type IssueCaps } from '../src/lib/utils/adminFeed.ts';
+import type { AdminIssueRow } from '../src/lib/firebase/functions.ts';
 
 const caps = (over: Partial<IssueCaps> = {}): IssueCaps => ({
   perAccount: 10,
@@ -13,6 +14,7 @@ const caps = (over: Partial<IssueCaps> = {}): IssueCaps => ({
   groupsShown: 0,
   unreadAccounts: 0,
   anonymousUnread: false,
+  cappedAccountEmails: [],
   ...over,
 });
 
@@ -50,4 +52,35 @@ test('every way the feed can be incomplete produces exactly one note', () => {
     feedNotes(caps({ cappedAccounts: 2, anonymousCapped: true, shown: 200, total: 340, groupsWithRows: 210, groupsShown: 200, unreadAccounts: 3, anonymousUnread: true })).length,
     6,
   );
+});
+
+test('the capped-accounts note names the accounts when the server sends them', () => {
+  assert.match(feedNotes(caps({ cappedAccounts: 1, cappedAccountEmails: ['a@example.test'] }))[0], /listed \(a@example.test\)$/);
+  assert.match(feedNotes(caps({ cappedAccounts: 2, cappedAccountEmails: ['a@example.test', 'b@example.test'] }))[0], /\(a@example.test, b@example.test\)$/);
+  // A server that predates the field still states the count.
+  const legacy = { ...caps({ cappedAccounts: 1 }) } as Partial<IssueCaps>;
+  delete legacy.cappedAccountEmails;
+  assert.match(feedNotes(legacy as IssueCaps)[0], /listed$/);
+});
+
+const issue = (at: number, over: Partial<AdminIssueRow> = {}): AdminIssueRow => ({
+  id: `id-${at}`, at, level: 'error', event: 'firestore.write_failed', code: 'permission-denied',
+  message: 'updateProfile failed', uid: 'u1', email: 'a@example.test', emailVerified: true,
+  malformed: false, ...over,
+});
+
+test('identical consecutive rows collapse into one line that keeps the newest time and the span', () => {
+  const rows = [
+    issue(5000), issue(4000), issue(3000),
+    issue(2500, { message: 'other' }),
+    issue(2000), issue(1000, { email: 'b@example.test' }),
+  ];
+  const groups = groupIssues(rows);
+  assert.deepEqual(groups.map(({ row, count, earliestAt }) => [row.at, count, earliestAt]), [
+    [5000, 3, 3000], [2500, 1, 2500], [2000, 1, 2000], [1000, 1, 1000],
+  ]);
+  // A different level or code is a different line even with the same message.
+  assert.equal(groupIssues([issue(2), issue(1, { level: 'warn' })]).length, 2);
+  assert.equal(groupIssues([issue(2), issue(1, { code: null })]).length, 2);
+  assert.deepEqual(groupIssues([]), []);
 });
