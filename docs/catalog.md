@@ -38,7 +38,19 @@ queried.
 
 Redirects are one hop. Resolving an alias whose target is itself merged, or
 that points at itself, throws rather than following a chain, in the callables,
-in the admin transaction and in `db-audit.ts`.
+in the admin transaction and in `db-audit.ts`. A merge flattens chains so one
+hop always suffices, and an alias document is never deleted: something may
+still name it.
+
+Catalog documents carry canonical ids: `mergeAuthors` rewrites the works that
+name an absorbed author in the same transaction, and `catalog.create` and the
+admin work operations resolve a merged author id before writing (a client or
+form that loaded its author list before the merge). Personal books are never
+rewritten by a merge — a merge would otherwise scale with an author's
+readership and reach into tombstoned accounts — so a book keeps whatever
+author or work id it was saved with, the Rules accept the alias, and every
+reader (the client's in-memory author map, the callables, the admin scan,
+`db-audit.ts`) resolves it in one hop at read time.
 
 ## Who creates what
 
@@ -97,19 +109,10 @@ operations are `upsertAuthor`, `mergeAuthors`, `createWork`, `linkBooks`,
 `mergeWorks`, `editWork`, `upsertEdition` and `repointIsbn`. Every apply is
 idempotent by operation id and writes an `adminAudit` record.
 
-`mergeAuthors` is atomic on the author documents only; the same apply then
-rewrites every work and live-account book naming an absorbed id to the
-survivor, one transaction per page of 200, each page advancing the counters
-on the audit record (`canonicalization`). The preview states how many works
-and books that is; the result and the audit record state what was rewritten
-and that the sweep completed. Applying the same preview again resumes an
-interrupted sweep. Books in tombstoned accounts stay on the alias, which
-every reader still resolves in one hop.
-
 ## Migration
 
 `migrate-cross-user-works.ts` (planner: `cross-user-work-migration.ts`) creates
-the catalog and links personal books; `migrate-finished-at.ts` backfills
-`finishedAt` in the same window; `db-audit.ts` reports drift before and after.
+the catalog and links personal books; `db-audit.ts` reports drift before and
+after.
 The rollout order, flags and retention policy are in
 [MIGRATIONS.md](../MIGRATIONS.md#shared-catalog-rollout).

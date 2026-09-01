@@ -354,8 +354,13 @@ function authorSummary(author: ResolvedAuthor): AuthorSummary {
   };
 }
 
-async function resolveCatalogAuthor(authorId: string): Promise<ResolvedAuthor> {
-  const snapshot = await db.collection("catalogAuthors").doc(authorId).get();
+// Merged authors redirect one hop, like works (resolveWork below): the
+// alias document stays behind forever, so a work, a personal book or a
+// stale client may name it and every reader follows the redirect.
+async function resolveCatalogAuthor(
+  read: SnapshotReader,
+  snapshot: DocumentSnapshot,
+): Promise<ResolvedAuthor> {
   const author = storedCatalogAuthor(snapshot);
   if (author.status === "active") {
     return {
@@ -369,7 +374,7 @@ async function resolveCatalogAuthor(authorId: string): Promise<ResolvedAuthor> {
   if (author.mergedInto === undefined || author.mergedInto === snapshot.id) {
     throw new CatalogDataError(`Broken catalog author redirect at ${snapshot.ref.path}.`);
   }
-  const targetSnapshot = await db.collection("catalogAuthors").doc(author.mergedInto).get();
+  const targetSnapshot = await read(db.collection("catalogAuthors").doc(author.mergedInto));
   const target = storedCatalogAuthor(targetSnapshot);
   if (target.status !== "active") {
     throw new CatalogDataError(`Catalog author redirect is not one hop at ${snapshot.ref.path}.`);
@@ -390,7 +395,8 @@ async function workAuthors(
   const resolved = await Promise.all(work.authorIds.map((authorId) => {
     const cached = cache.get(authorId);
     if (cached !== undefined) return cached;
-    const pending = resolveCatalogAuthor(authorId);
+    const pending = readSnapshot(db.collection("catalogAuthors").doc(authorId))
+      .then((snapshot) => resolveCatalogAuthor(readSnapshot, snapshot));
     cache.set(authorId, pending);
     return pending;
   }));
@@ -694,14 +700,13 @@ export async function createCatalogEntry(
         externalRefs.length === 0 ? Promise.resolve(null) :
           tx.get(db.collection("externalIdIndex").count()),
       ]);
-    for (const snapshot of authorSnapshots) {
-      if (storedCatalogAuthor(snapshot).status !== "active") {
-        throw new functions.https.HttpsError(
-          "failed-precondition",
-          "A selected catalog author is no longer active.",
-        );
-      }
-    }
+    // A client that loaded its author list before an admin merge still
+    // names the absorbed author; the id resolves one hop so the work is
+    // written with the survivor (works carry canonical ids, books need not).
+    const read: SnapshotReader = (ref) => tx.get(ref);
+    const authorIds = [...new Set((await Promise.all(authorSnapshots.map((snapshot) =>
+      resolveCatalogAuthor(read, snapshot),
+    ))).map((author) => author.authorId))];
     const indexed = [isbnSnapshot, ...externalSnapshots].find((snapshot) => snapshot?.exists);
     if (indexed !== undefined && indexed !== null) {
       const indexedWorkId = indexed.get("workId");
@@ -709,7 +714,6 @@ export async function createCatalogEntry(
       if (typeof indexedWorkId !== "string" || typeof indexedEditionId !== "string") {
         throw new CatalogDataError(`Invalid catalog index ${indexed.ref.path}.`);
       }
-      const read: SnapshotReader = (ref) => tx.get(ref);
       const resolved = await resolveWork(
         read,
         await read(db.collection("works").doc(indexedWorkId)),
@@ -743,7 +747,7 @@ export async function createCatalogEntry(
       canonicalTitle: request.work.canonicalTitle,
       alternateTitles: request.work.alternateTitles,
       titleKeys,
-      authorIds: request.work.authorIds,
+      authorIds,
       coverUrl: request.work.coverUrl,
       subjects: request.work.subjects,
       fiction: request.work.fiction,
@@ -859,12 +863,15 @@ export function summarizeReadingAttempt(
   const progressed = ordered.filter((event) => event.pagesRead > 0);
   const firstProgress = progressed[0]?.createdAt ?? null;
   const firstRead = reading[0]?.createdAt ?? null;
-  // The book's own finishedAt stamp (written when finished flipped,
-  // backfilled by migrate-finished-at.ts) is the finish date. The fallback
-  // covers a finished book a pre-stamp client wrote: its last forward
-  // progress, not its last row.
-  const finishedAt = !book.finished ? null :
-    book.finishedAt ?? (progressed.at(-1) ?? ordered.at(-1))?.createdAt ?? null;
+  // The book's own finishedAt stamp is the finish date: the client writes
+  // it in the batch that flips finished and migrate-finished-at.ts
+  // backfilled every older book, so a finished book without one is
+  // malformed (db-audit book.finished-without-finishedAt), never inferred
+  // from its history.
+  if (book.finished && book.finishedAt === null) {
+    throw new CatalogDataError("A finished book carries no finishedAt.");
+  }
+  const finishedAt = book.finished ? book.finishedAt : null;
   const activeDayKeys = new Set(reading.map((event) => dayParts(event.createdAt, timeZone).key));
   let trackedMinutes = 0;
   let qualifiedMinutes = 0;
@@ -921,6 +928,8 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
   const finished = snapshot.get("finished");
   const finishedAt = snapshot.get("finishedAt");
   const pageCount = snapshot.get("pageCount");
+  // A finished book without a stamp is refused by summarizeReadingAttempt,
+  // which the unit tests pin; this only types the field.
   if (typeof finished !== "boolean" || !Number.isSafeInteger(pageCount) || pageCount <= 0 ||
       (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp))) {
     throw new CatalogDataError(`Invalid personal book summary fields ${snapshot.ref.path}.`);

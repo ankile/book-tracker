@@ -145,7 +145,11 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
     timeRead,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 300},
+    {
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("2024-03-10T22:00:00.000Z")),
+      pageCount: 300,
+    },
     [
       // 01:30 local, before the 3 AM boundary: first (positive) progress
       // lands on the previous calendar day.
@@ -180,7 +184,11 @@ test("reading summary dates preserve four-digit years below 1000", () => {
     timeRead: 60,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 100},
+    {
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("0001-01-02T04:00:00.000Z")),
+      pageCount: 100,
+    },
     [event("0001-01-01T04:00:00.000Z", 50), event("0001-01-02T04:00:00.000Z", 50)],
     "UTC",
   );
@@ -189,13 +197,11 @@ test("reading summary dates preserve four-digit years below 1000", () => {
   assert.equal(result.calendarDays, 2);
 });
 
-// A page-count correction (updateBook with pageCountClampFrom) is an
-// update event with zero or negative pagesRead, appended long after the
-// book was finished; it must not move the finish date or stretch the
-// calendar span.
-// The stamp written when the book was marked finished is the finish date;
-// the history only stands in for books a pre-stamp client finished.
-test("an explicit finishedAt stamp wins over the reading history", () => {
+// The stamp written when the book was marked finished is the finish date,
+// whatever the history says; a finished book without one is malformed
+// (migrate-finished-at.ts stamped every older book) and is refused rather
+// than dated from its rows.
+test("the finishedAt stamp is the finish date and an unstamped finished book is refused", () => {
   const reading = (createdAt: string): ReadingEventStub => ({
     type: "reading",
     createdAt: Timestamp.fromDate(new Date(createdAt)),
@@ -213,9 +219,21 @@ test("an explicit finishedAt stamp wins over the reading history", () => {
   );
   assert.equal(result.finishedAt, "2026-03-05");
   assert.equal(result.calendarDays, 5);
+  assert.throws(
+    () => catalog.summarizeReadingAttempt(
+      {finished: true, finishedAt: null, pageCount: 200},
+      [reading("2026-03-01T10:00:00.000Z")],
+      "UTC",
+    ),
+    /carries no finishedAt/,
+  );
 });
 
-test("a later page-count correction does not move the finish date", () => {
+// A page-count correction (updateBook with pageCountClampFrom) is an
+// update event with zero or negative pagesRead, appended long after the
+// book was finished; it must not count as an active day or stretch the
+// calendar span.
+test("a later page-count correction does not stretch the reading span", () => {
   const event = (type: "reading" | "update", createdAt: string, pagesRead: number): ReadingEventStub => ({
     type,
     createdAt: Timestamp.fromDate(new Date(createdAt)),
@@ -223,7 +241,11 @@ test("a later page-count correction does not move the finish date", () => {
     timeRead: type === "reading" ? 60 : 0,
   });
   const result = catalog.summarizeReadingAttempt(
-    {finished: true, finishedAt: null, pageCount: 250},
+    {
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("2026-03-02T10:00:00.000Z")),
+      pageCount: 250,
+    },
     [
       event("reading", "2026-03-01T10:00:00.000Z", 150),
       event("reading", "2026-03-02T10:00:00.000Z", 150),
@@ -305,7 +327,12 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
         }})}),
       },
     },
-    identity: {uid: `reader-${index}`, finished: true, finishedAt: null, pageCount: 300},
+    identity: {
+      uid: `reader-${index}`,
+      finished: true,
+      finishedAt: Timestamp.fromDate(new Date("2026-08-21T18:00:00.000Z")),
+      pageCount: 300,
+    },
     shared: {
       username: `reader-${index}`,
       displayName: `Reader ${index}`,
@@ -348,7 +375,7 @@ test("the largest possible owner page is summarized in full", async () => {
     identity: {
       uid: `reader-${Math.floor(index / 5)}`,
       finished: true,
-      finishedAt: null,
+      finishedAt: Timestamp.fromDate(new Date("2026-08-21T18:00:00.000Z")),
       pageCount: 300,
     },
     shared: {
@@ -855,11 +882,23 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   assert.deepEqual(existing, {workId: "canonical-work", editionId: "old-edition", created: false});
   assert.deepEqual(created, []);
 
-  // A retired author cannot seed a work.
-  rows.set("catalogAuthors/ada", {...activeAuthor("Ada Lovelace"), status: "merged", mergedInto: "x"});
+  // A client that loaded its author list before an admin merge still
+  // names the absorbed author: the work is written with the survivor.
+  rows.set("catalogAuthors/ada", {...activeAuthor("Ada Lovelace"), status: "merged", mergedInto: "lovelace"});
+  rows.set("catalogAuthors/lovelace", {...activeAuthor("Ada Lovelace"), mergedFrom: ["ada"]});
+  const resolved = await deployed.catalog.create.run({
+    work: {...work, authorIds: ["ada", "lovelace"]}, edition,
+  }, authContext);
+  assert.deepEqual(rows.get(`works/${resolved.workId}`)?.authorIds, ["lovelace"]);
+
+  // A chain (the merge transaction flattens them, so this is corruption)
+  // is refused rather than followed.
+  rows.set("catalogAuthors/lovelace", {
+    ...activeAuthor("Ada Lovelace"), status: "merged", mergedInto: "elsewhere",
+  });
   await assert.rejects(
     deployed.catalog.create.run({work, edition}, authContext),
-    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /no longer active/),
+    (error) => error instanceof Error && /not one hop at catalogAuthors\/ada/.test(error.message),
   );
 });
 
@@ -989,12 +1028,16 @@ test("work readers resolve aliases and return only consented redacted summaries"
     privateNote: "must not be returned",
   };
   const updates = snap("users/shared-reader/books/reread/updates/session", updatesData);
-  const bookSnap = (uid: string, owner: {path: string}, id: string) => snap(`users/${uid}/books/${id}`, {
+  const bookSnap = (
+    uid: string, owner: {path: string}, id: string, overrides: Row = {},
+  ) => snap(`users/${uid}/books/${id}`, {
     owner,
     finished: true,
+    finishedAt: Timestamp.fromDate(new Date("2026-08-20T20:00:00.000Z")),
     pageCount: 300,
     editionId: "edition-one",
     email: `${uid}@example.test`,
+    ...overrides,
   }, {
     ref: {
       path: `users/${uid}/books/${id}`,
@@ -1130,9 +1173,13 @@ test("work readers resolve aliases and return only consented redacted summaries"
         ]);
         return {orderBy: () => ({limit: (limit: number) => {
           assert.equal(limit, 6);
+          // A finished book without its finishedAt stamp is malformed
+          // (every finished book carries one since the backfill) and is
+          // omitted like the bad owner, never dated from its history.
           const visibleBooks = malformedBook ? [
             ...books,
             bookSnap("shared-reader", {path: "users/other"}, "invalid-owner"),
+            bookSnap("shared-reader", sharedOwner, "unstamped", {finishedAt: undefined}),
           ] : books;
           return {get: async () => ({docs: visibleBooks, size: visibleBooks.length})};
         }})};
@@ -1215,7 +1262,8 @@ test("work readers resolve aliases and return only consented redacted summaries"
     {workId: "canonical-work"}, authContext,
   );
   assert.equal(malformedBookResult.incomplete, true);
-  assert.equal(malformedBookResult.omittedAttempts, 1);
+  assert.equal(malformedBookResult.omittedAttempts, 2);
+  assert.equal(malformedBookResult.attempts.length, 1);
   malformedBook = false;
   updatesData.book = {path: "users/shared-reader/books/a-different-book"};
   const malformedUpdateResult = await deployed.catalog.workreaders.run(

@@ -221,8 +221,7 @@ migration, then the client:
    allowlist the four catalog link fields the migration adds, which the
    previous Rules reject on a book's next edit — run the migration first and
    every migrated book is frozen for its owner until the deploy lands. The
-   composite and collection-group indexes must exist before search or a
-   curation merge run, and
+   composite indexes must exist before search or a curation merge run, and
    the new callables and projection triggers are simply unused until the
    client ships. The cost of this order is stated in step 2;
 2. run the standard snapshot, dry-run, apply-twice, and audit loop with the

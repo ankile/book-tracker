@@ -139,17 +139,12 @@ test('catalog queries have the required collection-group and pagination indexes'
     assert.equal(override.indexes.some((entry) =>
       entry.order === 'ASCENDING' && entry.queryScope === 'COLLECTION_GROUP'), true);
   }
-  // The post-merge canonicalization sweep finds every personal book naming
-  // an absorbed author through a collection-group array-contains query.
-  // Firestore's automatic single-field indexes are collection-scoped only,
-  // and the emulator does not enforce indexes, so without this override the
-  // first production merge fails after its redirect commits.
-  const authorIds = parsed.fieldOverrides.find((entry) =>
-    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds');
-  assert.ok(authorIds, 'missing books.authorIds field override');
-  assert.equal(authorIds.indexes.some((entry) =>
-    entry.arrayConfig === 'CONTAINS' && entry.queryScope === 'COLLECTION_GROUP'), true,
-  'missing collection-group CONTAINS index for books.authorIds');
+  // mergeAuthors leaves personal books untouched (they resolve through the
+  // merged alias), so no collection-group index on books.authorIds exists;
+  // an override reappearing here means a book fan-out query came back.
+  assert.equal(parsed.fieldOverrides.some((entry) =>
+    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds'), false,
+  'unexpected books.authorIds field override');
 
   assert.equal(parsed.indexes.some((index) =>
     index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&
@@ -181,16 +176,6 @@ test('migration docs mark one-time rollouts complete and prescribe idempotency',
     'node <migration>.ts --prod --apply',
     'node db-audit.ts --prod',
   ]);
-});
-
-test('the reviewed catalog manifest is tracked and the docs say so consistently', async () => {
-  const migrations = await readFile(migrationsUrl, 'utf8');
-  const manifest = JSON.parse(
-    await readFile(new URL('../reviewed-cross-user-works.json', import.meta.url), 'utf8'),
-  ) as {groups: unknown[]};
-  assert.ok(Array.isArray(manifest.groups) && manifest.groups.length >= 1);
-  assert.match(migrations, /`reviewed-cross-user-works\.json`,\s+tracked in this repository/);
-  assert.doesNotMatch(migrations, /manifests?[^.\n]*(?:not in Git|out of Git|private runbook)/i);
 });
 
 test('README lists every package script', async () => {

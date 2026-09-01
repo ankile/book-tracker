@@ -128,28 +128,11 @@ test('admin preview and apply decoders retain exact before/after differences', (
       before: {workId: null}, after: {workId: 'work', editionId: null},
     }],
     touchedDocuments: 2,
-    canonicalize: null,
   });
   assert.deepEqual(preview.changes[0].after, {workId: 'work', editionId: null});
-  assert.equal(preview.canonicalize, null);
-  assert.deepEqual(decodeAdminCatalogPreviewResponse({
-    ...preview, changes: [], expected: {catalog: [], books: []},
-    canonicalize: {absorbed: ['alias'], targetId: 'target', works: 198, books: 2},
-  }).canonicalize, {absorbed: ['alias'], targetId: 'target', works: 198, books: 2});
-  assert.throws(() => decodeAdminCatalogPreviewResponse({
-    ...preview, changes: [], expected: {catalog: [], books: []},
-    canonicalize: {absorbed: ['alias'], targetId: 'target', works: -1, books: 2},
-  }), /non-negative integer/);
   assert.deepEqual(decodeAdminCatalogApplyResponse({
-    operationId: 'operation', applied: true, touchedDocuments: 2, canonicalized: null,
-  }), {operationId: 'operation', applied: true, touchedDocuments: 2, canonicalized: null});
-  assert.deepEqual(decodeAdminCatalogApplyResponse({
-    operationId: 'operation', applied: true, touchedDocuments: 3,
-    canonicalized: {works: 198, liveBooks: 1, frozenBooks: 1},
-  }).canonicalized, {works: 198, liveBooks: 1, frozenBooks: 1});
-  assert.throws(() => decodeAdminCatalogApplyResponse({
-    operationId: 'operation', applied: true, touchedDocuments: 3,
-  }), /canonicalized/);
+    operationId: 'operation', applied: true, touchedDocuments: 2,
+  }), {operationId: 'operation', applied: true, touchedDocuments: 2});
   assert.throws(() => decodeAdminCatalogPreviewResponse({
     ...preview, changes: [{...preview.changes[0], after: {bad: Number.NaN}}],
   }), /finite number/);

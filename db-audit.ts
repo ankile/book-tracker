@@ -209,8 +209,6 @@ for (const workDoc of works.docs) {
       work.authorIds.some((id) => typeof id !== 'string')) {
     found('catalog.work.bad-authors', path, JSON.stringify(work.authorIds));
   } else {
-    // Merges canonicalize work references in a post-commit sweep; a
-    // surviving alias resolves but marks an interrupted sweep.
     for (const authorId of work.authorIds) {
       const resolution = resolveCatalogAuthor(authorId);
       if (resolution.id === null) found('catalog.work.author-unresolved', path, authorId);

@@ -4,8 +4,6 @@ import type {
   AdminCatalogAuthorRow,
   AdminCatalogBookRow,
   AdminCatalogBookTarget,
-  AdminCatalogCanonicalized,
-  AdminCatalogCanonicalizePlan,
   AdminCatalogChange,
   AdminCatalogEditionRow,
   AdminCatalogExpectedBook,
@@ -382,34 +380,11 @@ function decodeChange(value: unknown, context: string): AdminCatalogChange {
   };
 }
 
-function decodeCanonicalizePlan(value: unknown, context: string): AdminCatalogCanonicalizePlan | null {
-  if (value === null) return null;
-  const data = record(value, context);
-  exactKeys(data, ['absorbed', 'targetId', 'works', 'books'], context);
-  return {
-    absorbed: strings(data.absorbed, `${context}.absorbed`),
-    targetId: nonEmptyString(data.targetId, `${context}.targetId`),
-    works: nonNegativeInteger(data.works, `${context}.works`),
-    books: nonNegativeInteger(data.books, `${context}.books`),
-  };
-}
-
-function decodeCanonicalized(value: unknown, context: string): AdminCatalogCanonicalized | null {
-  if (value === null) return null;
-  const data = record(value, context);
-  exactKeys(data, ['works', 'liveBooks', 'frozenBooks'], context);
-  return {
-    works: nonNegativeInteger(data.works, `${context}.works`),
-    liveBooks: nonNegativeInteger(data.liveBooks, `${context}.liveBooks`),
-    frozenBooks: nonNegativeInteger(data.frozenBooks, `${context}.frozenBooks`),
-  };
-}
-
 export function decodeAdminCatalogPreviewResponse(value: unknown): AdminCatalogPreviewResponse {
   const data = record(value, 'admin-catalogpreview response');
   exactKeys(
     data,
-    ['operationId', 'operationHash', 'expected', 'changes', 'touchedDocuments', 'canonicalize'],
+    ['operationId', 'operationHash', 'expected', 'changes', 'touchedDocuments'],
     'admin-catalogpreview response',
   );
   return {
@@ -421,17 +396,12 @@ export function decodeAdminCatalogPreviewResponse(value: unknown): AdminCatalogP
       data.touchedDocuments,
       'admin-catalogpreview response.touchedDocuments',
     ),
-    canonicalize: decodeCanonicalizePlan(data.canonicalize, 'admin-catalogpreview response.canonicalize'),
   };
 }
 
 export function decodeAdminCatalogApplyResponse(value: unknown): AdminCatalogApplyResponse {
   const data = record(value, 'admin-catalogapply response');
-  exactKeys(
-    data,
-    ['operationId', 'applied', 'touchedDocuments', 'canonicalized'],
-    'admin-catalogapply response',
-  );
+  exactKeys(data, ['operationId', 'applied', 'touchedDocuments'], 'admin-catalogapply response');
   if (data.applied !== true) throw new TypeError('admin-catalogapply response.applied: expected true');
   return {
     operationId: nonEmptyString(data.operationId, 'admin-catalogapply response.operationId'),
@@ -440,7 +410,6 @@ export function decodeAdminCatalogApplyResponse(value: unknown): AdminCatalogApp
       data.touchedDocuments,
       'admin-catalogapply response.touchedDocuments',
     ),
-    canonicalized: decodeCanonicalized(data.canonicalized, 'admin-catalogapply response.canonicalized'),
   };
 }
 

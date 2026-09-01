@@ -348,29 +348,12 @@ export interface AdminCatalogPreviewRequest {
   operation: AdminCatalogOperation;
 }
 
-// An author merge is atomic on the author documents only; the same apply
-// call then rewrites every work and live-account book naming an absorbed
-// id, in pages, and reports what it rewrote.
-export interface AdminCatalogCanonicalizePlan {
-  absorbed: string[];
-  targetId: string;
-  works: number;
-  books: number;
-}
-
-export interface AdminCatalogCanonicalized {
-  works: number;
-  liveBooks: number;
-  frozenBooks: number;
-}
-
 export interface AdminCatalogPreviewResponse {
   operationId: string;
   operationHash: string;
   expected: AdminCatalogExpectedState;
   changes: AdminCatalogChange[];
   touchedDocuments: number;
-  canonicalize: AdminCatalogCanonicalizePlan | null;
 }
 
 export interface AdminCatalogApplyRequest {
@@ -383,5 +366,4 @@ export interface AdminCatalogApplyResponse {
   operationId: string;
   applied: true;
   touchedDocuments: number;
-  canonicalized: AdminCatalogCanonicalized | null;
 }
