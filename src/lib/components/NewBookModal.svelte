@@ -2,8 +2,10 @@
   import ModalCard from "$lib/components/ModalCard.svelte";
   import Input from "$lib/components/Input.svelte";
   import AuthorInput from "$lib/components/AuthorInput.svelte";
+  import CatalogMatchPanel from "$lib/components/CatalogMatchPanel.svelte";
 
   import { Database } from "../firebase/db.ts";
+  import { user } from "../firebase/auth.ts";
   import { editableBookAuthorChips, resolveChip, AUTHOR_KINDS } from "../utils/authors.ts";
   import { normalizeIsbn } from "../utils/isbn.ts";
   import {
@@ -19,19 +21,33 @@
     extractModsGenres,
     extractModsCoverUrl,
   } from "../utils/nasjonalbiblioteket.ts";
-  import { lookupIsbn } from "../firebase/functions.ts";
+  import { catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
+  import type {
+    CatalogSearchResult,
+    CatalogSelection,
+  } from "../interfaces/catalog.ts";
   import {
     bookDeletionPolicy,
     executeBookWrite,
     fillMissingItems,
     fillMissingPageCount,
     fillMissingText,
+    MAX_BOOK_AUTHORS,
     prepareBookWrite,
   } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
+  import {
+    automaticIsbnSelectionStillApplies,
+    buildCatalogCreateRequest,
+    buildCatalogSearchRequest,
+    createLatestRequestGate,
+    exactEditionPreselection,
+    linkedBooksForWork,
+    selectionForResult,
+  } from "../utils/catalogClient.ts";
 
   let {
     open, userId, book = null, onclose,
@@ -45,7 +61,7 @@
   let authorsLoaded = $state(false);
   $effect(() => {
     if (!open || !userId) return;
-    const store = Database.getAuthors(userId);
+    const store = Database.getAuthors();
     const unsubscribeStore = store.subscribe((authors) => {
       if (authors === undefined) return;
       authorList = authors;
@@ -64,17 +80,60 @@
   // ISBN-derived metadata (bookMetadata.ts shape). Seeded from the book in
   // edit mode so saving without a fresh lookup preserves what's stored.
   let metadata = $state<BookMetadata>({ ...EMPTY_METADATA });
+  let allBooks = $state<Book[]>([]);
+  let catalogResults = $state<CatalogSearchResult[]>([]);
+  let catalogSelection = $state<CatalogSelection | null>(null);
+  let selectedCatalogResult = $state<CatalogSearchResult | null>(null);
+  let catalogLoading = $state(false);
+  let catalogMessage = $state("");
+  let catalogChoiceTouched = $state(false);
+  let automaticSelectionIsbn13 = $state<string | null>(null);
+  let online = $state(true);
+  const catalogRequestGate = createLatestRequestGate();
+
+  $effect(() => {
+    if (!open || !userId) return;
+    const store = Database.getAllBooks(userId);
+    return store.subscribe((books) => {
+      if (books !== undefined) allBooks = books;
+    });
+  });
+
+  $effect(() => {
+    const updateOnline = () => (online = navigator.onLine);
+    updateOnline();
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+    return () => {
+      window.removeEventListener('online', updateOnline);
+      window.removeEventListener('offline', updateOnline);
+    };
+  });
 
   let isEditMode = $derived(!!book);
   let deletionPolicy = $derived(book === null ? null : bookDeletionPolicy(book.activeTimer));
   let isLookingUp = $state(false);
   let lookupError = $state("");
   let bookWrite = $state({ accepted: false });
+  let resolvingAuthors = $state(false);
+  let creatingWork = $state(false);
+  let authorResolutionRequest = 0;
   const unresolvedAuthorCount = $derived(authorChips.filter(
     (chip) => chip.id !== null && 'unresolved' in chip,
   ).length);
 
+  // Seed every modal session, including a fresh add after the component was
+  // closed without being unmounted on /me. A plain sentinel avoids tracking
+  // bookkeeping while still letting a different edited book reseed in place.
+  let seededFormBookId: string | null | undefined;
   $effect(() => {
+    if (!open) {
+      seededFormBookId = undefined;
+      return;
+    }
+    const bookId = book?.id ?? null;
+    if (seededFormBookId === bookId) return;
+    seededFormBookId = bookId;
     title = book?.title ?? "";
     pageCount = book?.pageCount;
     currentPage = book?.currentPage ?? 1;
@@ -86,19 +145,41 @@
       subjects: book?.subjects ?? [],
       fiction: book?.fiction ?? null,
     };
+    catalogSelection = book?.workId
+      ? {
+        workId: book.workId,
+        editionId: book.editionId,
+        // Existing migration/admin links keep their stored matchMethod
+        // because prepareBookWrite omits an unchanged link patch.
+        matchMethod: 'catalog-choice',
+      }
+      : null;
+    selectedCatalogResult = null;
+    catalogChoiceTouched = false;
+    automaticSelectionIsbn13 = book?.matchMethod === 'isbn'
+      ? normalizeIsbn(book.isbn)
+      : null;
+    catalogResults = [];
+    catalogMessage = "";
+    lookupError = "";
   });
 
   // Chips seed separately from the plain fields: resolving authorIds
-  // needs the author docs, and the seed must run exactly once per opened
+  // needs the shared author catalog, and the seed must run exactly once per opened
   // book so a later authors snapshot can't wipe in-progress edits.
   // Plain variable, not $state — bookkeeping the effect must not track.
   let seededBookId: string | null | undefined;
   $effect(() => {
     if (!open) {
+      authorResolutionRequest += 1;
+      resolvingAuthors = false;
       bookWrite.accepted = false;
       seededBookId = undefined;
       authorChips = [];
       lookupError = "";
+      catalogRequestGate.invalidate();
+      catalogResults = [];
+      catalogMessage = "";
       return;
     }
     if (!authorsLoaded) return;
@@ -116,13 +197,127 @@
     }
   });
 
-  function handleSubmit() {
+  const catalogAuthorNames = $derived(authorChips.map((chip) => chip.name).filter(Boolean));
+  const duplicateBooks = $derived(
+    selectedCatalogResult === null
+      ? []
+      : linkedBooksForWork(allBooks, selectedCatalogResult.work, book?.id ?? null),
+  );
+
+  $effect(() => {
+    if (!open || !authorsLoaded) return;
+    const request = buildCatalogSearchRequest({isbn, title, authorNames: catalogAuthorNames});
+    if (request === null) {
+      catalogRequestGate.invalidate();
+      catalogResults = [];
+      catalogLoading = false;
+      if (automaticSelectionIsbn13 !== null) {
+        catalogSelection = null;
+        selectedCatalogResult = null;
+        automaticSelectionIsbn13 = null;
+      }
+      return;
+    }
+    if (!automaticIsbnSelectionStillApplies(automaticSelectionIsbn13, request)) {
+      catalogSelection = null;
+      selectedCatalogResult = null;
+      automaticSelectionIsbn13 = null;
+    }
+    if (!online) {
+      catalogRequestGate.invalidate();
+      catalogLoading = false;
+      catalogMessage = catalogSelection === null
+        ? 'Catalog lookup is unavailable offline. Saving will keep this book unlinked.'
+        : 'Catalog lookup is unavailable offline. Your current shared-work choice remains selected.';
+      return;
+    }
+
+    // Input changes make any already-running request stale immediately, not
+    // only after the replacement request starts at the end of the debounce.
+    catalogRequestGate.invalidate();
+    catalogResults = [];
+    const timeout = window.setTimeout(() => void searchCatalog(request), 350);
+    return () => window.clearTimeout(timeout);
+  });
+
+  async function searchCatalog(request: NonNullable<ReturnType<typeof buildCatalogSearchRequest>>) {
+    const requestId = catalogRequestGate.begin();
+    catalogLoading = true;
+    catalogMessage = '';
+    try {
+      const response = await catalogSearch(request);
+      if (!catalogRequestGate.isCurrent(requestId)) return;
+      catalogResults = response.results;
+      if (catalogSelection !== null) {
+        selectedCatalogResult = response.results.find((result) =>
+          result.workId === catalogSelection?.workId ||
+          result.work.mergedFrom.includes(catalogSelection?.workId ?? '')) ?? selectedCatalogResult;
+      }
+      const exact = exactEditionPreselection(response.results);
+      if (!catalogChoiceTouched && catalogSelection === null && exact !== null) {
+        selectCatalogResult(exact, false);
+      }
+    } catch (error) {
+      if (!catalogRequestGate.isCurrent(requestId)) return;
+      console.error('Catalog search failed', error);
+      catalogResults = [];
+      catalogMessage = 'Catalog suggestions are unavailable. You can still save this book unlinked.';
+    } finally {
+      if (catalogRequestGate.isCurrent(requestId)) catalogLoading = false;
+    }
+  }
+
+  function selectCatalogResult(result: CatalogSearchResult, touched = true) {
+    catalogSelection = selectionForResult(result);
+    selectedCatalogResult = result;
+    catalogChoiceTouched = touched;
+    automaticSelectionIsbn13 = touched ? null : normalizeIsbn(isbn);
+    title = fillMissingText(title, result.edition?.title || result.work.canonicalTitle);
+    const inheritingAuthors = authorChips.length === 0;
+    authorChips = fillMissingItems(
+      authorChips,
+      result.work.authors
+        .slice(0, MAX_BOOK_AUTHORS)
+        .map((author) => resolveChip(author.canonicalName, authorList)),
+    );
+    if (inheritingAuthors && result.work.authors.length > MAX_BOOK_AUTHORS) {
+      catalogMessage = `This work has ${result.work.authors.length} catalog authors. The first ${MAX_BOOK_AUTHORS} were copied to your personal book.`;
+    }
+    pageCount = fillMissingPageCount(pageCount, [result.edition?.suggestedPageCount ?? undefined]);
+    metadata = {
+      coverUrl: fillMissingText(metadata.coverUrl, result.edition?.coverUrl || result.work.coverUrl),
+      publisher: fillMissingText(metadata.publisher, result.edition?.publisher ?? ''),
+      publishedDate: fillMissingText(metadata.publishedDate, result.edition?.publishedDate ?? ''),
+      subjects: fillMissingItems(metadata.subjects, result.work.subjects),
+      fiction: metadata.fiction ?? result.work.fiction,
+    };
+  }
+
+  function removeCatalogLink() {
+    catalogSelection = null;
+    selectedCatalogResult = null;
+    catalogChoiceTouched = true;
+    automaticSelectionIsbn13 = null;
+    catalogMessage = 'This personal book will be saved without a shared-work link.';
+  }
+
+  async function handleSubmit() {
+    if (resolvingAuthors) return;
     lookupError = "";
+    // The shared author list is readable by verified accounts only, so for
+    // an unverified account the listener never delivers and "loading" would
+    // be a lie the user cannot act on.
+    if ($user && !$user.emailVerified) {
+      lookupError = 'Verify your email address to add or edit books.';
+      return;
+    }
     if (!authorsLoaded) {
       lookupError = 'Authors loading.';
       return;
     }
-    const prepared = prepareBookWrite({
+    // Re-run after every step that can change the draft (author resolution,
+    // catalog creation): each one rewrites state the write depends on.
+    const preparedWrite = () => prepareBookWrite({
       userId,
       book,
       authorChips,
@@ -131,10 +326,77 @@
       currentPage,
       isbn,
       metadata: $state.snapshot(metadata),
+      catalogSelection: $state.snapshot(catalogSelection),
+      catalogSelectionTouched: catalogChoiceTouched,
+      catalogSelectionIsbn13: automaticSelectionIsbn13,
     });
+    let prepared = preparedWrite();
     if (!prepared.valid) {
       lookupError = prepared.message;
       return;
+    }
+    if (authorChips.some((chip) => chip.id === null)) {
+      if (!online) {
+        lookupError = 'Connect to create a new shared author, then try again.';
+        return;
+      }
+      const request = ++authorResolutionRequest;
+      resolvingAuthors = true;
+      try {
+        const resolved = await Database.resolveBookAuthors(authorChips);
+        if (!open || request !== authorResolutionRequest) return;
+        authorChips = resolved;
+      } catch (error) {
+        if (request !== authorResolutionRequest) return;
+        lookupError = error instanceof Error
+          ? error.message
+          : 'Could not create the shared author. Try again.';
+        return;
+      } finally {
+        if (request === authorResolutionRequest) resolvingAuthors = false;
+      }
+      prepared = preparedWrite();
+      if (!prepared.valid) {
+        lookupError = prepared.message;
+        return;
+      }
+    }
+    // A book that matched nothing and that the user did not explicitly
+    // save unlinked seeds the shared catalog itself (catalog data is
+    // public). Offline it stays unlinked, as the panel says; a creation
+    // failure keeps the draft so the user can retry or save unlinked.
+    if (catalogSelection === null && !catalogChoiceTouched && online) {
+      const request = buildCatalogCreateRequest({
+        title: prepared.write.input.title,
+        authorIds: authorChips.flatMap((chip) => chip.id === null ? [] : [chip.id]),
+        isbn: prepared.write.input.isbn,
+        pageCount: prepared.write.input.pageCount,
+        metadata: $state.snapshot(metadata),
+      });
+      if (request !== null) {
+        creatingWork = true;
+        try {
+          const created = await catalogCreate(request);
+          if (!open) return;
+          catalogSelection = {
+            workId: created.workId,
+            editionId: created.editionId,
+            matchMethod: 'catalog-choice',
+          };
+          catalogChoiceTouched = true;
+        } catch (error) {
+          console.error('Catalog creation failed', error);
+          lookupError = 'Could not create the shared work. Try again, or remove the link to save the book unlinked.';
+          return;
+        } finally {
+          creatingWork = false;
+        }
+        prepared = preparedWrite();
+        if (!prepared.valid) {
+          lookupError = prepared.message;
+          return;
+        }
+      }
     }
     // The SDK has accepted the mutation into its offline queue once the
     // wrapped method returns its promise. Close now; waiting for that promise
@@ -209,7 +471,9 @@
       title = fillMissingText(title, primary.title);
       authorChips = fillMissingItems(
         authorChips,
-        primary.authorNames.map((name) => resolveChip(name, authorList)),
+        primary.authorNames
+          .slice(0, MAX_BOOK_AUTHORS)
+          .map((name) => resolveChip(name, authorList)),
       );
 
       pageCount = fillMissingPageCount(pageCount, [
@@ -429,10 +693,10 @@
   onclose={() => onclose()}
   header={isEditMode ? 'Edit book' : 'Add new book'}
   primaryText={isEditMode ? 'Update book' : 'Add book'}
-  primaryDisabled={!authorsLoaded || bookWrite.accepted}
+  primaryDisabled={!authorsLoaded || resolvingAuthors || creatingWork || bookWrite.accepted}
   primaryAction={handleSubmit}>
   <Input label="Author" inputId="author">
-    <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" />
+    <AuthorInput bind:chips={authorChips} authors={authorList} inputId="author" disabled={resolvingAuthors} />
   </Input>
 
   {#if unresolvedAuthorCount > 0}
@@ -450,6 +714,7 @@
       <select
         class="form-select detail-kind"
         aria-label={`Kind of new author ${chip.name}`}
+        disabled={resolvingAuthors}
         bind:value={chip.kind}>
         {#each AUTHOR_KINDS as kind (kind)}
           <option value={kind}>{kind}</option>
@@ -461,6 +726,7 @@
           class="form-control"
           placeholder="First name(s)"
           aria-label={`First name(s) of ${chip.name}`}
+          disabled={resolvingAuthors}
           bind:value={chip.givenName} />
         <input
           type="text"
@@ -468,6 +734,7 @@
           placeholder="Last name"
           aria-label={`Last name of ${chip.name}`}
           required
+          disabled={resolvingAuthors}
           bind:value={chip.familyName} />
       {:else}
         <input
@@ -476,6 +743,7 @@
           placeholder="Name"
           aria-label={`Name of ${chip.name}`}
           required
+          disabled={resolvingAuthors}
           bind:value={chip.name} />
       {/if}
     </div>
@@ -489,7 +757,7 @@
 
   <div class="space"></div>
 
-  <Input label="Number of pages" inputId="pageCount">
+  <Input label="Your edition's page count" inputId="pageCount">
     <input
       id="pageCount"
       class="form-control"
@@ -550,6 +818,17 @@
       </div>
     </div>
   {/if}
+
+  <CatalogMatchPanel
+    suggestions={catalogResults}
+    selected={catalogSelection}
+    selectedResult={selectedCatalogResult}
+    duplicates={duplicateBooks}
+    loading={catalogLoading}
+    {online}
+    message={catalogMessage}
+    onselect={selectCatalogResult}
+    onremove={removeCatalogLink} />
 
   {#if isEditMode}
     <button

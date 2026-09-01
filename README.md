@@ -54,7 +54,12 @@ editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
   integration.
 - Shows yearly statistics, reading streaks, a daily activity heatmap, and
   per-book reading speed.
-- Supports author cleanup, merging, and classification within an account.
+- Resolves authors through one shared catalog and lets authorized operators
+  curate author identities, aliases, classifications, and merges.
+- Suggests existing shared works and editions while keeping each reader's
+  own title, page count, progress, and reading history independent.
+- Shows opted-in reading summaries for a shared work without exposing raw
+  session records.
 - Finds books whose ISBN data needs repair.
 - Publishes an optional reading profile with a separate search-discovery
   setting.
@@ -92,6 +97,28 @@ fallback only. It is not part of the live app or a scheduled workflow.
 
 Books without a valid ISBN appear on `/isbns` and can be repaired through the
 normal edit dialog.
+
+## Shared catalog
+
+The shared catalog connects personal books without replacing them. A Work is
+the common intellectual work and references shared author entities. An Edition
+is a publication of that Work and can carry its own identifier, title, cover,
+page-count hint, publisher, date, language, format, and translators. Work-level
+title, authors, cover, subjects, and fiction classification provide
+fallback metadata.
+
+Selecting a suggestion fills only empty personal fields. The personal book
+remains authoritative for tracking and may use a different page count or title,
+or remain unlinked. Verified accounts create what the catalog is missing: when
+a search finds nothing, the app creates the Work and Edition, and resolves or
+creates the shared authors it needs. Bibliographic records are public whoever
+added them; operators curate them afterwards through the restricted catalog
+page. Reader comparisons on `/books/[workId]` include only records whose owners
+enabled book sharing through a public profile.
+
+The collections, statuses, consent boundary, and admin operations are
+documented in [docs/catalog.md](docs/catalog.md). The migration and rollout
+boundary is in [MIGRATIONS.md](MIGRATIONS.md#shared-catalog-rollout).
 
 ## Requirements
 
@@ -195,6 +222,7 @@ Root package commands:
 | `npm run check:watch` | Watch-mode Svelte checks |
 | `npm run test:unit` | Application and migration unit tests |
 | `npm run test:rules` | Firestore Rules and integration tests against local emulators |
+| `npm run test:catalog-emulator` | Restricted catalog preview/apply workflow against local emulators |
 | `npm run test:functions` | Functions lint, production build, strict test type-check, and tests |
 | `npm run test:pwa` | Service-worker and PWA behavior tests |
 | `npm run test:artifacts` | Generated build and renderer artifact checks |
@@ -215,6 +243,7 @@ Functions package commands:
 | `npm --prefix functions run clean` | Remove compiled backend output |
 | `npm --prefix functions run build` | Compile backend TypeScript |
 | `npm --prefix functions run check:test` | Strictly type-check backend tests |
+| `npm --prefix functions run stage:emulator-secrets` | Stage checked-in local-only emulator credentials |
 | `npm --prefix functions run serve` | Build and start the local emulator suite |
 | `npm --prefix functions run shell` | Alias for the emulator workflow |
 | `npm --prefix functions start` | Alias for the emulator workflow |

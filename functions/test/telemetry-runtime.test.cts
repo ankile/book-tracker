@@ -7,6 +7,7 @@ const {logger}: typeof import("firebase-functions") = require("firebase-function
 
 type TestContext = import("node:test").TestContext;
 type Quota = Record<string, unknown> | undefined;
+type UserData = Record<string, unknown> | undefined;
 interface TransactionStub {
   get(ref: object): Promise<{data(): Quota}>;
   set(ref: object, value: Record<string, unknown>): void;
@@ -32,7 +33,7 @@ interface Deployed {
 
 const deployed: Deployed = require("../lib");
 const db = getFirestore();
-const authContext = {auth: {uid: "owner", token: {}}};
+const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
 const report = {
   level: "error",
   event: "firestore.listener_failed",
@@ -50,7 +51,8 @@ function snapshot(data: Quota): {data(): Quota} {
 function installStore(
   t: TestContext,
   initialQuota: Quota = undefined,
-): {quota(): Quota; rows: StoredIssueRow[]} {
+  userData: UserData = {},
+): {quota(): Quota; rows: StoredIssueRow[]; userReads(): number} {
   const quotaRef = {};
   let quota = initialQuota;
   const rows: StoredIssueRow[] = [];
@@ -72,7 +74,18 @@ function installStore(
       quota = {...quota, ...patch};
     },
   }));
+  let userReads = 0;
   t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return {doc: (uid: string) => {
+      assert.equal(uid, "owner");
+      return {get: async () => {
+        userReads += 1;
+        return {
+          exists: userData !== undefined,
+          get: (field: string) => userData?.[field],
+        };
+      }};
+    }};
     assert.equal(name, "logEvents");
     return {
       add: async (row: StoredIssueRow) => {
@@ -81,8 +94,28 @@ function installStore(
       },
     };
   });
-  return {quota: () => quota, rows};
+  return {quota: () => quota, rows, userReads: () => userReads};
 }
+
+test("reportissue rejects unverified and deleted accounts before quota or storage", async (t) => {
+  const store = installStore(t, undefined, {deletedAt: {seconds: 1}});
+  await assert.rejects(
+    deployed.telemetry.reportissue.run(
+      report,
+      {auth: {uid: "owner", token: {email_verified: false}}},
+    ),
+    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /Verify your email/),
+  );
+  assert.equal(store.userReads(), 0);
+  await assert.rejects(
+    deployed.telemetry.reportissue.run(report, authContext),
+    (error) => hasCode(error, "failed-precondition") &&
+      messageMatches(error, /account has been deleted/),
+  );
+  assert.equal(store.userReads(), 1);
+  assert.equal(store.quota(), undefined);
+  assert.equal(store.rows.length, 0);
+});
 
 test("reportissue stores an allowlisted row under the caller's uid", async (t) => {
   const store = installStore(t);
@@ -207,4 +240,8 @@ function hasCode(error: unknown, code: string): boolean {
     error !== null &&
     "code" in error &&
     error.code === code;
+}
+
+function messageMatches(error: unknown, pattern: RegExp): boolean {
+  return error instanceof Error && pattern.test(error.message);
 }

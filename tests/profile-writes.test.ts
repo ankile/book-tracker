@@ -77,7 +77,7 @@ test('every profile batch moves the ownership record the rules require', async (
   const deletion = batchWrites(source, method('deleteProfile'));
   assert.deepEqual(
     deletion.map((w) => `${w.verb} ${w.collection}`).sort(),
-    ['delete profileDiscovery', 'delete profileOwners', 'delete profiles'],
+    ['delete profileDiscovery', 'delete profileOwners', 'delete profiles', 'delete users'],
   );
   // The rename deletes the old profile and its old marker, and the record
   // names the new username.
@@ -86,6 +86,15 @@ test('every profile batch moves the ownership record the rules require', async (
   assert.ok(rename.filter((w) => w.collection === 'profileDiscovery' && w.verb === 'delete').length === 1);
   const renameRecord = rename.find((w) => w.collection === 'profileOwners')!;
   assert.equal(renameRecord.args[1].getText(source), '{ username: newUsername }');
+  const sharing = rename.find((w) => w.collection === 'users' && w.verb === 'set')!;
+  assert.ok(sharing, 'renameProfile moves an existing book-sharing setting in the same batch');
+  assert.match(sharing.args[1].getText(source), /profileUsername: newUsername/);
+  // createdAt is never copied: the local copy can be a serverTimestamps
+  // estimate and the update rule requires it unchanged, so the row is
+  // merged instead and the server keeps its own value.
+  assert.doesNotMatch(sharing.args[1].getText(source), /createdAt/);
+  assert.match(sharing.args[1].getText(source), /updatedAt: serverTimestamp\(\)/);
+  assert.match(sharing.args[2].getText(source), /merge: true/);
 });
 
 test('profile writes server-pin updatedAt', async () => {
@@ -98,6 +107,37 @@ test('profile writes server-pin updatedAt', async () => {
   // The own-profile listener must tolerate the pending server timestamp.
   const listener = method('getMyProfile').getText(source);
   assert.match(listener, /profileDoc\.data\(\{ serverTimestamps: 'estimate' \}\)/);
+
+  const sharingListener = method('getBookSharingSettings').getText(source);
+  assert.match(sharingListener, /snapshot\.data\(\{ serverTimestamps: 'estimate' \}\)/);
+  const sharingWrite = method('enableBookSharing').getText(source);
+  assert.match(sharingWrite, /createdAt: serverTimestamp\(\)/);
+  assert.match(sharingWrite, /updatedAt: serverTimestamp\(\)/);
+});
+
+test('book sharing stays outside full profile overwrites', async () => {
+  const { source, method } = await loadDatabase();
+  for (const name of ['createProfile', 'updateProfile']) {
+    const profileWrites = batchWrites(source, method(name)).filter((write) => write.collection === 'profiles');
+    assert.equal(profileWrites.length, 1);
+    assert.doesNotMatch(profileWrites[0].args[1].getText(source), /bookSharing|settings/);
+  }
+
+  const update = method('updateProfile').getText(source);
+  assert.match(update, /if \(removeBookSharing\)/);
+  assert.match(update, /batch\.delete\(doc\(db, 'users', userId, 'settings', 'bookSharing'\)\)/);
+
+  const rename = method('renameProfile').getText(source);
+  assert.match(rename, /bookSharing\.profileUsername !== oldUsername/);
+  assert.match(rename, /doc\(db, 'users', userId, 'settings', 'bookSharing'\)/);
+
+  const deletion = batchWrites(source, method('deleteProfile'));
+  const sharingDelete = deletion.find((write) => write.collection === 'users' && write.verb === 'delete');
+  assert.ok(sharingDelete, 'profile deletion removes the owner-scoped sharing setting');
+  assert.equal(
+    sharingDelete.args[0].getText(source),
+    "doc(db, 'users', userId, 'settings', 'bookSharing')",
+  );
 });
 
 test('client caps mirror the rules literals for books', async () => {

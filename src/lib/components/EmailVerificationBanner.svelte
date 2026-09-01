@@ -70,8 +70,9 @@
 {#if $user && !$user.emailVerified}
   <div class="alert alert-warning verification" role="status">
     <strong>Verify your email address.</strong>
-    Sharing your books with other readers will need a verified address.
-    Use the link in the email we sent to {$user.email}, or request a new one.
+    Until you do, author names stay hidden and books can't be added or edited
+    (the shared author catalog is verified-only). Use the link in the email we
+    sent to {$user.email}, or request a new one.
     <div class="actions">
       <button type="button" class="btn btn-sm btn-dark" onclick={check} disabled={busy}>
         I've verified

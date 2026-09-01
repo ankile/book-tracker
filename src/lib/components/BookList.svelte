@@ -10,6 +10,7 @@
   import { formatTime } from "../utils/format.ts";
   import { finishedDateOf } from "../utils/finished.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
+  import { catalogWorkHref } from "../utils/catalogClient.ts";
   import { FirebaseError } from "firebase/app";
   import type { Author } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
@@ -54,13 +55,13 @@
   const showSessions = (book: Book) => (sessionsBookId = book.id);
   const closeSessions = () => (sessionsBookId = null);
 
-  // Books reference authors by id; resolve them against the user's author
-  // docs. undefined = still loading, during which authorIds books render
+  // Books reference authors by id; resolve them against the shared author
+  // catalog. undefined = still loading, during which authorIds books render
   // an empty author line for a frame rather than strict-looking-up into a
   // map that isn't there yet.
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
-    const authorsStore = Database.getAuthors(userId);
+    const authorsStore = Database.getAuthors();
     const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
     return unsubscribe;
   });
@@ -341,6 +342,20 @@
   .title {
     color: #555;
     font-style: italic;
+  }
+
+  .catalog-link {
+    display: inline-block;
+    margin-top: 0.35rem;
+    color: #35686a;
+    font-size: 0.82rem;
+    font-style: normal;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .catalog-link:hover {
+    text-decoration: underline;
   }
 
   .book-identity {
@@ -647,6 +662,7 @@
   {#each books as book (book.id)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
     {@const resolvedAuthors = repairableBookAuthors(book, authorMap)}
+    {@const workHref = catalogWorkHref(book)}
     <div class="book-row">
       <div class="row">
         <div class="col">
@@ -672,6 +688,10 @@
               <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
               <br />
               <span class="title">{book.title}</span>
+              {#if workHref}
+                <br />
+                <a class="catalog-link" href={workHref}>Linked work</a>
+              {/if}
             </div>
           </div>
         </div>

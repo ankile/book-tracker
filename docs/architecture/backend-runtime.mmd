@@ -31,6 +31,16 @@ flowchart TB
     bookdialog --> metadataapi --> catalog --> bookresult
   end
 
+  subgraph sharedcatalogpath[Shared book catalog]
+    direction LR
+    catalogreader["<b>Signed-in reader</b><br/>Searches or opens a shared Work"]:::source
+    catalogservice["<b>Catalog service</b><br/>Resolves shared authors and books<br/>and returns bounded reader summaries"]:::service
+    sharedcatalog[("<b>Shared catalog</b><br/>Authors · Works · Editions<br/>and consented reader projections")]:::data
+    catalogoperator["<b>Authorized operator</b><br/>Previews and applies curation"]:::source
+    catalogreader --> catalogservice --> sharedcatalog
+    catalogoperator --> catalogservice
+  end
+
   subgraph operationspath[Issue reporting and restricted operations]
     direction LR
     clientissue["<b>Signed-in app</b><br/>Bounded issue report"]:::source
@@ -72,4 +82,4 @@ flowchart TB
 
   observability["<b>Shared operational behavior</b><br/>Backend components emit bounded health and issue signals.<br/>Operational controls watch availability and failed background work."]:::note
 
-  publicpath ~~~ metadatapath ~~~ operationspath ~~~ timerpath ~~~ offlinepath ~~~ lifecyclepath ~~~ observability
+  publicpath ~~~ metadatapath ~~~ sharedcatalogpath ~~~ operationspath ~~~ timerpath ~~~ offlinepath ~~~ lifecyclepath ~~~ observability

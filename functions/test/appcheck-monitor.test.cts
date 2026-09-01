@@ -54,20 +54,28 @@ test("a callable with an App Check token logs appcheck.monitor present", async (
 test("every https.onCall handler starts with logAppCheckPresence", () => {
   const sourceDir = join(__dirname, "..", "src");
   const names = [];
+  const wrappedNames = [];
   let handlers = 0;
   for (const file of readdirSync(sourceDir).filter((f) => f.endsWith(".ts"))) {
     const source = readFileSync(join(sourceDir, file), "utf8");
-    const pattern = /\.https\.onCall\(async \([^)]*\)(?:: [^=]*)? => \{\s*(\w+)\("([^"]+)", context\);/g;
+    const pattern = /\.https\.onCall\(async \([^)]*\)(?:: [^=]*)? => \{\s*(\w+)\((?:"([^"]+)"|(\w+)), context\);/g;
     const total = source.split(".https.onCall(").length - 1;
     let matched = 0;
     for (const match of source.matchAll(pattern)) {
       assert.equal(match[1], "logAppCheckPresence", `${file}: handler opens with ${match[1]}`);
-      names.push(match[2]);
+      if (match[2] !== undefined) names.push(match[2]);
+      else assert.equal(match[3], "endpointName", `${file}: dynamic monitor name is pinned by its wrapper`);
       matched += 1;
+    }
+    for (const match of source.matchAll(/adminCallable(?:<[^>]+>)?\(\s*"([^"]+)"/g)) {
+      wrappedNames.push(match[1]);
     }
     assert.equal(matched, total, `${file}: ${total} onCall handlers, ${matched} open with logAppCheckPresence`);
     handlers += total;
   }
-  assert.equal(handlers, 8, "eight deployed callables carry the monitor line");
-  assert.equal(new Set(names).size, names.length, "each call site names its own function");
+  assert.equal(handlers, 12, "twelve callable handler implementations carry the monitor line");
+  assert.equal(wrappedNames.length, 4, "all four admin callables pin their monitor names at the wrapper call site");
+  const deployedNames = [...names, ...wrappedNames];
+  assert.equal(deployedNames.length, 15, "all fifteen deployed callables are named for monitoring");
+  assert.equal(new Set(deployedNames).size, deployedNames.length, "each callable names its own function");
 });

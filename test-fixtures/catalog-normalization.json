@@ -1,0 +1,34 @@
+[
+  {
+    "input": "The Hitchhiker's Guide to the Galaxy",
+    "output": "hitchhikers guide to the galaxy"
+  },
+  {
+    "input": "Hitchhiker's Guide to the Galaxy, The",
+    "output": "hitchhikers guide to the galaxy"
+  },
+  {
+    "input": "  Cien años de soledad  ",
+    "output": "cien anos de soledad"
+  },
+  {
+    "input": "Søsterklokkene",
+    "output": "sosterklokkene"
+  },
+  {
+    "input": "Tilværelsens uutholdelige letthet",
+    "output": "tilvaerelsens uutholdelige letthet"
+  },
+  {
+    "input": "Þingvellir & Æsir",
+    "output": "thingvellir and aesir"
+  },
+  {
+    "input": "En moderne familie",
+    "output": "en moderne familie"
+  },
+  {
+    "input": "The",
+    "output": "the"
+  }
+]

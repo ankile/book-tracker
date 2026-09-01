@@ -122,6 +122,13 @@ function installOverviewStore(
       });
       const docIds = [...new Set([...docs, ...tombstoned])];
       return {
+        doc: (uid: string) => ({
+          get: async () => ({
+            exists: true,
+            get: (field: string) => field === "deletedAt" && tombstoned.includes(uid) ?
+              Timestamp.fromMillis(1) : undefined,
+          }),
+        }),
         get: async () => ({docs: docIds.map(userDoc)}),
         listDocuments: async () => [...new Set([...uids, ...docIds])].map((uid) => ({id: uid})),
       };

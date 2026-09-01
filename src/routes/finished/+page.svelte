@@ -35,7 +35,7 @@
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
     if ($user) {
-      const authorsStore = Database.getAuthors($user.uid);
+      const authorsStore = Database.getAuthors();
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
       return unsubscribe;
     }

@@ -4,9 +4,11 @@ import type { User } from 'firebase/auth';
 import {
   browserLocalPersistence,
   connectAuthEmulator,
+  EmailAuthProvider,
   getAuth,
   initializeAuth,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut
@@ -110,4 +112,17 @@ export async function signOut(): Promise<void> {
     const { clearLocalData } = await import('./db.ts');
     await clearLocalData();
   }
+}
+
+// Refreshing an ID token does not change its auth_time claim. Admin catalog
+// mutations therefore need a real credential check when the callable reports
+// that the session is older than its fifteen-minute window.
+export async function reauthenticateWithPassword(password: string): Promise<void> {
+  const currentUser = auth.currentUser;
+  if (currentUser === null || currentUser.email === null) {
+    throw new Error('Password reauthentication requires a signed-in account with an email address.');
+  }
+  const credential = EmailAuthProvider.credential(currentUser.email, password);
+  await reauthenticateWithCredential(currentUser, credential);
+  await currentUser.getIdToken(true);
 }

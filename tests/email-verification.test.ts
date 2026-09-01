@@ -76,3 +76,18 @@ test('the profile page no longer tells an unverified user the app cannot verify 
   assert.doesNotMatch(meSource, /cannot verify it yet/);
   assert.match(meSource, /verification email/);
 });
+
+// The shared author catalog is readable by verified accounts only
+// (firestore.rules), so an unverified account's author listener never
+// delivers. Without these two pieces of copy that looks like a bug: rows
+// without author names and an "Authors loading." submit that never ends.
+test('unverified accounts are told what verification unlocks', () => {
+  const modal = readFileSync('src/lib/components/NewBookModal.svelte', 'utf8');
+  const guard = modal.indexOf('if ($user && !$user.emailVerified) {');
+  const loading = modal.indexOf("lookupError = 'Authors loading.'");
+  assert.ok(guard !== -1, 'the modal checks the verification state before submitting');
+  assert.ok(guard < loading, 'the verification message comes before the loading fallback');
+  assert.match(modal, /lookupError = 'Verify your email address to add or edit books\.'/);
+  const banner = readFileSync('src/lib/components/EmailVerificationBanner.svelte', 'utf8');
+  assert.match(banner, /author names stay hidden and books can't be added or edited/);
+});

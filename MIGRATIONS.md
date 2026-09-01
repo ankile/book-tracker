@@ -33,6 +33,7 @@ requires both flags and an interactive confirmation.
 | `db-snapshot.ts` | Read-only JSON snapshot before a migration |
 | `db-restore.ts` | Last-resort restore aid, not a routine rollback command |
 | `migrate-lib.ts` | Shared target selection, confirmation, and connection helpers |
+| `migrate-cross-user-works.ts` | Create the shared author, work, and edition catalog and link personal books |
 | `migrate-*.ts` | Data-shape migrations and bounded maintenance tasks |
 
 ## Standard migration loop
@@ -104,8 +105,8 @@ compatibility sequence. If they do not, stop and add that sequence before
 touching production. Do not reuse a completed rollout sequence from an older
 migration.
 
-Hosting and public profile rendering remain one coupled release artifact. Do
-not deploy Hosting alone during a migration.
+The client site and the public profile renderer remain one coupled release
+artifact. Do not deploy the site alone during a migration.
 
 ### 5. Run the production migration
 
@@ -142,7 +143,7 @@ Do not use it for an ordinary release reversal.
 If a migration partially applies, stop new writes through the private incident
 procedure and determine whether the idempotent migration can safely resume.
 Use a purpose-built repair migration when data written by newer code cannot be
-understood by older code. Never roll back only one member of a coupled Hosting
+understood by older code. Never roll back only one member of a coupled site
 and renderer release.
 
 ## Script conventions
@@ -181,6 +182,7 @@ current deployment instructions.
 | `migrate-timer-claims.ts` | Add server-owned timer claim state | Completed historical rollout. Do not rerun during deployment. |
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
+| `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Implemented and emulator-rehearsed; production rollout pending |
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
@@ -192,6 +194,117 @@ The strict-TypeScript, timer-claim, progress-source, profile-publication, and
 credential-storage rollouts are complete. They are historical context, not
 steps in the current deployment procedure.
 
+## Shared catalog rollout
+
+The shared-catalog migration creates canonical author, Work, Edition, and
+lookup records, rewrites resolvable personal-book author references to the
+shared catalog, and adds explicit catalog links. It never changes personal
+progress, sessions, or the user's chosen page count. Ambiguous records remain
+unlinked and retain the legacy rows needed for review.
+
+Matching is conservative: a normalized edition identifier is strongest;
+otherwise the complete normalized title-and-author identity must agree. A
+reviewed JSON manifest may join exact personal-book paths when an operator has
+resolved a translation or spelling difference. Every reviewed group must
+provide positional `authorNames` and `authorKinds`. The decoder keeps each
+name/kind pair together while normalizing, sorting, and deduplicating, and
+rejects omitted kinds or conflicting classifications.
+
+The release is not additive at the Rules layer — the personal author
+collection loses its write rules and every book write must reference the
+shared author catalog — and the client is a separate deploy artifact from
+Rules and the backend. The order below is Rules and backend, then the
+migration, then the client:
+
+1. deploy Rules, indexes and the backend together, before the migration
+   runs. The new Rules are a superset of the stored book shape: they
+   allowlist the four catalog link fields the migration adds, which the
+   previous Rules reject on a book's next edit — run the migration first and
+   every migrated book is frozen for its owner until the deploy lands. The
+   composite indexes must exist before search or a curation merge run, and
+   the new callables and projection triggers are simply unused until the
+   client ships. The cost of this order is stated in step 2;
+2. run the standard snapshot, dry-run, apply-twice, and audit loop with the
+   exact reviewed manifest. Pass `--expect-overlap-groups=N` with the number
+   the reviewed dry-run printed, so a data change between review and apply
+   is a refusal rather than a different write. The migration writes through
+   the Admin SDK, so Rules do not constrain it. Do not use the app between
+   the snapshot and step 3: the migration is only atomic against data
+   nothing else is writing. A browser tab still holding the pre-catalog
+   bundle is degraded from step 1 onward, not intact: it reads its retained
+   per-user author documents and can still record reading progress, but an
+   add or edit that writes a per-user author is refused until it reloads.
+   Editing is effectively down for un-reloaded tabs during this window;
+3. deploy the client with `npm run pages:deploy`. Rules and Functions went
+   out in step 1, so nothing else ships here; the service worker installs the
+   new bundle on the next navigation. Tell users to reload if a save was
+   refused;
+4. re-run the dry run; apply again only if step 2's window produced new
+   personal-author references (the apply is idempotent and prints them as
+   REVIEW lines otherwise), then audit;
+5. verify catalog suggestions, personal-book edits, sharing convergence, Work
+   reader summaries, and restricted catalog curation.
+
+The two deploy commands are `firebase deploy --only
+firestore:rules,firestore:indexes,functions` for step 1 and `npm run
+pages:deploy` for step 3. They are never one command: the client is served
+from a different platform than Rules and the backend.
+
+### Operator run sheet
+
+One operator session runs the whole rollout start to finish in one sitting.
+There is no scheduling concern: the owner is the only active user and does
+not use the app during the run. The only goal is data integrity — if any
+step's output differs from the reviewed dry run recorded in the operator
+log, stop; the snapshot and PITR are the rollback, and nothing below
+deletes anything.
+
+```bash
+# 0. from merged master, full validation
+nvm use && npm ci && npm --prefix functions ci && npm run validate
+
+# 1. baseline (read-only) + snapshot
+node db-audit.ts --prod
+node db-snapshot.ts --prod
+
+# 2. Rules + indexes + backend, before any data moves
+firebase deploy --only firestore:rules,firestore:indexes,functions
+
+# 3. catalog migration: dry run must match the reviewed numbers exactly,
+#    then apply twice — the second apply must report no writes
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
+npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
+
+# 4. audit, then ship the client and purge the edge cache
+node db-audit.ts --prod
+npm run pages:deploy && npm run pages:purge
+
+# 5. verify by hand: add-book search suggestion, edit an existing book,
+#    a work's reader page, the sharing toggle, /admin/catalog scan
+```
+
+`<N>` and the expected dry-run counts are production observations and live
+in the operator log, not here. The reviewed manifest is
+`reviewed-cross-user-works.json`, tracked in this repository: it is part of
+the reviewed change (which books form a group and under which author), not
+rehearsal evidence.
+
+Legacy per-user author documents and the read-only
+`users/{userId}/authors` compatibility block stay exactly as they are after
+the rollout. No purge script exists and none is scheduled: retained data is
+moved or removed only on an explicit owner request (owner decision
+2026-08-31).
+
+The migration never deletes a document. Legacy per-user author records are
+retained once no book references them (they are unreachable for the new
+client and counted by `db-audit.ts`), a book that still references a
+retired-as-deleted author is a REVIEW line rather than a rewrite, and
+tombstoned accounts are skipped entirely so the private deletion runbook
+stays the only path that touches them.
+
+The migration header documents its flags. Production rehearsal evidence
+(dry-run output, counts, `<N>`) stays in the operator log, not in Git.
 ## finishedAt rollout (completed 2026-09-01)
 
 Books carry an explicit `finishedAt` (a timestamp exactly when `finished`

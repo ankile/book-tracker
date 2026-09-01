@@ -28,7 +28,7 @@ const rows: AccessRow[] = [
     reached: ['Navbar · My site card · direct URL', "Profile 'Go to app' link"],
     read: ['Owner'],
     readKind: 'owner',
-    writes: ['Books · authors · page updates', 'Sessions · reading timers'],
+    writes: ['Personal books · page updates', 'Sessions · reading timers'],
   },
   {
     name: 'Finished',
@@ -36,7 +36,7 @@ const rows: AccessRow[] = [
     reached: ['Navbar · My site card · direct URL'],
     read: ['Owner'],
     readKind: 'owner',
-    writes: ['Books · authors · page updates', 'Reading sessions'],
+    writes: ['Personal books · page updates', 'Reading sessions'],
   },
   {
     name: 'My site',
@@ -52,7 +52,7 @@ const rows: AccessRow[] = [
     reached: ['My site Authors card · direct URL'],
     read: ['Owner'],
     readKind: 'owner',
-    writes: ['Authors · book author references', 'Delete is stored as retirement'],
+    writes: ['None on this page', 'Shared author records are created by book edits'],
   },
   {
     name: 'Book metadata',
@@ -60,7 +60,15 @@ const rows: AccessRow[] = [
     reached: ['My site ISBN card · direct URL'],
     read: ['Owner'],
     readKind: 'owner',
-    writes: ['Book metadata and authors', 'Through the edit-book dialog'],
+    writes: ['Personal book metadata', 'Through the edit-book dialog'],
+  },
+  {
+    name: 'Shared Work',
+    path: '/books/[workId]',
+    reached: ['Catalog link from a personal book', 'Direct URL'],
+    read: ['Signed-in reader'],
+    readKind: 'owner',
+    writes: ['None on this page', 'Shows consented reader summaries'],
   },
   {
     name: 'Reading profile',
@@ -77,6 +85,15 @@ const rows: AccessRow[] = [
     read: ['Authorized operator'],
     readKind: 'privileged',
     writes: ['No page editing', 'Operational access may be audited'],
+    writeKind: 'privileged',
+  },
+  {
+    name: 'Catalog curation',
+    path: '/admin/catalog',
+    reached: ['Restricted overview · direct URL'],
+    read: ['Authorized operator'],
+    readKind: 'privileged',
+    writes: ['Authors · Works · Editions', 'Personal-book catalog links'],
     writeKind: 'privileged',
   },
 ];

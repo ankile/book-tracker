@@ -52,12 +52,19 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 303 -> 305 KiB for profile search opt-in: the owner-only
   // marker listener/decoder, two atomic write paths, and the Me-page switch
   // add 0.3 KiB compressed, with the remainder retained as explicit headroom.
-  // Total raised 305 -> 306 KiB for the explicit finishedAt: the stamp on
-  // every finishing write path and the finished list/stats reading it
-  // land 51 bytes over the old cap.
+  // Total raised 305 -> 324 KiB for shared works: catalog suggestions and
+  // runtime decoders, the work/readers route, sharing controls, and the
+  // admin curation route add 15.1 KiB compressed, with explicit headroom.
+  // Total raised 324 -> 326 KiB when integrating the App Check monitoring
+  // client from the current base; the merged production build is 324.7 KiB.
+  // Total raised 326 -> 330 KiB for user-created catalog works: the create
+  // request builder, response decoder and modal wiring add ~0.7 KiB, plus
+  // headroom so the next field does not need a budget commit.
+  // Master raised 305 -> 306 KiB for the explicit finishedAt in the same
+  // period; the 330 KiB cap above already covers that stamp.
   assert.ok(
-    totalBytes <= 306 * 1024,
-    `Expected at most 306 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 330 * 1024,
+    `Expected at most 330 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

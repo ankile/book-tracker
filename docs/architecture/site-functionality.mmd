@@ -3,7 +3,7 @@ title: Pages and navigation
 ---
 flowchart LR
   accTitle: Book Tracker pages and navigation
-  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview. The separate route access matrix lists readers and writes for every page.
+  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and catalog curation pages. The separate route access matrix lists readers and writes for every page.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
@@ -28,16 +28,19 @@ flowchart LR
     finished["<b>Finished</b><br/><code>/finished</code><br/>Search · sort · year filter · totals"]:::page
     me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · optional integrations"]:::page
 
-    authors["<b>Authors</b><br/><code>/authors</code><br/>Rename · classify · merge · delete"]:::page
+    authors["<b>Authors</b><br/><code>/authors</code><br/>Browse the shared author catalog"]:::page
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
+    work["<b>Shared Work</b><br/><code>/books/[workId]</code><br/>Work metadata · opted-in reader summaries"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
     admin["<b>Restricted overview</b><br/><code>/admin</code><br/>Operational summary"]:::admin
+    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Authors · Works · Editions · matching"]:::admin
   end
 
   signedout --> auth --> shell
   owner --> shell
   publicentry --> profile
   operator --> admin
+  operator --> admincatalog
 
   shell -->|"Currently Reading"| current
   shell -->|"Finished"| finished
@@ -45,3 +48,5 @@ flowchart LR
   me -->|"Authors card"| authors
   me -->|"Needs an ISBN card"| isbns
   me -->|"Profile link"| profile
+  current -->|"Catalog link"| work
+  finished -->|"Catalog link"| work

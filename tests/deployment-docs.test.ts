@@ -9,6 +9,7 @@ const functionsPackageUrl = new URL('../functions/package.json', import.meta.url
 const firebaseRcUrl = new URL('../.firebaserc', import.meta.url);
 const functionsIndexUrl = new URL('../functions/src/index.ts', import.meta.url);
 const progressMigrationUrl = new URL('../migrate-reading-progress-sources.ts', import.meta.url);
+const firestoreIndexesUrl = new URL('../firestore.indexes.json', import.meta.url);
 
 function section(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -115,6 +116,46 @@ test('book metadata docs describe field-specific live precedence and validated w
   assert.match(metadata, /Publisher and publication date \| Open catalog \| Metered catalog, then national catalog/);
   assert.match(metadata, /Firestore Rules allowlist the book\s+fields, validate their types and sizes/i);
   assert.doesNotMatch(metadata, /blanket write access/i);
+});
+
+test('catalog queries have the required collection-group and pagination indexes', async () => {
+  const parsed = JSON.parse(await readFile(firestoreIndexesUrl, 'utf8')) as {
+    indexes: Array<{
+      collectionGroup: string;
+      queryScope: string;
+      fields: Array<{fieldPath: string; order: string}>;
+    }>;
+    fieldOverrides: Array<{
+      collectionGroup: string;
+      fieldPath: string;
+      indexes: Array<{order?: string; arrayConfig?: string; queryScope?: string}>;
+    }>;
+  };
+
+  for (const fieldPath of ['workId', 'editionId']) {
+    const override = parsed.fieldOverrides.find((entry) =>
+      entry.collectionGroup === 'books' && entry.fieldPath === fieldPath);
+    assert.ok(override, `missing books.${fieldPath} field override`);
+    assert.equal(override.indexes.some((entry) =>
+      entry.order === 'ASCENDING' && entry.queryScope === 'COLLECTION_GROUP'), true);
+  }
+  // mergeAuthors leaves personal books untouched (they resolve through the
+  // merged alias), so no collection-group index on books.authorIds exists;
+  // an override reappearing here means a book fan-out query came back.
+  assert.equal(parsed.fieldOverrides.some((entry) =>
+    entry.collectionGroup === 'books' && entry.fieldPath === 'authorIds'), false,
+  'unexpected books.authorIds field override');
+
+  assert.equal(parsed.indexes.some((index) =>
+    index.collectionGroup === 'workTitleIndex' && index.queryScope === 'COLLECTION' &&
+    index.fields[0]?.fieldPath === 'status' && index.fields[0]?.order === 'ASCENDING' &&
+    index.fields[1]?.fieldPath === 'titleKey' && index.fields[1]?.order === 'ASCENDING'), true,
+  'missing active title-prefix composite index');
+  // The work-reader page (`where('workId', 'in', ...)` ordered by document
+  // id) needs no composite index: one equality plus __name__ ascending is
+  // exactly what the automatic single-field index on workId stores.
+  assert.equal(parsed.indexes.some((index) => index.collectionGroup === 'sharedWorkOwners'), false,
+  'redundant sharedWorkOwners composite index');
 });
 
 test('migration docs mark one-time rollouts complete and prescribe idempotency', async () => {

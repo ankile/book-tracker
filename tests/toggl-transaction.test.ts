@@ -652,6 +652,17 @@ test('checked recovery clears capped failures but refuses live processing work',
   assert.equal((await lifecycleRef.get()).data()?.state, 'idle');
   assert.equal((await queueRef.get()).exists, false);
 
+  await seed('error', Timestamp.now(), 1);
+  await userRef.update({deletedAt: Timestamp.now()});
+  await assert.rejects(
+    deployed.toggl.clearstopping.run({bookId}, context),
+    (error: unknown) => error instanceof Error && 'code' in error &&
+      error.code === 'failed-precondition' && /account has been deleted/.test(error.message),
+  );
+  assert.equal((await bookRef.get()).data()?.activeTimer.state, 'stopping');
+  assert.equal((await queueRef.get()).exists, true);
+  await userRef.set({uid});
+
   await seed('processing', Timestamp.now());
   await assert.rejects(
     deployed.toggl.clearstopping.run({bookId}, context),

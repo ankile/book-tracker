@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "workTitleIndex",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "titleKey", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "updates",
       "queryScope": "COLLECTION_GROUP",
       "fields": [
@@ -47,6 +55,21 @@
       "fieldPath": "expiresAt",
       "ttl": true,
       "indexes": []
+    },
+    {
+      "collectionGroup": "books",
+      "fieldPath": "workId",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
+      "collectionGroup": "books",
+      "fieldPath": "editionId",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
     },
     {
       "collectionGroup": "togglQueue",

@@ -21,10 +21,10 @@ flowchart TB
 
   identity["<b>Managed identity</b><br/>Sign-in and authenticated sessions"]:::security
   permissions["<b>Data access controls</b><br/>Owner scope and write validation"]:::security
-  appdata[("<b>Application data</b><br/>Private libraries · sharing data<br/>deferred work · operations data")]:::data
+  appdata[("<b>Application data</b><br/>Private libraries · shared book catalog<br/>sharing data · deferred work · operations data")]:::data
 
   publicrenderer["<b>Public profile renderer</b><br/>Produces bounded public pages"]:::service
-  apis["<b>Backend service layer</b><br/>Authorization · validation<br/>privileged application operations"]:::service
+  apis["<b>Backend service layer</b><br/>Authorization · validation<br/>catalog and privileged operations"]:::service
   events["<b>Managed event delivery</b><br/>Identity and data lifecycle events"]:::neutral
   workers["<b>Background workers</b><br/>Cleanup and deferred synchronization"]:::service
   configuration["<b>Protected configuration</b><br/>Server-only integration credentials"]:::security

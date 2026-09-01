@@ -6,6 +6,7 @@ const {getFirestore}: typeof import("firebase-admin/firestore") = require("fireb
 
 type TestContext = import("node:test").TestContext;
 type Quota = Record<string, unknown> | undefined;
+type UserData = Record<string, unknown> | undefined;
 interface TransactionStub {
   get(ref: object): Promise<{data(): Quota}>;
   set(ref: object, value: Record<string, unknown>): void;
@@ -27,15 +28,32 @@ process.env.FUNCTIONS_CONFIG_EXPORT = JSON.stringify({
 
 const deployed: Deployed = require("../lib");
 const db = getFirestore();
-const authContext = {auth: {uid: "owner", token: {}}};
+const authContext = {auth: {uid: "owner", token: {email_verified: true}}};
 
 function snapshot(data: Quota): {data(): Quota} {
   return {data: () => data};
 }
 
-function installQuotaStore(t: TestContext): {quota(): Quota} {
+function installQuotaStore(
+  t: TestContext,
+  userData: UserData = {},
+): {quota(): Quota; userReads(): number} {
   const quotaRef = {};
   let quota: Quota;
+  let userReads = 0;
+  t.mock.method(db, "collection", (name: string) => {
+    assert.equal(name, "users");
+    return {doc: (uid: string) => {
+      assert.equal(uid, "owner");
+      return {get: async () => {
+        userReads += 1;
+        return {
+          exists: userData !== undefined,
+          get: (field: string) => userData?.[field],
+        };
+      }};
+    }};
+  });
   t.mock.method(db, "doc", (path: string) => {
     assert.equal(path, "users/owner/functionQuotas/booksApi");
     return quotaRef;
@@ -54,8 +72,33 @@ function installQuotaStore(t: TestContext): {quota(): Quota} {
       quota = {...quota, ...patch};
     },
   }));
-  return {quota: () => quota};
+  return {quota: () => quota, userReads: () => userReads};
 }
+
+test("lookupisbn rejects unverified and deleted accounts before quota or fetch", async (t) => {
+  const store = installQuotaStore(t, {deletedAt: {seconds: 1}});
+  let fetchCalls = 0;
+  t.mock.method(global, "fetch", async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not run");
+  });
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run(
+      {isbn: "9780000000002"},
+      {auth: {uid: "owner", token: {email_verified: false}}},
+    ),
+    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /Verify your email/),
+  );
+  assert.equal(store.userReads(), 0);
+  await assert.rejects(
+    deployed.booksapi.lookupisbn.run({isbn: "9780000000002"}, authContext),
+    (error) => hasCode(error, "failed-precondition") &&
+      messageMatches(error, /account has been deleted/),
+  );
+  assert.equal(store.userReads(), 1);
+  assert.equal(store.quota(), undefined);
+  assert.equal(fetchCalls, 0);
+});
 
 test("lookupisbn returns sanitized partial metadata", async (t) => {
   const quota = installQuotaStore(t);
@@ -221,4 +264,8 @@ function hasCode(error: unknown, code: string): boolean {
     error !== null &&
     "code" in error &&
     error.code === code;
+}
+
+function messageMatches(error: unknown, pattern: RegExp): boolean {
+  return error instanceof Error && pattern.test(error.message);
 }

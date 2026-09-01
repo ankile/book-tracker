@@ -1,9 +1,11 @@
 import type { AuthorChip } from '../interfaces/author.ts';
 import type { Book } from '../interfaces/book.ts';
+import type { CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
+import { normalizeIsbn } from './isbn.ts';
 import { validateBookPages, validateBookTitle } from './validation.ts';
 
-interface BookWriteInput {
+interface BookWriteBase {
   userId: string;
   authorChips: AuthorChip[];
   title: string;
@@ -13,24 +15,35 @@ interface BookWriteInput {
   metadata: BookMetadata;
 }
 
-interface UpdateBookWriteInput extends BookWriteInput {
+export type CatalogLinkWrite = CatalogSelection | null;
+
+interface AddBookWriteInput extends BookWriteBase {
+  catalogLink: CatalogLinkWrite;
+}
+
+interface UpdateBookWriteInput extends BookWriteBase {
   bookId: string;
   // The stored flag before this edit, so finishedAt is stamped only when
   // the edit is what finishes the book (a shrunk page count can).
   previouslyFinished: boolean;
   pageCountClampFrom: number | null;
+  catalogLink?: CatalogLinkWrite;
 }
 
 export type PreparedBookWrite =
-  | { kind: 'add'; input: BookWriteInput }
+  | { kind: 'add'; input: AddBookWriteInput }
   | { kind: 'update'; input: UpdateBookWriteInput };
 
 export type PreparedBookWriteResult =
   | { valid: true; write: PreparedBookWrite }
   | { valid: false; message: string };
 
+// Firestore Rules verify every referenced shared author. Six keeps the
+// book write within the Rules document-access and expression budgets.
+export const MAX_BOOK_AUTHORS = 6;
+
 export interface BookWriter {
-  addBook(input: BookWriteInput): Promise<void>;
+  addBook(input: AddBookWriteInput): Promise<void>;
   updateBook(input: UpdateBookWriteInput): Promise<void>;
 }
 
@@ -107,6 +120,9 @@ export function prepareBookWrite({
   currentPage,
   isbn,
   metadata,
+  catalogSelection,
+  catalogSelectionTouched = false,
+  catalogSelectionIsbn13 = null,
 }: {
   userId: string;
   book: Book | null;
@@ -116,7 +132,16 @@ export function prepareBookWrite({
   currentPage: number | null | undefined;
   isbn: string;
   metadata: BookMetadata;
+  catalogSelection?: CatalogSelection | null;
+  catalogSelectionTouched?: boolean;
+  catalogSelectionIsbn13?: string | null;
 }): PreparedBookWriteResult {
+  if (authorChips.length > MAX_BOOK_AUTHORS) {
+    return {
+      valid: false,
+      message: `A personal book may reference at most ${MAX_BOOK_AUTHORS} authors.`,
+    };
+  }
   if (authorChips.some((chip) => chip.id !== null && 'unresolved' in chip)) {
     return {
       valid: false,
@@ -150,17 +175,29 @@ export function prepareBookWrite({
   const pages = validateBookPages({ pageCount, currentPage: editCurrentPage });
   if (!pages.valid) return pages;
 
-  const input: BookWriteInput = {
+  const normalizedIsbn = normalizeIsbn(trimmedIsbn);
+  const input: BookWriteBase = {
     userId,
     authorChips,
     title: titleResult.title,
     pageCount: pages.pageCount,
     currentPage: pages.currentPage,
-    isbn: trimmedIsbn,
+    isbn: normalizedIsbn ?? trimmedIsbn,
     metadata,
   };
+  const isbnDerivedLinkChanged = book !== null && book.matchMethod === 'isbn' &&
+    normalizeIsbn(book.isbn) !== normalizedIsbn && !catalogSelectionTouched &&
+    catalogSelectionIsbn13 !== normalizedIsbn;
+  const effectiveCatalogSelection = isbnDerivedLinkChanged ? null : catalogSelection;
+  const sameCatalogLink = book !== null && effectiveCatalogSelection !== undefined &&
+    book.workId === effectiveCatalogSelection?.workId &&
+    book.editionId === (effectiveCatalogSelection?.editionId ?? null) &&
+    (!catalogSelectionTouched || book.matchMethod === effectiveCatalogSelection?.matchMethod);
   return book === null
-    ? { valid: true, write: { kind: 'add', input } }
+    ? {
+      valid: true,
+      write: {kind: 'add', input: {...input, catalogLink: catalogSelection ?? null}},
+    }
     : {
       valid: true,
       write: {
@@ -172,6 +209,9 @@ export function prepareBookWrite({
           pageCountClampFrom: pages.currentPage < book.currentPage
             ? book.currentPage
             : null,
+          ...(effectiveCatalogSelection === undefined || sameCatalogLink
+            ? {}
+            : {catalogLink: effectiveCatalogSelection}),
         },
       },
     };

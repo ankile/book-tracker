@@ -6,6 +6,7 @@
     "lint": "eslint --flag unstable_native_nodejs_ts_config \"src/**/*\"",
     "clean": "node -e \"require('node:fs').rmSync('lib', {recursive: true, force: true})\"",
     "build": "npm run clean && tsc",
+    "stage:emulator-secrets": "node lib/scripts/stage-emulator-secrets.js",
     "serve": "npm run build && node lib/scripts/stage-emulator-secrets.js && npm exec --yes --package firebase-tools@15.24.0 -- firebase emulators:start --only auth,firestore,functions",
     "shell": "npm run serve",
     "start": "npm run serve",

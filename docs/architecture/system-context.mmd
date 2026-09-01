@@ -13,7 +13,7 @@ flowchart LR
     direction TB
     reader["<b>Reader</b><br/>Tracks books, progress, sessions,<br/>authors, and reading statistics"]:::person
     visitor["<b>Profile visitor</b><br/>Reads a shared public profile"]:::person
-    operator["<b>Authorized operator</b><br/>Reviews operational summaries"]:::person
+    operator["<b>Authorized operator</b><br/>Reviews operations and curates<br/>the shared book catalog"]:::person
     crawler["<b>Search indexer</b><br/>Finds profiles shared for discovery"]:::person
   end
 
@@ -27,7 +27,7 @@ flowchart LR
 
   reader -->|"uses"| app
   visitor -->|"opens shared profile"| app
-  operator -->|"opens restricted view"| app
+  operator -->|"uses restricted operations"| app
   crawler -->|"reads discoverable pages"| app
   app -->|"looks up book information"| catalogs
   app -->|"synchronizes reading activity"| timer

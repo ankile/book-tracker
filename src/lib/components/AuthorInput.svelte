@@ -6,13 +6,15 @@
   // wrapper with an absolutely positioned suggestion list, which works
   // inside the <dialog> top layer without a portal.
   import { resolveChip, selectableAuthors, splitAuthors, joinPersonName } from "../utils/authors.ts";
+  import { MAX_BOOK_AUTHORS } from "../utils/bookForm.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
 
   let {
     chips = $bindable(),
     authors,
     inputId,
-  }: { chips: AuthorChip[]; authors: Author[]; inputId: string } = $props();
+    disabled = false,
+  }: { chips: AuthorChip[]; authors: Author[]; inputId: string; disabled?: boolean } = $props();
 
   let text = $state("");
   let focused = $state(false);
@@ -26,8 +28,11 @@
   const availableAuthors = $derived(selectableAuthors(authors));
 
   const suggestions = $derived(
-    focused && !dismissed && draft !== ""
-      ? availableAuthors.filter((a) => a.nameLower.includes(draft) && !chipIds.has(a.id)).slice(0, 6)
+    !disabled && focused && !dismissed && draft !== ""
+      ? availableAuthors.filter((a) => (
+          a.nameLower.includes(draft)
+          || a.alternateNames?.some((name) => name.toLowerCase().includes(draft)) === true
+        ) && !chipIds.has(a.id)).slice(0, 6)
       : []
   );
 
@@ -36,6 +41,8 @@
   }
 
   function commit(name: string) {
+    if (disabled) return;
+    if (chips.length >= MAX_BOOK_AUTHORS) return;
     const chip = resolveChip(name, authors);
     if (chip.name !== "" && !isDuplicate(chip)) chips = [...chips, chip];
     text = "";
@@ -43,16 +50,21 @@
   }
 
   function select(author: Author) {
-    if (!chipIds.has(author.id)) chips = [...chips, { id: author.id, name: author.name }];
+    if (disabled) return;
+    if (chips.length < MAX_BOOK_AUTHORS && !chipIds.has(author.id)) {
+      chips = [...chips, { id: author.id, name: author.name }];
+    }
     text = "";
     highlighted = 0;
   }
 
   function removeChip(index: number) {
+    if (disabled) return;
     chips = chips.filter((_, i) => i !== index);
   }
 
   function onkeydown(event: KeyboardEvent) {
+    if (disabled) return;
     if (event.key === ",") {
       event.preventDefault();
       commit(text);
@@ -84,6 +96,7 @@
   // Pasted author lists ("Kahneman, Tversky & Thaler") split into chips;
   // plain pastes fall through to normal input.
   function onpaste(event: ClipboardEvent) {
+    if (disabled) return;
     const pasted = event.clipboardData?.getData("text") ?? '';
     if (!pasted.includes(",") && !pasted.includes("&")) return;
     event.preventDefault();
@@ -181,7 +194,7 @@
     onmousedown={(event) => {
       // Clicking the field (not a chip button) focuses the inner input;
       // preventDefault stops the click from blurring it again.
-      if (event.target === event.currentTarget) {
+      if (!disabled && event.target === event.currentTarget) {
         event.preventDefault();
         inputEl?.focus();
       }
@@ -192,6 +205,7 @@
         <button
           type="button"
           class="chip-remove"
+          disabled={disabled}
           aria-label={`Remove ${chip.name}`}
           onclick={() => removeChip(index)}>×</button>
       </span>
@@ -200,6 +214,8 @@
       bind:this={inputEl}
       id={inputId}
       type="text"
+      disabled={disabled || chips.length >= MAX_BOOK_AUTHORS}
+      title={chips.length >= MAX_BOOK_AUTHORS ? `A book may have at most ${MAX_BOOK_AUTHORS} authors` : undefined}
       autocomplete="off"
       role="combobox"
       aria-controls={`${inputId}-listbox`}

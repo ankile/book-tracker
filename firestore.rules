@@ -19,7 +19,9 @@ service cloud.firestore {
                     && validInitialBookTimer()
                     && validBookPageState(request.resource.data)
                     && request.resource.data.get('currentPageUpdateId', null) == null
-                    && validBookShape();
+                    && validBookShape()
+                    && validBookAuthors()
+                    && validBookCatalogLink();
       allow update: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validBookTimerTransition(userId, bookId)
@@ -30,7 +32,9 @@ service cloud.firestore {
                            'pagesRead', 'timeRead', 'finished', 'finishedAt', 'updatedAt'
                          ])
                          && validBookProgressFields())
-                        || validBookShape());
+                        || (validBookShape()
+                            && validBookAuthorsTransition()
+                            && validBookCatalogLinkTransition()));
       // A local timer has no remote side effect. The UI explicitly warns
       // that its unsaved interval will be lost. Server-backed and uncertain
       // Toggl lifecycle states must be cleared through their stop/resolve path.
@@ -58,6 +62,80 @@ service cloud.firestore {
                       && resource.data.type == 'reading'
                       && validDeletedBookUpdate(userId, bookId, updateId);
       }
+    }
+
+    // Consent for title-level reader summaries lives outside the cached
+    // profile document. Older clients replace profile documents wholesale,
+    // so storing this switch there would let an unrelated stats sync erase
+    // or recreate consent. Only the owner can read the setting.
+    match /users/{userId}/settings/{settingId} {
+      allow get: if request.auth != null
+                 && userId == request.auth.uid
+                 && settingId == 'bookSharing';
+      allow create: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing'
+                    && validBookSharingSetting(userId);
+      allow update: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing'
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && validBookSharingSetting(userId);
+      allow delete: if request.auth != null
+                    && userId == request.auth.uid
+                    && settingId == 'bookSharing';
+    }
+
+    function validBookSharingSetting(userId) {
+      let setting = request.resource.data;
+      let username = setting.get('profileUsername', '');
+      let profile = getAfter(/databases/$(database)/documents/profiles/$(username)).data;
+      return setting.keys().hasAll([
+               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
+             ])
+             && setting.keys().hasOnly([
+               'profileUsername', 'timeZone', 'createdAt', 'updatedAt'
+             ])
+             && username is string
+             && username.matches('[a-z0-9-]{3,30}')
+             && setting.timeZone is string
+             && setting.timeZone.matches('[A-Za-z0-9_+./-]{1,100}')
+             && setting.createdAt is timestamp
+             && setting.updatedAt is timestamp
+             && profile.uid == userId
+             && profile.public == true;
+    }
+
+    // Rollout compatibility (shared-catalog migration, MIGRATIONS.md): a
+    // client bundle cached by the service worker from before the catalog
+    // release still listens to its per-user author list. Reads stay open so
+    // that tab degrades to stale author names rather than a listener error;
+    // writes are gone — the migration has moved every reference to
+    // catalogAuthors, and a book written by that old bundle is refused by
+    // validBookAuthors. The block and the documents it guards stay until the
+    // owner explicitly asks for the legacy per-user author documents to be
+    // moved or removed; nothing here schedules their deletion.
+    match /users/{userId}/authors/{authorId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+    }
+
+    // Catalog documents are server-owned. Works and editions stay behind
+    // bounded search callables. Authors are the one shared list used by
+    // every personal book, so signed-in clients may read and autocomplete
+    // active names and retain merged redirects for cached book references.
+    match /works/{workId} {
+      allow get: if request.auth != null
+                 && resource.data.status == 'active';
+    }
+
+    match /catalogAuthors/{authorId} {
+      allow read: if request.auth != null && verifiedAccount();
+    }
+
+    match /editions/{editionId} {
+      allow get: if request.auth != null
+                 && resource.data.workId is string
+                 && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.status == 'active';
     }
 
     match /users/{userId}/timerLifecycle/{lifecycleId} {
@@ -110,14 +188,21 @@ service cloud.firestore {
       return book.keys().hasOnly([
                'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
                'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
+               'workId', 'editionId', 'matchMethod', 'linkedAt',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
              // Absent on the oldest documents; typed when present.
              && book.get('updatedAt', request.time) is timestamp
              && validBookFinishedAt(book)
+             // The shape cap stays at the pre-catalog 50 so a legacy book
+             // the migration left with 7–50 per-user ids (REVIEW
+             // too-many-personal-authors) can still have its title, page
+             // count or ISBN corrected; the six-author cap is enforced by
+             // validBookAuthors whenever authorIds itself changes.
              && (!book.keys().hasAny(['authorIds'])
                  || (book.authorIds is list && book.authorIds.size() <= 50
+                     && book.authorIds.toSet().size() == book.authorIds.size()
                      && book.authorIds.join('').size() <= 5000))
              && (!book.keys().hasAny(['coverUrl'])
                  || (book.coverUrl is string && book.coverUrl.size() <= 2048))
@@ -132,8 +217,23 @@ service cloud.firestore {
                  || book.fiction == null || book.fiction is bool)
              && (!book.keys().hasAny(['isbn'])
                  || (book.isbn is string && book.isbn.size() <= 32))
+             && (!book.keys().hasAny(['workId'])
+                 || book.workId == null
+                 || (book.workId is string && book.workId.matches('[^/]{1,100}')))
+             && (!book.keys().hasAny(['editionId'])
+                 || book.editionId == null
+                 || (book.editionId is string && book.editionId.matches('[^/]{1,100}')))
+             && (!book.keys().hasAny(['matchMethod'])
+                 || book.matchMethod == null
+                 || book.matchMethod in ['isbn', 'external-id', 'catalog-choice', 'migration', 'admin'])
+             && (!book.keys().hasAny(['linkedAt'])
+                 || book.linkedAt == null || book.linkedAt is timestamp)
+             // Cross-user summaries derive identity from this reference.
+             // Old unlinked books may omit it, but every linked row must pin
+             // it so one malformed record cannot make a work page fail.
              && (!book.keys().hasAny(['owner'])
-                 || book.owner == /databases/$(database)/documents/users/$(request.auth.uid))
+                 ? book.get('workId', null) == null
+                 : book.owner == /databases/$(database)/documents/users/$(request.auth.uid))
              && (!book.keys().hasAny(['createdAt']) || book.createdAt is timestamp)
              && (!book.keys().hasAny(['pagesRead'])
                  || (book.pagesRead is number && book.pagesRead >= 0))
@@ -142,6 +242,78 @@ service cloud.firestore {
              && (book.get('currentPageUpdateId', null) == null
                  || (book.currentPageUpdateId is string
                      && book.currentPageUpdateId.size() <= 100));
+    }
+
+    // Personal books accept at most six authors so Rules can prove every
+    // reference exists in the server-owned shared catalog. Merged aliases
+    // remain valid cached references; missing legacy per-user IDs do not.
+    function validBookAuthorsTransition() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorIds'])
+             || validBookAuthors();
+    }
+
+    function validBookAuthors() {
+      let ids = request.resource.data.get('authorIds', []);
+      return ids is list
+             && ids.size() <= 6
+             && ids.toSet().size() == ids.size()
+             && (bookAuthorsCoveredByLinkedWork(ids)
+                 || (validBookAuthorAt(ids, 0)
+                     && validBookAuthorAt(ids, 1)
+                     && validBookAuthorAt(ids, 2)
+                     && validBookAuthorAt(ids, 3)
+                     && validBookAuthorAt(ids, 4)
+                     && validBookAuthorAt(ids, 5)));
+    }
+
+    // A server-owned Work already pins valid shared authors. Reusing that
+    // trust avoids six extra document reads when an edit also links an
+    // edition and writes a page-count correction in the same atomic batch.
+    function bookAuthorsCoveredByLinkedWork(ids) {
+      let workId = request.resource.data.get('workId', null);
+      return workId is string
+             && get(/databases/$(database)/documents/works/$(workId)).data.authorIds is list
+             && get(/databases/$(database)/documents/works/$(workId)).data.authorIds.toSet()
+                  .hasAll(ids.toSet());
+    }
+
+    function validBookAuthorAt(ids, index) {
+      return ids.size() <= index
+             || (ids[index] is string
+                 && ids[index].matches('[^/]{1,100}')
+                 && exists(/databases/$(database)/documents/catalogAuthors/$(ids[index])));
+    }
+
+    // A link changed by the browser may target only an active work. Links
+    // to a hidden work (the admin soft delete) survive because Admin SDK
+    // writes bypass Rules; the browser just cannot create new ones. Later metadata edits skip these reads while
+    // the four link fields remain unchanged, which keeps timer and ordinary
+    // book edits inside the Rules expression and document-access budgets.
+    function validBookCatalogLinkTransition() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+               'workId', 'editionId', 'matchMethod', 'linkedAt'
+             ]) || validBookCatalogLink();
+    }
+
+    function validBookCatalogLink() {
+      let book = request.resource.data;
+      let workId = book.get('workId', null);
+      let editionId = book.get('editionId', null);
+      let method = book.get('matchMethod', null);
+      let linkedAt = book.get('linkedAt', null);
+      return (workId == null
+              && editionId == null
+              && method == null
+              && linkedAt == null)
+             || (workId is string
+                 && workId.matches('[^/]{1,100}')
+                 && method in ['isbn', 'external-id', 'catalog-choice']
+                 && linkedAt is timestamp
+                 && get(/databases/$(database)/documents/works/$(workId)).data.status == 'active'
+                 && (editionId == null
+                     || (editionId is string
+                         && editionId.matches('[^/]{1,100}')
+                         && get(/databases/$(database)/documents/editions/$(editionId)).data.workId == workId)));
     }
 
     function validBookUpdateIdentity(userId, bookId) {
@@ -329,7 +501,8 @@ service cloud.firestore {
                'authorIds', 'author', 'authors', 'title', 'pageCount',
                'currentPage', 'currentPageUpdateId', 'finished', 'finishedAt', 'isbn',
                'coverUrl', 'publisher', 'publishedDate', 'subjects',
-               'fiction', 'updatedAt'
+               'fiction', 'workId', 'editionId', 'matchMethod', 'linkedAt',
+               'updatedAt'
              ])
              && after.pageCount is int
              && after.pageCount > 0
@@ -699,69 +872,6 @@ service cloud.firestore {
       return localClaimMatchesTimer(before, bookId, resource.data.activeTimer)
              && validClearedTimerClaim(after, before);
     }
-    // Author entities, written in the same client batch as the book that
-    // references them. Own-user private data, so books-level strictness
-    // applies (the validation-heavy style is for anonymous surfaces).
-    // Author entities: allowlisted and capped like books (SEC-039). No
-    // delete rule by design — a book written offline may still reference
-    // the id, so authors retire instead (validAuthorRetirementTransition).
-    match /users/{userId}/authors/{authorId} {
-      allow read: if request.auth != null && userId == request.auth.uid;
-      allow create: if request.auth != null && userId == request.auth.uid
-                    && !request.resource.data.keys().hasAny(['retirement'])
-                    && validAuthorShape();
-      allow update: if request.auth != null && userId == request.auth.uid
-                    && validAuthorRetirementTransition(userId, authorId)
-                    && validAuthorShape();
-    }
-
-    function validAuthorShape() {
-      let author = request.resource.data;
-      return author.keys().hasOnly([
-               'name', 'nameLower', 'kind', 'givenName', 'familyName', 'retirement', 'updatedAt'
-             ])
-             && author.name is string
-             && author.name.size() > 0
-             && author.name.size() <= 200
-             && (!author.keys().hasAny(['nameLower'])
-                 || (author.nameLower is string && author.nameLower.size() <= 200))
-             && (!author.keys().hasAny(['kind'])
-                 || author.kind in ['person', 'entity', 'placeholder'])
-             && (!author.keys().hasAny(['givenName'])
-                 || (author.givenName is string && author.givenName.size() <= 100))
-             && (!author.keys().hasAny(['familyName'])
-                 || (author.familyName is string && author.familyName.size() <= 100))
-             && (!author.keys().hasAny(['updatedAt']) || author.updatedAt is timestamp)
-             // The retirement transition pins the map's shape on each legal
-             // transition; this bounds it on every write regardless.
-             && (!author.keys().hasAny(['retirement'])
-                 || (author.retirement is map
-                     && author.retirement.keys().hasOnly(['reason', 'targetId'])
-                     && author.retirement.reason in ['deleted', 'merged']
-                     && author.retirement.get('targetId', '') is string
-                     && author.retirement.get('targetId', '').size() <= 100));
-    }
-
-    function validAuthorRetirementTransition(userId, authorId) {
-      let before = resource.data.get('retirement', null);
-      let after = request.resource.data.get('retirement', null);
-      return before == after
-             || (before is map
-                 && before.reason == 'deleted'
-                 && after == null)
-             || (before == null
-                 && after is map
-                 && ((after.keys().hasAll(['reason'])
-                      && after.keys().hasOnly(['reason'])
-                      && after.reason == 'deleted')
-                     || (after.keys().hasAll(['reason', 'targetId'])
-                         && after.keys().hasOnly(['reason', 'targetId'])
-                         && after.reason == 'merged'
-                         && after.targetId is string
-                         && after.targetId != authorId
-                         && get(/databases/$(database)/documents/users/$(userId)/authors/$(after.targetId)).data.get('retirement', null) == null)));
-    }
-
     // Offline Toggl sync queue: the only row a client can create is the
     // atomic offline-stop row — the deterministic `bookId_start` row written
     // in the same batch that clears that exact timer (SEC-002: ordinary
@@ -1101,7 +1211,10 @@ service cloud.firestore {
       allow update: if request.auth != null
                     && verifiedAccount()
                     && resource.data.uid == request.auth.uid
-                    && validProfile();
+                    && validProfile()
+                    && (resource.data.public == true && request.resource.data.public == false
+                        ? validBookSharingRelease(username)
+                        : true);
       // A tombstoned profile is the record of a deleted account; only an
       // operator purge removes it. accountLive() closes the window in
       // which deleteUserDocument has tombstoned users/{uid} but not yet
@@ -1113,7 +1226,8 @@ service cloud.firestore {
                     && resource.data.uid == request.auth.uid
                     && resource.data.get('deletedAt', null) == null
                     && accountLive()
-                    && validProfileRelease(username);
+                    && validProfileRelease(username)
+                    && validBookSharingRelease(username);
     }
 
     // The batch that creates profiles/{username} must leave
@@ -1141,6 +1255,18 @@ service cloud.firestore {
              && (exists(marker)
                  ? (!existsAfter(marker) || get(marker).data.uid != request.auth.uid)
                  : true);
+    }
+
+    // A cached client may predate book-sharing UI. It must not be able to
+    // leave dormant consent behind when the selected profile becomes private
+    // or is deleted, because recreating that public profile would silently
+    // reactivate title-level sharing. A rename may atomically repoint the
+    // setting to the new owned public profile instead of deleting it.
+    function validBookSharingRelease(username) {
+      let setting = /databases/$(database)/documents/users/$(request.auth.uid)/settings/bookSharing;
+      return exists(setting) && get(setting).data.profileUsername == username
+             ? (!existsAfter(setting) || getAfter(setting).data.profileUsername != username)
+             : true;
     }
 
     // Owner-only, and only ever moved inside a profile batch: it may name

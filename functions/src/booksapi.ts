@@ -9,6 +9,7 @@ import {
   GoogleVolumeInfo,
 } from "./decoders";
 import {consumeQuota} from "./quota";
+import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logAppCheckPresence} from "./appCheck";
 
@@ -81,17 +82,13 @@ exports.lookupisbn = functions
     context,
   ): Promise<{volume: GoogleVolumeInfo | null}> => {
     logAppCheckPresence("booksapi.lookupisbn", context);
-    if (context.auth === undefined) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Sign in to look up book metadata.",
-      );
-    }
+    const uid = requireVerifiedUid(context);
 
     // The client normalizes to a checksum-valid ISBN-13 before calling
     // (utils/isbn.ts); anything else is a bug or a hand-rolled request.
     const {isbn} = decodeIsbnLookupRequest(data, invalidArgument);
-    await consumeLookupQuota(context.auth.uid);
+    await requireLiveUser(uid);
+    await consumeLookupQuota(uid);
 
     // Emulator rehearsals must not consume the production API key or quota.
     // Open Library and Nasjonalbiblioteket can still populate the client; a

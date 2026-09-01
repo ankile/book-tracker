@@ -1,5 +1,6 @@
 import type { DocumentReference, Timestamp } from 'firebase/firestore';
 import type { LegacyEmbeddedAuthor } from './author.ts';
+import type { CatalogLink } from './catalog.ts';
 import type { BookMetadata } from './metadata.ts';
 
 // A normalized users/{uid}/books doc returned by the Firestore decoder.
@@ -45,7 +46,7 @@ export type ActiveTimer =
   | UnknownTogglTimerOutcome
   | StoppingTogglTimer;
 
-interface BookBase extends BookMetadata {
+interface BookBase extends BookMetadata, CatalogLink {
   id: string;
   currentPage: number;
   // The update-row id that most recently set currentPage. The decoder maps
@@ -89,10 +90,6 @@ export interface LegacyEmbeddedAuthorsBook extends LegacyBookBase {
 }
 
 export type Book = CurrentBook | LegacyStringAuthorBook | LegacyEmbeddedAuthorsBook;
-
-export function hasCurrentAuthorship(book: Book): book is CurrentBook {
-  return book.author === undefined && book.authors === undefined;
-}
 
 export function isTogglTimer(timer: ActiveTimer): timer is TogglActiveTimer {
   return !('state' in timer) && 'entryId' in timer && timer.entryId !== undefined;

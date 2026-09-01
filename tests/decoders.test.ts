@@ -5,9 +5,9 @@ import { deleteApp, initializeApp } from 'firebase/app';
 import { doc, getFirestore, Timestamp } from 'firebase/firestore';
 
 import {
-  decodeAuthor,
   decodeBook,
   decodeBookUpdate,
+  decodeCatalogAuthor,
   decodeLiveQueueSweepItem,
   decodeProfile,
   decodeProfileDiscovery,
@@ -45,6 +45,57 @@ const bookData = (activeTimer: unknown = null) => ({
   publishedDate: '',
   subjects: [],
   fiction: null,
+});
+
+test('book decoder maps legacy catalog-link fields to explicit nulls', () => {
+  const book = decodeBook('legacy', bookData(), 'users/owner/books/legacy');
+  assert.deepEqual(
+    {
+      workId: book.workId,
+      editionId: book.editionId,
+      matchMethod: book.matchMethod,
+      linkedAt: book.linkedAt,
+    },
+    {workId: null, editionId: null, matchMethod: null, linkedAt: null},
+  );
+});
+
+test('book decoder validates correlated catalog links and provenance', () => {
+  const linked = decodeBook('linked', {
+    ...bookData(),
+    workId: 'work',
+    editionId: 'edition',
+    matchMethod: 'catalog-choice',
+    linkedAt: updatedAt,
+  }, 'users/owner/books/linked');
+  assert.equal(linked.workId, 'work');
+  assert.equal(linked.editionId, 'edition');
+  assert.equal(linked.matchMethod, 'catalog-choice');
+  assert.equal(linked.linkedAt, updatedAt);
+
+  assert.throws(
+    () => decodeBook('bad-method', {
+      ...bookData(),
+      workId: 'work',
+      matchMethod: 'title-guess',
+      linkedAt: updatedAt,
+    }, 'users/owner/books/bad-method'),
+    /matchMethod.*isbn, external-id, catalog-choice, migration, admin, or null/,
+  );
+  assert.throws(
+    () => decodeBook('missing-provenance', {
+      ...bookData(),
+      workId: 'work',
+    }, 'users/owner/books/missing-provenance'),
+    /matchMethod and linkedAt for a linked work/,
+  );
+  assert.throws(
+    () => decodeBook('edition-without-work', {
+      ...bookData(),
+      editionId: 'edition',
+    }, 'users/owner/books/edition-without-work'),
+    /editionId, matchMethod, and linkedAt to be null when workId is null/,
+  );
 });
 
 test('book decoder reads finishedAt as null when absent or null and as a timestamp otherwise', () => {
@@ -114,26 +165,32 @@ test('book decoder distinguishes current and documented legacy authorship', () =
   );
 });
 
-test('author and user decoders reject malformed nested data', () => {
-  const merged = decodeAuthor('old', {
-    name: 'Old Author',
-    nameLower: 'old author',
-    kind: 'person',
-    givenName: 'Old',
-    familyName: 'Author',
-    retirement: {reason: 'merged', targetId: 'new'},
-  }, 'users/owner/authors/old');
+test('the catalog author decoder derives person parts and rejects a missing sort name', () => {
+  const person = decodeCatalogAuthor('dahl', {
+    canonicalName: 'Roald Dahl', alternateNames: ['R. Dahl'],
+    nameKeys: ['roald dahl'], sortName: 'Dahl', kind: 'person',
+    status: 'active', mergedFrom: [],
+  }, 'catalogAuthors/dahl');
+  assert.deepEqual(person, {
+    id: 'dahl', name: 'Roald Dahl', nameLower: 'roald dahl',
+    alternateNames: ['R. Dahl'], sortName: 'Dahl', kind: 'person',
+  });
+  const merged = decodeCatalogAuthor('old', {
+    canonicalName: 'Old Author', alternateNames: [], nameKeys: ['old author'],
+    sortName: 'Author', kind: 'person', status: 'merged', mergedInto: 'new',
+    mergedFrom: [],
+  }, 'catalogAuthors/old');
   assert.deepEqual(merged.retirement, {reason: 'merged', targetId: 'new'});
   assert.throws(
-    () => decodeAuthor('bad', {
-      name: 'Bad Author',
-      nameLower: 'bad author',
-      kind: 'person',
-      givenName: 'Wrong',
-      familyName: 'Parts',
-    }, 'users/owner/authors/bad'),
-    /matching its explicit name parts/,
+    () => decodeCatalogAuthor('bad', {
+      canonicalName: 'Bad Author', alternateNames: [], nameKeys: ['bad author'],
+      kind: 'person', status: 'active', mergedFrom: [],
+    }, 'catalogAuthors/bad'),
+    /sortName/,
   );
+});
+
+test('the user decoder rejects malformed nested data', () => {
   assert.throws(
     () => decodeUser({
       uid: 'owner',

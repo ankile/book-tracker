@@ -24,14 +24,14 @@ export interface DisplayAuthor {
   id?: string;
   name: string;
   kind?: AuthorKind;
-  givenName?: string;
-  familyName?: string;
+  sortName?: string;
 }
 
 export interface ResolvableAuthor {
   id: string;
   name: string;
   nameLower: string;
+  alternateNames?: readonly string[];
   retirement?: AuthorRetirement;
 }
 
@@ -142,14 +142,6 @@ export function bookAuthorReferenceCounts(
     }
   }
   return counts;
-}
-
-export function booksReferencingAuthor<T extends AuthorshipBookView>(
-  books: readonly T[],
-  authorId: string,
-  authorMap: ReadonlyMap<string, Author>,
-): T[] {
-  return books.filter((book) => readableBookAuthorIds(book, authorMap).includes(authorId));
 }
 
 // The regular join stays deliberately strict so corrupt authorship cannot be
@@ -312,11 +304,11 @@ export function joinPersonName({
 
 // Resolve a typed name against the loaded author list into a chip:
 // {id, name} for an existing author, or a new-person chip carrying the
-// editable split parts (the id is minted at write time). The second,
-// by-id pass is load-bearing: after a rename, authorIdFor(oldName) still
-// equals the renamed doc's id, and without it a typed pre-rename name
-// would mint a "new" author whose merge-set lands on the renamed doc and
-// reverts the rename.
+// editable split parts (the id is minted at write time). matchingAuthor
+// tries the canonical name first and then every author's alternateNames,
+// which is what makes a rename safe: the old spelling is kept as an
+// alternate name, so typing it still finds the renamed author instead of
+// minting a second one.
 export function resolveChip(name: string, authors: readonly ResolvableAuthor[]): AuthorChip {
   const normalized = normalizeAuthorName(name);
   const existing = matchingAuthor(normalized, authors);
@@ -345,8 +337,10 @@ function normalizeAuthorName(name: string): string {
 function matchingAuthor<T extends ResolvableAuthor>(normalized: string, authors: readonly T[]): T | undefined {
   const lower = normalized.toLowerCase();
   const byName = authors.find((author) => author.nameLower === lower);
-  const byId = authors.find((author) => author.id === authorIdFor(normalized));
-  return byName ?? byId;
+  const byAlternateName = authors.find((author) =>
+    author.alternateNames?.some((name) => name.toLowerCase() === lower),
+  );
+  return byName ?? byAlternateName;
 }
 
 function newPersonChip(normalized: string): AuthorChip {
@@ -386,16 +380,16 @@ export function bookAuthors(
   });
 }
 
-// Presentation-only: persons abbreviate to their explicit familyName —
-// no heuristic runs here — and non-person kinds keep their full name.
-// Legacy {id, name} entries embedded on unmigrated books carry neither
-// kind nor parts; they get the last-token split until the straggler
-// cleanup removes the legacy path.
+// Presentation-only: persons abbreviate to their stored sortName (the family
+// name) — no heuristic runs here — and non-person kinds keep their full name.
+// Legacy {id, name} entries embedded on unmigrated books carry neither kind
+// nor sortName; they get the last-token split until the straggler cleanup
+// removes the legacy path.
 export function abbreviatedName(author: DisplayAuthor): string {
   if (author.kind === undefined) return splitPersonName(author.name).familyName;
   if (author.kind !== 'person') return author.name.trim().replace(/\s+/g, ' ');
-  if (!author.familyName) throw new Error(`Person author is missing familyName: ${author.name}`);
-  return author.familyName;
+  if (!author.sortName) throw new Error(`Person author is missing sortName: ${author.name}`);
+  return author.sortName;
 }
 
 // Compact list display: a lone author keeps their full name ("J. R. R.

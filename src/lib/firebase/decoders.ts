@@ -16,6 +16,7 @@ import type {
   LegacyEmbeddedAuthorsBook,
   LegacyStringAuthorBook,
 } from '../interfaces/book.ts';
+import type { CatalogLink, CatalogMatchMethod } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import {
   PROFILE_LINK_TYPES,
@@ -31,7 +32,6 @@ import {
   type PublishedSuperlatives,
 } from '../interfaces/profile.ts';
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
-import { splitPersonName, joinPersonName } from '../utils/authors.ts';
 import { isFinished } from '../utils/finished.ts';
 
 type Data = Record<string, unknown>;
@@ -192,6 +192,46 @@ function strings(value: unknown, context: string): string[] {
   return value.map((entry, index) => string(entry, `${context}[${index}]`));
 }
 
+function nullableNonEmptyString(value: unknown, context: string): string | null {
+  return value === undefined || value === null ? null : nonEmptyString(value, context);
+}
+
+function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod | null {
+  if (value === undefined || value === null) return null;
+  const decoded = string(value, context);
+  if (
+    decoded !== 'isbn' &&
+    decoded !== 'external-id' &&
+    decoded !== 'catalog-choice' &&
+    decoded !== 'migration' &&
+    decoded !== 'admin'
+  ) {
+    return fail(context, 'isbn, external-id, catalog-choice, migration, admin, or null');
+  }
+  return decoded;
+}
+
+function catalogLink(data: Data, context: string): CatalogLink {
+  const link: CatalogLink = {
+    workId: nullableNonEmptyString(data.workId, `${context}.workId`),
+    editionId: nullableNonEmptyString(data.editionId, `${context}.editionId`),
+    matchMethod: catalogMatchMethod(data.matchMethod, `${context}.matchMethod`),
+    linkedAt: data.linkedAt === undefined || data.linkedAt === null
+      ? null
+      : timestamp(data.linkedAt, `${context}.linkedAt`),
+  };
+  if (link.workId === null) {
+    if (link.editionId !== null || link.matchMethod !== null || link.linkedAt !== null) {
+      return fail(context, 'editionId, matchMethod, and linkedAt to be null when workId is null');
+    }
+    return link;
+  }
+  if (link.matchMethod === null || link.linkedAt === null) {
+    return fail(context, 'matchMethod and linkedAt for a linked work');
+  }
+  return link;
+}
+
 function exactKeys(value: Data, allowed: readonly string[], context: string): void {
   const extras = Object.keys(value).filter((key) => !allowed.includes(key));
   if (extras.length > 0) fail(context, `only keys ${allowed.join(', ')}`);
@@ -291,6 +331,7 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
     createdAt: timestamp(data.createdAt, `${path}.createdAt`),
     updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
     activeTimer: activeTimer(data.activeTimer, `${path}.activeTimer`),
+    ...catalogLink(data, path),
     ...metadata(data, path),
   };
 
@@ -326,62 +367,36 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
   return book;
 }
 
-export function decodeAuthor(id: string, value: unknown, path: string): Author {
+export function decodeCatalogAuthor(id: string, value: unknown, path: string): Author {
   const data = record(value, path);
-  const name = nonEmptyString(data.name, `${path}.name`);
-  const nameLower = string(data.nameLower ?? name.toLowerCase(), `${path}.nameLower`);
-  if (nameLower !== name.toLowerCase()) fail(`${path}.nameLower`, name.toLowerCase());
-  let retirement: AuthorRetirement | undefined;
-  if (data.retirement !== undefined) {
-    const retired = record(data.retirement, `${path}.retirement`);
-    const reason = string(retired.reason, `${path}.retirement.reason`);
-    if (reason === 'deleted') {
-      exactKeys(retired, ['reason'], `${path}.retirement`);
-      retirement = { reason };
-    } else if (reason === 'merged') {
-      exactKeys(retired, ['reason', 'targetId'], `${path}.retirement`);
-      retirement = {
-        reason,
-        targetId: nonEmptyString(retired.targetId, `${path}.retirement.targetId`),
-      };
-    } else {
-      fail(`${path}.retirement.reason`, 'deleted or merged');
-    }
-  }
-  const retirementFields = retirement === undefined ? {} : { retirement };
-
-  if (data.kind === undefined) {
-    const parts = splitPersonName(name);
-    return { id, name, nameLower, kind: 'person', ...parts, ...retirementFields };
-  }
-
+  const name = nonEmptyString(data.canonicalName, `${path}.canonicalName`);
+  const alternateNames = strings(data.alternateNames, `${path}.alternateNames`);
+  const sortName = nonEmptyString(data.sortName, `${path}.sortName`);
+  strings(data.nameKeys, `${path}.nameKeys`);
+  strings(data.mergedFrom, `${path}.mergedFrom`);
   const kindValue = string(data.kind, `${path}.kind`);
   if (kindValue !== 'person' && kindValue !== 'entity' && kindValue !== 'placeholder') {
     fail(`${path}.kind`, 'person, entity, or placeholder');
   }
-  const kind: AuthorKind = kindValue;
-  if (kind === 'person') {
-    const familyName = nonEmptyString(data.familyName, `${path}.familyName`);
-    const givenName = data.givenName === undefined
-      ? undefined
-      : string(data.givenName, `${path}.givenName`);
-    if (joinPersonName({ givenName: givenName ?? '', familyName }) !== name) {
-      fail(path, 'a person name matching its explicit name parts');
-    }
-    return {
-      id,
-      name,
-      nameLower,
-      kind,
-      familyName,
-      ...(givenName ? { givenName } : {}),
-      ...retirementFields,
+  const status = string(data.status, `${path}.status`);
+  let retirement: AuthorRetirement | undefined;
+  if (status === 'merged') {
+    retirement = {
+      reason: 'merged',
+      targetId: nonEmptyString(data.mergedInto, `${path}.mergedInto`),
     };
+  } else if (status !== 'active') {
+    fail(`${path}.status`, 'active or merged');
   }
-  if (data.givenName !== undefined || data.familyName !== undefined) {
-    fail(path, 'a non-person author without person name parts');
-  }
-  return { id, name, nameLower, kind, ...retirementFields };
+  return {
+    id,
+    name,
+    nameLower: name.toLowerCase(),
+    alternateNames,
+    sortName,
+    kind: kindValue,
+    ...(retirement === undefined ? {} : {retirement}),
+  };
 }
 
 function profileLink(value: unknown, context: string): ProfileLink {

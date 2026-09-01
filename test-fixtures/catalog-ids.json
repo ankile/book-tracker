@@ -1,0 +1,63 @@
+[
+  {
+    "kind": "catalog-author",
+    "input": {
+      "nameKey": "ursula k le guin"
+    },
+    "expectedId": "author_2f12b747a2cd76aa2b42c3e3"
+  },
+  {
+    "kind": "catalog-author",
+    "input": {
+      "nameKey": "harvard business review"
+    },
+    "expectedId": "author_83e6a92dfebfa3c122c4f6fb"
+  },
+  {
+    "kind": "work-title-index",
+    "input": {
+      "workId": "work_6ed2251baa8af1f5f11858ba",
+      "titleKey": "left hand of darkness"
+    },
+    "expectedId": "30d52d87292c36e93a6eb7da86f1e3349b01329907a2ef2d48633530e784f4fd"
+  },
+  {
+    "kind": "shared-work-owner",
+    "input": {
+      "workId": "work_6ed2251baa8af1f5f11858ba",
+      "uid": "uid-of-a-reader"
+    },
+    "expectedId": "2e35ed845d8a9627efd0aae39268be03be80b4d2ab8362da1bb20886dc96eba1"
+  },
+  {
+    "kind": "external-id-index",
+    "input": {
+      "provider": "open-library",
+      "externalId": "OL27258W"
+    },
+    "expectedId": "77a7d35e9d363c166d2de1e23db58356ca328f2dc89818dd6c697916802b1f0d"
+  },
+  {
+    "kind": "external-id-index",
+    "input": {
+      "provider": "google-books",
+      "externalId": "zyTCAlFPjgYC"
+    },
+    "expectedId": "aa2e94abaa4806592a86ab9a5e4d758ec4f749fcf03a11a2ef88068c42308ec1"
+  },
+  {
+    "kind": "migration-work",
+    "input": {
+      "identityKey": "title:left hand of darkness\u0000authors:ursula k le guin"
+    },
+    "expectedId": "work_6ed2251baa8af1f5f11858ba"
+  },
+  {
+    "kind": "migration-edition",
+    "input": {
+      "workId": "work_6ed2251baa8af1f5f11858ba",
+      "isbn13": "9780441478125"
+    },
+    "expectedId": "edition_0d5132c2d53b8b4c24fc4565"
+  }
+]

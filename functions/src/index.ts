@@ -4,6 +4,11 @@ import {initializeApp} from "firebase-admin/app";
 import {FieldPath, FieldValue, getFirestore} from "firebase-admin/firestore";
 import type {QueryDocumentSnapshot} from "firebase-admin/firestore";
 import {publicweb} from "./publicWeb";
+import {
+  syncbooksharingprojection,
+  syncsharingprofileprojection,
+  syncsharingsettingprojection,
+} from "./catalogProjection";
 import {AUTH_TRIGGER_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 
 initializeApp();
@@ -173,13 +178,32 @@ exports.deleteUserDocument = functions
     // the reverse order left a race where a still-valid ID token could
     // strand a live credential on a deleted account).
     await tombstoneUser(user.uid);
-    await deleteTogglCredential(user.uid);
-    await tombstoneProfiles(user.uid);
+    // Each cleanup must run even if another subsystem is temporarily down,
+    // and retries converge both. The sharing setting is kept like every
+    // other document: tombstoning the profile withdraws consent through the
+    // projection trigger (withdrawOwner deletes every sharedWorkOwners row
+    // the account has), so deleting the setting removed data without
+    // changing what anyone can see.
+    const cleanup = await Promise.allSettled([
+      tombstoneProfiles(user.uid),
+      deleteTogglCredential(user.uid),
+    ]);
+    const failures = cleanup.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Account deletion cleanup failed.");
+    }
     return null;
   });
 
+exports.syncbooksharingprojection = syncbooksharingprojection;
+exports.syncsharingsettingprojection = syncsharingsettingprojection;
+exports.syncsharingprofileprojection = syncsharingprofileprojection;
+
 exports.admin = require("./admin");
 exports.booksapi = require("./booksapi");
+exports.catalog = require("./catalogEndpoints");
 exports.telemetry = require("./telemetry");
 exports.toggl = require("./toggl");
 exports.publicweb = publicweb;

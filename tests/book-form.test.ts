@@ -7,6 +7,7 @@ import {
   fillMissingItems,
   fillMissingPageCount,
   fillMissingText,
+  MAX_BOOK_AUTHORS,
   prepareBookWrite,
   type BookWriter,
 } from '../src/lib/utils/bookForm.ts';
@@ -51,7 +52,102 @@ test('book form caps the ISBN at the rules limit and trims it', () => {
     isbn: '  978-0-316-76948-8  ', metadata: EMPTY_METADATA,
   });
   assert.equal(ok.valid, true);
-  assert.equal(ok.valid ? ok.write.input.isbn : '', '978-0-316-76948-8');
+  assert.equal(ok.valid ? ok.write.input.isbn : '', '9780316769488');
+});
+
+test('book form normalizes valid ISBNs even without a lookup', () => {
+  const result = prepareBookWrite({
+    userId: 'user', book: null, authorChips: [], title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: '0-316-55634-3', metadata: EMPTY_METADATA,
+  });
+  assert.ok(result.valid);
+  assert.equal(result.write.input.isbn, '9780316556347');
+});
+
+test('catalog writes are explicit on add and patch-only on edit', () => {
+  const selection = {workId: 'work', editionId: 'edition', matchMethod: 'isbn'} as const;
+  const added = prepareBookWrite({
+    userId: 'user', book: null, authorChips: [], title: 'Book', pageCount: 100, currentPage: 0,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(added.valid && added.write.kind === 'add');
+  assert.deepEqual(added.write.input.catalogLink, selection);
+
+  const unchanged = prepareBookWrite({
+    userId: 'user', book: {...baseBook, workId: 'work', editionId: 'edition'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(unchanged.valid && unchanged.write.kind === 'update');
+  assert.equal('catalogLink' in unchanged.write.input, false);
+
+  const repairedAdminLink = prepareBookWrite({
+    userId: 'user',
+    book: {...baseBook, workId: 'work', editionId: 'edition', matchMethod: 'admin'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+    catalogSelectionTouched: true,
+  });
+  assert.ok(repairedAdminLink.valid && repairedAdminLink.write.kind === 'update');
+  assert.deepEqual(repairedAdminLink.write.input.catalogLink, selection);
+
+  const untouchedAdminLink = prepareBookWrite({
+    userId: 'user',
+    book: {...baseBook, workId: 'work', editionId: 'edition', matchMethod: 'admin'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: selection,
+  });
+  assert.ok(untouchedAdminLink.valid && untouchedAdminLink.write.kind === 'update');
+  assert.equal('catalogLink' in untouchedAdminLink.write.input, false);
+
+  const unlinked = prepareBookWrite({
+    userId: 'user', book: {...baseBook, workId: 'work', editionId: 'edition'} as Book,
+    authorChips: [], title: 'Book', pageCount: 100, currentPage: 5,
+    isbn: '', metadata: EMPTY_METADATA, catalogSelection: null,
+  });
+  assert.ok(unlinked.valid && unlinked.write.kind === 'update');
+  assert.equal(unlinked.write.input.catalogLink, null);
+});
+
+test('editing an ISBN-derived link clears the stale link or keeps an exact reselection', () => {
+  const originalIsbn = '9780441478125';
+  const replacementIsbn = '9780316769488';
+  const linked = {
+    ...baseBook,
+    isbn: originalIsbn,
+    workId: 'work',
+    editionId: 'edition',
+    matchMethod: 'isbn',
+  } as Book;
+  const storedSelection = {
+    workId: 'work', editionId: 'edition', matchMethod: 'catalog-choice',
+  } as const;
+  const changed = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: replacementIsbn, metadata: EMPTY_METADATA,
+    catalogSelection: storedSelection, catalogSelectionIsbn13: originalIsbn,
+  });
+  assert.ok(changed.valid && changed.write.kind === 'update');
+  assert.equal(changed.write.input.catalogLink, null);
+
+  const cleared = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: '', metadata: EMPTY_METADATA,
+    catalogSelection: storedSelection, catalogSelectionIsbn13: originalIsbn,
+  });
+  assert.ok(cleared.valid && cleared.write.kind === 'update');
+  assert.equal(cleared.write.input.catalogLink, null);
+
+  const exactReplacement = prepareBookWrite({
+    userId: 'user', book: linked, authorChips: [], title: 'Book', pageCount: 100,
+    currentPage: 5, isbn: replacementIsbn, metadata: EMPTY_METADATA,
+    catalogSelection: {workId: 'new-work', editionId: 'new-edition', matchMethod: 'isbn'},
+    catalogSelectionIsbn13: replacementIsbn,
+  });
+  assert.ok(exactReplacement.valid && exactReplacement.write.kind === 'update');
+  assert.deepEqual(exactReplacement.write.input.catalogLink, {
+    workId: 'new-work', editionId: 'new-edition', matchMethod: 'isbn',
+  });
 });
 
 test('book form blocks writes while an unresolved repair chip remains', () => {
@@ -67,17 +163,32 @@ test('book form blocks writes while an unresolved repair chip remains', () => {
   });
 });
 
+test('book form rejects more shared authors than Rules can verify', () => {
+  const result = prepare(Array.from(
+    {length: MAX_BOOK_AUTHORS + 1},
+    (_, index) => ({id: `author-${index}`, name: `Author ${index}`}),
+  ));
+
+  assert.deepEqual(result, {
+    valid: false,
+    message: `A personal book may reference at most ${MAX_BOOK_AUTHORS} authors.`,
+  });
+});
+
 test('edit seeding exposes missing, broken, and cyclic ids as write-blocking repair chips', () => {
   const broken: Author = {
-    id: 'broken', name: 'Broken Author', nameLower: 'broken author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'broken', name: 'Broken Author', nameLower: 'broken author',
     retirement: { reason: 'merged', targetId: 'missing-target' },
   };
   const first: Author = {
-    id: 'first', name: 'First Author', nameLower: 'first author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'first', name: 'First Author', nameLower: 'first author',
     retirement: { reason: 'merged', targetId: 'second' },
   };
   const second: Author = {
-    id: 'second', name: 'Second Author', nameLower: 'second author', kind: 'person', familyName: 'Author',
+    kind: 'person', alternateNames: [], sortName: 'Author',
+    id: 'second', name: 'Second Author', nameLower: 'second author',
     retirement: { reason: 'merged', targetId: 'first' },
   };
   const seeded = editableBookAuthorChips(

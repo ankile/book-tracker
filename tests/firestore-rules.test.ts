@@ -29,7 +29,6 @@ import {
 import { FirebaseError } from 'firebase/app';
 import { togglQueueId } from '../src/lib/utils/toggl.ts';
 import {
-  authorShapeViolations,
   bookShapeViolations,
   profileOwnerRecordViolations,
   profileShapeViolations,
@@ -102,6 +101,41 @@ const createProfileBatch = (
 };
 const marker = (uid: string) => ({ uid, createdAt: serverTimestamp() });
 
+const catalogWork = (overrides: Record<string, unknown> = {}) => ({
+  canonicalTitle: 'Catalog work',
+  alternateTitles: [],
+  titleKeys: ['catalog work'],
+  authorIds: ['author'],
+  authorNames: ['Ada Author'],
+  authorNamesLower: ['ada author'],
+  coverUrl: '',
+  subjects: [],
+  fiction: true,
+  status: 'active',
+  mergedFrom: [],
+  createdAt: Timestamp.now(),
+  updatedAt: Timestamp.now(),
+  ...overrides,
+});
+
+const catalogEdition = (workId: string, overrides: Record<string, unknown> = {}) => ({
+  workId,
+  isbn13: '9780306406157',
+  title: 'Catalog work',
+  authorNames: ['Ada Author'],
+  publisher: 'Example Press',
+  publishedDate: '2026',
+  language: 'en',
+  translatorNames: [],
+  format: 'full',
+  suggestedPageCount: 200,
+  coverUrl: '',
+  externalIds: {},
+  createdAt: Timestamp.now(),
+  updatedAt: Timestamp.now(),
+  ...overrides,
+});
+
 const readingBook = (overrides: Record<string, unknown> = {}) => ({
   title: 'Reading book',
   activeTimer: null,
@@ -167,7 +201,22 @@ after(async () => environment.cleanup());
 
 // Every test starts from an empty database, so isolation is structural
 // rather than a convention of unique uids per test.
-beforeEach(async () => environment.clearFirestore());
+beforeEach(async () => {
+  await environment.clearFirestore();
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const db = context.firestore();
+    for (const id of [
+      'author', 'author-a', 'author-b',
+      ...Array.from({length: 8}, (_, index) => `author-${index}`),
+    ]) {
+      await setDoc(doc(db, 'catalogAuthors', id), {
+        canonicalName: id, alternateNames: [], nameKeys: [id], sortName: id,
+        kind: 'person', status: 'active', mergedFrom: [],
+        createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+      });
+    }
+  });
+});
 
 test('the owner can create and update a valid profile', async () => {
   await seedAccount('owner');
@@ -376,6 +425,11 @@ test('deleting a profile releases its record and takes its own marker with it', 
   const db = verified('releaser');
   await assertSucceeds(createProfileBatch(db, 'releaser', 'released'));
   await assertSucceeds(setDoc(doc(db, 'profileDiscovery', 'released'), marker('releaser')));
+  const sharingRef = doc(db, 'users', 'releaser', 'settings', 'bookSharing');
+  await assertSucceeds(setDoc(sharingRef, {
+    profileUsername: 'released', timeZone: 'UTC',
+    createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  }));
   // Alone: the record still names it and the marker would be orphaned.
   await assertFails(deleteDoc(doc(db, 'profiles', 'released')));
   // Profile + marker, record kept.
@@ -388,12 +442,19 @@ test('deleting a profile releases its record and takes its own marker with it', 
   keepMarker.delete(doc(db, 'profiles', 'released'));
   keepMarker.delete(doc(db, 'profileOwners', 'releaser'));
   await assertFails(keepMarker.commit());
-  // All three.
+  // A stale client that sends only the historical three-document batch may
+  // not leave dormant sharing consent behind.
   const all = writeBatch(db);
   all.delete(doc(db, 'profiles', 'released'));
   all.delete(doc(db, 'profileDiscovery', 'released'));
   all.delete(doc(db, 'profileOwners', 'releaser'));
-  await assertSucceeds(all.commit());
+  await assertFails(all.commit());
+  const allWithSharing = writeBatch(db);
+  allWithSharing.delete(doc(db, 'profiles', 'released'));
+  allWithSharing.delete(doc(db, 'profileDiscovery', 'released'));
+  allWithSharing.delete(doc(db, 'profileOwners', 'releaser'));
+  allWithSharing.delete(sharingRef);
+  await assertSucceeds(allWithSharing.commit());
   // The freed name is first-writer-wins again, with a clean marker slot.
   await seedAccount('next-owner');
   await assertSucceeds(createProfileBatch(verified('next-owner'), 'next-owner', 'released'));
@@ -681,10 +742,11 @@ const bookShapeRejections = (
     fatSubjects: { subjects: ['a'.repeat(2501)] },
     fatSubjectsSpread: { subjects: Array.from({ length: 25 }, () => 'a'.repeat(101)) },
     nonStringSubject: { subjects: [{ name: 'x' }] },
+    // 51 trips the stored-shape cap; 7-50 is only a write-time (validBookAuthors) refusal.
     tooManyAuthorIds: { authorIds: Array.from({ length: 51 }, (_, i) => `a${i}`) },
     fatAuthorIds: { authorIds: ['a'.repeat(5001)] },
-    // (A number inside authorIds is stringified by join(), not rejected —
-    // the bytes stay bounded and the client decoder refuses it on read.)
+    // Author references are additionally checked against shared documents,
+    // so non-string IDs are rejected even though join() can stringify them.
     fiction: { fiction: 'yes' },
     foreignOwner: { owner: doc(db, 'users', 'someone-else') },
     ownerString: { owner: `users/${uid}` },
@@ -712,8 +774,7 @@ test('book documents are allowlisted and byte-capped', async () => {
     }
   }
   assert.deepEqual(admitted, []);
-  // Every field is optional except what page state and the title require:
-  // the minimal shape the older client wrote still works.
+  // Old unlinked books may omit owner; catalog-linked books may not.
   await assertSucceeds(setDoc(doc(books, 'minimal'), creatableBook()));
 
   // Progress and timer updates never run the shape check (they only touch
@@ -757,54 +818,127 @@ test('book documents are allowlisted and byte-capped', async () => {
   await assertSucceeds(updateDoc(preRule, { pagesRead: 30, timeRead: 90.5, updatedAt: Timestamp.now() }));
 });
 
-const author = (overrides: Record<string, unknown> = {}) => ({
-  name: 'Ada Lovelace',
-  nameLower: 'ada lovelace',
-  kind: 'person',
-  givenName: 'Ada',
-  familyName: 'Lovelace',
-  updatedAt: Timestamp.now(),
-  ...overrides,
+test('the shared author catalog is readable only to verified live accounts and is server-owned', async () => {
+  const uid = 'shared-author-reader';
+  await seedAccount(uid);
+  const db = verified(uid);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'catalogAuthors', 'ada'), {
+      canonicalName: 'Ada Lovelace', alternateNames: [], nameKeys: ['ada lovelace'],
+      sortName: 'Lovelace', kind: 'person', status: 'active', mergedFrom: [],
+      createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+    });
+  });
+  await assertSucceeds(getDoc(doc(db, 'catalogAuthors', 'ada')));
+  await assertSucceeds(getDocs(collection(db, 'catalogAuthors')));
+  await seedAccount('unverified-author-reader');
+  const unverified = environment.authenticatedContext('unverified-author-reader').firestore();
+  await assertFails(getDoc(doc(unverified, 'catalogAuthors', 'ada')));
+  await assertFails(getDocs(collection(unverified, 'catalogAuthors')));
+  await seedAccount('tombstoned-author-reader');
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await updateDoc(doc(context.firestore(), 'users', 'tombstoned-author-reader'), {
+      deletedAt: Timestamp.now(),
+    });
+  });
+  const tombstoned = verified('tombstoned-author-reader');
+  await assertFails(getDoc(doc(tombstoned, 'catalogAuthors', 'ada')));
+  await assertFails(getDocs(collection(tombstoned, 'catalogAuthors')));
+  const anonymous = environment.unauthenticatedContext().firestore();
+  await assertFails(getDoc(doc(anonymous, 'catalogAuthors', 'ada')));
+  await assertFails(getDocs(collection(anonymous, 'catalogAuthors')));
+  await assertFails(setDoc(doc(db, 'catalogAuthors', 'new'), {canonicalName: 'New'}));
+  await assertFails(updateDoc(doc(db, 'catalogAuthors', 'ada'), {sortName: 'Byron'}));
+  await assertFails(deleteDoc(doc(db, 'catalogAuthors', 'ada')));
+  await assertFails(setDoc(doc(db, 'users', uid, 'authors', 'legacy'), {name: 'Legacy'}));
+  // Reads of the retired per-user list stay open for the rollout window
+  // (a cached pre-catalog bundle); see the compatibility block in the rules.
+  await assertSucceeds(getDoc(doc(db, 'users', uid, 'authors', 'legacy')));
 });
-const admittedAuthors = (): Record<string, unknown>[] => [
-  author(),
-  { name: 'Anon' },
-  { name: 'Penguin', nameLower: 'penguin', kind: 'entity' },
-];
-const authorShapeRejections = (): Record<string, unknown>[] => [
-    author({ bio: 'x'.repeat(120_000) }),
-  author({ rating: 5 }),
-  author({ name: 'n'.repeat(201) }),
-  author({ name: '' }),
-  author({ name: 42 }),
-  author({ nameLower: 'n'.repeat(201) }),
-  author({ kind: 'robot' }),
-  author({ givenName: 'g'.repeat(101) }),
-  author({ familyName: 'f'.repeat(101) }),
-  author({ updatedAt: 'now' }),
-  { nothing: true },
-  {},
-];
 
-test('author documents are allowlisted and capped', async () => {
-  const uid = 'author-shape';
+test('book author references must exist while one-hop shared aliases remain usable', async () => {
+  const uid = 'shared-author-writer';
   const db = environment.authenticatedContext(uid).firestore();
-  const authors = collection(db, 'users', uid, 'authors');
-  await assertSucceeds(setDoc(doc(authors, 'ada'), author()));
-  await assertSucceeds(setDoc(doc(authors, 'minimal'), { name: 'Anon' }));
-  await assertSucceeds(setDoc(doc(authors, 'entity'), { name: 'Penguin', nameLower: 'penguin', kind: 'entity' }));
-  const rejected = authorShapeRejections();
-  for (const [index, value] of rejected.entries()) {
-    await assertFails(setDoc(doc(authors, `bad-${index}`), value));
-  }
-  // Updates are shape-checked too: junk cannot be added later, including
-  // inside the retirement map on any path.
-  await assertFails(updateDoc(doc(authors, 'ada'), { bio: 'x'.repeat(1000) }));
-  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'deleted', blob: 'x'.repeat(500_000) } }));
-  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'merged', targetId: 'x'.repeat(101) } }));
-  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: { reason: 'retired' } }));
-  await assertFails(updateDoc(doc(authors, 'ada'), { retirement: 'x'.repeat(500_000) }));
-  await assertSucceeds(updateDoc(doc(authors, 'ada'), { givenName: 'Augusta Ada', name: 'Augusta Ada Lovelace', nameLower: 'augusta ada lovelace', updatedAt: Timestamp.now() }));
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'catalogAuthors', 'old-author'), {
+      canonicalName: 'Old Author', alternateNames: [], nameKeys: ['old author'],
+      sortName: 'Author', kind: 'person', status: 'merged', mergedInto: 'author',
+      mergedFrom: [], createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+    });
+    await setDoc(doc(adminDb, 'works', 'six-author-work'), catalogWork({
+      authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+    }));
+    await setDoc(doc(adminDb, 'editions', 'six-author-edition'), catalogEdition('six-author-work'));
+  });
+  await assertSucceeds(setDoc(
+    doc(db, 'users', uid, 'books', 'cached-alias'),
+    fullBook(db, uid, {authorIds: ['old-author']}),
+  ));
+  await assertFails(setDoc(
+    doc(db, 'users', uid, 'books', 'stale-personal-id'),
+    fullBook(db, uid, {authorIds: ['deleted-personal-id']}),
+  ));
+  await assertSucceeds(setDoc(
+    doc(db, 'users', uid, 'books', 'six-authors-unlinked'),
+    fullBook(db, uid, {
+      authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+    }),
+  ));
+  await assertSucceeds(setDoc(
+    doc(db, 'users', uid, 'books', 'six-authors-linked'),
+    fullBook(db, uid, {
+      authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+      workId: 'six-author-work',
+      editionId: 'six-author-edition',
+      matchMethod: 'catalog-choice',
+      linkedAt: Timestamp.now(),
+    }),
+  ));
+  await assertFails(setDoc(
+    doc(db, 'users', uid, 'books', 'seven-authors'),
+    fullBook(db, uid, {
+      authorIds: Array.from({length: 7}, (_, index) => `author-${index}`),
+    }),
+  ));
+  await assertFails(setDoc(
+    doc(db, 'users', uid, 'books', 'duplicate-authors'),
+    fullBook(db, uid, {authorIds: ['author', 'author']}),
+  ));
+});
+
+// A legacy book the migration left with more than six per-user author ids
+// (REVIEW too-many-personal-authors) is not frozen: a metadata edit that
+// leaves authorIds untouched passes the 50-id shape cap, while any change
+// to authorIds itself meets the six-author catalog check. The retained
+// per-user author documents stay readable for a cached pre-catalog bundle
+// and are otherwise sealed.
+test('legacy over-limit author lists stay editable without touching authorIds', async () => {
+  const uid = 'legacy-anthology-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'anthology'), fullBook(adminDb, uid, {
+      authorIds: Array.from({length: 8}, (_, index) => `legacy-${index}`),
+    }));
+    await setDoc(doc(adminDb, 'users', uid, 'authors', 'legacy-0'), {
+      name: 'Legacy Author', nameLower: 'legacy author', kind: 'person', updatedAt: Timestamp.now(),
+    });
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const book = doc(db, 'users', uid, 'books', 'anthology');
+  await assertSucceeds(updateDoc(book, { title: 'Corrected title', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(book, { pageCount: 450, updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(book, {
+    authorIds: Array.from({length: 7}, (_, index) => `legacy-${index}`),
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(getDoc(doc(db, 'users', uid, 'authors', 'legacy-0')));
+  await assertFails(updateDoc(doc(db, 'users', uid, 'authors', 'legacy-0'), { name: 'Renamed' }));
+  await assertFails(setDoc(doc(db, 'users', uid, 'authors', 'legacy-new'), {
+    name: 'New Legacy', nameLower: 'new legacy', kind: 'person', updatedAt: Timestamp.now(),
+  }));
+  await assertFails(deleteDoc(doc(db, 'users', uid, 'authors', 'legacy-0')));
 });
 
 // The read-only audit (db-audit.ts) reports stored documents the rules
@@ -832,8 +966,9 @@ test('the audit shape mirror agrees with the rules', async () => {
   const bookCases: Record<string, Record<string, unknown>> = {
     full: fullBook(db, uid),
     minimal: creatableBook(),
-    // join('') stringifies numbers: admitted by both, bytes stay bounded.
+    // Shared-reference validation rejects non-string IDs.
     numericAuthorIds: fullBook(db, uid, { authorIds: [1, 2] }),
+    duplicateAuthorIds: fullBook(db, uid, { authorIds: ['author', 'author'] }),
     emptyTitle: fullBook(db, uid, { title: '' }),
     nullSourceId: fullBook(db, uid, { currentPageUpdateId: null }),
   };
@@ -847,12 +982,27 @@ test('the audit shape mirror agrees with the rules', async () => {
     if (rules !== (mirror.length > 0)) disagreements.push(`book ${name}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
   }
 
-  const authors = collection(db, 'users', uid, 'authors');
-  const authorCases = [...admittedAuthors(), ...authorShapeRejections()];
-  for (const [index, value] of authorCases.entries()) {
-    const mirror = authorShapeViolations(value);
-    const rules = await denied(setDoc(doc(authors, `case-${index}`), value));
-    if (rules !== (mirror.length > 0)) disagreements.push(`author ${index}: rules ${rules ? 'deny' : 'admit'}, mirror ${JSON.stringify(mirror)}`);
+  // The one fixture that cannot be a create: a book the migration left with
+  // 7-50 per-user author ids. validBookShape caps the stored list at 50
+  // while validBookAuthors caps a fresh authorship at 6, so the rules admit
+  // a metadata edit that leaves authorIds alone. The mirror judges stored
+  // documents, so a 6-id cap there would report every such book as drift the
+  // rules never produce.
+  let overLimitBook: Record<string, unknown> = {};
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    overLimitBook = fullBook(seeded, uid, {
+      authorIds: Array.from({length: 7}, (_, index) => `legacy-${index}`),
+    });
+    await setDoc(doc(seeded, 'users', uid, 'books', 'legacy-seven'), overLimitBook);
+  });
+  const overLimitEdit = {...overLimitBook, title: 'Corrected title', updatedAt: Timestamp.now()};
+  const overLimitMirror = bookShapeViolations(overLimitEdit, `users/${uid}`);
+  const overLimitRules = await denied(updateDoc(doc(books, 'legacy-seven'), {
+    title: 'Corrected title', updatedAt: Timestamp.now(),
+  }));
+  if (overLimitRules !== (overLimitMirror.length > 0)) {
+    disagreements.push(`book legacySevenAuthors: rules ${overLimitRules ? 'deny' : 'admit'}, mirror ${JSON.stringify(overLimitMirror)}`);
   }
 
   const profileCases: Record<string, Record<string, unknown>> = {
@@ -899,6 +1049,182 @@ test('the audit shape mirror agrees with the rules', async () => {
   }
 
   assert.deepEqual(disagreements, []);
+});
+
+test('catalog gets expose only active records and never permit listing', async () => {
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    await setDoc(doc(seeded, 'works', 'active'), catalogWork());
+    await setDoc(doc(seeded, 'works', 'hidden'), catalogWork({ status: 'hidden' }));
+    await setDoc(doc(seeded, 'works', 'merged'), catalogWork({ status: 'merged', mergedInto: 'active' }));
+    await setDoc(doc(seeded, 'editions', 'active-edition'), catalogEdition('active'));
+    await setDoc(doc(seeded, 'editions', 'hidden-edition'), catalogEdition('hidden'));
+    await setDoc(doc(seeded, 'isbnIndex', '9780306406157'), {
+      workId: 'active', editionId: 'active-edition',
+    });
+    await setDoc(doc(seeded, 'workTitleIndex', 'catalog-work'), {
+      workId: 'active', title: 'Catalog work', titleKey: 'catalog work',
+    });
+    await setDoc(doc(seeded, 'externalIdIndex', 'external'), {
+      workId: 'active', editionId: 'active-edition', provider: 'open-library', externalId: 'OL1',
+    });
+    await setDoc(doc(seeded, 'sharedWorkOwners', 'projection'), {
+      workId: 'active', uid: 'reader', updatedAt: Timestamp.now(),
+    });
+  });
+  const db = environment.authenticatedContext('catalog-reader').firestore();
+  await assertSucceeds(getDoc(doc(db, 'works', 'active')));
+  await assertSucceeds(getDoc(doc(db, 'editions', 'active-edition')));
+  await assertFails(getDoc(doc(db, 'works', 'hidden')));
+  await assertFails(getDoc(doc(db, 'works', 'merged')));
+  await assertFails(getDoc(doc(db, 'editions', 'hidden-edition')));
+  await assertFails(getDocs(collection(db, 'works')));
+  await assertFails(getDocs(collection(db, 'editions')));
+  await assertFails(getDoc(doc(db, 'isbnIndex', '9780306406157')));
+  await assertFails(getDoc(doc(db, 'workTitleIndex', 'catalog-work')));
+  await assertFails(getDoc(doc(db, 'externalIdIndex', 'external')));
+  await assertFails(getDoc(doc(db, 'sharedWorkOwners', 'projection')));
+  await assertFails(setDoc(doc(db, 'sharedWorkOwners', 'forged'), {
+    workId: 'active', uid: 'catalog-reader', updatedAt: Timestamp.now(),
+  }));
+  await assertFails(getDoc(doc(environment.unauthenticatedContext().firestore(), 'works', 'active')));
+});
+
+test('owners can link only to active works and matching editions', async () => {
+  const uid = 'catalog-link-owner';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    await setDoc(doc(seeded, 'works', 'target'), catalogWork({
+      authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+    }));
+    await setDoc(doc(seeded, 'works', 'other'), catalogWork({ canonicalTitle: 'Other' }));
+    await setDoc(doc(seeded, 'works', 'hidden'), catalogWork({ status: 'hidden' }));
+    await setDoc(doc(seeded, 'works', 'merged'), catalogWork({ status: 'merged', mergedInto: 'target' }));
+    await setDoc(doc(seeded, 'editions', 'target-edition'), catalogEdition('target'));
+    await setDoc(doc(seeded, 'editions', 'other-edition'), catalogEdition('other'));
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  const unlinked = {
+    ...creatableBook(), workId: null, editionId: null, matchMethod: null, linkedAt: null,
+  };
+  await assertSucceeds(setDoc(doc(books, 'unlinked'), unlinked));
+  await assertSucceeds(setDoc(doc(books, 'linked'), {
+    ...creatableBook(),
+    owner: doc(db, 'users', uid),
+    workId: 'target', editionId: 'target-edition', matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(books, 'linked-without-owner'), {
+    ...creatableBook(),
+    workId: 'target', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(books, 'hidden'), {
+    ...creatableBook(),
+    workId: 'hidden', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(books, 'merged'), {
+    ...creatableBook(),
+    workId: 'merged', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(books, 'wrong-edition'), {
+    ...creatableBook(),
+    workId: 'target', editionId: 'other-edition', matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(books, 'forged-admin'), {
+    ...creatableBook(),
+    workId: 'target', editionId: null, matchMethod: 'admin', linkedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(updateDoc(doc(books, 'linked'), {
+    workId: null, editionId: null, matchMethod: null, linkedAt: null,
+  }));
+  await assertSucceeds(updateDoc(doc(books, 'linked'), {
+    workId: 'target', editionId: null, matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+  }));
+  await assertFails(updateDoc(doc(books, 'linked'), {owner: deleteField()}));
+});
+
+test('a page-count clamp may carry an explicit catalog link but a reading batch may not', async () => {
+  const uid = 'catalog-link-batches';
+  const bookId = 'book';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    await setDoc(doc(seeded, 'works', 'target'), catalogWork({
+      authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+    }));
+    await setDoc(doc(seeded, 'editions', 'edition'), catalogEdition('target'));
+    await setDoc(doc(seeded, 'users', uid, 'books', bookId), readingBook({
+      owner: doc(seeded, 'users', uid),
+      authorIds: ['author'], currentPage: 80, currentPageUpdateId: 'prior', pageCount: 100,
+      isbn: '', coverUrl: '', publisher: '', publishedDate: '', subjects: [], fiction: null,
+      workId: null, editionId: null, matchMethod: null, linkedAt: null,
+    }));
+    await setDoc(doc(seeded, 'users', uid, 'books', bookId, 'updates', 'prior'), readingEntry(seeded, uid, bookId, {
+      fromPage: 0, toPage: 80, pagesRead: 80,
+    }));
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const bookRef = doc(db, 'users', uid, 'books', bookId);
+  const clampRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'clamp');
+  const clamp = writeBatch(db);
+  clamp.set(clampRef, pageCorrectionEntry(db, uid, bookId, {
+    fromPage: 80, toPage: 60, pagesRead: -20,
+  }));
+  clamp.update(bookRef, {
+    authorIds: Array.from({length: 6}, (_, index) => `author-${index}`),
+    title: 'Reading book', pageCount: 60,
+    currentPage: 60, currentPageUpdateId: 'clamp', finished: true, finishedAt: Timestamp.now(),
+    isbn: '', coverUrl: '', publisher: '', publishedDate: '', subjects: [], fiction: null,
+    workId: 'target', editionId: 'edition', matchMethod: 'catalog-choice', linkedAt: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(clamp.commit());
+
+  const readingRef = doc(db, 'users', uid, 'books', bookId, 'updates', 'reading-with-link');
+  const reading = writeBatch(db);
+  reading.set(readingRef, readingEntry(db, uid, bookId, {
+    fromPage: 60, toPage: 60, pagesRead: 0,
+  }));
+  reading.update(bookRef, {
+    currentPage: 60,
+    currentPageUpdateId: readingRef.id,
+    pagesRead: increment(0),
+    timeRead: increment(30),
+    finished: true,
+    workId: 'target',
+    editionId: null,
+    matchMethod: 'catalog-choice',
+    linkedAt: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(reading.commit());
+});
+
+test('book sharing settings require an owned public profile and remain owner-only', async () => {
+  const uid = 'sharing-owner';
+  await seedAccount(uid);
+  const db = verified(uid);
+  await createProfileBatch(db, uid, 'sharing-reader');
+  const settingRef = doc(db, 'users', uid, 'settings', 'bookSharing');
+  const setting = {
+    profileUsername: 'sharing-reader',
+    timeZone: 'America/Los_Angeles',
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  };
+  await assertSucceeds(setDoc(settingRef, setting));
+  await assertSucceeds(getDoc(settingRef));
+  const stranger = environment.authenticatedContext('sharing-stranger').firestore();
+  await assertFails(getDoc(doc(stranger, 'users', uid, 'settings', 'bookSharing')));
+  await assertFails(getDocs(collection(db, 'users', uid, 'settings')));
+  await assertFails(updateDoc(settingRef, { createdAt: Timestamp.now(), updatedAt: Timestamp.now() }));
+
+  await assertFails(setDoc(doc(db, 'profiles', 'sharing-reader'), profile(uid, { public: false })));
+  const privateProfile = writeBatch(db);
+  privateProfile.set(doc(db, 'profiles', 'sharing-reader'), profile(uid, { public: false }));
+  privateProfile.set(doc(db, 'profileOwners', uid), { username: 'sharing-reader' });
+  privateProfile.delete(settingRef);
+  await privateProfile.commit();
+  await assertFails(setDoc(settingRef, { ...setting, updatedAt: Timestamp.now() }));
 });
 
 // Firestore evaluates at most 1000 expressions per request, and the timer
@@ -3193,38 +3519,22 @@ test('function quota documents are inaccessible to their owner', async () => {
   }
 });
 
-test('author retirement rules prevent deletes, rewrites, and merge cycles', async () => {
-  const uid = 'author-retirement';
-  const db = environment.authenticatedContext(uid).firestore();
-  const first = doc(db, 'users', uid, 'authors', 'first');
-  const second = doc(db, 'users', uid, 'authors', 'second');
-  const deleted = doc(db, 'users', uid, 'authors', 'deleted');
-  const author = (name: string) => ({
-    name,
-    nameLower: name.toLowerCase(),
-    kind: 'person',
-    familyName: name,
+test('clients cannot mutate shared author redirects or revive personal author shadows', async () => {
+  const uid = 'author-catalog-owner';
+  await seedAccount(uid);
+  const db = verified(uid);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await setDoc(doc(context.firestore(), 'catalogAuthors', 'source'), {
+      canonicalName: 'Source', alternateNames: [], nameKeys: ['source'], sortName: 'Source',
+      kind: 'person', status: 'merged', mergedInto: 'target', mergedFrom: [],
+      createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+    });
   });
-  await assertSucceeds(setDoc(first, author('First')));
-  await assertSucceeds(setDoc(second, author('Second')));
-  await assertSucceeds(setDoc(deleted, author('Deleted')));
-  await assertSucceeds(updateDoc(deleted, {
-    retirement: {reason: 'deleted'},
-  }));
-  await assertSucceeds(updateDoc(deleted, {
-    ...author('Deleted'),
-    retirement: deleteField(),
-  }));
-  await assertSucceeds(updateDoc(first, {
-    retirement: {reason: 'merged', targetId: 'second'},
-  }));
-  await assertFails(updateDoc(second, {
-    retirement: {reason: 'merged', targetId: 'first'},
-  }));
-  await assertFails(updateDoc(first, {
-    retirement: {reason: 'deleted'},
-  }));
-  await assertFails(deleteDoc(first));
+  const source = doc(db, 'catalogAuthors', 'source');
+  await assertSucceeds(getDoc(source));
+  await assertFails(updateDoc(source, {mergedInto: 'other'}));
+  await assertFails(deleteDoc(source));
+  await assertFails(setDoc(doc(db, 'users', uid, 'authors', 'source'), {name: 'Source'}));
 });
 
 test('remote offline stop atomically creates one exact queue row and stopping lock', async () => {

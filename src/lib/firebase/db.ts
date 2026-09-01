@@ -24,7 +24,6 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager,
   type FirestoreError,
-  type WriteBatch,
 } from 'firebase/firestore';
 import { derived, type Readable, type Unsubscriber } from 'svelte/store';
 import { FirebaseError } from 'firebase/app';
@@ -42,7 +41,8 @@ import {
   togglQueueId,
   writeTogglReportedIds,
 } from '../utils/toggl.ts';
-import { authorIdFor, joinPersonName } from '../utils/authors.ts';
+import { joinPersonName } from '../utils/authors.ts';
+import { MAX_BOOK_AUTHORS } from '../utils/bookForm.ts';
 import { invokeReportedWrite } from '../utils/offlineWrite.ts';
 import { runRetryableSessionTask } from '../utils/sessionTask.ts';
 import {
@@ -55,8 +55,14 @@ import {
   queueReadingSessionDelete,
   queueReadingSessionUpdate,
 } from './readingSessionWrites.ts';
-import type { Author, AuthorChip, AuthorKind } from '../interfaces/author.ts';
+import type {
+  Author,
+  AuthorChip,
+  ExistingAuthorChip,
+  UnresolvedAuthorChip,
+} from '../interfaces/author.ts';
 import type { ActiveTimer, Book } from '../interfaces/book.ts';
+import type { CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
   Profile,
@@ -68,7 +74,7 @@ import type {
 import type { BookUpdate, ReadingSession } from '../interfaces/reading.ts';
 import { assertProfileViewFor, resolveProfileView } from '../utils/profileRead.ts';
 import {
-  decodeAuthor,
+  decodeCatalogAuthor,
   decodeBook,
   decodeBookUpdate,
   decodeLiveQueueSweepItem,
@@ -81,6 +87,7 @@ import {
   type NewQueueOperation,
   type UserDocument,
 } from './decoders.ts';
+import { ensureCatalogAuthors } from './functions.ts';
 
 // Persistent local cache makes the app work offline: snapshots serve from
 // IndexedDB and writes queue locally, syncing when connectivity returns.
@@ -151,11 +158,21 @@ const listenError = (label: string) => (error: FirestoreError) => {
 const userStores = new Map<string, Readable<UserDocument | null | undefined>>();
 const booksStores = new Map<string, Readable<Book[]>>();
 const allBooksStores = new Map<string, Readable<Book[] | undefined>>();
-const authorsStores = new Map<string, Readable<Author[] | undefined>>();
 const profileStores = new Map<string, Readable<Profile | null | undefined>>();
 const profileDiscoveryStores = new Map<string, Readable<ProfileDiscovery | null | undefined>>();
+const bookSharingStores = new Map<string, Readable<BookSharingSettings | null | undefined>>();
 const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
+const catalogAuthorsStore: Readable<Author[] | undefined> = cachedReadable<Author[] | undefined>(
+  undefined,
+  (set) => onSnapshot(query(collection(db, 'catalogAuthors')), (snapshot) => {
+    const authors = snapshot.docs.map((authorDoc) => decodeStored(
+      () => decodeCatalogAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
+    ));
+    authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
+    set(authors);
+  }, listenError('load the author catalog')),
+);
 
 type StoreStart<T> = (set: (value: T) => void) => Unsubscriber;
 
@@ -215,13 +232,6 @@ function decodeStored<T>(decode: () => T): T {
   }
 }
 
-interface AuthorNameInput {
-  kind: AuthorKind;
-  name: string;
-  givenName: string;
-  familyName: string;
-}
-
 interface ProfileWrite extends ProfilePayload {
   userId: string;
   username: string;
@@ -230,17 +240,59 @@ interface ProfileWrite extends ProfilePayload {
   links: ProfileLink[];
   isPublic: boolean;
   removeDiscovery?: boolean;
+  removeBookSharing?: boolean;
 }
 
 interface RenameProfileWrite extends Omit<ProfileWrite, 'username'> {
   oldUsername: string;
   newUsername: string;
   isDiscoverable: boolean;
+  bookSharing: BookSharingSettings | null;
+}
+
+export interface BookSharingSettings {
+  profileUsername: string;
+  timeZone: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+interface EnableBookSharingInput {
+  userId: string;
+  profileUsername: string;
+  timeZone: string;
 }
 
 interface ProfileDiscoveryWrite {
   userId: string;
   username: string;
+}
+
+function decodeBookSharingSettings(value: unknown, path: string): BookSharingSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected an object.`);
+  }
+  const data = value as Record<string, unknown>;
+  const keys = Object.keys(data).sort();
+  const expected = ['createdAt', 'profileUsername', 'timeZone', 'updatedAt'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError(`${path}: expected only ${expected.join(', ')}.`);
+  }
+  if (typeof data.profileUsername !== 'string' || !/^[a-z0-9-]{3,30}$/.test(data.profileUsername)) {
+    throw new TypeError(`${path}.profileUsername: expected a profile username.`);
+  }
+  if (typeof data.timeZone !== 'string' || data.timeZone.length === 0 || data.timeZone.length > 100) {
+    throw new TypeError(`${path}.timeZone: expected a non-empty string of at most 100 characters.`);
+  }
+  if (!(data.createdAt instanceof Timestamp) || !(data.updatedAt instanceof Timestamp)) {
+    throw new TypeError(`${path}: expected Firestore timestamps.`);
+  }
+  return {
+    profileUsername: data.profileUsername,
+    timeZone: data.timeZone,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+  };
 }
 
 interface AddProfileLinkInput {
@@ -262,7 +314,7 @@ interface AddReadingInput extends AddPageUpdateInput {
   timeRead: number;
 }
 
-interface AddBookInput {
+interface BookInputBase {
   userId: string;
   authorChips: AuthorChip[];
   title: string;
@@ -272,29 +324,22 @@ interface AddBookInput {
   metadata: BookMetadata;
 }
 
-interface UpdateBookInput extends AddBookInput {
+interface AddBookInput extends BookInputBase {
+  catalogLink: CatalogSelection | null;
+}
+
+interface UpdateBookInput extends BookInputBase {
   bookId: string;
   previouslyFinished: boolean;
   pageCountClampFrom: number | null;
+  catalogLink?: CatalogSelection | null;
 }
 
-interface UpdateAuthorInput extends AuthorNameInput {
-  userId: string;
-  authorId: string;
-}
-
-interface MergeAuthorsInput {
-  userId: string;
-  sourceId: string;
-  targetId: string;
-  sourceName: string;
-  targetName: string;
-}
-
-interface DeleteAuthorInput {
-  userId: string;
-  authorId: string;
-  name: string;
+function catalogLinkFields(catalogLink: CatalogSelection | null) {
+  if (catalogLink === null) {
+    return {workId: null, editionId: null, matchMethod: null, linkedAt: null};
+  }
+  return {...catalogLink, linkedAt: Timestamp.now()};
 }
 
 interface UpdateReadingSessionInput {
@@ -317,47 +362,19 @@ interface DeleteReadingSessionInput {
   title: string;
 }
 
-// The stored author-doc name fields for a given kind: persons derive the
-// display name from their explicit, user-confirmed parts; other kinds are
-// just the raw name. Shared by minting and the authors-page edit.
-function authorNameFields({ kind, name, givenName, familyName }: AuthorNameInput) {
-  const person = kind === 'person';
-  const displayName = person
-    ? joinPersonName({ givenName: givenName.trim().replace(/\s+/g, ' '), familyName: familyName.trim().replace(/\s+/g, ' ') })
-    : name.trim().replace(/\s+/g, ' ');
-  return {
-    name: displayName,
-    nameLower: displayName.toLowerCase(),
-    kind,
-    // deleteField() rather than omission so an edit can change kind or
-    // clear a mononym's given name without leaving stale parts behind.
-    givenName: person && givenName.trim() !== '' ? givenName.trim().replace(/\s+/g, ' ') : deleteField(),
-    familyName: person ? familyName.trim().replace(/\s+/g, ' ') : deleteField(),
-  };
-}
-
-// Resolve author chips into the id array stored on the book, minting
-// author docs for new authors in the same batch as the book write so the
-// collection can never disagree with the books that reference it —
-// offline included. Existing chips ({id, name}) pass through untouched: a
-// book write must never rewrite an author doc, or renames made on the
-// authors page would be silently reverted. New chips carry the kind and
-// the user-confirmed name parts from the entry form and mint with the
-// deterministic creation-time id (convergent offline merge-upserts).
-function resolveAuthorIds(batch: WriteBatch, userId: string, chips: AuthorChip[]): string[] {
-  return chips.map((chip) => {
-    if (chip.id !== null) return chip.id;
-    const fields = authorNameFields(chip.kind === 'person'
-      ? chip
-      : { ...chip, givenName: '', familyName: '' });
-    const id = authorIdFor(fields.name);
-    batch.set(
-      doc(db, 'users', userId, 'authors', id),
-      { ...fields, retirement: deleteField(), updatedAt: Timestamp.now() },
-      { merge: true }
-    );
-    return id;
+function storedAuthorIds(chips: AuthorChip[]): string[] {
+  if (chips.length > MAX_BOOK_AUTHORS) {
+    throw new Error(`A personal book may have at most ${MAX_BOOK_AUTHORS} authors.`);
+  }
+  const ids = chips.map((chip) => {
+    if (chip.id === null) throw new Error('Resolve each new author before saving the book.');
+    if ('unresolved' in chip) throw new Error('Replace each unresolved author before saving the book.');
+    return chip.id;
   });
+  if (new Set(ids).size !== ids.length) {
+    throw new Error('A personal book cannot reference the same author twice.');
+  }
+  return ids;
 }
 
 // Public profile projection from the publicweb function. Under `vite dev`
@@ -423,6 +440,39 @@ async function fetchPublicProfile(username: string): Promise<ProfileView | null>
 const ownProfileUsernames = new Map<string, Set<string>>();
 
 class Database {
+  // Existing catalog authors remain fully offline-capable. A genuinely new
+  // author needs one bounded callable so clients cannot edit or merge shared
+  // catalog documents directly. The response order matches the new-chip order
+  // and ensureCatalogAuthors rejects a response of any other length, so the
+  // ids line up positionally. Two chips can name the same author, in which
+  // case the catalog answers with one id twice and the duplicate is dropped.
+  static async resolveBookAuthors(chips: AuthorChip[]): Promise<AuthorChip[]> {
+    if (chips.length > MAX_BOOK_AUTHORS) {
+      throw new Error(`A personal book may have at most ${MAX_BOOK_AUTHORS} authors.`);
+    }
+    const newChips = chips.filter((chip) => chip.id === null);
+    if (newChips.length === 0) return chips;
+    const response = await ensureCatalogAuthors({
+      authors: newChips.map((chip) => ({
+        canonicalName: chip.kind === 'person' ? joinPersonName(chip) : chip.name.trim().replace(/\s+/g, ' '),
+        sortName: chip.kind === 'person' ? chip.familyName.trim().replace(/\s+/g, ' ') : chip.name.trim().replace(/\s+/g, ' '),
+        kind: chip.kind,
+      })),
+    });
+    let newIndex = 0;
+    const seen = new Set<string>();
+    const resolved: AuthorChip[] = [];
+    for (const chip of chips) {
+      const entry: ExistingAuthorChip | UnresolvedAuthorChip = chip.id === null
+        ? {id: response.authorIds[newIndex++], name: chip.name}
+        : chip;
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      resolved.push(entry);
+    }
+    return resolved;
+  }
+
   // Returns a Svelte store that listens to the user document.
   // Starts as undefined (loading) so consumers can distinguish "not yet
   // loaded" from the first snapshot; user docs always exist (created by
@@ -480,22 +530,17 @@ class Database {
     });
   }
 
-  // All author docs, for autocomplete and the book-list join. Deliberately
-  // unordered (see getAllBooks for why orderBy is a trap); sorted
-  // client-side. Starts as undefined (loading, getUser convention) so the
-  // join can distinguish "not yet loaded" from an empty collection.
-  static getAuthors(userId: string): Readable<Author[] | undefined> {
-    return cachedStore(authorsStores, userId, undefined, (set) => {
-      const q = query(collection(db, 'users', userId, 'authors'));
-
-      return onSnapshot(q, (snapshot) => {
-        const authors = snapshot.docs.map((authorDoc) => decodeStored(
-          () => decodeAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
-        ));
-        authors.sort((a, b) => (a.nameLower < b.nameLower ? -1 : a.nameLower > b.nameLower ? 1 : 0));
-        set(authors);
-      }, listenError('load your authors'));
-    });
+  // The shared author catalog, for autocomplete and the book-list join. One
+  // store for everyone: the catalog is not per-user, and the whole collection
+  // is listened to on purpose — it is bounded at 1000 documents (a few
+  // hundred KB at realistic sizes; see catalogLimits.ts), and autocomplete
+  // needs all of them locally. If the bound ever rises with scan
+  // pagination, this listener must become lazy. Deliberately unordered (see
+  // getAllBooks for why orderBy is a trap); sorted client-side. Starts as
+  // undefined (loading, getUser convention) so the join can distinguish
+  // "not yet loaded" from an empty collection.
+  static getAuthors(): Readable<Author[] | undefined> {
+    return catalogAuthorsStore;
   }
 
   // The signed-in user's own public profile doc, found by uid because the
@@ -597,6 +642,35 @@ class Database {
     ));
   }
 
+  // Per-book sharing is separate from the profile document because cached
+  // clients replace profiles wholesale. The setting's existence is consent;
+  // the work-readers callable still checks that the named profile is public.
+  static getBookSharingSettings(userId: string): Readable<BookSharingSettings | null | undefined> {
+    return cachedStore(bookSharingStores, userId, undefined, (set) => (
+      onSnapshot(doc(db, 'users', userId, 'settings', 'bookSharing'), (snapshot) => {
+        set(snapshot.exists()
+          ? decodeStored(() => decodeBookSharingSettings(
+            snapshot.data({ serverTimestamps: 'estimate' }),
+            snapshot.ref.path,
+          ))
+          : null);
+      }, listenError('load your book-sharing setting'))
+    ));
+  }
+
+  static enableBookSharing({ userId, profileUsername, timeZone }: EnableBookSharingInput): Promise<void> {
+    return setDoc(doc(db, 'users', userId, 'settings', 'bookSharing'), {
+      profileUsername,
+      timeZone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  static disableBookSharing(userId: string): Promise<void> {
+    return deleteDoc(doc(db, 'users', userId, 'settings', 'bookSharing'));
+  }
+
   // setDoc, not addDoc: the username is the doc id. If the username is
   // already taken the rules evaluate this as an update of someone else's
   // doc and reject it, so the caller sees permission-denied and reports
@@ -627,7 +701,7 @@ class Database {
   // Full overwrite with the freshly computed payload (the Me page keeps the
   // published doc in step with live stats whenever it differs, and the
   // profile-edit form and visibility checkbox write through here too).
-  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, stats, records, years, days }: ProfileWrite): Promise<void> {
+  static async updateProfile({ userId, username, givenName, familyName, links, isPublic, removeDiscovery = false, removeBookSharing = false, stats, records, years, days }: ProfileWrite): Promise<void> {
     const profileRef = doc(db, 'profiles', username);
     const profile = {
       uid: userId,
@@ -648,6 +722,9 @@ class Database {
     batch.set(profileRef, profile);
     batch.set(doc(db, 'profileOwners', userId), { username });
     if (removeDiscovery) batch.delete(doc(db, 'profileDiscovery', username));
+    if (removeBookSharing) {
+      batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
+    }
     await batch.commit();
   }
 
@@ -685,7 +762,10 @@ class Database {
   // profile is never gone or doubled — offline included. A taken new
   // username rejects the whole batch (see createProfile), which is why
   // this, like createProfile, stays out of writeLabels and reports inline.
-  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, stats, records, years, days }: RenameProfileWrite): Promise<void> {
+  static async renameProfile({ userId, oldUsername, newUsername, givenName, familyName, links, isPublic, isDiscoverable, bookSharing, stats, records, years, days }: RenameProfileWrite): Promise<void> {
+    if (bookSharing !== null && bookSharing.profileUsername !== oldUsername) {
+      throw new Error('Book-sharing settings do not match the profile being renamed.');
+    }
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newUsername), {
       uid: userId,
@@ -701,6 +781,17 @@ class Database {
     });
     batch.delete(doc(db, 'profiles', oldUsername));
     batch.set(doc(db, 'profileOwners', userId), { username: newUsername });
+    // A merge so createdAt stays whatever the server holds: the local copy
+    // may be an estimate (sharing enabled offline in this session), and the
+    // update rule requires createdAt unchanged — a copied estimate would
+    // reject the whole rename batch, which /me reports as a taken name.
+    if (bookSharing !== null) {
+      batch.set(doc(db, 'users', userId, 'settings', 'bookSharing'), {
+        profileUsername: newUsername,
+        timeZone: bookSharing.timeZone,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    }
     if (isDiscoverable) {
       batch.set(doc(db, 'profileDiscovery', newUsername), {
         uid: userId,
@@ -718,6 +809,7 @@ class Database {
     batch.delete(doc(db, 'profiles', username));
     batch.delete(doc(db, 'profileDiscovery', username));
     batch.delete(doc(db, 'profileOwners', userId));
+    batch.delete(doc(db, 'users', userId, 'settings', 'bookSharing'));
     await batch.commit();
   }
 
@@ -796,18 +888,19 @@ class Database {
     await batch.commit();
   }
 
-  // Books reference authors by id only; names live on the author docs and
+  // Books reference authors by id only; names live in the shared catalog and
   // are joined client-side (bookAuthors). updateBook also deletes the
   // legacy author/authors fields, so their presence on any doc proves an
   // old client wrote it last — the invariant the legacy-wins read rule
   // and the migration re-run policy both stand on.
-  static addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata }: AddBookInput): Promise<void> {
+  static addBook({ userId, authorChips, title, pageCount, currentPage, isbn, metadata, catalogLink }: AddBookInput): Promise<void> {
+    const authorIds = storedAuthorIds(authorChips);
     const batch = writeBatch(db);
     const ownerRef = doc(db, 'users', userId);
     const bookRef = doc(collection(db, 'users', userId, 'books'));
 
     batch.set(bookRef, {
-      authorIds: resolveAuthorIds(batch, userId, authorChips),
+      authorIds,
       currentPage,
       currentPageUpdateId: null,
       finished: isFinished(currentPage, pageCount),
@@ -818,6 +911,7 @@ class Database {
       timeRead: 0,
       title,
       isbn,
+      ...catalogLinkFields(catalogLink),
       // ISBN-derived metadata (utils/bookMetadata.ts shape), defaults when
       // the caller never looked the ISBN up.
       ...metadata,
@@ -828,7 +922,8 @@ class Database {
     return batch.commit();
   }
 
-  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, previouslyFinished, pageCountClampFrom, isbn, metadata }: UpdateBookInput): Promise<void> {
+  static updateBook({ userId, bookId, authorChips, title, pageCount, currentPage, previouslyFinished, pageCountClampFrom, isbn, metadata, catalogLink }: UpdateBookInput): Promise<void> {
+    const authorIds = storedAuthorIds(authorChips);
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', bookId);
     let correctionId: string | null = null;
@@ -852,7 +947,7 @@ class Database {
     // Its fromPage is the optimistic-concurrency claim enforced by rules, so
     // a newer remote reading rejects the whole stale offline edit.
     batch.update(bookRef, {
-      authorIds: resolveAuthorIds(batch, userId, authorChips),
+      authorIds,
       author: deleteField(),
       authors: deleteField(),
       title,
@@ -864,68 +959,12 @@ class Database {
       finished: isFinished(currentPage, pageCount),
       ...finishedAtPatch(previouslyFinished, isFinished(currentPage, pageCount), Timestamp.now()),
       isbn,
+      ...(catalogLink === undefined ? {} : catalogLinkFields(catalogLink)),
       ...metadata,
       updatedAt: Timestamp.now(),
     });
 
     return batch.commit();
-  }
-
-  // Author entity mutations, driven by the /authors page. Rename and
-  // kind/name-part edits touch only the author doc — every book shows the
-  // new values through the id join, which is the point of id-only refs.
-  // The doc id deliberately stays put (opaque after creation). `name` is
-  // read only for non-person kinds; persons derive it from the parts.
-  static async updateAuthor({ userId, authorId, name, kind, givenName, familyName }: UpdateAuthorInput): Promise<void> {
-    await updateDoc(doc(db, 'users', userId, 'authors', authorId), {
-      ...authorNameFields({ kind, name, givenName, familyName }),
-      updatedAt: Timestamp.now(),
-    });
-  }
-
-  // Merge by retiring the source as a durable redirect. Existing books do
-  // not need rewriting: every read canonicalizes redirects, and omitting
-  // those writes avoids clobbering a concurrent book edit with authorIds
-  // captured from an older UI snapshot. The transaction reads both author
-  // docs, so opposing concurrent merges conflict and cannot form a cycle.
-  // sourceName/targetName exist for writeLabels only.
-  static async mergeAuthors({ userId, sourceId, targetId }: MergeAuthorsInput): Promise<void> {
-    const sourceRef = doc(db, 'users', userId, 'authors', sourceId);
-    const targetRef = doc(db, 'users', userId, 'authors', targetId);
-    await runTransaction(db, async (tx) => {
-      const [source, target] = await Promise.all([
-        tx.get(sourceRef),
-        tx.get(targetRef),
-      ]);
-      if (!source.exists() || !target.exists()) throw new Error('Both merge authors must exist.');
-      const decodedSource = decodeAuthor(source.id, source.data(), source.ref.path);
-      const decodedTarget = decodeAuthor(target.id, target.data(), target.ref.path);
-      if (decodedSource.retirement !== undefined || decodedTarget.retirement !== undefined) {
-        throw new Error('Retired authors cannot participate in another merge. Reload and try again.');
-      }
-      tx.update(sourceRef, {
-        retirement: { reason: 'merged', targetId },
-        updatedAt: Timestamp.now(),
-      });
-    });
-  }
-
-  // Retire rather than physically delete. A concurrent/offline book write
-  // can still reference this id after the UI's zero-reference snapshot;
-  // retaining the document prevents a dangling id while hiding it from
-  // future author selection.
-  static async deleteAuthor({ userId, authorId }: DeleteAuthorInput): Promise<void> {
-    const ref = doc(db, 'users', userId, 'authors', authorId);
-    await runTransaction(db, async (tx) => {
-      const snapshot = await tx.get(ref);
-      if (!snapshot.exists()) throw new Error('Author does not exist.');
-      const author = decodeAuthor(snapshot.id, snapshot.data(), snapshot.ref.path);
-      if (author.retirement !== undefined) throw new Error('Author is already retired.');
-      tx.update(ref, {
-        retirement: { reason: 'deleted' },
-        updatedAt: Timestamp.now(),
-      });
-    });
   }
 
   // Local (non-Toggl) timers reuse the activeTimer field the Toggl flow
@@ -1332,18 +1371,6 @@ Database.addBook = reportWriteFailures(
 Database.updateBook = reportWriteFailures(
   'updateBook', ({ userId }) => userId,
   ({ title }) => `save changes to "${title}"`, Database.updateBook,
-);
-Database.updateAuthor = reportWriteFailures(
-  'updateAuthor', ({ userId }) => userId,
-  ({ name }) => `save changes to author "${name}"`, Database.updateAuthor,
-);
-Database.mergeAuthors = reportWriteFailures(
-  'mergeAuthors', ({ userId }) => userId,
-  ({ sourceName, targetName }) => `merge "${sourceName}" into "${targetName}"`, Database.mergeAuthors,
-);
-Database.deleteAuthor = reportWriteFailures(
-  'deleteAuthor', ({ userId }) => userId,
-  ({ name }) => `delete author "${name}"`, Database.deleteAuthor,
 );
 Database.startLocalTimer = reportWriteFailures(
   'startLocalTimer', (userId) => userId,

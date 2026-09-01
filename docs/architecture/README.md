@@ -60,6 +60,8 @@ deterministic SVG generator.
   owner scope and validate writes.
 - Backend services perform operations that require server-side authorization,
   protected configuration, or access to external integrations.
+- A shared catalog connects author, Work, and Edition identity while personal
+  books remain owner-controlled tracking records.
 - Background workers process lifecycle events, cleanup, and deferred work.
 - The public profile renderer returns a bounded sharing projection. It does not
   define the browser's private-data permissions.
@@ -75,6 +77,7 @@ deterministic SVG generator.
 | Backend requests | The service handling a request performs authorization and input validation before privileged work. |
 | Published profiles | Publication state and a bounded output projection decide what a visitor can receive. Private and missing profiles do not reveal private content. |
 | Restricted overview | A server-side authorization check protects operational summaries. Hiding navigation alone is insufficient. |
+| Catalog curation | Server-side authorization, recent authentication, preview/apply checks, and bounded transactions protect shared catalog changes. |
 | External integrations | Server-only credentials remain outside public responses and browser-readable state. |
 | Background work | Managed lifecycle events invoke bounded workers. Workers apply the same ownership and retention expectations as interactive operations. |
 
@@ -88,10 +91,12 @@ part of this public map package.
 | `/` | Books in progress, page progress, reading sessions, and timers | Signed-in owner read and write |
 | `/finished` | Finished books, search, sorting, filtering, totals, and session correction | Signed-in owner read and write |
 | `/me` | Reading analytics, sharing settings, optional integrations, and sign-out | Signed-in owner read and write |
-| `/authors` | Rename, classify, merge, and retire authors | Signed-in owner read and write |
+| `/authors` | Browse the shared author catalog | Signed-in reader; no writes on this page |
 | `/isbns` | Find incomplete book information and open the edit dialog | Signed-in owner read and write |
+| `/books/[workId]` | Shared Work metadata and opted-in reader summaries | Signed-in reader; no writes on this page |
 | `/profiles/[username]` | Shared reading statistics, activity, records, yearly data, and links | Anyone when published; the owner can view a private profile; no writes on this page |
 | `/admin` | Restricted operational summary | Authorized operator read only; operational access may be audited |
+| `/admin/catalog` | Preview and apply shared author, Work, Edition, and matching changes | Authorized operator read and write; changes are audited |
 
 ## Public sanitization rules
 

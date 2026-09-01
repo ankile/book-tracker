@@ -42,15 +42,20 @@ test('a live book and author listener survives reloading the original tab', asyn
   const auth = getAuth(adminApp);
   const db = getFirestore(adminApp);
   const userRef = db.doc(`users/${uid}`);
-  const authorRef = userRef.collection('authors').doc(authorId);
+  const authorRef = db.doc(`catalogAuthors/${authorId}`);
   const bookRef = userRef.collection('books').doc(bookId);
 
-  await auth.createUser({ uid, email, password: TEST_PASSWORD });
+  await auth.createUser({ uid, email, password: TEST_PASSWORD, emailVerified: true });
   await userRef.set({ uid, email });
   await authorRef.set({
-    name: initialAuthor,
-    nameLower: initialAuthor.toLowerCase(),
+    canonicalName: initialAuthor,
+    alternateNames: [],
+    nameKeys: [initialAuthor.toLowerCase()],
+    sortName: initialAuthor,
     kind: 'entity',
+    status: 'active',
+    mergedFrom: [],
+    createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
   await bookRef.set({
@@ -133,8 +138,9 @@ test('a live book and author listener survives reloading the original tab', asyn
     await db.runTransaction(async (transaction) => {
       transaction.update(bookRef, { title: updatedTitle, updatedAt: FieldValue.serverTimestamp() });
       transaction.update(authorRef, {
-        name: updatedAuthor,
-        nameLower: updatedAuthor.toLowerCase(),
+        canonicalName: updatedAuthor,
+        nameKeys: [updatedAuthor.toLowerCase()],
+        sortName: updatedAuthor,
         updatedAt: FieldValue.serverTimestamp(),
       });
     });
@@ -151,6 +157,7 @@ test('a live book and author listener survives reloading the original tab', asyn
   } finally {
     await context.close();
     await db.recursiveDelete(userRef);
+    await authorRef.delete();
     await auth.deleteUser(uid);
     await deleteApp(adminApp);
   }

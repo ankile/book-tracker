@@ -51,6 +51,13 @@
     margin-bottom: 1.5rem;
   }
 
+  .catalog-link {
+    display: inline-block;
+    margin: -0.75rem 0 1.5rem;
+    color: #0069d9;
+    font-weight: 600;
+  }
+
   .card {
     background: white;
     padding: 2rem;
@@ -196,6 +203,7 @@
 
 <div class="admin-container">
   <h1>Admin overview</h1>
+  <a class="catalog-link" href="/admin/catalog">Open catalog curation</a>
 
   {#if overview}
     <div class="card">

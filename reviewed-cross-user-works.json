@@ -1,0 +1,11 @@
+{
+  "groups": [
+    {
+      "id": "holy-bible",
+      "bookPaths": ["users/1Cf0CaNfgnVSvTrF5dYjzRd9Xri2/books/T22XFNS8aeR1MXmrJUzH"],
+      "canonicalTitle": "Holy Bible",
+      "authorNames": ["Various Authors"],
+      "authorKinds": ["entity"]
+    }
+  ]
+}
