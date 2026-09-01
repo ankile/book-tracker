@@ -158,3 +158,6 @@ serviceAccountKey.json
 
 # Cloudflare Pages upload directory (cloudflare/assemble.ts)
 .pages-dist/
+
+# wrangler state from npm run pages:deploy
+.wrangler/
