@@ -6,17 +6,14 @@ import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime"
 import {
   AdminCatalogApplyRequest,
   AdminCatalogPreviewRequest,
-  AdminCatalogScanRequest,
   DecodeFailure,
   decodeAdminCatalogApplyRequest,
   decodeAdminCatalogPreviewRequest,
-  decodeAdminCatalogScanRequest,
   decodeEmptyCallableRequest,
 } from "./decoders";
 import {
   applyAdminCatalogOperation,
   previewAdminCatalogOperation,
-  scanAdminCatalog,
 } from "./adminCatalog";
 import {logAppCheckPresence} from "./appCheck";
 import {
@@ -376,13 +373,6 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
     },
   };
 }, {auditView: true});
-
-exports.catalogscan = adminCallable(
-  "admin.catalogscan",
-  decodeAdminCatalogScanRequest,
-  async ({bookCursor}: AdminCatalogScanRequest) => scanAdminCatalog(db, bookCursor),
-  {auditView: true},
-);
 
 exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
   "admin.catalogpreview",

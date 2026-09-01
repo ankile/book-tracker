@@ -1,117 +1,64 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { FunctionsError } from 'firebase/functions';
 
 import {
-  appendAdminScanPage,
-  classifyAdminCatalogFailure,
+  adminCatalogCandidatesByBook,
   adminCatalogCandidatesForBook,
+  classifyAdminCatalogFailure,
   decodeAdminCatalogApplyResponse,
   decodeAdminCatalogPreviewResponse,
-  decodeAdminCatalogScanResponse,
+  externalIndexId,
   parseAdminBookTargets,
   parseAdminExternalIds,
   parseAdminStringList,
 } from '../src/lib/utils/adminCatalog.ts';
+import type {
+  AdminCatalogBookRow,
+  AdminCatalogWorkRow,
+  CatalogScan,
+} from '../src/lib/interfaces/catalog.ts';
 
-const work = {
+const work: AdminCatalogWorkRow = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, status: 'hidden',
   mergedFrom: [], createdBy: null, createdAt: 900,
   editionCount: 1, linkedBookCount: 1, warnings: [],
 };
-const edition = {
-  editionId: 'edition', workId: 'work', isbn13: '9780316769488', title: 'Book',
-  publisher: '', publishedDate: '', language: '',
-  translatorNames: [], format: 'unknown', suggestedPageCount: 200, coverUrl: '',
-  externalIds: {'open-library': 'OL1M'},
-};
-const author = {
-  authorId: 'author', canonicalName: 'Author', alternateNames: [],
-  sortName: 'Author', kind: 'person', status: 'active',
-  mergedFrom: [], workCount: 1, warnings: [],
-};
-const limits = {catalogAuthors: 500, works: 200, books: 100};
-const book = {
+const book: AdminCatalogBookRow = {
   uid: 'user', bookId: 'book', title: 'Personal title', authorNames: ['Author'],
   isbn13: '9780316769488', rawIsbn: null, pageCount: 201, publisher: '',
   coverUrl: '', workId: 'work', editionId: 'edition', anomaly: null,
 };
 
-test('admin catalog scan decoder accepts the bounded identity-only projection', () => {
-  const decoded = decodeAdminCatalogScanResponse({
-    authors: [author], works: [work], editions: [edition], books: [book], nextBookCursor: null,
-    bookCountsComplete: true, findings: [{
-      code: 'unmatched-isbn-candidate', severity: 'warning', message: 'Review link',
-      workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'book'}],
-    }],
-    limits,
-  });
-  assert.equal(decoded.works[0].canonicalTitle, 'Book');
-  assert.equal(decoded.books[0].pageCount, 201);
-  assert.equal('currentPage' in decoded.books[0], false);
-  assert.equal('timeRead' in decoded.books[0], false);
-  assert.equal('activeTimer' in decoded.books[0], false);
-});
-
-// A book with no usable page count is the reason the scan reports null: an
-// older row may carry none at all, and dropping the whole page over it left
-// the console blank (the decoder used to refuse anything but a positive
-// integer).
-test('admin catalog scan decoder keeps a book that has no page count', () => {
-  const response = {
-    authors: [author], works: [work], editions: [edition], nextBookCursor: null,
-    bookCountsComplete: true, findings: [], limits,
-  };
-  const decoded = decodeAdminCatalogScanResponse({
-    ...response, books: [{...book, pageCount: null}],
-  });
-  assert.equal(decoded.books[0].pageCount, null);
-  assert.throws(() => decodeAdminCatalogScanResponse({
-    ...response, books: [{...book, pageCount: 0}],
-  }), /positive safe integer or null/);
-});
-
-// The console labels findings by code, so a code it does not know is a
-// deploy mismatch, not a row to render blank.
-test('admin catalog scan decoder rejects an unknown finding code', () => {
-  assert.throws(() => decodeAdminCatalogScanResponse({
-    authors: [author], works: [work], editions: [edition], books: [book],
-    nextBookCursor: null, bookCountsComplete: true,
-    findings: [{
-      code: 'title-conflict', severity: 'warning', message: 'Review title',
-      workIds: [], editionIds: [], books: [],
-    }],
-    limits,
-  }), /known catalog finding code/);
-});
-
-test('admin catalog scan decoder rejects extra personal and nested fields', () => {
-  const response = {
-    authors: [author], works: [work], editions: [edition], books: [{...book, currentPage: 50}],
-    nextBookCursor: 'users/user/books/book', bookCountsComplete: false, findings: [],
-    limits,
-  };
-  assert.throws(() => decodeAdminCatalogScanResponse(response), /expected only/);
-  assert.throws(() => decodeAdminCatalogScanResponse({
-    ...response, books: [book], editions: [{...edition, externalIds: {openlibrary: 3}}],
-  }), /expected a string/);
-});
-
 test('admin catalog candidates prioritize exact identity evidence and prefill exact editions', () => {
-  const unmatched = {...book, workId: null, editionId: null};
-  const scan = decodeAdminCatalogScanResponse({
-    authors: [author], works: [work], editions: [edition], books: [unmatched], nextBookCursor: null,
-    bookCountsComplete: true,
+  const unmatched: AdminCatalogBookRow = {...book, workId: null, editionId: null};
+  const scan: Pick<CatalogScan, 'works' | 'books' | 'findings'> = {
+    works: [work],
+    books: [unmatched],
     findings: [
       {code: 'likely-title-author-candidate', severity: 'warning', message: 'Likely', workIds: ['work'], editionIds: [], books: [{uid: 'user', bookId: 'book'}]},
       {code: 'unmatched-isbn-candidate', severity: 'warning', message: 'Exact', workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'book'}]},
+      {code: 'unmatched-isbn-candidate', severity: 'warning', message: 'Other', workIds: ['work'], editionIds: ['edition'], books: [{uid: 'user', bookId: 'other'}]},
     ],
-    limits,
-  });
+  };
   assert.deepEqual(adminCatalogCandidatesForBook(scan, unmatched), [{
     workId: 'work', editionId: 'edition', label: 'Exact ISBN', title: 'Book',
   }]);
+  // The per-page map keys unmatched books only and never invents a
+  // candidate for a work the scan does not know.
+  const byBook = adminCatalogCandidatesByBook({...scan, books: [unmatched, {...book, bookId: 'linked'}]});
+  assert.deepEqual([...byBook.keys()], ['user/book']);
+  assert.deepEqual(adminCatalogCandidatesForBook({...scan, works: []}, unmatched), []);
+});
+
+// The browser computes externalIdIndex ids to check every index row; it
+// must agree byte for byte with the server's node:crypto digest.
+test('the browser-side external index id is the server digest', async () => {
+  const expected = createHash('sha256').update('open-library\0OL1M').digest('hex');
+  assert.equal(await externalIndexId('open-library', 'OL1M'), expected);
+  assert.notEqual(await externalIndexId('open-library', 'OL1N'), expected);
 });
 
 test('admin preview and apply decoders retain exact before/after differences', () => {
@@ -168,41 +115,4 @@ test('admin form parsers accept bounded line-oriented targets and metadata', () 
     openlibrary: 'OL1M', google: 'abc=def',
   });
   assert.throws(() => parseAdminExternalIds('missing-separator'), /provider=id/);
-});
-
-test('appending a scan page keeps the first-page inventories, accumulates link counts, and completes only when the cursor ends', () => {
-  const finding = (message: string) => ({
-    code: 'book-link-anomaly', severity: 'error', message, workIds: [], editionIds: [], books: [],
-  } as const);
-  const first = decodeAdminCatalogScanResponse({
-    authors: [author], works: [work], editions: [edition], books: [book],
-    nextBookCursor: 'users/user/books/book', bookCountsComplete: false,
-    findings: [finding('first')], limits,
-  });
-  const second = decodeAdminCatalogScanResponse({
-    authors: [], works: [{...work, linkedBookCount: 2}], editions: [],
-    books: [{...book, bookId: 'second'}], nextBookCursor: 'users/user/books/second',
-    bookCountsComplete: false, findings: [finding('second')], limits,
-  });
-  const merged = appendAdminScanPage(first, second);
-  assert.deepEqual(merged.authors, first.authors);
-  assert.deepEqual(merged.editions, first.editions);
-  assert.deepEqual(merged.works.map(({workId, linkedBookCount}) => [workId, linkedBookCount]), [['work', 3]]);
-  assert.deepEqual(merged.books.map(({bookId}) => bookId), ['book', 'second']);
-  assert.deepEqual(merged.findings.map(({message}) => message), ['first', 'second']);
-  assert.equal(merged.nextBookCursor, 'users/user/books/second');
-  // A first page with no unlinked book is still an incomplete scan.
-  assert.equal(merged.books.filter(({workId}) => workId === null).length, 0);
-  assert.equal(merged.bookCountsComplete, false);
-
-  const last = decodeAdminCatalogScanResponse({
-    authors: [], works: [{...work, linkedBookCount: 1}], editions: [],
-    books: [{...book, bookId: 'third', workId: null, editionId: null}], nextBookCursor: null,
-    bookCountsComplete: false, findings: [], limits,
-  });
-  const complete = appendAdminScanPage(merged, last);
-  assert.equal(complete.bookCountsComplete, true);
-  assert.deepEqual(complete.works.map(({linkedBookCount}) => linkedBookCount), [4]);
-  assert.equal(complete.books.length, 3);
-  assert.deepEqual(complete.authors, first.authors);
 });

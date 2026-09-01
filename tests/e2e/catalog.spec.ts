@@ -452,7 +452,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     const nonAdminContext: BrowserContext = await browser.newContext();
     const nonAdminPage = await nonAdminContext.newPage();
     await login(nonAdminPage, normalEmail);
-    await navigateInApp(nonAdminPage, '/admin/catalog');
+    await navigateInApp(nonAdminPage, '/admin');
     await expect(nonAdminPage.getByText('Not Found')).toBeVisible();
     await nonAdminContext.close();
 
@@ -460,8 +460,9 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     const page = await context.newPage();
     try {
       await login(page, adminEmail);
-      await navigateInApp(page, '/admin/catalog');
-      await expect(page.getByRole('heading', {name: 'Catalog curation'})).toBeVisible();
+      await navigateInApp(page, '/admin');
+      await expect(page.getByRole('heading', {name: 'Catalog', exact: true})).toBeVisible();
+      await expect(page.getByText(/^Live · /)).toBeVisible();
       await expect(page.getByRole('heading', {name: /New works from readers/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Same book, split across records/})).toBeVisible();
       await page.getByText(/All catalog data/).click();

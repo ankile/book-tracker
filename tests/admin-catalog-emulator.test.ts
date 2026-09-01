@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import test from 'node:test';
 import {deleteApp as deleteClientApp, initializeApp as initializeClientApp} from 'firebase/app';
 import {connectAuthEmulator, getAuth, signInWithEmailAndPassword} from 'firebase/auth';
 import {deleteApp, initializeApp} from 'firebase-admin/app';
 import {getAuth as getAdminAuth} from 'firebase-admin/auth';
-import {FieldValue, Timestamp, getFirestore} from 'firebase-admin/firestore';
+import {FieldValue, Timestamp, getFirestore, type QuerySnapshot} from 'firebase-admin/firestore';
+import {externalIndexDigestInput} from '../shared/catalogIdentity.ts';
+import {scanCatalog} from '../shared/catalogScan.ts';
 import type {AdminCatalogOperation} from '../src/lib/interfaces/catalog.ts';
 
 const PROJECT_ID = 'book-tracker-d8f24';
@@ -524,9 +526,9 @@ test('all admin catalog operations use real callable transactions and preserve p
   );
   assert.equal((await staleRef.get()).get('matchMethod'), 'catalog-choice');
 
-  // Open-signup data is paged instead of participating in the operator-owned
-  // catalog bounds. One account with >500 books and >100 unrelated user roots
-  // must not make the first or subsequent admin page unavailable.
+  // Open-signup data: one account with 600 books, a malformed personal row
+  // and a hundred and fifty unrelated accounts, all of which the scan must
+  // take in stride.
   const attackerUid = `attacker-${suffix}`;
   const scanNow = Timestamp.now();
   const attackerWrites: Array<{path: string; data: Record<string, unknown>}> = [];
@@ -584,50 +586,57 @@ test('all admin catalog operations use real callable transactions and preserve p
     }
     await attackerBatch.commit();
   }
-  const firstScan = await callable<{
-    books: Array<{uid: string; bookId: string}>;
-    works: Array<{workId: string; linkedBookCount: number}>;
-    findings: Array<{code: string; workIds: string[]; editionIds: string[]; books: Array<{uid: string; bookId: string}>}>;
-    nextBookCursor: string | null;
-    bookCountsComplete: boolean;
-    limits: {books: number};
-  }>('admin-catalogscan', {});
-  assert.equal(firstScan.books.length, 100);
-  assert.equal(firstScan.limits.books, 100);
-  assert.equal(firstScan.bookCountsComplete, false);
-  assert.match(firstScan.nextBookCursor ?? '', /^users\/[^/]+\/books\/[^/]+$/);
-  const secondScan = await callable<{
-    books: Array<{uid: string; bookId: string}>;
-    works: Array<{workId: string; linkedBookCount: number}>;
-    findings: Array<{code: string; workIds: string[]; editionIds: string[]; books: Array<{uid: string; bookId: string}>}>;
-    nextBookCursor: string | null;
-    bookCountsComplete: boolean;
-  }>('admin-catalogscan', {bookCursor: firstScan.nextBookCursor});
-  assert.equal(secondScan.books.length, 100);
-  assert.equal(secondScan.bookCountsComplete, false);
-  const pages = [firstScan, secondScan];
-  let scanCursor = secondScan.nextBookCursor;
-  while (scanCursor !== null) {
-    assert.ok(pages.length < 20, 'admin scan cursor did not converge');
-    const page = await callable<typeof secondScan>('admin-catalogscan', {bookCursor: scanCursor});
-    pages.push(page);
-    scanCursor = page.nextBookCursor;
-  }
-  const allRows = pages.flatMap((page) => page.books);
-  assert.equal(allRows.filter((book) => book.uid === attackerUid).length, 600);
-  assert.equal(new Set(allRows.map((book) => `${book.uid}/${book.bookId}`)).size, allRows.length);
-  const findingSignatures = pages.flatMap((page) => page.findings).map((finding) => JSON.stringify([
+  // The catalog scan runs in the operator's browser over live listeners
+  // (shared/catalogScan.ts); the same function over everything the
+  // operations above wrote must see every book, report the malformed one and
+  // count links against the surviving work.
+  const documentsOf = (snapshot: QuerySnapshot) =>
+    snapshot.docs.map((snapshotDoc) => ({id: snapshotDoc.id, data: snapshotDoc.data()}));
+  const [authorDocs, workDocs, editionDocs, isbnDocs, externalDocs, bookDocs, userDocs] = await Promise.all([
+    db.collection('catalogAuthors').get(),
+    db.collection('works').get(),
+    db.collection('editions').get(),
+    db.collection('isbnIndex').get(),
+    db.collection('externalIdIndex').get(),
+    db.collectionGroup('books').get(),
+    db.collection('users').get(),
+  ]);
+  const scan = scanCatalog({
+    authors: documentsOf(authorDocs),
+    works: documentsOf(workDocs),
+    editions: documentsOf(editionDocs),
+    isbnIndex: documentsOf(isbnDocs),
+    externalIdIndex: externalDocs.docs.map((snapshotDoc) => ({
+      id: snapshotDoc.id,
+      data: snapshotDoc.data(),
+      expectedId: createHash('sha256').update(externalIndexDigestInput(
+        String(snapshotDoc.get('provider')), String(snapshotDoc.get('externalId')),
+      )).digest('hex'),
+    })),
+    books: bookDocs.docs.map((snapshotDoc) => ({
+      uid: snapshotDoc.ref.parent.parent!.id, bookId: snapshotDoc.id, data: snapshotDoc.data(),
+    })),
+    liveUserIds: new Set(userDocs.docs
+      .filter((snapshotDoc) => snapshotDoc.get('deletedAt') === undefined)
+      .map((snapshotDoc) => snapshotDoc.id)),
+  });
+  assert.equal(scan.books.filter((book) => book.uid === attackerUid).length, 600);
+  assert.equal(new Set(scan.books.map((book) => `${book.uid}/${book.bookId}`)).size, scan.books.length);
+  const findingSignatures = scan.findings.map((finding) => JSON.stringify([
     finding.code, finding.workIds, finding.editionIds, finding.books,
   ]));
   assert.equal(new Set(findingSignatures).size, findingSignatures.length);
-  assert.equal(pages.some((page) => page.findings.some((finding) =>
+  assert.equal(scan.findings.some((finding) =>
     finding.code === 'book-link-anomaly' &&
     finding.books.some((book) => book.uid === personalUid && book.bookId === overLimitBookId),
-  )), true);
+  ), true);
   // personal, cross-ISBN, prior-target-ISBN, same-work-ISBN, and the stale
   // book relinked to the merged source.
-  assert.equal(pages.reduce((total, page) => total +
-    (page.works.find((work) => work.workId === targetWorkId)?.linkedBookCount ?? 0), 0), 5);
+  assert.equal(scan.works.find((work) => work.workId === targetWorkId)?.linkedBookCount, 5);
+  // Every index row the operations left behind agrees with its edition.
+  assert.deepEqual(scan.findings.filter((finding) =>
+    finding.code === 'isbn-index-mismatch' || finding.code === 'external-id-index-mismatch' ||
+    finding.code === 'catalog-row-anomaly'), []);
 
   const largeTargetId = `large-target-${suffix}`;
   const largeSourceId = `large-source-${suffix}`;
@@ -671,7 +680,6 @@ test('all admin catalog operations use real callable transactions and preserve p
   const postDeletePreview = await preview(postDeleteOperation);
   await db.doc(`users/${ADMIN_UID}`).update({deletedAt: Timestamp.now()});
   const denied = (error: unknown) => (error as {status?: string}).status === 'NOT_FOUND';
-  await assert.rejects(callable('admin-catalogscan', {}), denied);
   await assert.rejects(callable('admin-catalogpreview', {operation: postDeleteOperation}), denied);
   await assert.rejects(callable('admin-catalogapply', {
     operationId: postDeletePreview.operationId,

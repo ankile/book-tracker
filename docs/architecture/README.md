@@ -77,6 +77,7 @@ deterministic SVG generator.
 | Backend requests | The service handling a request performs authorization and input validation before privileged work. |
 | Published profiles | Publication state and a bounded output projection decide what a visitor can receive. Private and missing profiles do not reveal private content. |
 | Restricted overview | A server-side authorization check protects operational summaries. Hiding navigation alone is insufficient. |
+| Catalog console reads | Data permissions grant the operator's identity read access to shared catalog data and catalog links; every other identity keeps owner-only access. |
 | Catalog curation | Server-side authorization, recent authentication, preview/apply checks, and bounded transactions protect shared catalog changes. |
 | External integrations | Server-only credentials remain outside public responses and browser-readable state. |
 | Background work | Managed lifecycle events invoke bounded workers. Workers apply the same ownership and retention expectations as interactive operations. |
@@ -95,8 +96,8 @@ part of this public map package.
 | `/isbns` | Find incomplete book information and open the edit dialog | Signed-in owner read and write |
 | `/books/[workId]` | Shared Work metadata and opted-in reader summaries | Signed-in reader; no writes on this page |
 | `/profiles/[username]` | Shared reading statistics, activity, records, yearly data, and links | Anyone when published; the owner can view a private profile; no writes on this page |
-| `/admin` | Restricted operational summary | Authorized operator read only; operational access may be audited |
-| `/admin/catalog` | Preview and apply shared author, Work, Edition, and matching changes | Authorized operator read and write; changes are audited |
+| `/admin` | Live catalog console: review reader-created works, merge duplicates, link books; preview and apply shared author, Work, Edition, and matching changes | Authorized operator read (data permissions) and write (audited operations) |
+| `/admin/users` | Restricted operational summary: accounts and issue log | Authorized operator read only; operational access may be audited |
 
 ## Public sanitization rules
 

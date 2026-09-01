@@ -166,110 +166,19 @@ export interface WorkReadersResponse {
   nextCursor: string | null;
 }
 
-// The scan rows carry what the curation console renders or prefills a form
-// with, and nothing else.
-export interface AdminCatalogWorkRow {
-  workId: string;
-  canonicalTitle: string;
-  alternateTitles: string[];
-  authorIds: string[];
-  coverUrl: string;
-  subjects: string[];
-  fiction: boolean | null;
-  status: WorkStatus;
-  mergedFrom: string[];
-  // uid of the user who created the work through the add-book flow; null
-  // for migration- or admin-created works. Newest first on the admin page.
-  createdBy: string | null;
-  createdAt: number;
-  editionCount: number;
-  linkedBookCount: number;
-  warnings: string[];
-}
-
-export interface AdminCatalogAuthorRow {
-  authorId: string;
-  canonicalName: string;
-  alternateNames: string[];
-  sortName: string;
-  kind: CatalogAuthorKind;
-  status: CatalogAuthorStatus;
-  mergedFrom: string[];
-  workCount: number;
-  warnings: string[];
-}
-
-export interface AdminCatalogEditionRow extends Omit<CatalogEditionInput, 'externalIds'> {
-  editionId: string;
-  workId: string;
-  externalIds: Record<string, string>;
-}
-
-export interface AdminCatalogBookTarget {
-  uid: string;
-  bookId: string;
-}
-
-export interface AdminCatalogBookRow extends AdminCatalogBookTarget {
-  title: string;
-  authorNames: string[];
-  isbn13: string | null;
-  rawIsbn: string | null;
-  // null when the book has no usable page count; the console renders an em
-  // dash rather than dropping the row.
-  pageCount: number | null;
-  publisher: string;
-  coverUrl: string;
-  workId: string | null;
-  editionId: string | null;
-  anomaly: string | null;
-}
-
-// The codes the scan emits (functions/src/adminCatalog.ts). Decoding them as
-// a union is what makes an unlabelled code a decode failure instead of a
-// blank cell.
-export type AdminCatalogFindingCode =
-  | 'book-row-anomaly'
-  | 'book-link-anomaly'
-  | 'unmatched-isbn-candidate'
-  | 'unmatched-title-author-candidate'
-  | 'likely-title-author-candidate'
-  | 'edition-missing-work'
-  | 'isbn-index-mismatch'
-  | 'external-id-index-mismatch'
-  | 'work-invariant'
-  | 'duplicate-author-name'
-  | 'suspected-duplicate-works';
-
-export interface AdminCatalogFinding {
-  code: AdminCatalogFindingCode;
-  severity: 'error' | 'warning';
-  message: string;
-  workIds: string[];
-  editionIds: string[];
-  books: AdminCatalogBookTarget[];
-}
-
-export interface AdminCatalogLimits {
-  catalogAuthors: number;
-  works: number;
-  books: number;
-}
-
-export interface AdminCatalogScanResponse {
-  authors: AdminCatalogAuthorRow[];
-  works: AdminCatalogWorkRow[];
-  editions: AdminCatalogEditionRow[];
-  books: AdminCatalogBookRow[];
-  nextBookCursor: string | null;
-  bookCountsComplete: boolean;
-  findings: AdminCatalogFinding[];
-  limits: AdminCatalogLimits;
-}
-
-export interface AdminCatalogScanRequest {
-  bookCursor?: string | null;
-}
+// The scan rows, finding shape and codes are the shared scan's
+// (shared/catalogScan.ts): the browser computes them from live listeners.
+export type {
+  AdminCatalogAuthorRow,
+  AdminCatalogBookRow,
+  AdminCatalogBookTarget,
+  AdminCatalogEditionRow,
+  AdminCatalogFinding,
+  AdminCatalogFindingCode,
+  AdminCatalogWorkRow,
+  CatalogScan,
+} from '../../../shared/catalogScan.ts';
+import type { AdminCatalogBookTarget } from '../../../shared/catalogScan.ts';
 
 export type AdminCatalogOperation =
   | {

@@ -289,7 +289,7 @@ node db-audit.ts --prod
 npm run pages:deploy && npm run pages:purge
 
 # 5. verify by hand: add-book search suggestion, edit an existing book,
-#    a work's reader page, the sharing toggle, /admin/catalog scan
+#    a work's reader page, the sharing toggle, the /admin catalog console
 ```
 
 `<N>` and the expected dry-run counts are production observations and live

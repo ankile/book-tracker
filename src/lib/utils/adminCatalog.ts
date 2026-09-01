@@ -1,28 +1,20 @@
 import { FunctionsError } from 'firebase/functions';
+import { externalIndexDigestInput } from '../../../shared/catalogIdentity.ts';
 import type {
   AdminCatalogApplyResponse,
-  AdminCatalogAuthorRow,
   AdminCatalogBookRow,
   AdminCatalogBookTarget,
   AdminCatalogChange,
-  AdminCatalogEditionRow,
   AdminCatalogExpectedBook,
   AdminCatalogExpectedDocument,
   AdminCatalogExpectedState,
-  AdminCatalogFinding,
-  AdminCatalogFindingCode,
-  AdminCatalogLimits,
   AdminCatalogPreviewResponse,
-  AdminCatalogScanResponse,
-  AdminCatalogWorkRow,
-  CatalogAuthorStatus,
   CatalogMatchMethod,
-  WorkStatus,
+  CatalogScan,
 } from '../interfaces/catalog.ts';
 import {
   boolean,
   type Data,
-  editionFormat,
   exactKeys,
   finiteNumber,
   integer,
@@ -30,8 +22,6 @@ import {
   nullableNumber,
   nullableString,
   record,
-  string,
-  strings,
 } from './decodePrimitives.ts';
 
 function nonNegativeInteger(value: unknown, context: string): number {
@@ -40,51 +30,9 @@ function nonNegativeInteger(value: unknown, context: string): number {
   return decoded;
 }
 
-function positiveInteger(value: unknown, context: string): number {
-  const decoded = integer(value, context);
-  if (decoded <= 0) throw new TypeError(`${context}: expected a positive integer`);
-  return decoded;
-}
-
 function array<T>(value: unknown, context: string, decode: (entry: unknown, context: string) => T): T[] {
   if (!Array.isArray(value)) throw new TypeError(`${context}: expected an array`);
   return value.map((entry, index) => decode(entry, `${context}[${index}]`));
-}
-
-function workStatus(value: unknown, context: string): WorkStatus {
-  if (value !== 'active' && value !== 'merged' && value !== 'hidden') {
-    throw new TypeError(`${context}: expected active, merged or hidden`);
-  }
-  return value;
-}
-
-function authorStatus(value: unknown, context: string): CatalogAuthorStatus {
-  if (value !== 'active' && value !== 'merged') {
-    throw new TypeError(`${context}: expected active or merged`);
-  }
-  return value;
-}
-
-function decodeAuthor(value: unknown, context: string): AdminCatalogAuthorRow {
-  const data = record(value, context);
-  exactKeys(data, [
-    'authorId', 'canonicalName', 'alternateNames', 'sortName',
-    'kind', 'status', 'mergedFrom', 'workCount', 'warnings',
-  ], context);
-  if (data.kind !== 'person' && data.kind !== 'entity' && data.kind !== 'placeholder') {
-    throw new TypeError(`${context}.kind: expected a supported catalog author kind`);
-  }
-  return {
-    authorId: nonEmptyString(data.authorId, `${context}.authorId`),
-    canonicalName: nonEmptyString(data.canonicalName, `${context}.canonicalName`),
-    alternateNames: strings(data.alternateNames, `${context}.alternateNames`),
-    sortName: nonEmptyString(data.sortName, `${context}.sortName`),
-    kind: data.kind,
-    status: authorStatus(data.status, `${context}.status`),
-    mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
-    workCount: nonNegativeInteger(data.workCount, `${context}.workCount`),
-    warnings: strings(data.warnings, `${context}.warnings`),
-  };
 }
 
 function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod | null {
@@ -96,18 +44,6 @@ function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod
     throw new TypeError(`${context}: expected a catalog match method or null`);
   }
   return value;
-}
-
-function nullableBoolean(value: unknown, context: string): boolean | null {
-  return value === null ? null : boolean(value, context);
-}
-
-function stringRecord(value: unknown, context: string): Record<string, string> {
-  const data = record(value, context);
-  return Object.fromEntries(Object.entries(data).map(([key, entry]) => [
-    key,
-    string(entry, `${context}.${key}`),
-  ]));
 }
 
 function jsonValue(value: unknown, context: string): unknown {
@@ -135,164 +71,15 @@ function decodeBookTarget(value: unknown, context: string): AdminCatalogBookTarg
   };
 }
 
-function decodeWork(value: unknown, context: string): AdminCatalogWorkRow {
-  const data = record(value, context);
-  exactKeys(data, [
-    'workId', 'canonicalTitle', 'alternateTitles', 'authorIds', 'coverUrl', 'subjects',
-    'fiction', 'status', 'mergedFrom', 'createdBy', 'createdAt',
-    'editionCount', 'linkedBookCount', 'warnings',
-  ], context);
-  return {
-    workId: nonEmptyString(data.workId, `${context}.workId`),
-    canonicalTitle: nonEmptyString(data.canonicalTitle, `${context}.canonicalTitle`),
-    alternateTitles: strings(data.alternateTitles, `${context}.alternateTitles`),
-    authorIds: strings(data.authorIds, `${context}.authorIds`),
-    coverUrl: string(data.coverUrl, `${context}.coverUrl`),
-    subjects: strings(data.subjects, `${context}.subjects`),
-    fiction: nullableBoolean(data.fiction, `${context}.fiction`),
-    status: workStatus(data.status, `${context}.status`),
-    mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
-    createdBy: nullableString(data.createdBy, `${context}.createdBy`),
-    createdAt: finiteNumber(data.createdAt, `${context}.createdAt`),
-    editionCount: nonNegativeInteger(data.editionCount, `${context}.editionCount`),
-    linkedBookCount: nonNegativeInteger(data.linkedBookCount, `${context}.linkedBookCount`),
-    warnings: strings(data.warnings, `${context}.warnings`),
-  };
-}
-
-function decodeEdition(value: unknown, context: string): AdminCatalogEditionRow {
-  const data = record(value, context);
-  exactKeys(data, [
-    'editionId', 'workId', 'isbn13', 'title', 'publisher', 'publishedDate',
-    'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
-    'externalIds',
-  ], context);
-  const suggestedPageCount = nullableNumber(data.suggestedPageCount, `${context}.suggestedPageCount`);
-  if (suggestedPageCount !== null && (!Number.isSafeInteger(suggestedPageCount) || suggestedPageCount <= 0)) {
-    throw new TypeError(`${context}.suggestedPageCount: expected a positive safe integer or null`);
-  }
-  return {
-    editionId: nonEmptyString(data.editionId, `${context}.editionId`),
-    workId: nonEmptyString(data.workId, `${context}.workId`),
-    isbn13: nullableString(data.isbn13, `${context}.isbn13`),
-    title: nonEmptyString(data.title, `${context}.title`),
-    publisher: string(data.publisher, `${context}.publisher`),
-    publishedDate: string(data.publishedDate, `${context}.publishedDate`),
-    language: string(data.language, `${context}.language`),
-    translatorNames: strings(data.translatorNames, `${context}.translatorNames`),
-    format: editionFormat(data.format, `${context}.format`),
-    suggestedPageCount,
-    coverUrl: string(data.coverUrl, `${context}.coverUrl`),
-    externalIds: stringRecord(data.externalIds, `${context}.externalIds`),
-  };
-}
-
-function decodeBook(value: unknown, context: string): AdminCatalogBookRow {
-  const data = record(value, context);
-  exactKeys(data, [
-    'uid', 'bookId', 'title', 'authorNames', 'isbn13', 'rawIsbn', 'pageCount',
-    'publisher', 'coverUrl', 'workId', 'editionId', 'anomaly',
-  ], context);
-  const target = decodeBookTarget({uid: data.uid, bookId: data.bookId}, `${context}.target`);
-  const pageCount = nullableNumber(data.pageCount, `${context}.pageCount`);
-  if (pageCount !== null && (!Number.isSafeInteger(pageCount) || pageCount <= 0)) {
-    throw new TypeError(`${context}.pageCount: expected a positive safe integer or null`);
-  }
-  return {
-    ...target,
-    title: nonEmptyString(data.title, `${context}.title`),
-    authorNames: strings(data.authorNames, `${context}.authorNames`),
-    isbn13: nullableString(data.isbn13, `${context}.isbn13`),
-    rawIsbn: nullableString(data.rawIsbn, `${context}.rawIsbn`),
-    pageCount,
-    publisher: string(data.publisher, `${context}.publisher`),
-    coverUrl: string(data.coverUrl, `${context}.coverUrl`),
-    workId: nullableString(data.workId, `${context}.workId`),
-    editionId: nullableString(data.editionId, `${context}.editionId`),
-    anomaly: nullableString(data.anomaly, `${context}.anomaly`),
-  };
-}
-
-const FINDING_CODES: readonly AdminCatalogFindingCode[] = [
-  'book-row-anomaly', 'book-link-anomaly', 'unmatched-isbn-candidate',
-  'unmatched-title-author-candidate', 'likely-title-author-candidate',
-  'edition-missing-work', 'isbn-index-mismatch', 'external-id-index-mismatch',
-  'work-invariant', 'duplicate-author-name', 'suspected-duplicate-works',
-];
-
-function findingCode(value: unknown, context: string): AdminCatalogFindingCode {
-  const code = nonEmptyString(value, context);
-  if (!FINDING_CODES.includes(code as AdminCatalogFindingCode)) {
-    throw new TypeError(`${context}: expected a known catalog finding code`);
-  }
-  return code as AdminCatalogFindingCode;
-}
-
-function decodeFinding(value: unknown, context: string): AdminCatalogFinding {
-  const data = record(value, context);
-  exactKeys(data, ['code', 'severity', 'message', 'workIds', 'editionIds', 'books'], context);
-  if (data.severity !== 'error' && data.severity !== 'warning') {
-    throw new TypeError(`${context}.severity: expected error or warning`);
-  }
-  return {
-    code: findingCode(data.code, `${context}.code`),
-    severity: data.severity,
-    message: nonEmptyString(data.message, `${context}.message`),
-    workIds: strings(data.workIds, `${context}.workIds`),
-    editionIds: strings(data.editionIds, `${context}.editionIds`),
-    books: array(data.books, `${context}.books`, decodeBookTarget),
-  };
-}
-
-function decodeLimits(value: unknown, context: string): AdminCatalogLimits {
-  const data = record(value, context);
-  exactKeys(data, ['catalogAuthors', 'works', 'books'], context);
-  return {
-    catalogAuthors: positiveInteger(data.catalogAuthors, `${context}.catalogAuthors`),
-    works: positiveInteger(data.works, `${context}.works`),
-    books: positiveInteger(data.books, `${context}.books`),
-  };
-}
-
-export function decodeAdminCatalogScanResponse(value: unknown): AdminCatalogScanResponse {
-  const data = record(value, 'admin-catalogscan response');
-  exactKeys(data, [
-    'authors', 'works', 'editions', 'books', 'nextBookCursor', 'bookCountsComplete',
-    'findings', 'limits',
-  ], 'admin-catalogscan response');
-  return {
-    authors: array(data.authors, 'admin-catalogscan response.authors', decodeAuthor),
-    works: array(data.works, 'admin-catalogscan response.works', decodeWork),
-    editions: array(data.editions, 'admin-catalogscan response.editions', decodeEdition),
-    books: array(data.books, 'admin-catalogscan response.books', decodeBook),
-    nextBookCursor: nullableString(data.nextBookCursor, 'admin-catalogscan response.nextBookCursor'),
-    bookCountsComplete: boolean(data.bookCountsComplete, 'admin-catalogscan response.bookCountsComplete'),
-    findings: array(data.findings, 'admin-catalogscan response.findings', decodeFinding),
-    limits: decodeLimits(data.limits, 'admin-catalogscan response.limits'),
-  };
-}
-
-// A continuation page answers for its own hundred books only: the author
-// and edition inventories came with the first page and are empty here, so
-// they are kept rather than overwritten. Linked book counts accumulate
-// across pages, and the scan is complete only once a page has no cursor.
-export function appendAdminScanPage(
-  prior: AdminCatalogScanResponse,
-  page: AdminCatalogScanResponse,
-): AdminCatalogScanResponse {
-  const priorCounts = new Map(prior.works.map((work) => [work.workId, work.linkedBookCount]));
-  return {
-    ...page,
-    authors: prior.authors,
-    editions: prior.editions,
-    works: page.works.map((work) => ({
-      ...work,
-      linkedBookCount: (priorCounts.get(work.workId) ?? 0) + work.linkedBookCount,
-    })),
-    books: [...prior.books, ...page.books],
-    findings: [...prior.findings, ...page.findings],
-    bookCountsComplete: page.nextBookCursor === null,
-  };
+// The externalIdIndex document id, computed the way the server computes it
+// (functions/src/catalog.ts externalIndexId) so the live scan can check
+// every index row against its own provider and external id.
+export async function externalIndexId(provider: string, id: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(externalIndexDigestInput(provider, id)),
+  );
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export interface AdminCatalogCandidate {
@@ -303,8 +90,8 @@ export interface AdminCatalogCandidate {
 }
 
 export function adminCatalogCandidatesForBook(
-  scan: AdminCatalogScanResponse,
-  book: AdminCatalogBookRow,
+  scan: Pick<CatalogScan, 'findings' | 'works'>,
+  book: AdminCatalogBookTarget,
 ): AdminCatalogCandidate[] {
   const labels = {
     'unmatched-isbn-candidate': 'Exact ISBN',
@@ -339,6 +126,16 @@ export function adminCatalogCandidatesForBook(
   return [...candidates.values()]
     .sort((left, right) => left.rank - right.rank || left.title.localeCompare(right.title))
     .map(({rank: _rank, ...candidate}) => candidate);
+}
+
+// Candidates for every unmatched book in one pass over the findings, so the
+// page does not rescan the finding list per row on every render.
+export function adminCatalogCandidatesByBook(
+  scan: Pick<CatalogScan, 'findings' | 'works' | 'books'>,
+): Map<string, AdminCatalogCandidate[]> {
+  return new Map(scan.books
+    .filter((book: AdminCatalogBookRow) => book.workId === null)
+    .map((book) => [`${book.uid}/${book.bookId}`, adminCatalogCandidatesForBook(scan, book)]));
 }
 
 function decodeExpectedDocument(value: unknown, context: string): AdminCatalogExpectedDocument {

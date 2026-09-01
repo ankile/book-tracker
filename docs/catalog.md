@@ -112,13 +112,25 @@ whose data is malformed or too large is skipped rather than failing the page.
 
 ## Admin tools
 
-`/admin/catalog` runs three callables: a scan that reports catalog findings
-(index mismatches, duplicate names, suspected duplicate works, anomalous
-books), a preview that plans one operation, and an apply that re-plans it
-inside a transaction and refuses if the state moved under the preview. The
-operations are `upsertAuthor`, `mergeAuthors`, `createWork`, `linkBooks`,
-`mergeWorks`, `editWork`, `upsertEdition` and `repointIsbn`. Every apply is
-idempotent by operation id and writes an `adminAudit` record.
+`/admin` is the catalog console, and it is live: the operator's browser
+listens to the catalog collections and to every personal book (the rules grant
+those reads to the operator's UID alone, `isOperator`) and runs the scan
+locally, so index mismatches, duplicate names, suspected duplicate works and
+anomalous books appear as the data changes and cost only the documents that
+change. The scan and the identity normalizers live in `shared/`
+(`catalogScan.ts`, `catalogIdentity.ts`), imported by the app and copied into
+`functions/src/shared` by the functions build, so the keys the browser matches
+are the keys the server wrote. Changes go through two callables: a preview
+that plans one operation, and an apply that re-plans it inside a transaction
+and refuses if the state moved under the preview. The operations are
+`upsertAuthor`, `mergeAuthors`, `createWork`, `linkBooks`, `mergeWorks`,
+`editWork`, `upsertEdition` and `repointIsbn`. Every apply is idempotent by
+operation id and writes an `adminAudit` record.
+
+`/admin/users` is the accounts and issues page: the Auth user list,
+per-account reading aggregates and the issue log, which only the Admin SDK
+can read. It is one callable, run when the page is opened and never
+prefetched.
 
 ## Migration
 

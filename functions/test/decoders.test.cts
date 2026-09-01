@@ -89,14 +89,6 @@ test("catalog request decoders are exact and bounded", () => {
 });
 
 test("admin catalog decoders admit only the bounded tagged operations", () => {
-  assert.deepEqual(decoders.decodeAdminCatalogScanRequest({}), {bookCursor: null});
-  assert.deepEqual(decoders.decodeAdminCatalogScanRequest({
-    bookCursor: "users/reader/books/book-one",
-  }), {bookCursor: "users/reader/books/book-one"});
-  assert.throws(() => decoders.decodeAdminCatalogScanRequest({
-    bookCursor: "works/not-a-book",
-  }));
-  assert.throws(() => decoders.decodeAdminCatalogScanRequest({extra: true}));
   assert.throws(() => decoders.decodeAdminCatalogOperation({
     type: "linkBooks",
     books: [{uid: "reader", bookId: "book"}],

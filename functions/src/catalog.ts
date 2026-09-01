@@ -27,7 +27,10 @@ import {consumeQuota} from "./quota";
 import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
 import {sharedWorkOwnerId} from "./catalogProjection";
 import {readerIdentity, sharingConsent, validTimeZone} from "./sharingConsent";
-import {CATALOG_LIMITS} from "./catalogLimits";
+import {CATALOG_LIMITS} from "./shared/catalogLimits";
+import {externalIndexDigestInput, normalizeCatalogTitle} from "./shared/catalogIdentity";
+
+export {normalizeCatalogTitle};
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logAppCheckPresence} from "./appCheck";
 
@@ -223,23 +226,6 @@ async function requireQuota(
   }
 }
 
-const SUPPORTED_LEADING_TITLE_ARTICLES = ["a", "an", "the"] as const;
-
-function moveTrailingEnglishArticle(title: string): string {
-  const match = /^(.*\S)\s*,\s*(a|an|the)\s*$/iu.exec(title);
-  return match === null ? title : `${match[2]} ${match[1]}`;
-}
-
-export function normalizeCatalogTitle(value: string): string {
-  const normalized = normalizeCatalogIdentity(moveTrailingEnglishArticle(value));
-  const words = normalized.split(" ");
-  const first = words[0] as typeof SUPPORTED_LEADING_TITLE_ARTICLES[number];
-  if (words.length > 1 && SUPPORTED_LEADING_TITLE_ARTICLES.includes(first)) {
-    return words.slice(1).join(" ");
-  }
-  return normalized;
-}
-
 export function storedWork(
   snapshot: DocumentSnapshot,
   fail: CatalogDataFail = catalogDataError,
@@ -411,7 +397,7 @@ async function workAuthors(
 
 export function externalIndexId(externalId: CatalogExternalId): string {
   return createHash("sha256")
-    .update(`${externalId.provider}\0${externalId.id}`)
+    .update(externalIndexDigestInput(externalId.provider, externalId.id))
     .digest("hex");
 }
 

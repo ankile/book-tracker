@@ -62,9 +62,13 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // headroom so the next field does not need a budget commit.
   // Master raised 305 -> 306 KiB for the explicit finishedAt in the same
   // period; the 330 KiB cap above already covers that stamp.
+  // Total raised 330 -> 336 KiB for the live catalog console: the shared
+  // scan (shared/catalogScan.ts, ~3 KiB compressed) now runs in the
+  // operator's browser over listener stores, replacing the scan callable and
+  // its response decoder; the build measures 333.8 KiB, the rest is headroom.
   assert.ok(
-    totalBytes <= 330 * 1024,
-    `Expected at most 330 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 336 * 1024,
+    `Expected at most 336 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

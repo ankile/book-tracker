@@ -1,5 +1,5 @@
 import { error } from '@sveltejs/kit';
-import { ADMIN_UID } from '$lib/admin.ts';
+import { ADMIN_UID } from '$lib/admin-uid.ts';
 import { auth } from '$lib/firebase/auth.ts';
 
 // Cosmetic gate at the shared boundary: every admin/* route inherits this

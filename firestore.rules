@@ -3,6 +3,9 @@ service cloud.firestore {
   match /databases/{database}/documents {
     match /users/{userId} {
       allow read: if request.auth != null && userId == request.auth.uid;
+      // The operator's live catalog console needs every account's tombstone
+      // state to tell orphaned data from a live reader's book.
+      allow list: if isOperator();
     }
     // Own-user private data, but a signed-up stranger's too: every field a
     // client may write is allowlisted and byte-capped (SEC-039), so one
@@ -14,6 +17,7 @@ service cloud.firestore {
     // expression budget and must stay cheap.
     match /users/{userId}/books/{bookId} {
       allow read: if request.auth != null && userId == request.auth.uid;
+      allow get: if isOperator();
       allow create: if request.auth != null && userId == request.auth.uid
                     && validBookTitle()
                     && validInitialBookTimer()
@@ -116,9 +120,19 @@ service cloud.firestore {
     // bounded search callables. Authors are the one shared list used by
     // every personal book, so signed-in clients may read and autocomplete
     // active names and retain merged redirects for cached book references.
+    //
+    // The operator's browser is the exception: the catalog console listens
+    // to every catalog collection (works and editions in every status, the
+    // identifier indexes, every account's books) and runs the scan locally
+    // (shared/catalogScan.ts), so the console is live and costs only the
+    // documents that change. The gate is the one the admin callables apply
+    // (isOperator). Bibliographic data is public whoever seeded it; who read
+    // what stays behind the owner rules for everyone else (owner decision
+    // 2026-09-01).
     match /works/{workId} {
       allow get: if request.auth != null
                  && resource.data.status == 'active';
+      allow read: if isOperator();
     }
 
     match /catalogAuthors/{authorId} {
@@ -129,6 +143,15 @@ service cloud.firestore {
       allow get: if request.auth != null
                  && resource.data.workId is string
                  && get(/databases/$(database)/documents/works/$(resource.data.workId)).data.status == 'active';
+      allow read: if isOperator();
+    }
+
+    match /isbnIndex/{isbn13} {
+      allow read: if isOperator();
+    }
+
+    match /externalIdIndex/{indexId} {
+      allow read: if isOperator();
     }
 
     match /users/{userId}/timerLifecycle/{lifecycleId} {
@@ -1121,6 +1144,14 @@ service cloud.firestore {
       return request.auth.token.get('email_verified', false) == true
              && accountLive();
     }
+    // The operator: the same pair of checks functions/src/admin.ts applies
+    // before an admin callable reads, on the immutable UID rather than an
+    // email (a claimable string while sign-up is open).
+    function isOperator() {
+      return request.auth != null
+             && request.auth.uid == '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2'
+             && verifiedAccount();
+    }
 
     match /profileDiscovery/{username} {
       allow get: if request.auth != null
@@ -1386,6 +1417,13 @@ service cloud.firestore {
     match /{path=**}/updates/{updateId} {
       allow read: if request.auth != null &&
                      resource.data.owner == /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    // Every personal book at once, for the operator's live catalog scan.
+    // Books live only under users/{uid}/books, whose rule covers a single
+    // get; a collection-group query needs this wildcard match.
+    match /{path=**}/books/{bookId} {
+      allow list: if isOperator();
     }
   }
 }

@@ -241,7 +241,8 @@ Functions package commands:
 | `npm --prefix functions test` | Lint and type-check production/test backend code, then run backend tests |
 | `npm --prefix functions run lint` | Lint backend TypeScript |
 | `npm --prefix functions run clean` | Remove compiled backend output |
-| `npm --prefix functions run build` | Compile backend TypeScript |
+| `npm --prefix functions run build` | Compile backend TypeScript (copies `shared/` into `functions/src/shared` first) |
+| `npm --prefix functions run sync-shared` | Copy the app-and-functions shared modules into the functions source tree |
 | `npm --prefix functions run check:test` | Strictly type-check backend tests |
 | `npm --prefix functions run stage:emulator-secrets` | Stage checked-in local-only emulator credentials |
 | `npm --prefix functions run serve` | Build and start the local emulator suite |

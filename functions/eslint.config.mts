@@ -3,6 +3,8 @@ import tseslint from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 
 export default [
+  // src/shared is the build's copy of ../shared, linted with the app.
+  {ignores: ["src/shared/**"]},
   eslint.configs.recommended,
   {
     files: ["src/**/*.ts"],

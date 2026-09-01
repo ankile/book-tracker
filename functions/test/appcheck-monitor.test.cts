@@ -74,8 +74,8 @@ test("every https.onCall handler starts with logAppCheckPresence", () => {
     handlers += total;
   }
   assert.equal(handlers, 12, "twelve callable handler implementations carry the monitor line");
-  assert.equal(wrappedNames.length, 4, "all four admin callables pin their monitor names at the wrapper call site");
+  assert.equal(wrappedNames.length, 3, "all three admin callables pin their monitor names at the wrapper call site");
   const deployedNames = [...names, ...wrappedNames];
-  assert.equal(deployedNames.length, 15, "all fifteen deployed callables are named for monitoring");
+  assert.equal(deployedNames.length, 14, "all fourteen deployed callables are named for monitoring");
   assert.equal(new Set(deployedNames).size, deployedNames.length, "each callable names its own function");
 });

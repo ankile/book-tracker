@@ -3804,3 +3804,61 @@ test('two offline local starts serialize on the user-wide lifecycle after reconn
     assert.ok(['first', 'second'].includes(lifecycle.data()?.bookId));
   });
 });
+
+// The catalog console runs in the operator's browser over live listeners,
+// so the operator alone may list the catalog collections, the identifier
+// indexes, every account document and every personal book. The grant is
+// the callables' gate (UID + verified claim + live account) and is read
+// only: the console still mutates through the audited callables.
+test('the operator reads the whole catalog and every book live; nobody else does', async () => {
+  const operator = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2';
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const seeded = context.firestore();
+    await setDoc(doc(seeded, 'users', operator), { uid: operator });
+    await setDoc(doc(seeded, 'users', 'scan-reader'), { uid: 'scan-reader' });
+    await setDoc(doc(seeded, 'users', 'scan-reader', 'books', 'b1'), { title: 'Their book' });
+    await setDoc(doc(seeded, 'works', 'scan-hidden'), catalogWork({ status: 'hidden' }));
+    await setDoc(doc(seeded, 'editions', 'scan-hidden-edition'), catalogEdition('scan-hidden'));
+    await setDoc(doc(seeded, 'isbnIndex', '9780140328721'), { workId: 'scan-hidden', editionId: 'scan-hidden-edition' });
+    await setDoc(doc(seeded, 'externalIdIndex', 'scan-external'), {
+      workId: 'scan-hidden', editionId: 'scan-hidden-edition', provider: 'open-library', externalId: 'OL9',
+    });
+  });
+  const operatorDb = environment.authenticatedContext(operator, { email_verified: true }).firestore();
+  await assertSucceeds(getDocs(collection(operatorDb, 'works')));
+  await assertSucceeds(getDoc(doc(operatorDb, 'works', 'scan-hidden')));
+  await assertSucceeds(getDocs(collection(operatorDb, 'editions')));
+  await assertSucceeds(getDocs(collection(operatorDb, 'isbnIndex')));
+  await assertSucceeds(getDocs(collection(operatorDb, 'externalIdIndex')));
+  await assertSucceeds(getDocs(collection(operatorDb, 'users')));
+  await assertSucceeds(getDocs(collectionGroup(operatorDb, 'books')));
+  await assertSucceeds(getDoc(doc(operatorDb, 'users', 'scan-reader', 'books', 'b1')));
+  await assertFails(setDoc(doc(operatorDb, 'works', 'forged'), catalogWork()));
+  await assertFails(updateDoc(doc(operatorDb, 'users', 'scan-reader', 'books', 'b1'), { title: 'Renamed' }));
+  await assertFails(deleteDoc(doc(operatorDb, 'isbnIndex', '9780140328721')));
+  await assertFails(getDocs(collection(operatorDb, 'logEvents')));
+  await assertFails(getDocs(collectionGroup(operatorDb, 'updates')));
+
+  for (const db of [
+    environment.authenticatedContext(operator).firestore(),
+    environment.authenticatedContext(operator, { email_verified: false }).firestore(),
+    environment.authenticatedContext('scan-reader', { email_verified: true }).firestore(),
+    environment.unauthenticatedContext().firestore(),
+  ]) {
+    await assertFails(getDocs(collection(db, 'works')));
+    await assertFails(getDoc(doc(db, 'works', 'scan-hidden')));
+    await assertFails(getDocs(collection(db, 'editions')));
+    await assertFails(getDocs(collection(db, 'isbnIndex')));
+    await assertFails(getDocs(collection(db, 'externalIdIndex')));
+    await assertFails(getDocs(collection(db, 'users')));
+    await assertFails(getDocs(collectionGroup(db, 'books')));
+  }
+
+  // A tombstoned operator account (SEC-006) loses the grant with the account,
+  // for the hour its ID token outlives it.
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    await updateDoc(doc(context.firestore(), 'users', operator), { deletedAt: Timestamp.now() });
+  });
+  await assertFails(getDocs(collection(operatorDb, 'works')));
+  await assertFails(getDocs(collectionGroup(operatorDb, 'books')));
+});

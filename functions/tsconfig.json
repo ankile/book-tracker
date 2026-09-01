@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "module": "commonjs",
+    "rewriteRelativeImportExtensions": true,
     "noImplicitReturns": true,
     "noUnusedLocals": true,
     "outDir": "lib",

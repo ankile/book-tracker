@@ -10,3 +10,6 @@ node_modules/
 
 # Local Secret Manager emulator overrides
 .secret.local
+
+# Build-time copy of ../shared (see package.json sync-shared)
+src/shared/

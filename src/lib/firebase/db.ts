@@ -1384,4 +1384,4 @@ Database.deleteReadingSession = reportWriteFailures(
   ({ title }) => `delete the reading session for "${title}"`, Database.deleteReadingSession,
 );
 
-export { Database };
+export { Database, db, listenError };

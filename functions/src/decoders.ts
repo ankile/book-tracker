@@ -1,5 +1,10 @@
 import {Timestamp} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
+import {normalizeCatalogIdentity, normalizeIsbn13} from "./shared/catalogIdentity";
+
+// Re-exported so every server module keeps one import for the catalog
+// normalizers; the implementation is shared with the browser.
+export {normalizeCatalogIdentity, normalizeIsbn13};
 
 export class DataDecodeError extends Error {
   constructor(message: string) {
@@ -165,29 +170,6 @@ export function decodeEmptyCallableRequest(
   exactKeys(decoded, [], "request data", fail);
 }
 
-export interface AdminCatalogScanRequest {
-  bookCursor: string | null;
-}
-
-export function decodeAdminCatalogScanRequest(
-  value: unknown,
-  fail: DecodeFailure = throwDecodeError,
-): AdminCatalogScanRequest {
-  const decoded = record(value, "request data", fail);
-  exactKeys(decoded, ["bookCursor"], "request data", fail);
-  if (decoded.bookCursor === undefined || decoded.bookCursor === null) {
-    return {bookCursor: null};
-  }
-  const cursor = string(decoded.bookCursor, "bookCursor", fail, 3100);
-  const path = cursor.split("/");
-  if (path.length !== 4 || path[0] !== "users" || path[2] !== "books") {
-    fail("bookCursor must identify a users/{uid}/books/{bookId} document.");
-  }
-  documentId(path[1], "bookCursor uid", fail);
-  documentId(path[3], "bookCursor book id", fail);
-  return {bookCursor: cursor};
-}
-
 export interface SaveTokenRequest {
   token: string;
 }
@@ -221,34 +203,6 @@ export function decodeBookCallableRequest(
 
 export interface IsbnLookupRequest {
   isbn: string;
-}
-
-function isbn13CheckDigit(first12: string): string {
-  let sum = 0;
-  for (let index = 0; index < 12; index += 1) {
-    sum += Number(first12[index]) * (index % 2 === 0 ? 1 : 3);
-  }
-  return String((10 - (sum % 10)) % 10);
-}
-
-// The one ISBN normalizer: any ISBN-10 or ISBN-13 spelling a personal book
-// may carry (hyphens and spaces included) becomes the checksum-valid
-// ISBN-13 the catalog indexes by, or null. The admin scan reports link
-// candidates with it, so it must agree with what the link path accepts.
-export function normalizeIsbn13(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const isbn = value.replace(/[-\s]/g, "").toUpperCase();
-  if (/^\d{9}[\dX]$/.test(isbn)) {
-    let isbn10Sum = 0;
-    for (let index = 0; index < 10; index += 1) {
-      isbn10Sum += (10 - index) * (isbn[index] === "X" ? 10 : Number(isbn[index]));
-    }
-    if (isbn10Sum % 11 !== 0) return null;
-    const core = `978${isbn.slice(0, 9)}`;
-    return `${core}${isbn13CheckDigit(core)}`;
-  }
-  if (!/^\d{13}$/.test(isbn)) return null;
-  return isbn[12] === isbn13CheckDigit(isbn) ? isbn : null;
 }
 
 // The wire form is stricter than the normalizer: a request carries the
@@ -346,35 +300,6 @@ export interface CatalogExternalId {
 }
 
 const TRUSTED_CATALOG_PROVIDERS = new Set(["google-books", "open-library"]);
-
-const CATALOG_CHARACTER_FOLDS: Readonly<Record<string, string>> = {
-  "æ": "ae",
-  "ð": "d",
-  "đ": "d",
-  "ł": "l",
-  "ø": "o",
-  "œ": "oe",
-  "ß": "ss",
-  "þ": "th",
-};
-
-// One normalizer for every catalog identity: this writes nameKeys on
-// ensureauthors, catalog.ts derives title keys from it and the admin scan
-// recomputes both, so a fold added for one table but not another would
-// report every stored author as corrupt and make lookups miss existing
-// authors.
-export function normalizeCatalogIdentity(value: string): string {
-  const folded = [...value.normalize("NFKD").toLowerCase()].map((character) =>
-    CATALOG_CHARACTER_FOLDS[character] ?? character,
-  ).join("");
-  return folded
-    .replace(/\p{Mark}+/gu, "")
-    .replace(/['\u2018\u2019\u02bc`\u00b4]/gu, "")
-    .replace(/&/gu, " and ")
-    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
-    .trim()
-    .replace(/\s+/gu, " ");
-}
 
 export interface CatalogAuthorCreateInput {
   canonicalName: string;

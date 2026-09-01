@@ -32,15 +32,15 @@ flowchart LR
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
     work["<b>Shared Work</b><br/><code>/books/[workId]</code><br/>Work metadata · opted-in reader summaries"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
-    admin["<b>Restricted overview</b><br/><code>/admin</code><br/>Operational summary"]:::admin
-    admincatalog["<b>Catalog curation</b><br/><code>/admin/catalog</code><br/>Authors · Works · Editions · matching"]:::admin
+    admin["<b>Catalog console</b><br/><code>/admin</code><br/>Authors · Works · Editions · matching"]:::admin
+    adminusers["<b>Accounts and issues</b><br/><code>/admin/users</code><br/>Operational summary"]:::admin
   end
 
   signedout --> auth --> shell
   owner --> shell
   publicentry --> profile
   operator --> admin
-  operator --> admincatalog
+  operator --> adminusers
 
   shell -->|"Currently Reading"| current
   shell -->|"Finished"| finished

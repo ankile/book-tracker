@@ -37,7 +37,6 @@ interface FunctionsBundle {
   admin: {
     catalogapply: DeployedFunction;
     catalogpreview: DeployedFunction;
-    catalogscan: DeployedFunction;
     overview: DeployedFunction;
   };
   booksapi: {lookupisbn: DeployedFunction};
@@ -98,7 +97,6 @@ test("preserves the deployed function export names", () => {
   assert.deepEqual(Object.keys(functions.admin).sort(), [
     "catalogapply",
     "catalogpreview",
-    "catalogscan",
     "overview",
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
@@ -127,7 +125,6 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.admin.overview,
     functions.admin.catalogapply,
     functions.admin.catalogpreview,
-    functions.admin.catalogscan,
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
@@ -888,7 +885,6 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     functions.admin.overview,
     functions.admin.catalogapply,
     functions.admin.catalogpreview,
-    functions.admin.catalogscan,
     functions.booksapi.lookupisbn,
     functions.catalog.search,
     functions.catalog.workreaders,
@@ -913,7 +909,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     "utf8",
   ));
   const serve = packageJson.scripts.serve;
-  assert.match(packageJson.scripts.build, /^npm run clean && tsc$/);
+  assert.match(packageJson.scripts.build, /^npm run clean && npm run sync-shared && tsc$/);
   assert.match(packageJson.scripts.clean, /rmSync\('lib'/);
   assert.ok(
     serve.indexOf("stage-emulator-secrets.js") <
@@ -938,7 +934,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "admin.overview": functions.admin.overview,
     "admin.catalogapply": functions.admin.catalogapply,
     "admin.catalogpreview": functions.admin.catalogpreview,
-    "admin.catalogscan": functions.admin.catalogscan,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
     "catalog.search": functions.catalog.search,
     "catalog.create": functions.catalog.create,
@@ -1025,7 +1020,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.admin.overview": 2,
     "functions.admin.catalogapply": 2,
     "functions.admin.catalogpreview": 2,
-    "functions.admin.catalogscan": 2,
     "functions.booksapi.lookupisbn": 10,
     "functions.catalog.create": 10,
     "functions.catalog.ensureauthors": 10,

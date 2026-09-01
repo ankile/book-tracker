@@ -132,8 +132,8 @@ test('logIssue reports once, on the live session, and swallows its own failure',
   assert.doesNotMatch(declarations[0].getText(), /addError/);
 });
 
-test('the admin page reads issueCaps only through the guarded derived and gates all clear on it', async () => {
-  const page = await readFile(new URL('../src/routes/admin/+page.svelte', import.meta.url), 'utf8');
+test('the accounts page reads issueCaps only through the guarded derived and gates all clear on it', async () => {
+  const page = await readFile(new URL('../src/routes/admin/users/+page.svelte', import.meta.url), 'utf8');
   const code = page.replace(/^\s*\/\/.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '');
   assert.match(code, /const caps = \$derived\(overview\?\.issueCaps \?\? null\)/);
   // Exactly one mention of issueCaps outside comments: the derived itself.
