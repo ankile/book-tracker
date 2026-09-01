@@ -24,13 +24,15 @@ test('editing the exact current-page source updates deltas and finished progress
     planReadingSessionUpdate(
       session,
       { fromPage: 10, toPage: 40, timeRead: 45 },
-      { currentPage: 20, currentPageUpdateId: 'session', pageCount: 40 },
+      { currentPage: 20, currentPageUpdateId: 'session', pageCount: 40, finished: false },
       'session',
+      'now',
     ),
     {
       deltaPages: 20,
       deltaTime: 15,
-      progress: { currentPage: 40, currentPageUpdateId: 'session', finished: true },
+      // Reaching the last page flips finished, so the stamp rides along.
+      progress: { currentPage: 40, currentPageUpdateId: 'session', finished: true, finishedAt: 'now' },
     },
   );
 });
@@ -40,8 +42,9 @@ test('editing a historical session preserves later book progress', () => {
     planReadingSessionUpdate(
       session,
       { fromPage: 10, toPage: 18, timeRead: 25 },
-      { currentPage: 35, currentPageUpdateId: 'later', pageCount: 40 },
+      { currentPage: 35, currentPageUpdateId: 'later', pageCount: 40, finished: false },
       'session',
+      'now',
     ),
     { deltaPages: -2, deltaTime: -5, progress: null },
   );
@@ -52,8 +55,9 @@ test('editing a session that shares a later correction endpoint preserves progre
     planReadingSessionUpdate(
       session,
       { fromPage: 10, toPage: 18, timeRead: 25 },
-      { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 40 },
+      { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 40, finished: false },
       'session',
+      'now',
     ),
     { deltaPages: -2, deltaTime: -5, progress: null },
   );
@@ -64,8 +68,9 @@ test('editing a legacy session without an exact progress source preserves progre
     planReadingSessionUpdate(
       session,
       { fromPage: 10, toPage: 18, timeRead: 25 },
-      { currentPage: 20, currentPageUpdateId: null, pageCount: 40 },
+      { currentPage: 20, currentPageUpdateId: null, pageCount: 40, finished: false },
       'session',
+      'now',
     ),
     { deltaPages: -2, deltaTime: -5, progress: null },
   );
@@ -75,15 +80,31 @@ test('deleting the exact current-page source rolls progress back and clears owne
   assert.deepEqual(
     planReadingSessionDelete(
       session,
-      { currentPage: 20, currentPageUpdateId: 'session', pageCount: 40 },
+      { currentPage: 20, currentPageUpdateId: 'session', pageCount: 40, finished: false },
       'session',
       null,
+      'now',
     ),
     {
       deltaPages: -10,
       deltaTime: -30,
-      progress: { currentPage: 10, currentPageUpdateId: null, finished: false },
+      // Unfinished before and after: finishedAt is written as null, not left alone.
+      progress: { currentPage: 10, currentPageUpdateId: null, finished: false, finishedAt: null },
     },
+  );
+});
+
+test('a mutation that keeps a finished book finished leaves its stamp alone; un-finishing clears it', () => {
+  const finishedBook = { currentPage: 40, currentPageUpdateId: 'session', pageCount: 40, finished: true };
+  // Editing the finishing session's minutes only: still on the last page.
+  assert.deepEqual(
+    planReadingSessionUpdate({ ...session, toPage: 40, pagesRead: 30 }, { fromPage: 10, toPage: 40, timeRead: 50 }, finishedBook, 'session', 'now').progress,
+    { currentPage: 40, currentPageUpdateId: 'session', finished: true },
+  );
+  // Deleting the finishing session rolls the book back to reading.
+  assert.deepEqual(
+    planReadingSessionDelete({ ...session, toPage: 40, pagesRead: 30 }, finishedBook, 'session', null, 'now').progress,
+    { currentPage: 10, currentPageUpdateId: null, finished: false, finishedAt: null },
   );
 });
 
@@ -91,9 +112,10 @@ test('deleting a historical session preserves later book progress', () => {
   assert.deepEqual(
     planReadingSessionDelete(
       session,
-      { currentPage: 35, currentPageUpdateId: 'later', pageCount: 40 },
+      { currentPage: 35, currentPageUpdateId: 'later', pageCount: 40, finished: false },
       'session',
       null,
+      'now',
     ),
     { deltaPages: -10, deltaTime: -30, progress: null },
   );
@@ -103,9 +125,10 @@ test('deleting a session that shares a later correction endpoint preserves progr
   assert.deepEqual(
     planReadingSessionDelete(
       session,
-      { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 40 },
+      { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 40, finished: false },
       'session',
       null,
+      'now',
     ),
     { deltaPages: -10, deltaTime: -30, progress: null },
   );
@@ -123,11 +146,12 @@ test('deleting the progress owner hands ownership to the newest matching survivo
   assert.deepEqual(
     planReadingSessionDelete(
       session,
-      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40},
+      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40, finished: false},
       'session',
       previous,
+      'now',
     ).progress,
-    {currentPage: 10, currentPageUpdateId: 'newer-correction', finished: false},
+    {currentPage: 10, currentPageUpdateId: 'newer-correction', finished: false, finishedAt: null},
   );
 });
 
@@ -140,9 +164,10 @@ test('progress predecessor selection is deterministic and rejects a wrong endpoi
   assert.throws(
     () => planReadingSessionDelete(
       session,
-      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40},
+      {currentPage: 20, currentPageUpdateId: 'session', pageCount: 40, finished: false},
       'session',
       {id: 'wrong', toPage: 9},
+      'now',
     ),
     /does not establish/,
   );

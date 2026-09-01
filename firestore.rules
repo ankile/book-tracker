@@ -161,13 +161,17 @@ service cloud.firestore {
              && validBookFinishedAt(book);
     }
 
-    // finishedAt is the moment the book was marked finished: null (or
-    // absent, on documents written before it existed) while unfinished, a
-    // timestamp only on a finished book. The client stamps it in the same
-    // batch that flips finished; migrate-finished-at.ts backfilled the rest.
+    // finishedAt is the moment the book was marked finished, and the only
+    // finish date the app reads (updatedAt moves on every metadata edit).
+    // A finished book carries a timestamp, an unfinished one null or
+    // nothing. The client stamps it in the same batch that flips finished;
+    // migrate-finished-at.ts backfilled every book finished before the
+    // field existed, so a finished book without one is refused rather
+    // than tolerated.
     function validBookFinishedAt(book) {
-      return book.get('finishedAt', null) == null
-             || (book.finishedAt is timestamp && book.get('finished', false) == true);
+      return book.get('finished', false) == true
+             ? book.get('finishedAt', null) is timestamp
+             : book.get('finishedAt', null) == null;
     }
 
     // Field allowlist and byte caps for a book document (SEC-039). Lists

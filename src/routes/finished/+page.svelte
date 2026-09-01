@@ -3,11 +3,12 @@
   import BookList from '$lib/components/BookList.svelte';
   import { Database } from '$lib/firebase/db.ts';
   import { formatTime } from '$lib/utils/format.ts';
+  import { finishedDateOf } from '$lib/utils/finished.ts';
   import { repairableBookAuthors, joinAuthors } from '$lib/utils/authors.ts';
   import type { Author } from '$lib/interfaces/author.ts';
   import type { Book } from '$lib/interfaces/book.ts';
 
-  let sortBy = $state('updatedAt'); // 'updatedAt', 'pageCount', 'timeRead', 'title'
+  let sortBy = $state('finishedAt'); // 'finishedAt', 'pageCount', 'timeRead', 'title'
   let filterYear = $state('all'); // 'all', '2020', '2021', etc.
   let searchTerm = $state(''); // Search filter
 
@@ -23,14 +24,10 @@
     }
   });
 
-  // Get available years from books
+  // The years books were finished in (finishedAt, never updatedAt: that
+  // moves on every metadata edit).
   let availableYears = $derived.by(() => {
-    const years = new Set<number>();
-    allBooks.forEach(book => {
-      if (book.updatedAt?.toDate) {
-        years.add(book.updatedAt.toDate().getFullYear());
-      }
-    });
+    const years = new Set(allBooks.map((book) => finishedDateOf(book).getFullYear()));
     return Array.from(years).sort((a, b) => b - a); // Descending
   });
 
@@ -60,10 +57,7 @@
   // Filter books by year
   let filteredBooks = $derived.by(() => {
     if (filterYear === 'all') return searchedBooks;
-    return searchedBooks.filter(book => {
-      if (!book.updatedAt?.toDate) return false;
-      return book.updatedAt.toDate().getFullYear() === parseInt(filterYear);
-    });
+    return searchedBooks.filter((book) => finishedDateOf(book).getFullYear() === parseInt(filterYear));
   });
 
   // Sort books
@@ -76,13 +70,9 @@
         return books.sort((a, b) => (b.timeRead || 0) - (a.timeRead || 0));
       case 'title':
         return books.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-      case 'updatedAt':
+      case 'finishedAt':
       default:
-        return books.sort((a, b) => {
-          const aTime = a.updatedAt?.toDate?.()?.getTime() || 0;
-          const bTime = b.updatedAt?.toDate?.()?.getTime() || 0;
-          return bTime - aTime;
-        });
+        return books.sort((a, b) => finishedDateOf(b).getTime() - finishedDateOf(a).getTime());
     }
   });
 
@@ -208,7 +198,7 @@
       <div class="filter-group">
         <label class="filter-label" for="sort-select">Sort by</label>
         <select id="sort-select" bind:value={sortBy}>
-          <option value="updatedAt">Recently Finished</option>
+          <option value="finishedAt">Recently Finished</option>
           <option value="title">Title (A-Z)</option>
           <option value="pageCount">Length (Pages)</option>
           <option value="timeRead">Time Spent</option>

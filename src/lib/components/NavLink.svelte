@@ -7,7 +7,7 @@
     children: Snippet;
   }
 
-  let { to = "", children }: Props = $props();
+  let { to = '', children }: Props = $props();
 
   const isActive = $derived(
     to === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(to)
@@ -16,28 +16,42 @@
 
 <style>
   a {
-    color: rgba(255, 255, 255, 0.75);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0.55rem 0.9rem;
+    color: #dce9e9;
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1;
     text-decoration: none;
-    padding: 0.5rem 1rem;
-    font-size: 1.25rem;
-    font-weight: 500;
-    transition: color 0.15s ease-in-out;
+    border-radius: 9px;
+    transition: color 0.15s ease-in-out, background 0.15s ease-in-out;
   }
 
   a:hover {
-    color: rgba(255, 255, 255, 1);
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
   }
 
   a.active {
-    color: white;
-    font-weight: 700;
+    color: #294f52;
+    font-weight: 750;
+    background: #edf5f5;
   }
 
-  /* Keep all three links on one row on phone screens. */
-  @media only screen and (max-width: 500px) {
+  a:focus-visible {
+    outline: 2px solid white;
+    outline-offset: 2px;
+  }
+
+  @media only screen and (max-width: 720px) {
     a {
-      font-size: 0.95rem;
-      padding: 0.5rem 0.4rem;
+      width: 100%;
+      padding-right: 0.4rem;
+      padding-left: 0.4rem;
+      font-size: 0.9rem;
     }
   }
 </style>

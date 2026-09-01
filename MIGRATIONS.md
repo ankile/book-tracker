@@ -183,7 +183,7 @@ current deployment instructions.
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
 | `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Implemented and emulator-rehearsed; production rollout pending |
-| `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Implemented; runs in the shared-catalog rollout window |
+| `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -231,10 +231,7 @@ migration, then the client:
    is a refusal rather than a different write. The migration writes through
    the Admin SDK, so Rules do not constrain it. Do not use the app between
    the snapshot and step 3: the migration is only atomic against data
-   nothing else is writing. Run `migrate-finished-at.ts` (dry run, then
-   `--apply`) in the same window: the new client stamps `finishedAt` on
-   every book it finishes, and the backfill gives every already-finished
-   book its inferred date. A browser tab still holding the pre-catalog
+   nothing else is writing. A browser tab still holding the pre-catalog
    bundle is degraded from step 1 onward, not intact: it reads its retained
    per-user author documents and can still record reading progress, but an
    add or edit that writes a per-user author is refused until it reloads.
@@ -280,16 +277,11 @@ npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-over
 npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
 npx tsx migrate-cross-user-works.ts reviewed-cross-user-works.json --expect-overlap-groups=<N> --prod --apply
 
-# 4. finishedAt backfill, same discipline
-npx tsx migrate-finished-at.ts --prod
-npx tsx migrate-finished-at.ts --prod --apply
-npx tsx migrate-finished-at.ts --prod --apply
-
-# 5. audit, then ship the client
+# 4. audit, then ship the client and purge the edge cache
 node db-audit.ts --prod
-npm run pages:deploy
+npm run pages:deploy && npm run pages:purge
 
-# 6. verify by hand: add-book search suggestion, edit an existing book,
+# 5. verify by hand: add-book search suggestion, edit an existing book,
 #    a work's reader page, the sharing toggle, /admin/catalog scan
 ```
 
@@ -314,6 +306,51 @@ stays the only path that touches them.
 
 The migration header documents its flags. Production rehearsal evidence
 (dry-run output, counts, `<N>`) stays in the operator log, not in Git.
+## finishedAt rollout (completed 2026-09-01)
+
+Books carry an explicit `finishedAt` (a timestamp exactly when `finished`
+is true, null otherwise). Before the field existed, the finished list
+rendered `updatedAt` as the finish date, which moves on every metadata
+edit. The client now stamps `finishedAt` in the same batch that flips
+`finished`; `migrate-finished-at.ts` backfills every book finished before
+the field existed from its own progress history (newest forward-progress
+row, else newest row, else the book's `createdAt`; never `updatedAt`).
+
+The Rules enforce the invariant from the first deploy rather than tolerating
+an unstamped finished book, so the order is Rules, then the backfill, then
+the client, in one sitting. Between the Rules deploy and the end of the
+backfill an old client cannot edit a finished book (the Rules refuse the
+missing stamp) and cannot finish one until the new client is live; the
+owner is the only user and does not use the app during the run.
+
+```bash
+# 0. from the reviewed revision, full validation
+nvm use && npm ci && npm --prefix functions ci && npm run validate
+
+# 1. baseline (read-only) + snapshot: the rollback is this snapshot and PITR
+node db-audit.ts --prod            # book.finished-without-finishedAt = every finished book
+node db-snapshot.ts --prod
+
+# 2. Rules only (nothing in Functions changes)
+firebase deploy --only firestore:rules
+
+# 3. backfill: dry run, then apply twice — the second apply must stamp 0
+#    books. Compare the YEARS lines with the books-by-year table on /me.
+node migrate-finished-at.ts --prod
+node migrate-finished-at.ts --prod --apply
+node migrate-finished-at.ts --prod --apply
+
+# 4. audit: zero finishedAt findings
+node db-audit.ts --prod
+
+# 5. ship the client and purge the edge cache
+npm run pages:deploy && npm run pages:purge
+```
+
+The migration writes one field per finished book and nothing else. Nothing
+is deleted; `updatedAt`, `createdAt`, and the update rows are untouched.
+Undoing it is deleting the one field, and `db-restore.ts` from the step-1
+snapshot restores the exact prior documents.
 
 ## Documentation maintenance
 

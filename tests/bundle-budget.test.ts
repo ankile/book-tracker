@@ -60,6 +60,8 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // Total raised 326 -> 330 KiB for user-created catalog works: the create
   // request builder, response decoder and modal wiring add ~0.7 KiB, plus
   // headroom so the next field does not need a budget commit.
+  // Master raised 305 -> 306 KiB for the explicit finishedAt in the same
+  // period; the 330 KiB cap above already covers that stamp.
   assert.ok(
     totalBytes <= 330 * 1024,
     `Expected at most 330 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`

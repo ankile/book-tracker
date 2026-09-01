@@ -5,10 +5,14 @@
 // progress — the newest update row with pagesRead > 0 — because that is
 // when the reader reached the last page. A page-count correction written
 // later is an update row with zero or negative pagesRead and must not
-// become the finish date. With no progress row at all the newest row of
-// any type stands in, and with no history the book's own updatedAt does.
-// Unfinished books are left alone: the decoder reads an absent field as
-// null, and the client writes null explicitly from now on.
+// become the finish date; the planner reports such a later row so the
+// operator sees the choice in the dry run. With no progress row at all
+// the newest row of any type stands in (the correction that marked the
+// book finished), and with no history at all the book's own createdAt
+// does: such a book was added already finished. updatedAt is never a
+// source — it moves on every metadata edit, which is exactly what made
+// fifteen books look finished on 2026-08-28. Unfinished and already-
+// stamped books are left alone.
 
 export interface StoredUpdateRow {
   id: string;
@@ -19,8 +23,14 @@ interface TimestampValue {
   toMillis(): number;
 }
 
-export interface FinishedAtPatch {
+export type FinishedAtSource = 'progress' | 'row' | 'createdAt';
+
+export interface FinishedAtPlan {
   finishedAt: TimestampValue;
+  via: FinishedAtSource;
+  // A row newer than the chosen progress row (a later correction). The
+  // stamp still comes from the progress row; this is for the operator.
+  laterRowAt: TimestampValue | null;
 }
 
 function timestampOf(value: unknown, label: string): TimestampValue {
@@ -36,7 +46,7 @@ function timestampOf(value: unknown, label: string): TimestampValue {
 export function planFinishedAt(
   book: Record<string, unknown>,
   updates: readonly StoredUpdateRow[],
-): FinishedAtPatch | null {
+): FinishedAtPlan | null {
   if (book.finished !== true) return null;
   if (book.finishedAt !== undefined && book.finishedAt !== null) {
     timestampOf(book.finishedAt, 'finishedAt');
@@ -54,7 +64,15 @@ export function planFinishedAt(
     };
   }).sort((left, right) =>
     left.createdAt.toMillis() - right.createdAt.toMillis() || left.id.localeCompare(right.id));
-  const progressed = rows.filter((row) => row.pagesRead > 0);
-  const source = progressed.at(-1) ?? rows.at(-1);
-  return {finishedAt: source?.createdAt ?? timestampOf(book.updatedAt, 'updatedAt')};
+  const newest = rows.at(-1);
+  const progress = rows.filter((row) => row.pagesRead > 0).at(-1);
+  if (progress !== undefined) {
+    return {
+      finishedAt: progress.createdAt,
+      via: 'progress',
+      laterRowAt: newest !== undefined && newest.id !== progress.id ? newest.createdAt : null,
+    };
+  }
+  if (newest !== undefined) return {finishedAt: newest.createdAt, via: 'row', laterRowAt: null};
+  return {finishedAt: timestampOf(book.createdAt, 'createdAt'), via: 'createdAt', laterRowAt: null};
 }

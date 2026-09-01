@@ -87,9 +87,11 @@ function unknownKeys(data: Record<string, unknown>, allowed: readonly string[]):
 export function bookShapeViolations(book: Record<string, unknown>, ownerPath: string): string[] {
   const v: string[] = unknownKeys(book, BOOK_FIELDS);
   if ('updatedAt' in book && !isTimestamp(book.updatedAt)) v.push('updatedAt.not-timestamp');
-  if ('finishedAt' in book && book.finishedAt !== null) {
-    if (!isTimestamp(book.finishedAt)) v.push('finishedAt.not-timestamp');
-    if (book.finished !== true) v.push('finishedAt.unfinished');
+  // finished <=> finishedAt is a timestamp (validBookFinishedAt).
+  if (book.finished === true) {
+    if (!isTimestamp(book.finishedAt)) v.push('finishedAt.missing');
+  } else if ('finishedAt' in book && book.finishedAt !== null) {
+    v.push('finishedAt.unfinished');
   }
   if ('authorIds' in book) {
     // validBookShape caps the stored list at 50, not at the six a fresh

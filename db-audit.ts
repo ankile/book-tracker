@@ -736,10 +736,15 @@ for (const user of users) {
     if (b.finished !== true && isFinished(b.currentPage, b.pageCount)) {
       found('book.unfinished-pages-equal', p, `${b.currentPage}/${b.pageCount}`);
     }
-    // finishedAt: stamped by the client when finished flips, backfilled by
-    // migrate-finished-at.ts; a finished book without it is migration drift.
-    if (b.finished === true && !(b.finishedAt instanceof Timestamp) && !tombstoned) {
+    // finished <=> finishedAt is a timestamp: the client stamps it in the
+    // batch that flips finished and migrate-finished-at.ts backfilled the
+    // rest, so a finished book without one is migration drift and an
+    // unfinished book with one is a flip that lost its clear.
+    if (b.finished === true && !(b.finishedAt instanceof Timestamp)) {
       found('book.finished-without-finishedAt', p);
+    }
+    if (b.finished !== true && b.finishedAt !== undefined && b.finishedAt !== null) {
+      found('book.unfinished-with-finishedAt', p, String(b.finishedAt));
     }
     if (Number.isFinite(b.currentPage) && Number.isFinite(b.pageCount) && b.currentPage > b.pageCount) {
       found('book.page-overrun', p, `${b.currentPage}/${b.pageCount}`);

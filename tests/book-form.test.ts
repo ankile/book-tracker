@@ -268,6 +268,7 @@ test('shrinking below an inflated current page prepares an atomic page correctio
   assert.equal(result.write.input.pageCount, 320);
   assert.equal(result.write.input.currentPage, 320);
   assert.equal(result.write.input.pageCountClampFrom, 350);
+  // The clamp finishes the book, so updateBook stamps finishedAt.
   assert.equal(result.write.input.previouslyFinished, false);
 });
 
@@ -285,7 +286,7 @@ test('shrinking a finished book prepares the same explicit correction', () => {
   assert.equal(result.write.kind, 'update');
   assert.equal(result.write.input.currentPage, 320);
   assert.equal(result.write.input.pageCountClampFrom, 350);
-  // The stamp is written only when this edit is what finishes the book.
+  // Already finished: the stored stamp must survive this edit.
   assert.equal(result.write.input.previouslyFinished, true);
 });
 

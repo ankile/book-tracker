@@ -1,4 +1,4 @@
-import { isFinished } from './finished.ts';
+import { finishedAtPatch, isFinished } from './finished.ts';
 
 export interface ReadingSessionValues {
   fromPage: number;
@@ -11,6 +11,7 @@ export interface ReadingAggregateBook {
   currentPage: number;
   currentPageUpdateId: string | null;
   pageCount: number;
+  finished: boolean;
 }
 
 export interface ReadingProgressUpdate {
@@ -19,27 +20,33 @@ export interface ReadingProgressUpdate {
   createdAt: { toMillis(): number };
 }
 
-export interface ReadingAggregateMutation {
+// progress carries finishedAt only when the mutation flips finished
+// (finishedAtPatch): a stamp of `now` on finishing, null on un-finishing,
+// and no key at all when the flag is unchanged so the stored stamp stays.
+export interface ReadingAggregateMutation<T> {
   deltaPages: number;
   deltaTime: number;
   progress: {
     currentPage: number;
     currentPageUpdateId: string | null;
     finished: boolean;
+    finishedAt?: T | null;
   } | null;
 }
 
 // Aggregate increments commute for different sessions. Progress does not:
 // only the update row recorded as the exact current-page source can move that
 // page. Legacy books without a source id preserve progress rather than guess.
-export function planReadingSessionUpdate(
+export function planReadingSessionUpdate<T>(
   previous: ReadingSessionValues,
   next: Pick<ReadingSessionValues, 'fromPage' | 'toPage' | 'timeRead'>,
   book: ReadingAggregateBook,
   sessionId: string,
-): ReadingAggregateMutation {
+  now: T,
+): ReadingAggregateMutation<T> {
   const nextPagesRead = next.toPage - next.fromPage;
   const affectsProgress = book.currentPageUpdateId === sessionId;
+  const finished = isFinished(next.toPage, book.pageCount);
   return {
     deltaPages: nextPagesRead - previous.pagesRead,
     deltaTime: next.timeRead - previous.timeRead,
@@ -47,23 +54,26 @@ export function planReadingSessionUpdate(
       ? {
         currentPage: next.toPage,
         currentPageUpdateId: sessionId,
-        finished: isFinished(next.toPage, book.pageCount),
+        finished,
+        ...finishedAtPatch(book.finished, finished, now),
       }
       : null,
   };
 }
 
-export function planReadingSessionDelete(
+export function planReadingSessionDelete<T>(
   session: ReadingSessionValues,
   book: ReadingAggregateBook,
   sessionId: string,
   previousProgressUpdate: Pick<ReadingProgressUpdate, 'id' | 'toPage'> | null,
-): ReadingAggregateMutation {
+  now: T,
+): ReadingAggregateMutation<T> {
   const affectsProgress = book.currentPageUpdateId === sessionId;
   if (affectsProgress && previousProgressUpdate !== null &&
       previousProgressUpdate.toPage !== session.fromPage) {
     throw new Error('The preceding update does not establish the restored page.');
   }
+  const finished = isFinished(session.fromPage, book.pageCount);
   return {
     deltaPages: -session.pagesRead,
     deltaTime: -session.timeRead,
@@ -71,7 +81,8 @@ export function planReadingSessionDelete(
       ? {
         currentPage: session.fromPage,
         currentPageUpdateId: previousProgressUpdate?.id ?? null,
-        finished: isFinished(session.fromPage, book.pageCount),
+        finished,
+        ...finishedAtPatch(book.finished, finished, now),
       }
       : null,
   };

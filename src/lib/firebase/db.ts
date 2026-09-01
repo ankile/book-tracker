@@ -330,8 +330,6 @@ interface AddBookInput extends BookInputBase {
 
 interface UpdateBookInput extends BookInputBase {
   bookId: string;
-  // The stored flag before this edit, so finishedAt is stamped only when
-  // the edit is what finishes the book (a shrunk page count can).
   previouslyFinished: boolean;
   pageCountClampFrom: number | null;
   catalogLink?: CatalogSelection | null;
@@ -348,7 +346,7 @@ interface UpdateReadingSessionInput {
   userId: string;
   bookId: string;
   session: ReadingSession;
-  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount' | 'finished'>;
   timeRead: number;
   fromPage: number;
   toPage: number;
@@ -359,7 +357,7 @@ interface DeleteReadingSessionInput {
   userId: string;
   bookId: string;
   session: ReadingSession;
-  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount'>;
+  bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount' | 'finished'>;
   previousProgressUpdate: Pick<BookUpdate, 'id' | 'toPage'> | null;
   title: string;
 }

@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import { user } from '$lib/firebase/auth.ts';
   import Navbar from '$lib/components/Navbar.svelte';
+  import Footer from '$lib/components/Footer.svelte';
   import EmailVerificationBanner from '$lib/components/EmailVerificationBanner.svelte';
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
@@ -15,7 +16,7 @@
   // launch screen (the page doesn't need the session, so there is nothing
   // to wait for). It gets a minimal header instead of the app navbar —
   // just a "Go to app" link to /, which the gate below resolves to the
-  // login screen when signed out and Currently Reading when signed in.
+  // login screen when signed out and Reading when signed in.
   const publicRoute = $derived(page.route.id?.startsWith('/profiles') ?? false);
 
   // Let the requested page paint first, then load the other private routes'
@@ -57,9 +58,11 @@
   }
 
   main {
+    flex: 1;
     text-align: center;
     padding: 0;
     margin: 0 auto;
+    width: 100%;
   }
 
   .public-bar {
@@ -89,6 +92,8 @@
   }
 
   .app-view {
+    display: flex;
+    flex-direction: column;
     min-height: calc(
       100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom)
     );
@@ -110,6 +115,7 @@
     <main>
       {@render children()}
     </main>
+    <Footer publicView />
   </div>
 {:else if $user === undefined}
   <LaunchScreen />
@@ -121,8 +127,12 @@
       <main>
         {@render children()}
       </main>
+      <Footer />
     {:else}
-      <Login />
+      <main>
+        <Login />
+      </main>
+      <Footer publicView />
     {/if}
   </div>
 {/if}

@@ -6,10 +6,12 @@ import type {
   ProfileRecords,
 } from '../interfaces/profile.ts';
 import type { BookUpdateView } from '../interfaces/reading.ts';
+import { finishedDateOf } from './finished.ts';
 
 export interface StatsBookView {
   id?: string;
   finished: boolean;
+  finishedAt: TimestampLike | null;
   timeRead: number;
   pagesRead: number;
   createdAt: TimestampLike;
@@ -31,20 +33,14 @@ export interface BooksByYearRow<T extends YearBookView = YearBookView> {
   newAuthors: number;
 }
 
-export function computeStats(
-  allBooks: readonly StatsBookView[],
-  finishedAtByBookId?: ReadonlyMap<string, Date>,
-): LibraryStats {
+export function computeStats(allBooks: readonly StatsBookView[]): LibraryStats {
   const finishedBooks = allBooks.filter((book) => book.finished);
   const readingBooks = allBooks.filter((book) => !book.finished);
   const totalTimeRead = allBooks.reduce((sum, book) => sum + book.timeRead, 0);
   const totalPagesRead = allBooks.reduce((sum, book) => sum + book.pagesRead, 0);
 
   const finishedDates = finishedBooks
-    .map((book) =>
-      (book.id === undefined ? undefined : finishedAtByBookId?.get(book.id))
-        ?? book.createdAt.toDate(),
-    )
+    .map(finishedDateOf)
     .sort((a, b) => a.getTime() - b.getTime());
   const addedDates = allBooks
     .map((book) => book.createdAt.toDate())
@@ -95,14 +91,11 @@ interface YearAccumulator<T extends YearBookView> {
 
 export function computeBooksByYear<T extends YearBookView>(
   allBooks: readonly T[],
-  finishedAtByBookId?: ReadonlyMap<string, Date>,
 ): BooksByYearRow<T>[] {
   const yearData = new Map<number, YearAccumulator<T>>();
 
   for (const book of allBooks.filter((candidate) => candidate.finished)) {
-    const date = (book.id === undefined ? undefined : finishedAtByBookId?.get(book.id))
-      ?? book.createdAt.toDate();
-    const year = date.getFullYear();
+    const year = finishedDateOf(book).getFullYear();
     let data = yearData.get(year);
     if (data === undefined) {
       data = {
@@ -192,10 +185,9 @@ export const PROFILE_MAX_DAYS = 4000;
 export function buildProfilePayload<T extends YearBookView>(
   allBooks: readonly T[],
   sessionDays: readonly ProfileDay[] = [],
-  finishedAtByBookId?: ReadonlyMap<string, Date>,
   records: ProfileRecords | null = null,
 ): ProfilePayload {
-  const stats = computeStats(allBooks, finishedAtByBookId);
+  const stats = computeStats(allBooks);
   const authors = new Set(allBooks.flatMap((book) => [...book.authorIds])).size;
   return {
     days: sessionDays.slice(-PROFILE_MAX_DAYS),
@@ -210,7 +202,7 @@ export function buildProfilePayload<T extends YearBookView>(
       authors,
     },
     records,
-    years: computeBooksByYear(allBooks, finishedAtByBookId).map(
+    years: computeBooksByYear(allBooks).map(
       ({ year, count, totalTimeRead, totalPages }) => ({
         year: Number(year),
         count,

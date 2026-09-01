@@ -12,13 +12,15 @@ import {
   USERNAME_PATTERN,
 } from "../src/lib/utils/stats.ts";
 
-// Firestore Timestamp stand-in: computeStats only calls createdAt.toDate().
+// Firestore Timestamp stand-in: the stats only call toDate().
 const ts = (iso: string): TimestampLike => ({ toDate: () => new Date(iso) });
 
+// finishedAt deliberately differs from createdAt (and updatedAt is newer
+// than both): the finish date must come from the stamp alone.
 const books = [
-  { finished: true, timeRead: 300, pagesRead: 320, pageCount: 320, authorIds: [], createdAt: ts("2024-03-01T12:00:00Z") },
-  { finished: true, timeRead: 600, pagesRead: 480, pageCount: 480, authorIds: [], createdAt: ts("2025-06-01T12:00:00Z") },
-  { finished: false, timeRead: 90, pagesRead: 100, pageCount: 400, authorIds: [], createdAt: ts("2025-07-01T12:00:00Z") },
+  { finished: true, timeRead: 300, pagesRead: 320, pageCount: 320, authorIds: [], createdAt: ts("2024-03-01T12:00:00Z"), finishedAt: ts("2024-03-20T12:00:00Z"), updatedAt: ts("2026-08-28T12:00:00Z") },
+  { finished: true, timeRead: 600, pagesRead: 480, pageCount: 480, authorIds: [], createdAt: ts("2025-06-01T12:00:00Z"), finishedAt: ts("2025-06-15T12:00:00Z"), updatedAt: ts("2026-08-28T12:00:00Z") },
+  { finished: false, timeRead: 90, pagesRead: 100, pageCount: 400, authorIds: [], createdAt: ts("2025-07-01T12:00:00Z"), finishedAt: null, updatedAt: ts("2026-08-28T12:00:00Z") },
 ];
 
 test("computeStats aggregates the library", () => {
@@ -38,8 +40,8 @@ test("computeStats reports the date range endpoints", () => {
   assert.ok(stats.firstFinishedAt);
   assert.ok(stats.lastFinishedAt);
   assert.ok(stats.firstBookAddedAt);
-  assert.equal(stats.firstFinishedAt.getTime(), new Date("2024-03-01T12:00:00Z").getTime());
-  assert.equal(stats.lastFinishedAt.getTime(), new Date("2025-06-01T12:00:00Z").getTime());
+  assert.equal(stats.firstFinishedAt.getTime(), new Date("2024-03-20T12:00:00Z").getTime());
+  assert.equal(stats.lastFinishedAt.getTime(), new Date("2025-06-15T12:00:00Z").getTime());
   assert.equal(stats.firstBookAddedAt.getTime(), new Date("2024-03-01T12:00:00Z").getTime());
   const empty = computeStats([]);
   assert.equal(empty.firstFinishedAt, null);
@@ -47,20 +49,20 @@ test("computeStats reports the date range endpoints", () => {
   assert.equal(empty.booksPerYear, 0);
 });
 
-test("computeStats prefers session-derived finish dates when given", () => {
-  const withIds = books.map((book, i) => ({ ...book, id: `b${i}` }));
-  const finishedAt = new Map([["b0", new Date("2023-11-15T12:00:00Z")]]);
-  const stats = computeStats(withIds, finishedAt);
-  assert.ok(stats.firstFinishedAt);
-  assert.equal(stats.firstFinishedAt.getTime(), new Date("2023-11-15T12:00:00Z").getTime());
+test("a finished book without finishedAt is refused, not dated from createdAt or updatedAt", () => {
+  const unstamped = [{ ...books[0], id: "unstamped", finishedAt: null }];
+  assert.throws(() => computeStats(unstamped), /unstamped has no finishedAt/);
+  assert.throws(() => computeBooksByYear(unstamped), /unstamped has no finishedAt/);
+  // An unfinished book carries null and is never dated.
+  assert.equal(computeStats([books[2]]).firstFinishedAt, null);
 });
 
 test("computeBooksByYear counts unique/new authors and tracks book extremes", () => {
   const library = [
-    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: ["x", "y"], createdAt: ts("2024-02-01T12:00:00Z") },
-    { id: "b2", finished: true, timeRead: 60, pagesRead: 500, pageCount: 500, authorIds: ["x"], createdAt: ts("2024-06-01T12:00:00Z") },
-    { id: "b3", finished: true, timeRead: 60, pagesRead: 300, pageCount: 300, authorIds: ["x", "z"], createdAt: ts("2025-01-05T12:00:00Z") },
-    { id: "b4", finished: false, timeRead: 60, pagesRead: 50, pageCount: 400, authorIds: ["w"], createdAt: ts("2025-02-01T12:00:00Z") },
+    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: ["x", "y"], createdAt: ts("2024-02-01T12:00:00Z"), finishedAt: ts("2024-02-10T12:00:00Z") },
+    { id: "b2", finished: true, timeRead: 60, pagesRead: 500, pageCount: 500, authorIds: ["x"], createdAt: ts("2024-06-01T12:00:00Z"), finishedAt: ts("2024-06-20T12:00:00Z") },
+    { id: "b3", finished: true, timeRead: 60, pagesRead: 300, pageCount: 300, authorIds: ["x", "z"], createdAt: ts("2025-01-05T12:00:00Z"), finishedAt: ts("2025-01-15T12:00:00Z") },
+    { id: "b4", finished: false, timeRead: 60, pagesRead: 50, pageCount: 400, authorIds: ["w"], createdAt: ts("2025-02-01T12:00:00Z"), finishedAt: null },
   ];
   const years = computeBooksByYear(library);
   assert.equal(years.length, 2);
@@ -76,12 +78,11 @@ test("computeBooksByYear counts unique/new authors and tracks book extremes", ()
   assert.equal(y2025.shortestBook.pageCount, 300);
 });
 
-test("computeBooksByYear reattributes by session-derived finish dates", () => {
+test("computeBooksByYear attributes a book to the year of its finishedAt, not its createdAt", () => {
   const library = [
-    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: [], createdAt: ts("2024-12-20T12:00:00Z") },
+    { id: "b1", finished: true, timeRead: 60, pagesRead: 100, pageCount: 100, authorIds: [], createdAt: ts("2024-12-20T12:00:00Z"), finishedAt: ts("2025-01-10T12:00:00Z") },
   ];
-  const finishedAt = new Map([["b1", new Date("2025-01-10T12:00:00Z")]]);
-  const years = computeBooksByYear(library, finishedAt);
+  const years = computeBooksByYear(library);
   assert.equal(years.length, 1);
   assert.equal(years[0].year, "2025");
 });
@@ -107,11 +108,10 @@ test("payload is stable across recomputes even with a minutes-old finish date", 
   // booksPerYear anchors on "now"; if it moved between recomputes the
   // profile-sync effect would rewrite the doc on every listener echo.
   const justFinished = [
-    { id: "b0", finished: true, timeRead: 300, pagesRead: 320, pageCount: 320, authorIds: [], createdAt: ts("2026-08-23T10:00:00") },
+    { id: "b0", finished: true, timeRead: 300, pagesRead: 320, pageCount: 320, authorIds: [], createdAt: ts("2026-08-23T10:00:00"), finishedAt: ts(new Date(Date.now() - 5 * 60 * 1000).toISOString()) },
   ];
-  const finishedAt = new Map([["b0", new Date(Date.now() - 5 * 60 * 1000)]]);
-  const first = buildProfilePayload(justFinished, [], finishedAt);
-  const second = buildProfilePayload(justFinished, [], finishedAt);
+  const first = buildProfilePayload(justFinished, []);
+  const second = buildProfilePayload(justFinished, []);
   assert.equal(profilePayloadEqual(structuredClone(first), second), true);
   // And the floored denominator keeps the rate sane rather than in the
   // thousands for a brand-new library.
@@ -142,6 +142,7 @@ test("profile aggregate author count retains unresolved raw identities", () => {
       pageCount: 20,
       authorIds: ['known', 'dangling'],
       createdAt: ts('2026-01-01T12:00:00Z'),
+      finishedAt: ts('2026-01-03T12:00:00Z'),
     },
     {
       finished: true,
@@ -150,6 +151,7 @@ test("profile aggregate author count retains unresolved raw identities", () => {
       pageCount: 20,
       authorIds: ['dangling'],
       createdAt: ts('2026-02-01T12:00:00Z'),
+      finishedAt: ts('2026-02-03T12:00:00Z'),
     },
   ]);
 
@@ -181,7 +183,7 @@ test("payload publishes title-free record aggregates", () => {
       fastestFinish: { days: 3, pageCount: 320 },
     },
   };
-  const payload = buildProfilePayload(books, [], undefined, records);
+  const payload = buildProfilePayload(books, [], records);
   assert.deepEqual(payload.records, records);
   assert.equal(JSON.stringify(payload.records).includes("title"), false);
   assert.equal(payload.stats.authors, 0);

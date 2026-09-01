@@ -1,7 +1,6 @@
 <script lang="ts">
   import { user, signOut } from '$lib/firebase/auth.ts';
   import { page } from '$app/state';
-  import NewBookModal from '$lib/components/NewBookModal.svelte';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
   import SpeedSection from '$lib/components/SpeedSection.svelte';
@@ -33,7 +32,6 @@
     buildBookTimelines,
     computeMomentum,
     computeSuperlatives,
-    finishedAtByBook,
     monthlyAggregates,
   } from '$lib/utils/sessions.ts';
   import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.ts';
@@ -51,16 +49,11 @@
   import type { BookUpdate } from '$lib/interfaces/reading.ts';
   import type { UserDocument } from '$lib/firebase/decoders.ts';
 
-  let newBookModal = $state(false);
-
   async function handleSignOut() {
     // signOut ends with a clean reload onto the front page (SEC-004:
     // the local Firestore mirror is dropped), so no goto here.
     await signOut();
   }
-
-  const toggleModal = () => (newBookModal = !newBookModal);
-  const closeModal = () => (newBookModal = false);
 
   // Get all books for statistics; undefined until the first snapshot (the
   // profile sync below must not run against the pre-snapshot empty list).
@@ -122,13 +115,11 @@
   // widened listener now carries.
   const sessionDays = $derived(aggregateSessionsByDay(allSessions ?? []));
 
-  // Session-derived finish dates (a book finishes at its last update of
-  // any type): feed the per-year table, the card ranges, and the published
-  // payload, so a book read across a year boundary counts in the year it
-  // was actually finished. timelines and months are computed once here and
-  // passed to the sections — each is a full pass over ~3.5k session docs.
+  // Finish dates come from each book's own finishedAt stamp (finishedDateOf
+  // in utils/stats.ts), never from its sessions. timelines and months are
+  // computed once here and passed to the sections — each is a full pass
+  // over ~3.5k session docs.
   const timelines = $derived(buildBookTimelines(allSessions ?? []));
-  const finishedAt = $derived(finishedAtByBook(analyticsBooks, timelines));
   const months = $derived(monthlyAggregates(allSessions ?? []));
   const profileRecords = $derived.by((): ProfileRecords | null => {
     const momentum = computeMomentum(allSessions ?? [], new Date());
@@ -208,8 +199,8 @@
   }
 
   // Statistics (shared with the public-profile payload, see utils/stats.ts)
-  const stats = $derived(computeStats(analyticsBooks, finishedAt));
-  const booksByYear = $derived(computeBooksByYear(analyticsBooks, finishedAt));
+  const stats = $derived(computeStats(analyticsBooks));
+  const booksByYear = $derived(computeBooksByYear(analyticsBooks));
 
   // Extract username from email
   const username = $derived(($user?.email ?? '').split('@')[0]);
@@ -306,13 +297,13 @@
         // explicit visibility checkbox below.
         await Database.createProfile({
           userId: currentUser.uid, username: chosenSlug, ...names, links: [],
-          isPublic: false, ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          isPublic: false, ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       } else if (chosenSlug === myProfile.username) {
         await Database.updateProfile({
           userId: currentUser.uid, username: chosenSlug, ...names,
           links: myProfile.links ?? [], isPublic: myProfile.public,
-          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       } else {
         if (bookSharing === undefined) {
@@ -322,7 +313,7 @@
           userId: currentUser.uid, oldUsername: myProfile.username, newUsername: chosenSlug,
           ...names, links: myProfile.links ?? [], isPublic: myProfile.public,
           isDiscoverable: profileDiscoverable, bookSharing,
-          ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+          ...buildProfilePayload(books, sessionDays, profileRecords),
         });
       }
       profileGivenName = chosenGiven;
@@ -392,7 +383,7 @@
       familyName: myProfile.familyName ?? '',
       links: myProfile.links ?? [],
       isPublic: myProfile.public,
-      ...buildProfilePayload(books, sessionDays, finishedAt, profileRecords),
+      ...buildProfilePayload(books, sessionDays, profileRecords),
       ...overrides,
     });
   }
@@ -556,7 +547,7 @@
   // as clean and the effect settles instead of looping.
   $effect(() => {
     if (!$user || !myProfile || allBooks === undefined || allSessions === undefined || authorList === undefined) return;
-    const payload = buildProfilePayload(analyticsBooks, sessionDays, finishedAt, profileRecords);
+    const payload = buildProfilePayload(analyticsBooks, sessionDays, profileRecords);
     if (profilePayloadEqual(myProfile, payload)) return;
     void persistProfileWithFeedback();
   });
@@ -1171,8 +1162,6 @@
 </style>
 
 {#if $user}
-  <NewBookModal open={newBookModal} onclose={closeModal} userId={$user.uid} />
-
   <div class="profile-container">
     <div class="profile-header">
       <h1>Welcome back, {myProfile?.givenName || username}!</h1>
@@ -1180,7 +1169,6 @@
     </div>
 
     <div class="actions">
-      <button onclick={toggleModal}>Add New Book</button>
       <button onclick={handleSignOut}>Sign Out</button>
     </div>
 

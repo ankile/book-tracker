@@ -98,6 +98,20 @@ test('book decoder validates correlated catalog links and provenance', () => {
   );
 });
 
+test('book decoder reads finishedAt as null when absent or null and as a timestamp otherwise', () => {
+  assert.equal(decodeBook('absent', bookData(), 'users/owner/books/absent').finishedAt, null);
+  assert.equal(decodeBook('null', { ...bookData(), finishedAt: null }, 'users/owner/books/null').finishedAt, null);
+  const stamp = Timestamp.fromMillis(1_700_000_000_000);
+  const stamped = decodeBook('stamped', {
+    ...bookData(), currentPage: 200, finished: true, finishedAt: stamp,
+  }, 'users/owner/books/stamped');
+  assert.equal(stamped.finishedAt?.toMillis(), stamp.toMillis());
+  assert.throws(
+    () => decodeBook('junk', { ...bookData(), finishedAt: '2024-01-01' }, 'users/owner/books/junk'),
+    /finishedAt/,
+  );
+});
+
 test('book decoder normalizes legacy progress-source state and validates new ids', () => {
   assert.equal(
     decodeBook('legacy', bookData(), 'users/owner/books/legacy').currentPageUpdateId,
