@@ -289,7 +289,12 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
   const profileByUid = new Map(profiles.docs.map((snap) => [snap.id, snap]));
   const uids = [...new Set([...authByUid.keys(), ...profileIds])];
 
-  const users = await Promise.all(uids.map(async (uid) => {
+  // The per-user aggregates and the issue feed are independent reads;
+  // running them together instead of one after the other takes a Firestore
+  // round-trip's worth of latency off every overview load.
+  const cutoff =
+    Timestamp.fromMillis(Date.now() - ISSUE_WINDOW_DAYS * 24 * 3600 * 1000);
+  const [users, reads] = await Promise.all([Promise.all(uids.map(async (uid) => {
     const authUser = authByUid.get(uid);
     const stats = await domainStats(uid);
     const lastSignInAt = millis(authUser?.metadata.lastSignInTime);
@@ -313,7 +318,10 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
           !profileByUid.has(uid) ? "profile doc missing" : null,
       ...stats,
     };
-  }));
+  })), Promise.allSettled([
+    ...uids.map((uid) => readIssuesFor(uid, ISSUES_PER_UID, cutoff)),
+    readIssuesFor(null, ANONYMOUS_ISSUE_LIMIT, cutoff),
+  ])]);
   users.sort((a, b) => (b.lastActiveAt ?? -1) - (a.lastActiveAt ?? -1));
 
   // Distinguishes "this uid has no auth record" from "this account exists
@@ -326,12 +334,6 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
     return [uid, {email: authUser.email ?? profileEmail ?? uid, verified: true}];
   }));
 
-  const cutoff =
-    Timestamp.fromMillis(Date.now() - ISSUE_WINDOW_DAYS * 24 * 3600 * 1000);
-  const reads = await Promise.allSettled([
-    ...uids.map((uid) => readIssuesFor(uid, ISSUES_PER_UID, cutoff)),
-    readIssuesFor(null, ANONYMOUS_ISSUE_LIMIT, cutoff),
-  ]);
   const groups: IssueGroup[] = [];
   let unreadAccounts = 0;
   let anonymousUnread = false;
