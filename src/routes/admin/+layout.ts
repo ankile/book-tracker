@@ -1,10 +1,6 @@
 import { error } from '@sveltejs/kit';
+import { ADMIN_UID } from '$lib/admin.ts';
 import { auth } from '$lib/firebase/auth.ts';
-
-// The operator's immutable auth UID — never the email, which is a
-// claimable string while signups are open (see functions/src/admin.ts,
-// which enforces the same pair of checks on the server).
-const ADMIN_UID = '1Cf0CaNfgnVSvTrF5dYjzRd9Xri2';
 
 // Cosmetic gate at the shared boundary: every admin/* route inherits this
 // layout, and non-admins (or signed-out visitors) get the same 404 page an

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { reauthenticateWithPassword } from '$lib/firebase/auth.ts';
+  import { scanCache } from '$lib/admin.ts';
   import {
     adminCatalogApply,
     adminCatalogPreview,
@@ -28,8 +29,12 @@
   type OperationType = AdminCatalogOperation['type'];
   type PreviewState = {operation: AdminCatalogOperation; response: AdminCatalogPreviewResponse};
 
-  let scan = $state<AdminCatalogScanResponse | null>(null);
-  let loading = $state(true);
+  // The first scan page is kept for the session (and warmed by the app
+  // prefetch): the page opens on the last answer and refreshes behind it.
+  const cachedScan = scanCache.read();
+  let scan = $state<AdminCatalogScanResponse | null>(cachedScan.value);
+  let scanLoadedAt = $state<number | null>(cachedScan.loadedAt);
+  let loading = $state(cachedScan.value === null);
   let loadingMore = $state(false);
   let statusMessage = $state('');
   let errorMessage = $state('');
@@ -118,6 +123,28 @@
   });
 
   const unmatchedBooks = $derived(scan?.books.filter((book) => book.workId === null) ?? []);
+  // The two jobs this console exists for: works other accounts created
+  // through the add-book flow (review: keep, edit, hide, or merge), and
+  // things the scan thinks are the same book twice (merge works, or link a
+  // book to the work it belongs to).
+  const userCreatedWorks = $derived(
+    [...(scan?.works ?? [])].filter((work) => work.createdBy !== null && work.status !== 'merged')
+      .sort((left, right) => right.createdAt - left.createdAt),
+  );
+  const duplicateWorkFindings = $derived(
+    (scan?.findings ?? []).filter((finding) => finding.code === 'suspected-duplicate-works'),
+  );
+  const unmatchedWithCandidates = $derived.by(() => {
+    const current = scan;
+    if (current === null) return [];
+    return unmatchedBooks
+      .map((book) => ({book, candidates: adminCatalogCandidatesForBook(current, book)}))
+      .filter(({candidates}) => candidates.length > 0);
+  });
+  const workById = $derived(new Map((scan?.works ?? []).map((work) => [work.workId, work])));
+  function booksLinkedTo(id: string) {
+    return scan?.books.filter((book) => book.workId === id) ?? [];
+  }
   const catalogAuthorNameById = $derived(new Map(
     (scan?.authors ?? []).map((author) => [author.authorId, author.canonicalName]),
   ));
@@ -133,16 +160,19 @@
       selectedWork?.mergedFrom.includes(book.workId ?? '')) ?? [],
   );
 
+  const SCAN_FRESH_MS = 60_000;
   $effect(() => {
-    void loadScan();
+    const age = scanLoadedAt === null ? Infinity : Date.now() - scanLoadedAt;
+    void loadScan(null, age > SCAN_FRESH_MS);
   });
 
-  async function loadScan(bookCursor: string | null = null): Promise<void> {
+  async function loadScan(bookCursor: string | null = null, force = true): Promise<void> {
     if (bookCursor === null) loading = true;
     else loadingMore = true;
     errorMessage = '';
     try {
-      const page = await adminCatalogScan(bookCursor);
+      const page = bookCursor === null ? await scanCache.fetch(force) : await adminCatalogScan(bookCursor);
+      if (bookCursor === null) scanLoadedAt = scanCache.read().loadedAt;
       if (bookCursor === null || scan === null) scan = page;
       else {
         const priorCounts = new Map(scan.works.map((work) => [work.workId, work.linkedBookCount]));
@@ -460,7 +490,37 @@
 
   function inspectWork(id: string): void {
     selectedWorkId = id;
+    allDataOpen = true;
     document.getElementById('work-detail-heading')?.scrollIntoView({behavior: 'smooth'});
+  }
+  let allDataOpen = $state(false);
+  function editWork(id: string): void {
+    selectedWorkId = id;
+    editSelectedWork();
+  }
+  // Hide is the soft delete: the work and its links stay, search and the
+  // reader page skip it. Same editWork operation with the status flipped.
+  function hideWork(id: string): void {
+    selectedWorkId = id;
+    editSelectedWork();
+    workStatus = 'hidden';
+  }
+  // Prefill a merge with the oldest work as the survivor: it is the one
+  // most books already point at.
+  function mergeWorks(ids: readonly string[]): void {
+    const works = ids.map((id) => workById.get(id)).filter((work) => work !== undefined)
+      .sort((left, right) => left.createdAt - right.createdAt);
+    if (works.length < 2) return;
+    operationType = 'mergeWorks';
+    mergeTarget = works[0].workId;
+    mergeSources = lines(works.slice(1).map((work) => work.workId));
+    document.getElementById('operation-heading')?.scrollIntoView({behavior: 'smooth'});
+  }
+  function mergeInto(sourceId: string): void {
+    operationType = 'mergeWorks';
+    mergeSources = sourceId;
+    mergeTarget = '';
+    document.getElementById('operation-heading')?.scrollIntoView({behavior: 'smooth'});
   }
 
   function editSelectedWork(): void {
@@ -515,17 +575,106 @@
   <header>
     <a href="/admin">← Admin overview</a>
     <h1>Catalog curation</h1>
-    <p>Bibliographic identity only. This console does not show progress, timers, sessions, or private profile settings.</p>
-    <button type="button" disabled={loading} onclick={() => void loadScan()}>{loading ? 'Scanning…' : 'Refresh scan'}</button>
+    <p class="toolbar">
+      <button type="button" disabled={loading} onclick={() => void loadScan()}>{loading ? 'Scanning…' : 'Refresh'}</button>
+      {#if scanLoadedAt !== null}<small>as of {new Date(scanLoadedAt).toLocaleTimeString()}</small>{/if}
+    </p>
   </header>
 
   {#if errorMessage}<div class="notice error" role="alert">{errorMessage}</div>{/if}
   {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
 
   {#if loading && scan === null}
-    <p class="loading">Loading bounded catalog scan…</p>
+    <p class="loading">Scanning the catalog…</p>
   {:else if scan}
-    <section class="card" aria-labelledby="catalog-authors-heading">
+    <section class="card" aria-labelledby="new-works-heading">
+      <h2 id="new-works-heading">New works from readers <span>{userCreatedWorks.length}</span></h2>
+      {#if userCreatedWorks.length === 0}
+        <p class="empty">Nothing to review.</p>
+      {:else}
+        <div class="work-cards">
+          {#each userCreatedWorks as work (work.workId)}
+            {@const linked = booksLinkedTo(work.workId)}
+            <article class="work-card" class:hidden-work={work.status === 'hidden'}>
+              {#if work.coverUrl}<img src={work.coverUrl} alt="" referrerpolicy="no-referrer" />{:else}<div class="no-cover"></div>{/if}
+              <div class="work-body">
+                <h3>{work.canonicalTitle}</h3>
+                <p>{catalogAuthorNames(work.authorIds)}</p>
+                <small>
+                  {new Date(work.createdAt).toISOString().slice(0, 10)} · by {work.createdBy?.slice(0, 8)}… ·
+                  {work.editionCount} {work.editionCount === 1 ? 'edition' : 'editions'} ·
+                  {linked.length} {linked.length === 1 ? 'reader' : 'readers'}{work.status === 'hidden' ? ' · hidden' : ''}
+                </small>
+                {#if linked.length > 0}
+                  <ul class="linked">
+                    {#each linked as book (`${book.uid}/${book.bookId}`)}
+                      <li>{book.title} — {book.authorNames.join(', ')} · {book.pageCount ?? '—'} p</li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
+              </div>
+              <div class="actions">
+                <button type="button" onclick={() => editWork(work.workId)}>Edit</button>
+                <button type="button" onclick={() => mergeInto(work.workId)}>Merge into…</button>
+                {#if work.status !== 'hidden'}<button type="button" onclick={() => hideWork(work.workId)}>Hide</button>{/if}
+                <button type="button" onclick={() => inspectWork(work.workId)}>Details</button>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <section class="card" aria-labelledby="duplicates-heading">
+      <h2 id="duplicates-heading">Same book, split across records <span>{duplicateWorkFindings.length + unmatchedWithCandidates.length}</span></h2>
+      {#if duplicateWorkFindings.length === 0 && unmatchedWithCandidates.length === 0}
+        <p class="empty">Nothing to merge or link.</p>
+      {/if}
+      {#if duplicateWorkFindings.length > 0}
+        <h3>Works that look like the same book</h3>
+        <div class="dupe-list">
+          {#each duplicateWorkFindings as finding, index (`dupe:${index}`)}
+            <div class="dupe">
+              <div>
+                <p>{finding.message}</p>
+                <ul>
+                  {#each finding.workIds as id (id)}
+                    {@const work = workById.get(id)}
+                    <li>
+                      <strong>{work?.canonicalTitle ?? id}</strong>
+                      <small>{work ? catalogAuthorNames(work.authorIds) : ''} · {booksLinkedTo(id).length} readers · {work?.editionCount ?? 0} editions · <code>{id}</code></small>
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+              <button class="primary" type="button" onclick={() => mergeWorks(finding.workIds)}>Merge into the oldest</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      {#if unmatchedWithCandidates.length > 0}
+        <h3>Books that probably belong to an existing work</h3>
+        <div class="dupe-list">
+          {#each unmatchedWithCandidates as {book, candidates} (`${book.uid}/${book.bookId}`)}
+            <div class="dupe">
+              <div>
+                <p><strong>{book.title}</strong> — {book.authorNames.join(', ')} · {book.isbn13 ?? book.rawIsbn ?? 'no ISBN'} · reader {book.uid.slice(0, 8)}…</p>
+              </div>
+              <div class="actions">
+                {#each candidates as candidate (`${book.uid}/${book.bookId}/${candidate.workId}`)}
+                  <button type="button" onclick={() => useCandidate(book, candidate)}>Link to {candidate.title} <small>({candidate.label})</small></button>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <details class="card all-data" bind:open={allDataOpen}>
+      <summary>All catalog data — {scan.authors.length} authors, {scan.works.length} works, {unmatchedBooks.length} unlinked books, {scan.findings.length} findings</summary>
+    <section aria-labelledby="catalog-authors-heading">
       <h2 id="catalog-authors-heading">Catalog authors <span>{scan.authors.length}/{scan.limits.catalogAuthors}</span></h2>
       <p>Works reference these entities by ID. Editing a canonical author updates every catalog display without rewriting personal books.</p>
       <div class="table-scroll">
@@ -545,7 +694,7 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="works-heading">
+    <section aria-labelledby="works-heading">
       <h2 id="works-heading">Works <span>{scan.works.length}/{scan.limits.works}</span></h2>
       <div class="table-scroll">
         <table>
@@ -567,7 +716,7 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="unmatched-heading">
+    <section aria-labelledby="unmatched-heading">
       <h2 id="unmatched-heading">Unmatched books <span>{unmatchedBooks.length} loaded · {scan.limits.books} per page</span></h2>
       <p>Only identity metadata needed for curation is shown. Anomalous owners require manual review.</p>
       {#if unmatchedBooks.length === 0}
@@ -606,7 +755,7 @@
       {/if}
     </section>
 
-    <section class="card" aria-labelledby="findings-heading">
+    <section aria-labelledby="findings-heading">
       <h2 id="findings-heading">Review findings <span>{scan.findings.length}</span></h2>
       {#if scan.findings.length === 0}
         <p class="empty">No deterministic findings.</p>
@@ -623,7 +772,7 @@
       {/if}
     </section>
 
-    <section class="card" aria-labelledby="work-detail-heading">
+    <section aria-labelledby="work-detail-heading">
       <h2 id="work-detail-heading">Work detail</h2>
       <label for="selected-work">Selected work</label>
       <select id="selected-work" bind:value={selectedWorkId}>
@@ -656,11 +805,11 @@
         </div>
       {/if}
     </section>
+    </details>
   {/if}
 
   <section class="card operation" aria-labelledby="operation-heading">
-    <h2 id="operation-heading">Preview an operation</h2>
-    <p>Every action is previewed without writes. Apply repeats the stale-state checks and asks for explicit confirmation.</p>
+    <h2 id="operation-heading">Run an operation</h2>
     <label for="operation-type">Operation</label>
     <select id="operation-type" bind:value={operationType}>
       <option value="upsertAuthor">Create or edit author</option><option value="mergeAuthors">Merge authors</option>
@@ -759,7 +908,17 @@
   button { border: 1px solid #49736d; border-radius: 4px; padding: .42rem .7rem; background: white; color: #244f49; cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; } .primary { background: #27685e; color: white; } .danger { background: #8b2e2e; color: white; border-color: #8b2e2e; }
   .card { margin: 1.25rem 0; padding: 1.25rem; border-radius: 7px; background: white; box-shadow: 0 2px 10px #0002; }
-  .card h2 { margin-top: 0; } h2 span { color: #71807d; font-size: .85rem; font-weight: 500; } .card > p { color: #64706d; }
+  .card h2 { margin-top: 0; }
+  .toolbar { display: flex; align-items: center; gap: .8rem; margin: .25rem 0 0; } .toolbar small { color: #71807d; }
+  .work-cards, .dupe-list { display: grid; gap: .8rem; }
+  .work-card { display: grid; grid-template-columns: 56px 1fr auto; gap: .9rem; padding: .8rem; background: #f5f7f6; border-radius: 6px; align-items: start; }
+  .work-card img, .no-cover { width: 56px; aspect-ratio: 2/3; object-fit: cover; border-radius: 3px; background: #dfe5e3; }
+  .work-card h3, .work-card p { margin: 0 0 .2rem; } .work-card small { color: #697572; } .work-card .warning { color: #8b5a12; font-size: .85rem; }
+  .work-card.hidden-work { opacity: .6; } .linked { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .85rem; color: #44514e; }
+  .actions { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; }
+  .dupe { display: grid; grid-template-columns: 1fr auto; gap: .9rem; padding: .8rem; background: #fff8e9; border-left: 4px solid #c68a23; border-radius: 4px; align-items: start; }
+  .dupe p { margin: 0 0 .3rem; } .dupe ul { margin: 0; padding-left: 1.1rem; } .dupe li small { display: block; color: #697572; }
+  .all-data summary { cursor: pointer; font-weight: 600; color: #244f49; } .all-data > section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #dfe5e3; } h2 span { color: #71807d; font-size: .85rem; font-weight: 500; } .card > p { color: #64706d; }
   .notice { margin: 1rem 0; padding: .8rem; border-radius: 5px; } .error { color: #842029; background: #f8d7da; } .success { color: #15583c; background: #ddefe4; }
   .table-scroll { overflow-x: auto; margin: .75rem 0; } table { width: 100%; min-width: 840px; border-collapse: collapse; }
   th, td { padding: .55rem; border-bottom: 1px solid #dfe5e3; text-align: left; vertical-align: top; } th { color: #697572; font-size: .76rem; text-transform: uppercase; }
@@ -778,5 +937,5 @@
   .preview li { margin: 1rem 0; } .diff { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; } pre { max-height: 320px; overflow: auto; padding: .6rem; background: #17201f; color: #e9f1ef; font-size: .75rem; white-space: pre-wrap; }
   dialog { max-width: 500px; border: 0; border-radius: 7px; box-shadow: 0 10px 40px #0006; } dialog::backdrop { background: #0008; } dialog form { display: grid; gap: .8rem; } .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
   .empty { color: #3d6d58; } .loading { padding: 2rem; color: #697572; } .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 700px) { .admin-catalog { padding: 1rem; } .form-grid, .diff { grid-template-columns: 1fr; } .wide { grid-column: auto; } .detail-heading { flex-wrap: wrap; } .detail-heading button { margin-left: 0; } }
+  @media (max-width: 700px) { .admin-catalog { padding: 1rem; } .form-grid, .diff, .work-card, .dupe { grid-template-columns: 1fr; } .wide { grid-column: auto; } .detail-heading { flex-wrap: wrap; } .detail-heading button { margin-left: 0; } }
 </style>

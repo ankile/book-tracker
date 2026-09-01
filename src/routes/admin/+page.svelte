@@ -1,18 +1,36 @@
 <script lang="ts">
   import { feedNotes as feedNotesFor, readFailed as readFailedFor } from '$lib/utils/adminFeed.ts';
-  import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
+  import { overviewCache } from '$lib/admin.ts';
+  import type { AdminOverview } from '$lib/firebase/functions.ts';
   import { addError } from '$lib/stores/errors.ts';
 
-  let overview = $state<AdminOverview | null>(null);
+  // The last answer is shown at once (it is kept for the session and
+  // warmed by the app prefetch); a fresh one loads behind it unless the
+  // cached one is under a minute old.
+  const cached = overviewCache.read();
+  let overview = $state<AdminOverview | null>(cached.value);
+  let loadedAt = $state<number | null>(cached.loadedAt);
+  let refreshing = $state(false);
   let failed = $state(false);
 
+  async function load(force: boolean): Promise<void> {
+    refreshing = true;
+    try {
+      overview = await overviewCache.fetch(force);
+      loadedAt = overviewCache.read().loadedAt;
+      failed = false;
+    } catch (error) {
+      failed = overview === null;
+      addError(`Couldn't load the admin overview (${error instanceof Error ? error.message : String(error)}).`);
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  const FRESH_MS = 60_000;
   $effect(() => {
-    adminOverview({})
-      .then((result) => (overview = result.data))
-      .catch((error: unknown) => {
-        failed = true;
-        addError(`Couldn't load the admin overview (${error instanceof Error ? error.message : String(error)}).`);
-      });
+    const age = loadedAt === null ? Infinity : Date.now() - loadedAt;
+    void load(age > FRESH_MS);
   });
 
   // The caps block is read through one guarded derived value so a server
@@ -51,9 +69,28 @@
     margin-bottom: 1.5rem;
   }
 
-  .catalog-link {
-    display: inline-block;
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
     margin: -0.75rem 0 1.5rem;
+  }
+
+  .toolbar small { color: #697572; }
+
+  .toolbar button {
+    font: inherit;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid #49736d;
+    border-radius: 4px;
+    background: white;
+    color: #244f49;
+    cursor: pointer;
+  }
+
+  .toolbar button:disabled { opacity: 0.55; cursor: default; }
+
+  .catalog-link {
     color: #0069d9;
     font-weight: 600;
   }
@@ -203,7 +240,11 @@
 
 <div class="admin-container">
   <h1>Admin overview</h1>
-  <a class="catalog-link" href="/admin/catalog">Open catalog curation</a>
+  <p class="toolbar">
+    <a class="catalog-link" href="/admin/catalog">Open catalog curation</a>
+    <button type="button" disabled={refreshing} onclick={() => void load(true)}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+    {#if loadedAt !== null}<small>as of {new Date(loadedAt).toLocaleTimeString()}</small>{/if}
+  </p>
 
   {#if overview}
     <div class="card">

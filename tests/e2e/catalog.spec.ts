@@ -462,7 +462,10 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await login(page, adminEmail);
       await navigateInApp(page, '/admin/catalog');
       await expect(page.getByRole('heading', {name: 'Catalog curation'})).toBeVisible();
-      await expect(page.getByRole('heading', {name: /Works/})).toBeVisible();
+      await expect(page.getByRole('heading', {name: /New works from readers/})).toBeVisible();
+      await expect(page.getByRole('heading', {name: /Same book, split across records/})).toBeVisible();
+      await page.getByText(/All catalog data/).click();
+      await expect(page.getByRole('heading', {name: /^Works/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Unmatched books/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Review findings/})).toBeVisible();
       await expect(page.getByRole('heading', {name: 'Work detail'})).toBeVisible();
