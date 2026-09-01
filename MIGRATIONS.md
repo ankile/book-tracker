@@ -182,7 +182,7 @@ current deployment instructions.
 | `migrate-timer-claims.ts` | Add server-owned timer claim state | Completed historical rollout. Do not rerun during deployment. |
 | `migrate-reading-progress-sources.ts` | Add progress-write provenance | Completed historical rollout. The proposed waiting period was superseded and the rollout completed in the same release window. |
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
-| `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Implemented and emulator-rehearsed; production rollout pending |
+| `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Completed historical rollout (2026-09-01: apply matched the reviewed dry run, second apply 0, audit clean apart from one reviewed-group author the planner did not mint — repaired separately). Idempotent; a rerun links only books that gained unlinked author references since. |
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
