@@ -16,9 +16,21 @@ export const PUBLICWEB_RUNTIME_SERVICE_ACCOUNT =
 
 // functions-runtime: roles/datastore.user, roles/firebaseauth.viewer
 // (admin overview lists users), roles/eventarc.eventReceiver plus
-// run.invoker on the two Eventarc-fed services, and secretAccessor on
-// FUNCTIONS_CONFIG_EXPORT (booksapi). Callables and triggers all need
-// Firestore writes, so they share one identity.
+// run.invoker on every Eventarc-fed gen2 service (toggl-syncqueue,
+// deletebookupdates, the three catalog projection triggers), and
+// secretAccessor on FUNCTIONS_CONFIG_EXPORT (booksapi). Callables and
+// triggers all need Firestore writes, so they share one identity.
+//
+// The run.invoker binding is per service and `firebase deploy` does not
+// create it: a NEW gen2 trigger is created without one, Eventarc's
+// deliveries are refused ("IAM principal lacks run.routes.invoke") and,
+// with retry: true, retried for up to 24 hours. After deploying a new
+// trigger, grant it:
+//   gcloud run services add-iam-policy-binding <service> --region=europe-west1 \
+//     --member=serviceAccount:functions-runtime@book-tracker-d8f24.iam.gserviceaccount.com \
+//     --role=roles/run.invoker
+// (2026-09-01: the three projection triggers were deployed without it and
+// refused every delivery for ~25 minutes until the grant landed.)
 export const FUNCTIONS_RUNTIME_SERVICE_ACCOUNT =
   "functions-runtime@book-tracker-d8f24.iam.gserviceaccount.com";
 

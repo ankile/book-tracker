@@ -251,7 +251,12 @@ migration, then the client:
 The two deploy commands are `firebase deploy --only
 firestore:rules,firestore:indexes,functions` for step 1 and `npm run
 pages:deploy` for step 3. They are never one command: the client is served
-from a different platform than Rules and the backend.
+from a different platform than Rules and the backend. The functions deploy
+needs `--force` (the projection triggers declare `retry: true`), and a
+newly created gen2 trigger service has no `run.invoker` binding for
+`functions-runtime@` until one is granted by hand — see
+`functions/src/runtime.ts`; until then Eventarc's deliveries are refused
+and retried.
 
 ### Operator run sheet
 
