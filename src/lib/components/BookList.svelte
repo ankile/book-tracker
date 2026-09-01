@@ -344,18 +344,16 @@
     font-style: italic;
   }
 
-  .catalog-link {
-    display: inline-block;
-    margin-top: 0.35rem;
-    color: #35686a;
-    font-size: 0.82rem;
-    font-style: normal;
-    font-weight: 600;
-    text-decoration: none;
+  .cover-link {
+    flex: 0 0 auto;
+    display: block;
+    line-height: 0;
+    border-radius: 3px;
   }
 
-  .catalog-link:hover {
-    text-decoration: underline;
+  .cover-link:focus-visible {
+    outline: 2px solid #35686a;
+    outline-offset: 2px;
   }
 
   .book-identity {
@@ -670,7 +668,18 @@
             <!-- Covers are hot-linked from Open Library (see migrate-enrich-books.ts).
                  The placeholder keeps the column width uniform for the books
                  without one, so the list's left edge never goes ragged. -->
-            {#if book.coverUrl}
+            <!-- A linked book's cover is the way to its shared work: an
+                 unannounced entry point until the work page's role is
+                 settled (owner decision 2026-09-01), so no visible link. -->
+            {#if workHref}
+              <a class="cover-link" href={workHref} aria-label="Linked work">
+                {#if book.coverUrl}
+                  <img class="cover" src={book.coverUrl} alt="" loading="lazy" referrerpolicy="no-referrer" />
+                {:else}
+                  <div class="cover cover-placeholder" aria-hidden="true">{book.title.slice(0, 1)}</div>
+                {/if}
+              </a>
+            {:else if book.coverUrl}
               <img class="cover" src={book.coverUrl} alt="" loading="lazy" referrerpolicy="no-referrer" />
             {:else}
               <div class="cover cover-placeholder" aria-hidden="true">{book.title.slice(0, 1)}</div>
@@ -688,10 +697,6 @@
               <span class="author" title={resolvedAuthors ? joinAuthors(resolvedAuthors.map((a) => a.name)) : ''}>{resolvedAuthors ? formatAuthors(resolvedAuthors) : ''}:</span>
               <br />
               <span class="title">{book.title}</span>
-              {#if workHref}
-                <br />
-                <a class="catalog-link" href={workHref}>Linked work</a>
-              {/if}
             </div>
           </div>
         </div>
