@@ -648,6 +648,8 @@ export interface PickerOption {
   search: string;
 }
 
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
 export function workPickerOptions(
   works: readonly AdminCatalogWorkRow[],
   names: ReadonlyMap<string, string>,
@@ -658,7 +660,7 @@ export function workPickerOptions(
       id: work.workId,
       title: work.canonicalTitle,
       detail: `${authors} · ${work.workId}`,
-      meta: `${work.linkedBookCount} readers · ${work.editionCount} editions · created ${isoDay(work.createdAt)}` +
+      meta: `${count(work.linkedBookCount, 'reader')} · ${count(work.editionCount, 'edition')} · created ${isoDay(work.createdAt)}` +
         (work.status === 'hidden' ? ' · hidden' : ''),
       search: [work.canonicalTitle, ...work.alternateTitles, authors, work.workId].join(' ').toLowerCase(),
     };
@@ -670,7 +672,7 @@ export function authorPickerOptions(authors: readonly AdminCatalogAuthorRow[]): 
     id: author.authorId,
     title: author.canonicalName,
     detail: `${author.sortName} · ${author.kind} · ${author.authorId}`,
-    meta: `${author.workCount} ${author.workCount === 1 ? 'work' : 'works'}` +
+    meta: count(author.workCount, 'work') +
       (author.alternateNames.length > 0 ? ` · also ${author.alternateNames.join(', ')}` : ''),
     search: [author.canonicalName, author.sortName, ...author.alternateNames, author.authorId].join(' ').toLowerCase(),
   }));

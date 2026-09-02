@@ -79,8 +79,11 @@
 </div>
 
 <style>
+  /* A picker takes a whole row of the dialog's form grid: its list needs
+     the width, and two side by side read as one. */
   .picker {
     display: grid;
+    grid-column: 1 / -1;
     gap: 0.3rem;
     min-width: 0;
   }
@@ -134,7 +137,7 @@
   }
 
   .picker-list {
-    max-height: 17rem;
+    max-height: 13rem;
     margin: 0;
     padding: 0;
     overflow-y: auto;
@@ -147,13 +150,17 @@
     border-top: 1px solid #e4e9e7;
   }
 
+  /* The console's button rule centres a grid's column with justify-content;
+     one full-width column, aligned to the start, keeps every line flush. */
   .picker .picker-list button {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: start;
     justify-items: start;
     gap: 0.1rem;
     width: 100%;
     min-height: auto;
-    padding: 0.5rem 0.75rem;
+    padding: 0.45rem 0.75rem;
     text-align: left;
     background: white;
     border: 0;

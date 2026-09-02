@@ -356,6 +356,7 @@ test('picker options say enough to tell records apart and search what an operato
   assert.equal(option.title, 'The Left Hand of Darkness');
   assert.equal(option.detail, 'Ursula K. Le Guin · work-a');
   assert.equal(option.meta, '4 readers · 2 editions · created 1970-01-01 · hidden');
+  assert.equal(workPickerOptions([work({linkedBookCount: 1, editionCount: 1})], names)[0].meta, '1 reader · 1 edition · created 1970-01-01');
   assert.ok(option.search.includes('left hand') && option.search.includes('le guin') && option.search.includes('work-a'));
   const [person] = authorPickerOptions([author({workCount: 1})]);
   assert.equal(person.detail, 'Le Guin · person · le-guin');
