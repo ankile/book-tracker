@@ -218,6 +218,26 @@
   transition: background 0.15s ease-in-out, border-color 0.15s ease-in-out, color 0.15s ease-in-out;
 }
 
+.admin-console .button-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0.45rem 0.9rem;
+  color: white;
+  font-size: 0.88rem;
+  font-weight: 650;
+  line-height: 1.1;
+  background: var(--brand-2);
+  border: 1px solid var(--brand-2);
+  border-radius: 8px;
+}
+
+.admin-console .button-link:hover {
+  background: #27575c;
+  border-color: #27575c;
+  text-decoration: none;
+}
+
 .admin-console button:hover:not(:disabled) {
   background: var(--tint-2);
   border-color: #bcc7c4;

@@ -97,15 +97,24 @@
             <code>{work.workId}</code>
           </p>
           {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
+          {#if work.status === 'merged'}
+            <p class="warning">An alias: it redirects to <a href="/admin/works/{work.mergedInto}">{workById.get(work.mergedInto ?? '')?.canonicalTitle ?? work.mergedInto}</a>, and every operation starts from there.</p>
+          {/if}
         </div>
-        <div class="actions">
-          <ReviewAction kind="work" ids={[work.workId]} reviewed={reviewStatus(work) !== 'done'} primary={reviewStatus(work) !== 'done'}
-            label={reviewStatus(work) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
-          <button type="button" onclick={() => (draft = editWorkDraft(work))}>Edit work…</button>
-          {#if work.status === 'active'}<button type="button" onclick={() => (draft = hideWorkDraft(work))}>Hide…</button>{/if}
-          {#if work.status !== 'merged'}<button type="button" onclick={() => (draft = mergeWorksDraft([work.workId], ''))}>Merge into another work…</button>{/if}
-          <button type="button" onclick={() => (draft = createEditionDraft(work))}>New edition…</button>
-        </div>
+        {#if work.status === 'merged'}
+          <div class="actions">
+            <a class="button-link" href="/admin/works/{work.mergedInto}">Open the survivor</a>
+          </div>
+        {:else}
+          <div class="actions">
+            <ReviewAction kind="work" ids={[work.workId]} reviewed={reviewStatus(work) !== 'done'} primary={reviewStatus(work) !== 'done'}
+              label={reviewStatus(work) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
+            <button type="button" onclick={() => (draft = editWorkDraft(work))}>Edit work…</button>
+            {#if work.status === 'active'}<button type="button" onclick={() => (draft = hideWorkDraft(work))}>Hide…</button>{/if}
+            <button type="button" onclick={() => (draft = mergeWorksDraft([work.workId], ''))}>Merge into another work…</button>
+            <button type="button" onclick={() => (draft = createEditionDraft(work))}>New edition…</button>
+          </div>
+        {/if}
       </div>
       <dl class="facts">
         <div><dt>Alternate titles</dt><dd>{work.alternateTitles.join(' · ') || '—'}</dd></div>
@@ -208,11 +217,13 @@
                   <td>{book.language === '' ? '—' : languageLabel(book.language)}{#if carried !== '' && book.language !== carried}<small class="warning">edition says {languageLabel(carried)}</small>{/if}</td>
                   <td>{book.anomaly ?? '—'}</td>
                   <td class="row-actions">
-                    <div class="actions">
-                      {#if book.editionId === null}<button class="primary" type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: null}))}>Mint edition…</button>{/if}
-                      <button type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: book.editionId}))}>Move…</button>
-                      <button type="button" onclick={() => (draft = linkBooksDraft([book], null))}>Unlink…</button>
-                    </div>
+                    {#if work.status !== 'merged'}
+                      <div class="actions">
+                        {#if book.editionId === null}<button class="primary" type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: null}))}>Mint edition…</button>{/if}
+                        <button type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: book.editionId}))}>Move…</button>
+                        <button type="button" onclick={() => (draft = linkBooksDraft([book], null))}>Unlink…</button>
+                      </div>
+                    {/if}
                   </td>
                 </tr>
               {/each}

@@ -88,6 +88,11 @@
     sortAuthors((scan?.authors ?? []).filter((author) => author.status === 'active')),
   );
   const editions = $derived(scan?.editions ?? []);
+  // An ISBN can only be repointed to a live edition, of any work; the work
+  // is named so two editions with one title can be told apart.
+  const repointTargets = $derived(editions.filter((edition) => edition.status === 'active'));
+  const workTitles = $derived(new Map((scan?.works ?? []).map((work) => [work.workId, work.canonicalTitle])));
+  const workTitle = (workId: string): string => workTitles.get(workId) ?? workId;
   // Only active editions can be stood on or merged into; a merge's sources
   // are not offered as its survivor.
   const targetEditions = $derived.by(() => {
@@ -412,7 +417,7 @@
           <label>New edition
             <select bind:value={draft.editionId}>
               <option value="">Choose the edition</option>
-              {#each editions as edition (edition.editionId)}<option value={edition.editionId}>{edition.title} · {edition.isbn13 ?? 'no ISBN'} ({edition.editionId})</option>{/each}
+              {#each repointTargets as edition (edition.editionId)}<option value={edition.editionId}>{edition.title} · {edition.isbn13 ?? 'no ISBN'} · {workTitle(edition.workId)} ({edition.editionId})</option>{/each}
             </select>
           </label>
         </div>

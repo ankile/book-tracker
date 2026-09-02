@@ -67,10 +67,17 @@
             <code>{author.authorId}</code>
           </p>
           {#if author.warnings.length > 0}<p class="warning">{author.warnings.join(' · ')}</p>{/if}
+          {#if author.status === 'merged'}
+            <p class="warning">An alias: it redirects to <a href="/admin/authors/{author.mergedInto}">{names.get(author.mergedInto ?? '') ?? author.mergedInto}</a>, and every operation starts from there.</p>
+          {/if}
         </div>
         <div class="actions">
-          <ReviewAction kind="author" ids={[author.authorId]} reviewed={reviewStatus(author) !== 'done'} primary={reviewStatus(author) !== 'done'}
-            label={reviewStatus(author) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
+          {#if author.status === 'merged'}
+            <a class="button-link" href="/admin/authors/{author.mergedInto}">Open the survivor</a>
+          {:else}
+            <ReviewAction kind="author" ids={[author.authorId]} reviewed={reviewStatus(author) !== 'done'} primary={reviewStatus(author) !== 'done'}
+              label={reviewStatus(author) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
+          {/if}
           {#if author.status === 'active'}
             <button type="button" onclick={() => (draft = editAuthorDraft(author))}>Edit author…</button>
             <button type="button" onclick={() => (draft = mergeAuthorsDraft(author.authorId, ''))}>Merge into another author…</button>

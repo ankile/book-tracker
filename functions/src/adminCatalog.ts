@@ -769,6 +769,8 @@ async function mintedEditionFor(
   now: Timestamp,
 ): Promise<{
   editionId: string;
+  // The edition the book ends up on: minted here, found, or a survivor.
+  edition: EditionData;
   versions: CatalogVersion[];
   changes: PlannedChange[];
   createdEdition: boolean;
@@ -797,10 +799,11 @@ async function mintedEditionFor(
         failedPrecondition("The book's minted edition was merged into another work.", "catalog-invariant");
       }
       return {
-        editionId: minted.mergedInto, versions, changes: [], createdEdition: false, createdIsbn: false,
+        editionId: minted.mergedInto, edition: survivor.edition, versions, changes: [],
+        createdEdition: false, createdIsbn: false,
       };
     }
-    return {editionId, versions, changes: [], createdEdition: false, createdIsbn: false};
+    return {editionId, edition: minted, versions, changes: [], createdEdition: false, createdIsbn: false};
   }
   const text = (field: string): string => {
     const value = snapshot.get(field);
@@ -826,8 +829,11 @@ async function mintedEditionFor(
           "identifier-conflict",
         );
       }
+      const indexed = await one(reader, db.collection("editions").doc(indexedEditionId));
+      versions.push(versionOf("edition", indexed));
       return {
-        editionId: indexedEditionId, versions, changes, createdEdition: false, createdIsbn: false,
+        editionId: indexedEditionId, edition: editionFrom(indexed), versions, changes,
+        createdEdition: false, createdIsbn: false,
       };
     }
   }
@@ -860,7 +866,7 @@ async function mintedEditionFor(
     const row = {workId, editionId};
     changes.push(change("isbn", isbnRef, "create", null, row, {type: "create", data: row}));
   }
-  return {editionId, versions, changes, createdEdition: true, createdIsbn: isbn13 !== null};
+  return {editionId, edition: data, versions, changes, createdEdition: true, createdIsbn: isbn13 !== null};
 }
 
 // The personal books a query names, with their owners checked: a book whose
@@ -970,21 +976,24 @@ async function linkChanges(
   versions: AdminCatalogExpected["books"];
   catalog: CatalogVersion[];
 }> {
-  let workLanguage = "";
+  let targetWork: WorkData | null = null;
+  let targetEdition: EditionData | null = null;
   if (target !== null) {
     if (pendingWork !== undefined) {
-      workLanguage = pendingWork.language;
+      targetWork = pendingWork;
     } else {
       const resolved = await unmergedWork(reader, db, target.workId);
-      workLanguage = resolved.work.language;
+      targetWork = resolved.work;
       if (target.editionId !== null) {
         const {edition} = await activeEdition(reader, db, target.editionId);
         if (edition.workId !== resolved.snapshot.id) {
           failedPrecondition("Edition belongs to another work.", "catalog-invariant");
         }
+        targetEdition = edition;
       }
     }
   }
+  const workLanguage = targetWork?.language ?? "";
   const snapshots = await Promise.all(targets.map(({uid, bookId}) =>
     one(reader, db.doc(`users/${uid}/books/${bookId}`)),
   ));
@@ -999,6 +1008,7 @@ async function linkChanges(
   for (const [index, snapshot] of snapshots.entries()) {
     const before = linkFrom(snapshot);
     let editionId = target?.editionId ?? null;
+    let edition = targetEdition;
     if (target !== null && editionId === null) {
       // Every linked book stands on an edition of its work (owner decision
       // 2026-09-01): a link that names none mints one per book.
@@ -1010,7 +1020,15 @@ async function linkChanges(
       mintedEditions += minted.createdEdition ? 1 : 0;
       mintedIsbns += minted.createdIsbn ? 1 : 0;
       editionId = minted.editionId;
+      edition = minted.edition;
     }
+    // A linked book inherits what its reader left blank from the edition it
+    // lands on and its work, and takes their language where it has none.
+    const inherited = target === null || targetWork === null || edition === null ?
+      {before: {}, after: {}} : inheritedBookMetadata(snapshot, edition, targetWork);
+    const carried = target === null || targetWork === null || edition === null ?
+      {before: {}, after: {}} :
+      carriedLanguage(snapshot, "", effectiveLanguage(edition.language, targetWork.language));
     const after: LinkState = target === null ? {
       workId: null,
       editionId: null,
@@ -1027,8 +1045,14 @@ async function linkChanges(
       editionId: after.editionId,
       matchMethod: after.matchMethod,
       linkedAt: target === null ? null : now,
+      ...inherited.after,
+      ...carried.after,
     };
-    changes.push(change("book", snapshot.ref, "update", before, after, {type: "set", data}));
+    changes.push(change(
+      "book", snapshot.ref, "update",
+      {...before, ...inherited.before, ...carried.before}, {...after, ...inherited.after, ...carried.after},
+      {type: "set", data},
+    ));
   }
   await ensureCollectionCapacity(
     reader, db.collection("editions"), MAX_EDITIONS, mintedEditions, "editions",
@@ -1704,9 +1728,12 @@ async function planOperation(
           linkedAt: now.toMillis(),
         };
         const carried = carriedLanguage(book, languageBefore, languageAfter);
+        const inherited = inheritedBookMetadata(book, next, work.work);
         changes.push(change(
-          "book", book.ref, "update", {...before, ...carried.before}, {...after, ...carried.after},
-          {type: "set", data: {...after, linkedAt: now, ...carried.after}},
+          "book", book.ref, "update",
+          {...before, ...inherited.before, ...carried.before},
+          {...after, ...inherited.after, ...carried.after},
+          {type: "set", data: {...after, linkedAt: now, ...inherited.after, ...carried.after}},
         ));
       }
       if (old.isbn13 !== null) {

@@ -222,7 +222,10 @@ is `repointIsbn`'s job, which also clears the other edition. The edition
 form can look its ISBN up (the add-book form's three sources) to fill the
 fields the operator left blank, and every edition edit gives the books
 standing on the edition what their readers left blank — ISBN, cover,
-publisher, date — and carries a changed language override into them. A new author's id is derived from its canonical name the way
+publisher, date — and carries a changed language override into them. An admin link does the
+same for the book it links: what the reader left blank comes from the
+edition the book lands on and its work. A merged work or author is an
+alias: its console page offers no operation, only the survivor. A new author's id is derived from its canonical name the way
 `catalog.ensureauthors` derives it, so a reader adding the same name later
 lands on the console's document. Every apply is idempotent by operation id
 and writes an `adminAudit` record.

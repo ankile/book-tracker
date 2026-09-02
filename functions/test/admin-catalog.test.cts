@@ -1264,6 +1264,50 @@ test("a minted edition overrides the work's language only where the book's diffe
   assert.deepEqual(minted.map(({after}) => [after?.title, after?.language]), [
     ["Sult same", ""], ["Sult differs", "en"], ["Sult none", ""],
   ]);
+  // The linked books take the work's fiction flag; the one with no language
+  // takes the effective language of the edition it lands on, the two that
+  // already carry it are left alone.
+  assert.deepEqual(
+    preview.changes.filter(({kind}) => kind === "book").map(({after}) => [after?.fiction, after?.language]),
+    [[true, undefined], [true, undefined], [true, "no"]],
+  );
+});
+
+test("linking a book to an existing edition fills what its reader left blank", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {language: "no", subjects: ["Romaner"]}));
+  store.write(store.ref("editions/gyldendal"), edition("sult", {
+    isbn13: "9788205394810", publisher: "Gyldendal", publishedDate: "2009",
+    coverUrl: "https://covers.test/gyldendal.jpg", createdAt: now, updatedAt: now,
+  }));
+  store.write(store.ref("isbnIndex/9788205394810"), {workId: "sult", editionId: "gyldendal"});
+  store.write(store.ref("users/magnus"), {uid: "magnus"});
+  store.write(store.ref("users/magnus/books/sult"), {
+    owner: store.ref("users/magnus"), title: "Sult", pageCount: 198, updatedAt: now, isbn: "",
+    coverUrl: "", publisher: "Own Press", publishedDate: "", fiction: null, subjects: [], language: "nn",
+    workId: null, editionId: null, matchMethod: null, linkedAt: null,
+  });
+  const operation = {
+    type: "linkBooks", books: [{uid: "magnus", bookId: "sult"}],
+    target: {workId: "sult", editionId: "gyldendal"},
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const book = preview.changes.find(({kind}) => kind === "book");
+  const {linkedAt: _linked, ...after} = book?.after ?? {};
+  assert.deepEqual(after, {
+    workId: "sult", editionId: "gyldendal", matchMethod: "admin",
+    isbn: "9788205394810", coverUrl: "https://covers.test/gyldendal.jpg", publishedDate: "2009",
+    fiction: true, subjects: ["Romaner"],
+  });
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+  const stored = store.rows.get("users/magnus/books/sult");
+  assert.equal(stored?.publisher, "Own Press");
+  assert.equal(stored?.language, "nn");
+  assert.equal(stored?.isbn, "9788205394810");
+  assert.equal(stored?.pageCount, 198);
 });
 
 test("merging editions gives the survivor what it lacks, moves identifiers with their index rows, and fills every reader's book", async (t) => {
