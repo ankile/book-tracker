@@ -50,7 +50,7 @@ test('only dev builds use the App Check debug token, sourced from the environmen
 // checked for the option in its own runWith.
 // Eight on master plus catalog.search, catalog.create, catalog.ensureauthors
 // and catalog.workreaders, which share one runWith chain in catalog.ts.
-const CALLABLE_COUNT = 12;
+const CALLABLE_COUNT = 13;
 
 function callableChains(): { file: string; chain: string }[] {
   const dir = 'functions/src';

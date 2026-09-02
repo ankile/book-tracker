@@ -46,6 +46,7 @@ interface FunctionsBundle {
     create: DeployedFunction;
     ensureauthors: DeployedFunction;
     search: DeployedFunction;
+    addedition: DeployedFunction;
     workreaders: DeployedFunction;
   };
   createUserDocument: DeployedFunction;
@@ -103,6 +104,7 @@ test("preserves the deployed function export names", () => {
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.catalog).sort(), [
+    "addedition",
     "create",
     "ensureauthors",
     "search",
@@ -939,6 +941,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
     "catalog.search": functions.catalog.search,
     "catalog.create": functions.catalog.create,
+    "catalog.addedition": functions.catalog.addedition,
     "catalog.ensureauthors": functions.catalog.ensureauthors,
     "catalog.workreaders": functions.catalog.workreaders,
     "telemetry.reportissue": functions.telemetry.reportissue,
@@ -1024,6 +1027,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.admin.catalogpreview": 2,
     "functions.booksapi.lookupisbn": 10,
     "functions.catalog.create": 10,
+    "functions.catalog.addedition": 10,
     "functions.catalog.ensureauthors": 10,
     "functions.catalog.search": 10,
     "functions.catalog.workreaders": 10,

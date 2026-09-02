@@ -121,9 +121,14 @@ for (const authorDoc of catalogAuthors.docs) {
   for (const field of required) {
     if (author[field] === undefined) found(`catalog.author.missing.${field}`, path);
   }
-  const allowed = new Set([...required, 'mergedInto', 'mergedFrom']);
+  // createdBy names the account whose add-book flow minted the author; the
+  // migration and the admin tools leave it absent.
+  const allowed = new Set([...required, 'mergedInto', 'mergedFrom', 'createdBy']);
   for (const field of Object.keys(author)) {
     if (!allowed.has(field)) found('catalog.author.unexpected-field', path, field);
+  }
+  if (author.createdBy !== undefined && typeof author.createdBy !== 'string') {
+    found('catalog.author.bad-created-by', path, String(author.createdBy));
   }
   if (typeof author.canonicalName !== 'string' || author.canonicalName.trim() === '' ||
       typeof author.sortName !== 'string' || author.sortName.trim() === '') {
@@ -258,16 +263,23 @@ for (const workDoc of works.docs) {
 for (const editionDoc of editions.docs) {
   const edition = editionDoc.data();
   const path = editionDoc.ref.path;
-  const allowedEditionFields = new Set([
+  const requiredEditionFields = [
     'workId', 'isbn13', 'title', 'publisher', 'publishedDate',
     'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
     'externalIds', 'createdAt', 'updatedAt',
-  ]);
-  for (const field of allowedEditionFields) {
+  ];
+  for (const field of requiredEditionFields) {
     if (edition[field] === undefined) found(`catalog.edition.missing.${field}`, path);
   }
+  // createdBy names the account whose book the edition was minted for (the
+  // add-book flow, an admin link, the backfill); migration- and
+  // admin-created editions leave it absent.
+  const allowedEditionFields = new Set([...requiredEditionFields, 'createdBy']);
   for (const field of Object.keys(edition)) {
     if (!allowedEditionFields.has(field)) found('catalog.edition.unexpected-field', path, field);
+  }
+  if (edition.createdBy !== undefined && typeof edition.createdBy !== 'string') {
+    found('catalog.edition.bad-created-by', path, String(edition.createdBy));
   }
   if (!validCatalogCover(edition.coverUrl)) {
     found('catalog.edition.bad-cover-url', path, JSON.stringify(edition.coverUrl));
@@ -685,6 +697,10 @@ for (const user of users) {
       if (!(b.linkedAt instanceof Timestamp) || !['isbn', 'external-id', 'catalog-choice', 'migration', 'admin'].includes(b.matchMethod)) {
         found('catalog.book.bad-provenance', p, `${String(b.matchMethod)}/${String(b.linkedAt)}`);
       }
+      // Every linked book stands on an edition of its work (owner decision
+      // 2026-09-01); migrate-book-editions.ts backfilled the ones the
+      // catalog build left without.
+      if (b.editionId === null) found('catalog.book.linked-without-edition', p, b.workId);
       if (b.editionId !== null) {
         const edition = typeof b.editionId === 'string' ? editionsById.get(b.editionId) : undefined;
         if (edition === undefined) {

@@ -420,6 +420,28 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       expect(createdWork.get('status')).toBe('active');
       expect(createdWork.get('createdBy')).toBe(normalUid);
       expect((await db.doc('isbnIndex/9780140328721').get()).get('editionId')).toBe(matilda.get('editionId'));
+      expect((await db.doc(`editions/${matilda.get('editionId')}`).get()).get('createdBy')).toBe(normalUid);
+
+      // A work chosen by title, with no matching edition, gets this book's
+      // own edition added to it: every linked book stands on an edition.
+      await openNewBook(page);
+      await chooseExistingAuthor(page, 'Ursula K. Le Guin');
+      await page.getByLabel('Book title', {exact: true}).fill('Left Hand of Darkness');
+      await page.getByLabel("Your edition's page count", {exact: true}).fill('320');
+      await page.getByRole('button', {name: 'Use this work'}).first().click();
+      await expect(page.getByRole('button', {name: 'Remove link'})).toBeVisible();
+      await page.getByRole('button', {name: 'Add book', exact: true}).click();
+      await expect(page.getByRole('dialog', {name: 'Add new book'})).toHaveCount(0);
+      const titleChoice = await waitForBookByTitle(db, normalUid, 'Left Hand of Darkness');
+      expect(titleChoice.get('workId')).toBe(workId);
+      expect(typeof titleChoice.get('editionId')).toBe('string');
+      expect(titleChoice.get('editionId')).not.toBe(editionId);
+      expect(titleChoice.get('matchMethod')).toBe('catalog-choice');
+      const mintedEdition = await db.doc(`editions/${titleChoice.get('editionId')}`).get();
+      expect(mintedEdition.get('workId')).toBe(workId);
+      expect(mintedEdition.get('createdBy')).toBe(normalUid);
+      expect(mintedEdition.get('title')).toBe('Left Hand of Darkness');
+      expect(mintedEdition.get('suggestedPageCount')).toBe(320);
 
       await openNewBook(page);
       await page.getByLabel('Author', {exact: true}).fill(newAuthorName);
@@ -441,6 +463,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await waitForDocument(db, `catalogAuthors/${expectedAuthorId}`, true);
       const createdAuthor = await db.doc(`catalogAuthors/${expectedAuthorId}`).get();
       expect(createdAuthor.get('canonicalName')).toBe(newAuthorName);
+      expect(createdAuthor.get('createdBy')).toBe(normalUid);
       const createdBook = await waitForBookByTitle(db, normalUid, 'A Newly Shared Author Test');
       expect(createdBook.get('authorIds')).toEqual([expectedAuthorId]);
     } finally {
@@ -538,13 +561,19 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await dialog.getByRole('button', {name: 'Cancel'}).click();
       await expect(dialog).toBeHidden();
 
-      // Every operation that starts from this work opens as its own dialog.
+      // The edition the title-only save minted is listed with its reader as
+      // creator, beside the seeded one.
+      await expect(page.getByRole('row').filter({hasText: 'Left Hand of Darkness edition'})).toHaveCount(0);
+      await expect(page.getByRole('cell', {name: `reader ${normalUid.slice(0, 8)}…`})).toBeVisible();
+
+      // Every operation that starts from this work opens as its own dialog;
+      // the per-edition buttons appear once per edition, so the first is used.
       for (const [button, title] of [
         ['Hide…', 'Edit work'], ['Merge into another work…', 'Merge works'],
         ['New edition…', 'Create or edit edition'], ['Edit edition…', 'Create or edit edition'],
         ['Repoint ISBN…', 'Repoint ISBN'],
       ]) {
-        await page.getByRole('button', {name: button, exact: true}).click();
+        await page.getByRole('button', {name: button, exact: true}).first().click();
         const opened = page.getByRole('dialog', {name: title});
         await expect(opened.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
         await opened.getByRole('button', {name: 'Cancel'}).click();

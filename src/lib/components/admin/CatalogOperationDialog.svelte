@@ -283,9 +283,9 @@
               {#each targetWorks as work (work.workId)}<option value={work.workId}>{work.canonicalTitle} ({work.workId})</option>{/each}
             </select>
           </label>
-          <label>Target edition <small>Optional.</small>
+          <label>Target edition <small>Blank mints one edition per book from the book's own fields.</small>
             <select bind:value={draft.targetEditionId} disabled={draft.targetWorkId === ''}>
-              <option value="">— none —</option>
+              <option value="">— mint from each book —</option>
               {#each targetEditions as edition (edition.editionId)}<option value={edition.editionId}>{edition.title} · {edition.isbn13 ?? 'no ISBN'} ({edition.editionId})</option>{/each}
             </select>
           </label>

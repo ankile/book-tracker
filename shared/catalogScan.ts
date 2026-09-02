@@ -94,7 +94,9 @@ export interface AdminCatalogAuthorRow {
   status: CatalogAuthorStatus;
   mergedInto: string | null;
   mergedFrom: string[];
-  // Authors carry no creator: the add-book flow mints them without a uid.
+  // uid of the account whose add-book flow minted the author; null for
+  // migration- or admin-created authors.
+  createdBy: string | null;
   createdAt: number;
   workCount: number;
   warnings: string[];
@@ -113,6 +115,10 @@ export interface AdminCatalogEditionRow {
   suggestedPageCount: number | null;
   coverUrl: string;
   externalIds: Record<string, string>;
+  // uid of the account whose book the edition was minted for (the add-book
+  // flow, an admin link, or the backfill); null for migration- or
+  // admin-created editions.
+  createdBy: string | null;
 }
 
 export interface AdminCatalogBookTarget {
@@ -139,6 +145,7 @@ export type AdminCatalogFindingCode =
   | 'catalog-row-anomaly'
   | 'book-row-anomaly'
   | 'book-link-anomaly'
+  | 'linked-without-edition'
   | 'unmatched-isbn-candidate'
   | 'unmatched-title-author-candidate'
   | 'likely-title-author-candidate'
@@ -192,6 +199,7 @@ interface ScanAuthor {
   status: CatalogAuthorStatus;
   mergedInto: string | null;
   mergedFrom: string[];
+  createdBy: string | null;
   createdAt: number;
   unsupportedFields: string[];
 }
@@ -216,11 +224,11 @@ const WORK_FIELDS = [
 ];
 const AUTHOR_FIELDS = [
   'canonicalName', 'alternateNames', 'nameKeys', 'sortName', 'kind', 'status', 'mergedInto',
-  'mergedFrom', 'createdAt', 'updatedAt',
+  'mergedFrom', 'createdBy', 'createdAt', 'updatedAt',
 ];
 const EDITION_FIELDS = [
   'workId', 'isbn13', 'title', 'publisher', 'publishedDate', 'language', 'translatorNames',
-  'format', 'suggestedPageCount', 'coverUrl', 'externalIds', 'createdAt', 'updatedAt',
+  'format', 'suggestedPageCount', 'coverUrl', 'externalIds', 'createdBy', 'createdAt', 'updatedAt',
 ];
 
 // The admin apply path round-trips whole documents and refuses one with a
@@ -247,6 +255,12 @@ function optionalRedirect(value: unknown, label: string): string | null {
   return value;
 }
 
+function optionalCreator(value: unknown, label: string): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== 'string') rowError(`Invalid creator ${label}.`);
+  return value;
+}
+
 function readWork({ id, data }: CatalogScanDocument): ScanWork {
   const label = `works/${id}`;
   if (data.status !== 'active' && data.status !== 'merged' && data.status !== 'hidden') {
@@ -261,9 +275,6 @@ function readWork({ id, data }: CatalogScanDocument): ScanWork {
       (data.fiction !== null && typeof data.fiction !== 'boolean')) {
     rowError(`Invalid catalog work ${label}.`);
   }
-  if (data.createdBy !== undefined && typeof data.createdBy !== 'string') {
-    rowError(`Invalid creator ${label}.`);
-  }
   return {
     canonicalTitle: data.canonicalTitle,
     alternateTitles,
@@ -275,7 +286,7 @@ function readWork({ id, data }: CatalogScanDocument): ScanWork {
     status: data.status,
     mergedInto: optionalRedirect(data.mergedInto, label),
     mergedFrom,
-    createdBy: data.createdBy ?? null,
+    createdBy: optionalCreator(data.createdBy, label),
     createdAt: millis(data.createdAt, `${label}.createdAt`),
     unsupportedFields: unsupportedFields(data, WORK_FIELDS),
   };
@@ -301,6 +312,7 @@ function readAuthor({ id, data }: CatalogScanDocument): ScanAuthor {
     status: data.status,
     mergedInto: optionalRedirect(data.mergedInto, label),
     mergedFrom,
+    createdBy: optionalCreator(data.createdBy, label),
     createdAt: millis(data.createdAt, `${label}.createdAt`),
     unsupportedFields: unsupportedFields(data, AUTHOR_FIELDS),
   };
@@ -335,6 +347,7 @@ function readEdition({ id, data }: CatalogScanDocument): ScanEdition {
     suggestedPageCount: data.suggestedPageCount,
     coverUrl: data.coverUrl,
     externalIds: externalIds as Record<string, string>,
+    createdBy: optionalCreator(data.createdBy, label),
     unsupportedFields: unsupportedFields(data, EDITION_FIELDS),
   };
 }
@@ -542,6 +555,18 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
         message: anomaly,
         workIds: row.workId === null ? [] : [row.workId],
         editionIds: row.editionId === null ? [] : [row.editionId],
+        books: [{ uid: row.uid, bookId: row.bookId }],
+      });
+    } else if (row.workId !== null && row.editionId === null) {
+      // Every linked book stands on an edition of its work (owner decision
+      // 2026-09-01); a link without one is drift the work page repairs by
+      // minting an edition from the book's own fields.
+      findings.push({
+        code: 'linked-without-edition',
+        severity: 'warning',
+        message: 'Linked book has no edition; every linked book belongs on an edition of its work.',
+        workIds: [row.workId],
+        editionIds: [],
         books: [{ uid: row.uid, bookId: row.bookId }],
       });
     }
@@ -788,6 +813,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       status: author.status,
       mergedInto: author.mergedInto,
       mergedFrom: author.mergedFrom,
+      createdBy: author.createdBy,
       createdAt: author.createdAt,
       workCount: catalogAuthorWorkCounts.get(authorId) ?? 0,
       warnings: catalogAuthorWarnings.get(authorId) ?? [],
@@ -822,6 +848,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       suggestedPageCount: edition.suggestedPageCount,
       coverUrl: edition.coverUrl,
       externalIds: edition.externalIds,
+      createdBy: edition.createdBy,
     })),
     books,
     findings,

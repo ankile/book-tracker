@@ -33,6 +33,7 @@ interface Deployed {
   catalog: {
     search: Runnable<SearchResult>;
     create: Runnable<{workId: string; editionId: string; created: boolean}>;
+    addedition: Runnable<{workId: string; editionId: string; created: boolean}>;
     ensureauthors: Runnable<{authorIds: string[]}>;
     workreaders: Runnable<WorkReadersResult>;
   };
@@ -557,6 +558,7 @@ test("ordinary users resolve existing shared authors and create only missing cat
   assert.equal(created.canonicalName, "Octavia E. Butler");
   assert.deepEqual(created.nameKeys, ["octavia e butler"]);
   assert.equal(created.status, "active");
+  assert.equal(created.createdBy, "owner");
   await assert.rejects(
     deployed.catalog.ensureauthors.run({authors: [{
       canonicalName: "Ursula K. Le Guin", sortName: "Le Guin", kind: "entity",
@@ -872,6 +874,7 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   assert.equal(storedWork?.createdBy, "owner");
   assert.deepEqual(storedWork?.titleKeys, ["new book"]);
   assert.equal(rows.get(`editions/${result.editionId}`)?.workId, result.workId);
+  assert.equal(rows.get(`editions/${result.editionId}`)?.createdBy, "owner");
   assert.equal(created.some(({path, data}) => path.startsWith("workTitleIndex/") &&
     data.workId === result.workId && data.titleKey === "new book"), true);
 
@@ -1322,3 +1325,87 @@ function hasMessage(error: unknown, message: string): boolean {
 function messageMatches(error: unknown, pattern: RegExp): boolean {
   return error instanceof Error && pattern.test(error.message);
 }
+
+// The add-book flow adds an edition to a work it matched by title, so the
+// book it saves stands on an edition of that work; the edition records the
+// account, identifiers already in the catalog resolve instead of writing,
+// and a hidden or missing work is not found.
+test("users add an edition to an existing work and resolve an indexed identifier instead", async (t) => {
+  const workRow = (title: string, overrides: Row = {}): Row => ({
+    canonicalTitle: title, alternateTitles: [], titleKeys: [title.toLowerCase()], authorIds: ["ada"],
+    coverUrl: "", subjects: [], fiction: true, status: "active", mergedFrom: [], ...overrides,
+  });
+  const rows = new Map<string, Row>([
+    ["catalogAuthors/ada", activeAuthor("Ada Lovelace")],
+    ["works/sheep", workRow("A Wild Sheep Chase", {mergedFrom: ["old-sheep"]})],
+    ["works/old-sheep", workRow("Sheep", {status: "merged", mergedInto: "sheep"})],
+    ["works/hidden", workRow("Hidden", {status: "hidden"})],
+    ["isbnIndex/9780000000002", {workId: "sheep", editionId: "seeded"}],
+  ]);
+  const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snap = (reference: Ref) => ({
+    exists: rows.has(reference.path), id: reference.id, ref: reference,
+    data: () => rows.get(reference.path),
+    get: (field: string) => rows.get(reference.path)?.[field],
+  });
+  const created: Array<{path: string; data: Row}> = [];
+  t.mock.method(db, "doc", (path: string) => ref(path));
+  t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return liveUserCollection();
+    return {
+      doc: (id: string) => ref(`${name}/${id}`),
+      count: () => ({kind: "count", name}),
+    };
+  });
+  t.mock.method(db, "runTransaction", async (handler: Handler<{
+    get(value: {kind: string; name: string} | Ref): Promise<unknown>;
+    create(reference: Ref, data: Row): void;
+  }>) => handler({
+    get: async (value: {kind: string; name: string} | Ref) => {
+      if ("kind" in value) {
+        return {data: () => ({count: [...rows.keys()].filter((path) => path.startsWith(`${value.name}/`)).length})};
+      }
+      return snap(value);
+    },
+    create: (reference: Ref, data: Row) => {
+      assert.equal(rows.has(reference.path), false, reference.path);
+      rows.set(reference.path, data);
+      created.push({path: reference.path, data});
+    },
+  }));
+  const edition = {
+    isbn13: null, title: "Vilda fårjakten", publisher: "Norstedts", publishedDate: "1987", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: 280, coverUrl: "", externalIds: {},
+  };
+  // A merged alias resolves to its survivor and the edition lands there.
+  const result = await deployed.catalog.addedition.run({workId: "old-sheep", edition}, authContext);
+  assert.equal(result.created, true);
+  assert.equal(result.workId, "sheep");
+  assert.match(result.editionId, /^edition-/);
+  const stored = rows.get(`editions/${result.editionId}`);
+  assert.equal(stored?.workId, "sheep");
+  assert.equal(stored?.createdBy, "owner");
+  assert.equal(stored?.title, "Vilda fårjakten");
+  assert.equal(created.length, 1);
+
+  // A new ISBN gets its index row; an indexed one resolves without writing.
+  created.length = 0;
+  const withIsbn = await deployed.catalog.addedition.run({
+    workId: "sheep", edition: {...edition, isbn13: "9780000000019"},
+  }, authContext);
+  assert.deepEqual(rows.get("isbnIndex/9780000000019"), {workId: "sheep", editionId: withIsbn.editionId});
+  created.length = 0;
+  assert.deepEqual(await deployed.catalog.addedition.run({
+    workId: "sheep", edition: {...edition, isbn13: "9780000000002"},
+  }, authContext), {workId: "sheep", editionId: "seeded", created: false});
+  assert.deepEqual(created, []);
+
+  // A hidden or missing work is not found, and nothing is written.
+  for (const workId of ["hidden", "nowhere"]) {
+    await assert.rejects(
+      deployed.catalog.addedition.run({workId, edition}, authContext),
+      (error) => error instanceof Error && (error as {code?: unknown}).code === "not-found",
+    );
+  }
+  assert.deepEqual(created, []);
+});

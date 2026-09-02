@@ -189,7 +189,7 @@ function authorFrom(snapshot: DocumentSnapshot): AuthorData {
   const author = storedCatalogAuthor(snapshot, catalogInvariant);
   assertStoredKeys(snapshot, [
     "canonicalName", "alternateNames", "nameKeys", "sortName", "kind",
-    "status", "mergedInto", "mergedFrom", "createdAt", "updatedAt",
+    "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt",
   ]);
   return {
     ...author,
@@ -203,7 +203,7 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
   assertStoredKeys(snapshot, [
     "workId", "isbn13", "title", "publisher",
     "publishedDate", "language", "translatorNames", "format",
-    "suggestedPageCount", "coverUrl", "externalIds", "createdAt", "updatedAt",
+    "suggestedPageCount", "coverUrl", "externalIds", "createdBy", "createdAt", "updatedAt",
   ]);
   return {
     ...edition,
@@ -260,6 +260,7 @@ function authorInputData(
     )],
     status: "active",
     mergedFrom: existing?.mergedFrom ?? [],
+    ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -274,6 +275,7 @@ function editionInputData(
   return {
     workId,
     ...edition,
+    ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -670,6 +672,99 @@ async function externalIndexChanges(
   return {changes, versions};
 }
 
+// The edition a book stands for when an admin links it without naming one,
+// minted from the book's own fields with the book's owner as creator. Its
+// id is a digest of the work and the book path — the formula the backfill
+// (book-edition-backfill.ts) uses too — so a preview, its apply, a repeated
+// apply and a later relink all name one document: an edition already
+// there is reused, and an ISBN already indexed to the work joins that
+// edition instead. An ISBN indexed to another work is a conflict for the
+// operator, not a guess.
+async function mintedEditionFor(
+  reader: PlanReader,
+  db: Firestore,
+  snapshot: DocumentSnapshot,
+  target: AdminBookTarget,
+  workId: string,
+  now: Timestamp,
+): Promise<{
+  editionId: string;
+  versions: CatalogVersion[];
+  changes: PlannedChange[];
+  createdEdition: boolean;
+  createdIsbn: boolean;
+}> {
+  const editionId = `edition_${createHash("sha256")
+    .update(`edition\0${workId}\0${target.uid}/${target.bookId}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+  const ref = db.collection("editions").doc(editionId);
+  const existing = await one(reader, ref);
+  const versions = [versionOf("edition", existing)];
+  if (existing.exists) {
+    if (editionFrom(existing).workId !== workId) {
+      failedPrecondition("The book's minted edition belongs to another work.", "catalog-invariant");
+    }
+    return {editionId, versions, changes: [], createdEdition: false, createdIsbn: false};
+  }
+  const text = (field: string): string => {
+    const value = snapshot.get(field);
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      catalogInvariant(`${snapshot.ref.path}.${field} must be a string.`);
+    }
+    return value ?? "";
+  };
+  const title = text("title").trim();
+  if (title === "") catalogInvariant(`${snapshot.ref.path} has no title.`);
+  const isbn13 = normalizeIsbn13(text("isbn"));
+  const changes: PlannedChange[] = [];
+  let isbnRef: DocumentReference | null = null;
+  if (isbn13 !== null) {
+    isbnRef = db.collection("isbnIndex").doc(isbn13);
+    const isbn = await one(reader, isbnRef);
+    versions.push(versionOf("isbn", isbn));
+    if (isbn.exists) {
+      const indexedEditionId = isbn.get("editionId");
+      if (isbn.get("workId") !== workId || typeof indexedEditionId !== "string") {
+        failedPrecondition(
+          "The book's ISBN belongs to an edition of another work.",
+          "identifier-conflict",
+        );
+      }
+      return {
+        editionId: indexedEditionId, versions, changes, createdEdition: false, createdIsbn: false,
+      };
+    }
+  }
+  const pageCount = snapshot.get("pageCount");
+  const coverUrl = text("coverUrl");
+  const data: EditionData = {
+    workId,
+    isbn13,
+    title,
+    publisher: text("publisher"),
+    publishedDate: text("publishedDate"),
+    language: "",
+    translatorNames: [],
+    format: "unknown",
+    suggestedPageCount: typeof pageCount === "number" && Number.isSafeInteger(pageCount) &&
+      pageCount > 0 ? pageCount : null,
+    coverUrl: /^https:\/\/[^\s]+$/.test(coverUrl) ? coverUrl : "",
+    externalIds: {},
+    createdBy: target.uid,
+    createdAt: now,
+    updatedAt: now,
+  };
+  changes.push(change(
+    "edition", ref, "create", null, wireEdition(data), {type: "create", data: {...data}},
+  ));
+  if (isbnRef !== null) {
+    const row = {workId, editionId};
+    changes.push(change("isbn", isbnRef, "create", null, row, {type: "create", data: row}));
+  }
+  return {editionId, versions, changes, createdEdition: true, createdIsbn: isbn13 !== null};
+}
+
 async function linkChanges(
   reader: PlanReader,
   db: Firestore,
@@ -677,7 +772,11 @@ async function linkChanges(
   target: {workId: string; editionId: string | null} | null,
   now: Timestamp,
   validateTarget = true,
-): Promise<{changes: PlannedChange[]; versions: AdminCatalogExpected["books"]}> {
+): Promise<{
+  changes: PlannedChange[];
+  versions: AdminCatalogExpected["books"];
+  catalog: CatalogVersion[];
+}> {
   if (target !== null && validateTarget) {
     const resolved = await unmergedWork(reader, db, target.workId);
     if (target.editionId !== null) {
@@ -698,8 +797,25 @@ async function linkChanges(
   const versions = snapshots.map((snapshot, index) =>
     bookVersion(snapshot, targets[index]),
   );
-  const changes = snapshots.map((snapshot) => {
+  const catalog: CatalogVersion[] = [];
+  const changes: PlannedChange[] = [];
+  let mintedEditions = 0;
+  let mintedIsbns = 0;
+  for (const [index, snapshot] of snapshots.entries()) {
     const before = linkFrom(snapshot);
+    let editionId = target?.editionId ?? null;
+    if (target !== null && editionId === null) {
+      // Every linked book stands on an edition of its work (owner decision
+      // 2026-09-01): a link that names none mints one per book.
+      const minted = await mintedEditionFor(
+        reader, db, snapshot, targets[index], target.workId, now,
+      );
+      catalog.push(...minted.versions);
+      changes.push(...minted.changes);
+      mintedEditions += minted.createdEdition ? 1 : 0;
+      mintedIsbns += minted.createdIsbn ? 1 : 0;
+      editionId = minted.editionId;
+    }
     const after: LinkState = target === null ? {
       workId: null,
       editionId: null,
@@ -707,7 +823,7 @@ async function linkChanges(
       linkedAt: null,
     } : {
       workId: target.workId,
-      editionId: target.editionId,
+      editionId,
       matchMethod: "admin",
       linkedAt: now.toMillis(),
     };
@@ -717,9 +833,15 @@ async function linkChanges(
       matchMethod: after.matchMethod,
       linkedAt: target === null ? null : now,
     };
-    return change("book", snapshot.ref, "update", before, after, {type: "set", data});
-  });
-  return {changes, versions};
+    changes.push(change("book", snapshot.ref, "update", before, after, {type: "set", data}));
+  }
+  await ensureCollectionCapacity(
+    reader, db.collection("editions"), MAX_EDITIONS, mintedEditions, "editions",
+  );
+  await ensureCollectionCapacity(
+    reader, db.collection("isbnIndex"), MAX_ISBN_INDEXES, mintedIsbns, "ISBN indexes",
+  );
+  return {changes, versions, catalog};
 }
 
 // One document may be versioned twice by one plan (an alias that is also a
@@ -925,10 +1047,12 @@ async function planOperation(
     );
     changes.push(...linked.changes);
     books = linked.versions;
+    catalog.push(...linked.catalog);
   } else if (operation.type === "linkBooks") {
     const linked = await linkChanges(reader, db, operation.books, operation.target, now);
     changes.push(...linked.changes);
     books = linked.versions;
+    catalog.push(...linked.catalog);
     if (operation.target !== null) {
       const workSnapshot = await one(
         reader, db.collection("works").doc(operation.target.workId),

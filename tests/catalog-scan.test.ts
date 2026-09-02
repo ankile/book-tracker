@@ -326,3 +326,36 @@ test('work rows carry creator, status and merged aliases; merged author ids reso
   // A hidden work is not an exact-title candidate.
   assert.deepEqual(codes(scan, 'unmatched-title-author-candidate'), []);
 });
+
+// Authors and editions record the account whose add-book flow minted them
+// (works already did); a linked book without an edition is drift the work
+// page repairs, reported as a warning rather than a broken link.
+test('authors and editions carry their creator; a linked book without an edition is a warning', () => {
+  const scan = scanCatalog(input({
+    authors: [
+      authorDocument('ada-author', 'Ada Author', { createdBy: 'reader' }),
+      authorDocument('bad-creator', 'Bad Creator', { createdBy: 7 }),
+    ],
+    works: [workDocument('pair', 'Pair Work')],
+    editions: [editionDocument('pair-edition', 'pair', { createdBy: 'reader' })],
+    books: [
+      bookDocument('on-edition', {
+        workId: 'pair', editionId: 'pair-edition', matchMethod: 'catalog-choice', linkedAt: now,
+      }),
+      bookDocument('no-edition', { workId: 'pair', matchMethod: 'migration', linkedAt: now }),
+      bookDocument('unlinked'),
+    ],
+  }));
+  assert.equal(scan.authors.find(({ authorId }) => authorId === 'ada-author')?.createdBy, 'reader');
+  assert.equal(scan.editions[0].createdBy, 'reader');
+  assert.deepEqual(
+    scan.findings.filter(({ code }) => code === 'linked-without-edition')
+      .map(({ books, workIds, severity }) => [books, workIds, severity]),
+    [[[{ uid: 'reader', bookId: 'no-edition' }], ['pair'], 'warning']],
+  );
+  assert.equal(scan.books.find(({ bookId }) => bookId === 'no-edition')?.anomaly, null);
+  assert.deepEqual(
+    scan.findings.filter(({ code }) => code === 'catalog-row-anomaly').map(({ message }) => message),
+    ['Invalid creator catalogAuthors/bad-creator.'],
+  );
+});

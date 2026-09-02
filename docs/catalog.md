@@ -9,9 +9,9 @@ public whoever contributed it; who read what is not.
 
 | Collection | Document id | Contents |
 |---|---|---|
-| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdAt`, `updatedAt` |
+| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy?`, `createdAt`, `updatedAt` |
 | `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy?`, `createdAt`, `updatedAt` |
-| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdAt`, `updatedAt` |
+| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy?`, `createdAt`, `updatedAt` |
 | `isbnIndex` | the ISBN-13 | `workId`, `editionId` |
 | `externalIdIndex` | `sha256(provider + "\0" + externalId)` | `workId`, `editionId`, `provider`, `externalId` |
 | `workTitleIndex` | `sha256(workId + "\0" + titleKey)` | `workId`, `title`, `titleKey`, `status` |
@@ -56,12 +56,16 @@ reader (the client's in-memory author map, the callables, the admin scan,
 
 - **Verified accounts.** `catalog.search` looks a book up by ISBN, external id
   or title. When nothing matches, `catalog.create` writes the Work, the
-  Edition and their index rows in one transaction, stamping the work with
-  `createdBy`; `catalog.ensureauthors` resolves or mints the shared authors a
+  Edition and their index rows in one transaction; when a work matches but
+  no edition does, `catalog.addedition` adds the book's own edition to that
+  work. `catalog.ensureauthors` resolves or mints the shared authors a
   personal book references and refuses a name that matches more than one
-  active author until an admin merges them. Both are bounded by the
-  structural caps in `functions/src/catalogLimits.ts`. There is no consent or
-  provenance gate: every account's books may seed the catalog.
+  active author until an admin merges them. Every work, edition and author
+  a reader's flow mints carries `createdBy`, the account that minted it;
+  the migration and the console leave it absent. All three callables are
+  bounded by the structural caps in `functions/src/catalogLimits.ts`. There
+  is no consent or provenance gate: every account's books may seed the
+  catalog.
 - **The migration.** `migrate-cross-user-works.ts` builds the catalog from the
   personal books that already exist and links them. Its ids are deterministic
   so a re-run creates nothing new. It never deletes: legacy per-user author
@@ -144,11 +148,15 @@ moved under the preview. The operations are `upsertAuthor`, `mergeAuthors`,
 lands on the console's document. Every apply is idempotent by operation id
 and writes an `adminAudit` record.
 
-A work with no edition is a legitimate state, not drift: the migration
-minted one edition per distinct ISBN among a work's books, so a work whose
-books carried no ISBN has none, while `catalog.create` always writes one.
-Search returns such a work with `editionId: null` and books link to it
-without an edition.
+Every personal book linked to a work stands on an edition of that work
+(owner decision 2026-09-01): the add-book flow mints one through
+`catalog.create` or `catalog.addedition`, an admin link that names no
+edition mints one per book from the book's own fields (owner as creator,
+under an id a relink reuses), and `migrate-book-editions.ts` backfilled the
+books the catalog build had left without one — it minted editions for ISBNs
+only. Two readers' editions that prove to be the same are for an operator
+to merge; nothing guesses that. The scan reports a linked book without an
+edition as a warning and the audit as `catalog.book.linked-without-edition`.
 
 `/admin/users` is the accounts and issues page: the Auth user list,
 per-account reading aggregates and the issue log, which only the Admin SDK

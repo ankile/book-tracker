@@ -604,6 +604,25 @@ export function decodeCatalogCreateRequest(
   };
 }
 
+export interface CatalogAddEditionRequest {
+  workId: string;
+  edition: CatalogEditionInput;
+}
+
+// The add-book flow adds an edition to a work it matched by title, so the
+// personal book it is saving lands on an edition of that work.
+export function decodeCatalogAddEditionRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): CatalogAddEditionRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["workId", "edition"], "request data", fail);
+  return {
+    workId: documentId(decoded.workId, "workId", fail),
+    edition: decodeCatalogEditionInput(decoded.edition, fail),
+  };
+}
+
 export interface WorkReadersRequest {
   workId: string;
   cursor: string | null;

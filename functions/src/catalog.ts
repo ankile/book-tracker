@@ -13,10 +13,12 @@ import {
 import {createHash, randomUUID} from "node:crypto";
 import {Buffer} from "node:buffer";
 import {
+  CatalogAddEditionRequest,
   CatalogAuthorCreateInput,
   CatalogCreateRequest,
   CatalogExternalId,
   CatalogSearchRequest,
+  decodeCatalogAddEditionRequest,
   decodeCatalogCreateRequest,
   decodeCatalogSearchRequest,
   decodeEnsureCatalogAuthorsRequest,
@@ -83,6 +85,9 @@ export interface StoredCatalogAuthor {
   status: "active" | "merged";
   mergedInto?: string;
   mergedFrom: string[];
+  // The uid whose add-book flow minted the author; absent for authors the
+  // migration or an administrator created.
+  createdBy?: string;
 }
 
 export interface StoredEdition {
@@ -97,6 +102,10 @@ export interface StoredEdition {
   suggestedPageCount: number | null;
   coverUrl: string;
   externalIds: Record<string, string>;
+  // The uid whose book the edition was minted for (the add-book flow, an
+  // admin link or the backfill); absent for migration- or admin-created
+  // editions.
+  createdBy?: string;
 }
 
 interface ResolvedWork {
@@ -286,7 +295,8 @@ export function storedEdition(
       typeof data.coverUrl !== "string" || typeof data.externalIds !== "object" ||
       data.externalIds === null || Array.isArray(data.externalIds) ||
       Object.entries(data.externalIds).some(([provider, id]) =>
-        !/^[a-z0-9-]{1,40}$/.test(provider) || typeof id !== "string")) {
+        !/^[a-z0-9-]{1,40}$/.test(provider) || typeof id !== "string") ||
+      (data.createdBy !== undefined && typeof data.createdBy !== "string")) {
     fail(`Invalid catalog edition ${snapshot.ref.path}.`);
   }
   return {
@@ -301,6 +311,7 @@ export function storedEdition(
     suggestedPageCount: data.suggestedPageCount,
     coverUrl: data.coverUrl,
     externalIds: data.externalIds,
+    ...(data.createdBy === undefined ? {} : {createdBy: data.createdBy}),
   };
 }
 
@@ -324,6 +335,9 @@ export function storedCatalogAuthor(
   if (data.mergedInto !== undefined && typeof data.mergedInto !== "string") {
     fail(`Invalid catalog author redirect at ${snapshot.ref.path}.`);
   }
+  if (data.createdBy !== undefined && typeof data.createdBy !== "string") {
+    fail(`Invalid catalog author creator at ${snapshot.ref.path}.`);
+  }
   return {
     canonicalName: data.canonicalName,
     alternateNames: data.alternateNames,
@@ -333,6 +347,7 @@ export function storedCatalogAuthor(
     status: data.status,
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
     mergedFrom: data.mergedFrom,
+    ...(data.createdBy === undefined ? {} : {createdBy: data.createdBy}),
   };
 }
 
@@ -751,6 +766,7 @@ export async function createCatalogEntry(
     tx.create(db.collection("editions").doc(editionId), {
       workId,
       ...request.edition,
+      createdBy,
       createdAt: now,
       updatedAt: now,
     });
@@ -770,6 +786,94 @@ export async function createCatalogEntry(
       );
     }
     return {workId, editionId, created: true};
+  });
+}
+
+// A verified user adds an edition to a work the catalog already has. The
+// add-book flow calls this when the chosen search result is a work without
+// a matching edition, so every linked personal book stands on an edition
+// of its work (owner decision 2026-09-01); two readers' editions that prove
+// to be one are for an operator to merge later. An identifier already in
+// the catalog resolves to its existing entry instead, as catalog.create
+// does, and a hidden or missing work is not found.
+export async function addCatalogEdition(
+  request: CatalogAddEditionRequest,
+  createdBy: string,
+): Promise<CatalogCreateResult> {
+  const editionId = `edition-${randomUUID()}`;
+  const now = Timestamp.now();
+  return db.runTransaction(async (tx): Promise<CatalogCreateResult> => {
+    const isbnRef = request.edition.isbn13 === null ? null :
+      db.collection("isbnIndex").doc(request.edition.isbn13);
+    const externalRefs = Object.entries(request.edition.externalIds).map(([provider, id]) => ({
+      provider,
+      id,
+      ref: db.collection("externalIdIndex").doc(externalIndexId({provider, id})),
+    }));
+    const [
+      workSnapshot,
+      isbnSnapshot,
+      externalSnapshots,
+      editionCount,
+      isbnCount,
+      externalCount,
+    ] = await Promise.all([
+      tx.get(db.collection("works").doc(request.workId)),
+      isbnRef === null ? Promise.resolve(null) : tx.get(isbnRef),
+      Promise.all(externalRefs.map(({ref}) => tx.get(ref))),
+      tx.get(db.collection("editions").count()),
+      isbnRef === null ? Promise.resolve(null) :
+        tx.get(db.collection("isbnIndex").count()),
+      externalRefs.length === 0 ? Promise.resolve(null) :
+        tx.get(db.collection("externalIdIndex").count()),
+    ]);
+    const read: SnapshotReader = (ref) => tx.get(ref);
+    const indexed = [isbnSnapshot, ...externalSnapshots].find((snapshot) => snapshot?.exists);
+    if (indexed !== undefined && indexed !== null) {
+      const indexedWorkId = indexed.get("workId");
+      const indexedEditionId = indexed.get("editionId");
+      if (typeof indexedWorkId !== "string" || typeof indexedEditionId !== "string") {
+        throw new CatalogDataError(`Invalid catalog index ${indexed.ref.path}.`);
+      }
+      const indexedWork = await resolveWork(
+        read,
+        await read(db.collection("works").doc(indexedWorkId)),
+      );
+      return {workId: indexedWork.id, editionId: indexedEditionId, created: false};
+    }
+    if (!workSnapshot.exists) {
+      throw new functions.https.HttpsError("not-found", "Book not found.");
+    }
+    const resolved = await resolveWork(read, workSnapshot);
+    if (resolved.work.status !== "active") {
+      throw new functions.https.HttpsError("not-found", "Book not found.");
+    }
+    if (editionCount.data().count >= CATALOG_LIMITS.editions ||
+        (isbnCount !== null && isbnCount.data().count >= CATALOG_LIMITS.isbnIndexes) ||
+        (externalCount !== null && externalCount.data().count + externalRefs.length >
+          CATALOG_LIMITS.externalIdIndexes)) {
+      throw new functions.https.HttpsError(
+        "resource-exhausted",
+        "The shared catalog has reached its size bound. Ask an administrator to raise it.",
+      );
+    }
+    tx.create(db.collection("editions").doc(editionId), {
+      workId: resolved.id,
+      ...request.edition,
+      createdBy,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (isbnRef !== null) tx.create(isbnRef, {workId: resolved.id, editionId});
+    for (const external of externalRefs) {
+      tx.create(external.ref, {
+        workId: resolved.id,
+        editionId,
+        provider: external.provider,
+        externalId: external.id,
+      });
+    }
+    return {workId: resolved.id, editionId, created: true};
   });
 }
 
@@ -1222,6 +1326,17 @@ exports.create = callable.https.onCall(async (
   return createCatalogEntry(request, uid);
 });
 
+exports.addedition = callable.https.onCall(async (
+  data: unknown,
+  context,
+): Promise<CatalogCreateResult> => {
+  logAppCheckPresence("catalog.addedition", context);
+  const uid = requireVerifiedUid(context);
+  const request = decodeCatalogAddEditionRequest(data, invalidArgument);
+  await requireLiveUser(uid);
+  return addCatalogEdition(request, uid);
+});
+
 exports.ensureauthors = callable.https.onCall(async (
   data: unknown,
   context,
@@ -1353,6 +1468,7 @@ exports.ensureauthors = callable.https.onCall(async (
         kind: author.kind,
         status: "active",
         mergedFrom: [],
+        createdBy: uid,
         createdAt: now,
         updatedAt: now,
       });

@@ -184,6 +184,7 @@ current deployment instructions.
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
 | `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Completed historical rollout (2026-09-01: apply matched the reviewed dry run, second apply 0, audit clean apart from one reviewed-group author the planner did not mint — repaired separately). Idempotent; a rerun links only books that gained unlinked author references since. |
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
+| `migrate-book-editions.ts` | Put every linked personal book on an edition of its work, minting one per reader per book identity from the book's own fields | See [Book editions backfill](#book-editions-backfill). Idempotent; a rerun joins what it minted and plans nothing for a book that carries an edition. |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -321,6 +322,32 @@ stays the only path that touches them.
 
 The migration header documents its flags. Production rehearsal evidence
 (dry-run output, counts, `<N>`) stays in the operator log, not in Git.
+## Book editions backfill
+
+Every personal book linked to a work stands on an edition of that work
+(owner decision 2026-09-01). The catalog build minted editions for ISBNs
+only, so a work seeded by ISBN-less books had none and an ISBN-less book on
+a work another reader's ISBN seeded had no edition of its own.
+`migrate-book-editions.ts` (planner: `book-edition-backfill.ts`) mints one
+edition per reader per distinct book identity (title, publisher, ISBN under
+one account — a reread shares one) from the book's own fields, with the
+owner as `createdBy`, and links the books to it. An ISBN already indexed to
+the work is joined instead; one indexed elsewhere, a merged or missing work,
+a tombstoned owner and an untitled book are printed as REVIEW lines and left
+for the console.
+
+The change is additive and needs no Rules change: `createdBy` on editions and
+authors is a new optional field the backend, the scan and the audit accept,
+and the edition ids follow the formula the admin link path uses, so a later
+relink from the console lands on the backfilled document. Order:
+
+1. deploy the backend (`catalog.addedition`, creator stamps, admin minting
+   on links) and then the client with `npm run pages:deploy`, so new links
+   made from now on carry an edition;
+2. run the standard dry-run, snapshot, apply-twice, audit loop. The audit
+   class `catalog.book.linked-without-edition` counts what is left; after the
+   apply it is the REVIEW lines only.
+
 ## finishedAt rollout (completed 2026-09-01)
 
 Books carry an explicit `finishedAt` (a timestamp exactly when `finished`

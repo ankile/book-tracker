@@ -2,6 +2,7 @@ require("./setup.cts");
 
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const test: typeof import("node:test").test = require("node:test");
+const {createHash}: typeof import("node:crypto") = require("node:crypto");
 const {getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
@@ -804,4 +805,131 @@ test("work operations resolve a merged author id to its survivor", async (t) => 
     }}, recentAdmin()),
     (error) => hasCode(error, "failed-precondition") && messageMatches(error, /not one hop/),
   );
+});
+
+// Every linked book stands on an edition of its work (owner decision
+// 2026-09-01): a link that names no edition mints one per book from the
+// book's own fields, under an id a repeated apply reuses.
+test("an admin link without an edition mints one per book and reuses it on a relink", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/target-work"), activeWork("Target Work"));
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  const bookRef = store.ref("users/reader/books/book-one");
+  store.write(bookRef, {
+    owner: store.ref("users/reader"), title: "Personal title", isbn: "0-441-47812-3",
+    publisher: "Ace", publishedDate: "1987", pageCount: 250, coverUrl: "https://covers.test/a.jpg",
+    updatedAt: Timestamp.fromMillis(100), workId: null, editionId: null, matchMethod: null, linkedAt: null,
+  });
+  const operation = {
+    type: "linkBooks",
+    books: [{uid: "reader", bookId: "book-one"}],
+    target: {workId: "target-work", editionId: null},
+  };
+  const editionId = `edition_${createHash("sha256")
+    .update("edition\0target-work\0reader/book-one").digest("hex").slice(0, 24)}`;
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.deepEqual(
+    preview.changes.map(({kind, action}) => `${kind}:${action}`).sort(),
+    ["book:update", "edition:create", "isbn:create"],
+  );
+  assert.equal(preview.expected.catalog.some(({kind, exists}) => kind === "edition" && !exists), true);
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+  const minted = store.rows.get(`editions/${editionId}`);
+  assert.equal(minted?.workId, "target-work");
+  assert.equal(minted?.isbn13, "9780441478125");
+  assert.equal(minted?.title, "Personal title");
+  assert.equal(minted?.publisher, "Ace");
+  assert.equal(minted?.publishedDate, "1987");
+  assert.equal(minted?.suggestedPageCount, 250);
+  assert.equal(minted?.coverUrl, "https://covers.test/a.jpg");
+  assert.equal(minted?.createdBy, "reader");
+  assert.deepEqual(store.rows.get("isbnIndex/9780441478125"), {workId: "target-work", editionId});
+  assert.equal(store.rows.get(bookRef.path)?.editionId, editionId);
+  assert.equal(store.rows.get(bookRef.path)?.matchMethod, "admin");
+
+  // Unlink, then the same link again: the edition is reused, not duplicated.
+  const unlink = {...operation, target: null};
+  const unlinkPreview = await deployed.admin.catalogpreview.run({operation: unlink}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: unlinkPreview.operationId, operation: unlink, expected: unlinkPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get(bookRef.path)?.editionId, null);
+  const relink = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.deepEqual(relink.changes.map(({kind, action}) => `${kind}:${action}`), ["book:update"]);
+  await deployed.admin.catalogapply.run({
+    operationId: relink.operationId, operation, expected: relink.expected,
+  }, recentAdmin());
+  assert.equal([...store.rows.keys()].filter((path) => path.startsWith("editions/")).length, 1);
+  assert.equal(store.rows.get(bookRef.path)?.editionId, editionId);
+});
+
+test("an admin link joins an ISBN indexed to this work and refuses one indexed elsewhere", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/target-work"), activeWork("Target Work"));
+  store.write(store.ref("works/other-work"), activeWork("Other Work"));
+  store.write(store.ref("editions/other-edition"), edition("other-work", {isbn13: "9780000000002"}));
+  store.write(store.ref("isbnIndex/9780000000002"), {workId: "other-work", editionId: "other-edition"});
+  store.write(store.ref("users/reader"), {uid: "reader"});
+  const bookRef = store.ref("users/reader/books/book-one");
+  store.write(bookRef, {
+    owner: store.ref("users/reader"), title: "Personal title", isbn: "9780000000002", pageCount: 250,
+    workId: null, editionId: null, matchMethod: null, linkedAt: null,
+  });
+  const operation = {
+    type: "linkBooks",
+    books: [{uid: "reader", bookId: "book-one"}],
+    target: {workId: "target-work", editionId: null},
+  };
+  await assert.rejects(
+    deployed.admin.catalogpreview.run({operation}, recentAdmin()),
+    (error) => hasCode(error, "failed-precondition") &&
+      detail(error, "reason") === "identifier-conflict",
+  );
+  store.write(store.ref("editions/other-edition"), edition("target-work", {isbn13: "9780000000002"}));
+  store.write(store.ref("isbnIndex/9780000000002"), {workId: "target-work", editionId: "other-edition"});
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  assert.deepEqual(
+    preview.changes.map(({kind, action, after}) => [kind, action, after?.editionId]),
+    [["book", "update", "other-edition"]],
+  );
+});
+
+test("author and edition edits keep the creator the add-book flow recorded", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("catalogAuthors/made-by-reader"), {
+    canonicalName: "Octavia Butler", alternateNames: [], nameKeys: ["octavia butler"],
+    sortName: "Butler", kind: "person", status: "active", mergedFrom: [],
+    createdBy: "reader", createdAt: now, updatedAt: now,
+  });
+  store.write(store.ref("works/target-work"), activeWork("Target Work"));
+  store.write(store.ref("editions/made-by-reader"), edition("target-work", {createdBy: "reader"}));
+  const authorEdit = {
+    type: "upsertAuthor",
+    authorId: "made-by-reader",
+    author: {canonicalName: "Octavia E. Butler", alternateNames: [], sortName: "Butler", kind: "person"},
+  };
+  const authorPreview = await deployed.admin.catalogpreview.run({operation: authorEdit}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: authorPreview.operationId, operation: authorEdit, expected: authorPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("catalogAuthors/made-by-reader")?.createdBy, "reader");
+  assert.equal(store.rows.get("catalogAuthors/made-by-reader")?.canonicalName, "Octavia E. Butler");
+  const editionEdit = {
+    type: "upsertEdition",
+    editionId: "made-by-reader",
+    workId: "target-work",
+    edition: {
+      isbn13: null, title: "Renamed", publisher: "", publishedDate: "", language: "en",
+      translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+    },
+  };
+  const editionPreview = await deployed.admin.catalogpreview.run({operation: editionEdit}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: editionPreview.operationId, operation: editionEdit, expected: editionPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("editions/made-by-reader")?.createdBy, "reader");
+  assert.equal(store.rows.get("editions/made-by-reader")?.title, "Renamed");
 });

@@ -7,9 +7,12 @@ import type { CatalogSearchResult, WorkReaderAttemptSummary } from '../src/lib/i
 import {
   appendDistinctReaderPage,
   automaticIsbnSelectionStillApplies,
+  buildCatalogAddEditionRequest,
+  buildCatalogCreateRequest,
   buildCatalogSearchRequest,
   catalogWorkHref,
   createLatestRequestGate,
+  decodeCatalogAddEditionResponse,
   decodeCatalogSearchResponse,
   decodeEnsureCatalogAuthorsResponse,
   decodeWorkReadersResponse,
@@ -223,5 +226,66 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
       attempts: [{...decoded.attempts[0], firstProgressAt: '2026-01-01T08:00:00.000Z'}],
     }),
     /valid YYYY-MM-DD calendar date/,
+  );
+});
+
+// A work chosen by title gets the book's own edition added to it: the same
+// edition the create path would seed, sent to the work by id, and the
+// answer decoded as strictly as a creation.
+test('the add-edition request carries the book\'s own edition to a named work', () => {
+  const metadata = {
+    coverUrl: 'https://covers.test/a.jpg', publisher: 'Ace', publishedDate: '1987',
+    subjects: ['Science fiction'], fiction: true,
+  };
+  const request = buildCatalogAddEditionRequest({
+    workId: 'work', title: 'Left Hand of Darkness', isbn: '0-441-47812-3', pageCount: 320, metadata,
+  });
+  assert.deepEqual(request, {
+    workId: 'work',
+    edition: {
+      isbn13: '9780441478125', title: 'Left Hand of Darkness', publisher: 'Ace', publishedDate: '1987',
+      language: '', translatorNames: [], format: 'unknown', suggestedPageCount: 320,
+      coverUrl: 'https://covers.test/a.jpg', externalIds: {},
+    },
+  });
+  const created = buildCatalogCreateRequest({
+    title: 'Left Hand of Darkness', authorIds: ['le-guin'], isbn: '0-441-47812-3', pageCount: 320, metadata,
+  });
+  assert.deepEqual(created?.edition, request.edition);
+  // An http cover and an invalid ISBN are dropped, not stored.
+  const bare = buildCatalogAddEditionRequest({
+    workId: 'work', title: 'T', isbn: '123', pageCount: 1, metadata: {...metadata, coverUrl: 'http://x'},
+  });
+  assert.equal(bare.edition.isbn13, null);
+  assert.equal(bare.edition.coverUrl, '');
+
+  assert.deepEqual(
+    decodeCatalogAddEditionResponse({workId: 'work', editionId: 'edition-new', created: true}),
+    {workId: 'work', editionId: 'edition-new', created: true},
+  );
+  assert.throws(
+    () => decodeCatalogAddEditionResponse({workId: 'work', editionId: 'edition-new', created: true, extra: 1}),
+    /catalog-addedition response/,
+  );
+  assert.throws(() => decodeCatalogAddEditionResponse({workId: 'work', editionId: '', created: true}), /editionId/);
+});
+
+// A title match is a work without an edition: both ids are null and the
+// result must decode (the check that a summary agrees with its result
+// once treated the missing edition as a disagreement, so no title-only
+// suggestion ever reached the panel).
+test('a work-level search result with no edition decodes; a missing summary for a named edition does not', () => {
+  const workLevel = {
+    workId: 'work', editionId: null, confidence: 'strong-work', reason: 'Exact title and author match',
+    work, edition: null,
+  };
+  assert.deepEqual(decodeCatalogSearchResponse({results: [workLevel]}).results, [workLevel]);
+  assert.throws(
+    () => decodeCatalogSearchResponse({results: [{...workLevel, editionId: 'edition'}]}),
+    /summary ids do not agree/,
+  );
+  assert.throws(
+    () => decodeCatalogSearchResponse({results: [{...workLevel, edition, editionId: null}]}),
+    /summary ids do not agree/,
   );
 });

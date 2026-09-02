@@ -89,6 +89,15 @@ export interface CatalogCreateResponse {
   created: boolean;
 }
 
+// Adds an edition to a work the catalog already has, for a book whose
+// chosen work had no matching edition.
+export interface CatalogAddEditionRequest {
+  workId: string;
+  edition: CatalogEditionInput;
+}
+
+export type CatalogAddEditionResponse = CatalogCreateResponse;
+
 export interface CatalogWorkInput {
   canonicalTitle: string;
   alternateTitles: string[];

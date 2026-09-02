@@ -25,6 +25,7 @@ const username = `catalog-${suffix}`.slice(0, 30)
 const secondUsername = `race-${suffix}`.slice(0, 30)
 const migrationPath = fileURLToPath(new URL('../migrate-cross-user-works.ts', import.meta.url))
 const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url))
+const backfillPath = fileURLToPath(new URL('../migrate-book-editions.ts', import.meta.url))
 const groupKey = 'title:left hand of darkness\0authors:ursula k le guin'
 const workId = deterministicCatalogId('work', groupKey)
 const isbn = '9780441478125'
@@ -477,6 +478,18 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     db.doc(`profiles/${secondUsername}`).delete(),
   ])
 
+  // The catalog build mints editions for ISBNs only, so its ISBN-less links
+  // are the drift migrate-book-editions.ts exists for: the rehearsal loop
+  // (dry-run, apply twice with a no-op second apply, audit) runs here so
+  // the migrated state is what the audit calls clean.
+  const backfillDryRun = runScript(backfillPath)
+  assert.match(backfillDryRun, /^linked books without an edition: [1-9]\d* of /m)
+  assert.match(backfillDryRun, /^dry-run: nothing written$/m)
+  const backfillApplied = runScript(backfillPath, '--apply')
+  assert.match(backfillApplied, /^applied: [1-9]\d* editions created, [1-9]\d* books linked$/m)
+  const backfillRerun = runScript(backfillPath, '--apply')
+  assert.match(backfillRerun, /^linked books without an edition: 0 of /m)
+  assert.match(backfillRerun, /^applied: 0 editions created, 0 books linked$/m)
   const audit = runScript(auditPath)
   assert.doesNotMatch(audit, /^catalog\./m)
 

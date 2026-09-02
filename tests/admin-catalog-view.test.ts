@@ -42,13 +42,13 @@ const work = (overrides: Partial<AdminCatalogWorkRow> = {}): AdminCatalogWorkRow
 const author = (overrides: Partial<AdminCatalogAuthorRow> = {}): AdminCatalogAuthorRow => ({
   authorId: 'le-guin', canonicalName: 'Ursula K. Le Guin', alternateNames: ['Ursula Le Guin'],
   sortName: 'Le Guin', kind: 'person', status: 'active', mergedInto: null, mergedFrom: [],
-  createdAt: 500, workCount: 1, warnings: [], ...overrides,
+  createdBy: null, createdAt: 500, workCount: 1, warnings: [], ...overrides,
 });
 const edition = (overrides: Partial<AdminCatalogEditionRow> = {}): AdminCatalogEditionRow => ({
   editionId: 'edition-a', workId: 'work-a', isbn13: '9780441478125',
   title: 'The Left Hand of Darkness', publisher: 'Ace', publishedDate: '1987', language: 'en',
   translatorNames: [], format: 'full', suggestedPageCount: 304, coverUrl: '',
-  externalIds: {'open-library': 'OL1M', 'google-books': 'abc'}, ...overrides,
+  externalIds: {'open-library': 'OL1M', 'google-books': 'abc'}, createdBy: null, ...overrides,
 });
 const book = (overrides: Partial<AdminCatalogBookRow> = {}): AdminCatalogBookRow => ({
   uid: 'reader', bookId: 'book-1', title: 'Left Hand', authorNames: ['Ursula K. Le Guin'],

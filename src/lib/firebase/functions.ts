@@ -5,6 +5,8 @@ import type {
   AdminCatalogApplyResponse,
   AdminCatalogPreviewRequest,
   AdminCatalogPreviewResponse,
+  CatalogAddEditionRequest,
+  CatalogAddEditionResponse,
   CatalogCreateRequest,
   CatalogCreateResponse,
   CatalogSearchRequest,
@@ -19,6 +21,7 @@ import {
   decodeAdminCatalogPreviewResponse,
 } from '../utils/adminCatalog.ts';
 import {
+  decodeCatalogAddEditionResponse,
   decodeCatalogCreateResponse,
   decodeCatalogSearchResponse,
   decodeEnsureCatalogAuthorsResponse,
@@ -127,6 +130,7 @@ const catalogSearchCallable = httpsCallable<CatalogSearchRequest, unknown>(fns, 
 const ensureCatalogAuthorsCallable = httpsCallable<EnsureCatalogAuthorsRequest, unknown>(fns, 'catalog-ensureauthors');
 const workReadersCallable = httpsCallable<WorkReadersRequest, unknown>(fns, 'catalog-workreaders');
 const catalogCreateCallable = httpsCallable<CatalogCreateRequest, unknown>(fns, 'catalog-create');
+const catalogAddEditionCallable = httpsCallable<CatalogAddEditionRequest, unknown>(fns, 'catalog-addedition');
 const adminCatalogPreviewCallable = httpsCallable<AdminCatalogPreviewRequest, unknown>(fns, 'admin-catalogpreview');
 const adminCatalogApplyCallable = httpsCallable<AdminCatalogApplyRequest, unknown>(fns, 'admin-catalogapply');
 
@@ -145,6 +149,12 @@ export async function ensureCatalogAuthors(
 
 export async function catalogCreate(request: CatalogCreateRequest): Promise<CatalogCreateResponse> {
   return decodeCatalogCreateResponse((await catalogCreateCallable(request)).data);
+}
+
+export async function catalogAddEdition(
+  request: CatalogAddEditionRequest,
+): Promise<CatalogAddEditionResponse> {
+  return decodeCatalogAddEditionResponse((await catalogAddEditionCallable(request)).data);
 }
 
 export async function workReaders(request: WorkReadersRequest): Promise<WorkReadersResponse> {

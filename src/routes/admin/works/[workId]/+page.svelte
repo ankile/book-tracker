@@ -122,11 +122,11 @@
     <section class="card" aria-labelledby="editions-heading">
       <h2 id="editions-heading">Editions <span>{editions.length}</span></h2>
       {#if editions.length === 0}
-        <p class="empty">No editions. The catalog build minted one edition per ISBN, so a work whose readers' books carried no ISBN has none; a work created through the add-book flow always has one. Add one with “New edition…” when an ISBN or publisher is known.</p>
+        <p class="empty">No editions. Every linked book stands on an edition of its work; a reader's book below without one offers to mint it from the book's own fields.</p>
       {:else}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Edition</th><th>ISBN</th><th>Publisher</th><th>Published</th><th>Language</th><th>Format</th><th>Pages</th><th>External IDs</th><th></th></tr></thead>
+            <thead><tr><th>Edition</th><th>ISBN</th><th>Publisher</th><th>Published</th><th>Language</th><th>Format</th><th>Pages</th><th>External IDs</th><th>Added by</th><th></th></tr></thead>
             <tbody>
               {#each editions as edition (edition.editionId)}
                 <tr>
@@ -138,6 +138,7 @@
                   <td>{edition.format}</td>
                   <td>{edition.suggestedPageCount ?? '—'}</td>
                   <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
+                  <td>{creatorLabel(edition.createdBy)}</td>
                   <td>
                     <div class="actions">
                       <button type="button" onclick={() => (draft = editEditionDraft(edition))}>Edit edition…</button>
@@ -154,7 +155,7 @@
 
     <section class="card" aria-labelledby="readers-heading">
       <h2 id="readers-heading">Readers' books <span>{books.length}</span></h2>
-      <p>Personal books that resolve to this work, including any still linked to a work merged into it. Only identity metadata is shown.</p>
+      <p>Personal books that resolve to this work, including any still linked to a work merged into it. Only identity metadata is shown. Every linked book stands on an edition; one without gets it minted from the book's own fields.</p>
       {#if books.length === 0}
         <p class="empty">No reader has a book linked to this work.</p>
       {:else}
@@ -171,10 +172,11 @@
                   <td><code>{book.uid}</code><small>{book.bookId}</small></td>
                   <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td>
                   <td>{book.pageCount ?? '—'}</td>
-                  <td>{book.editionId === null ? '—' : editionById.get(book.editionId)?.title ?? book.editionId}</td>
+                  <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}</td>
                   <td>{book.anomaly ?? '—'}</td>
                   <td>
                     <div class="actions">
+                      {#if book.editionId === null}<button class="primary" type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: null}))}>Mint edition…</button>{/if}
                       <button type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: book.editionId}))}>Move…</button>
                       <button type="button" onclick={() => (draft = linkBooksDraft([book], null))}>Unlink…</button>
                     </div>

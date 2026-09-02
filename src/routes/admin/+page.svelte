@@ -239,7 +239,7 @@
         <input class="filter" type="search" placeholder="Filter by title, author, or ID" aria-label="Filter works" bind:value={workQuery} />
         <button type="button" onclick={() => (draft = createWorkDraft())}>New work…</button>
       </div>
-      <p>Newest first. Open a work for its editions, its readers' books, and every operation on it. A work with no edition comes from readers' books that had no ISBN when the catalog was built.</p>
+      <p>Newest first. Open a work for its editions, its readers' books, and every operation on it. Every linked book stands on an edition; a work page offers to mint one for any book without.</p>
       <div class="table-scroll">
         <table>
           <thead><tr><th>Work</th><th>Created</th><th>Status</th><th>Editions</th><th>Readers</th><th>Warnings</th></tr></thead>

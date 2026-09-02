@@ -1,9 +1,12 @@
 import type { Book } from '../interfaces/book.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
+  CatalogAddEditionRequest,
+  CatalogAddEditionResponse,
   CatalogAuthorSummary,
   CatalogCreateRequest,
   CatalogCreateResponse,
+  CatalogEditionInput,
   CatalogEditionSummary,
   CatalogSearchRequest,
   CatalogSearchResponse,
@@ -121,7 +124,11 @@ export function decodeCatalogSearchResponse(value: unknown): CatalogSearchRespon
       : decodeEditionSummary(result.edition, `${context}.edition`);
     const workId = nonEmptyString(result.workId, `${context}.workId`);
     const editionId = nullableString(result.editionId, `${context}.editionId`);
-    if (work.workId !== workId || edition?.editionId !== editionId || (edition && edition.workId !== workId)) {
+    // A work-level result carries no edition on either side; a summary
+    // that names a different edition or work than the result is a
+    // protocol violation.
+    if (work.workId !== workId || (edition === null ? null : edition.editionId) !== editionId ||
+        (edition !== null && edition.workId !== workId)) {
       throw new TypeError(`${context}: summary ids do not agree`);
     }
     return {
@@ -135,14 +142,22 @@ export function decodeCatalogSearchResponse(value: unknown): CatalogSearchRespon
   })};
 }
 
-export function decodeCatalogCreateResponse(value: unknown): CatalogCreateResponse {
-  const data = record(value, 'catalog-create response');
-  exactKeys(data, ['workId', 'editionId', 'created'], 'catalog-create response');
+function decodeCatalogEntryResponse(value: unknown, context: string): CatalogCreateResponse {
+  const data = record(value, context);
+  exactKeys(data, ['workId', 'editionId', 'created'], context);
   return {
-    workId: nonEmptyString(data.workId, 'catalog-create response.workId'),
-    editionId: nonEmptyString(data.editionId, 'catalog-create response.editionId'),
-    created: boolean(data.created, 'catalog-create response.created'),
+    workId: nonEmptyString(data.workId, `${context}.workId`),
+    editionId: nonEmptyString(data.editionId, `${context}.editionId`),
+    created: boolean(data.created, `${context}.created`),
   };
+}
+
+export function decodeCatalogCreateResponse(value: unknown): CatalogCreateResponse {
+  return decodeCatalogEntryResponse(value, 'catalog-create response');
+}
+
+export function decodeCatalogAddEditionResponse(value: unknown): CatalogAddEditionResponse {
+  return decodeCatalogEntryResponse(value, 'catalog-addedition response');
 }
 
 // One id per requested author, in request order: the caller pairs them
@@ -165,6 +180,29 @@ export function decodeEnsureCatalogAuthorsResponse(
 // The work and edition a book with no catalog match creates: the personal
 // book's own bibliographic fields, nothing inferred. Books without a
 // resolved author cannot seed a work (a work needs at least one author).
+// The edition a personal book stands for: the book's own bibliographic
+// fields, nothing inferred.
+export function buildCatalogEditionInput({title, isbn, pageCount, metadata}: {
+  title: string;
+  isbn: string;
+  pageCount: number;
+  metadata: BookMetadata;
+}): CatalogEditionInput {
+  const coverUrl = metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '';
+  return {
+    isbn13: normalizeIsbn(isbn) ?? null,
+    title,
+    publisher: metadata.publisher,
+    publishedDate: metadata.publishedDate,
+    language: '',
+    translatorNames: [],
+    format: 'unknown',
+    suggestedPageCount: pageCount,
+    coverUrl,
+    externalIds: {},
+  };
+}
+
 export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, metadata}: {
   title: string;
   authorIds: readonly string[];
@@ -173,29 +211,29 @@ export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, me
   metadata: BookMetadata;
 }): CatalogCreateRequest | null {
   if (authorIds.length === 0) return null;
-  const coverUrl = metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '';
   return {
     work: {
       canonicalTitle: title,
       alternateTitles: [],
       authorIds: [...authorIds],
-      coverUrl,
+      coverUrl: metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '',
       subjects: metadata.subjects,
       fiction: metadata.fiction,
     },
-    edition: {
-      isbn13: normalizeIsbn(isbn) ?? null,
-      title,
-      publisher: metadata.publisher,
-      publishedDate: metadata.publishedDate,
-      language: '',
-      translatorNames: [],
-      format: 'unknown',
-      suggestedPageCount: pageCount,
-      coverUrl,
-      externalIds: {},
-    },
+    edition: buildCatalogEditionInput({title, isbn, pageCount, metadata}),
   };
+}
+
+// A chosen work without a matching edition gets this book's edition added
+// to it, so the saved book stands on an edition of its work.
+export function buildCatalogAddEditionRequest({workId, title, isbn, pageCount, metadata}: {
+  workId: string;
+  title: string;
+  isbn: string;
+  pageCount: number;
+  metadata: BookMetadata;
+}): CatalogAddEditionRequest {
+  return {workId, edition: buildCatalogEditionInput({title, isbn, pageCount, metadata})};
 }
 
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {

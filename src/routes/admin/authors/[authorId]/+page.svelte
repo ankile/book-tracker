@@ -18,9 +18,7 @@
 
   // One catalog author: the record, its aliases, the works that name it
   // (directly or through an alias merged into it), and the operations that
-  // start from it. Authors carry no creator field — the add-book flow mints
-  // them without a uid — so provenance is the creation day plus the creator
-  // of each work listed below.
+  // start from it.
   const scan = $derived($adminCatalogScan ?? null);
   const progress = $derived($adminCatalogProgress);
   const authorId = $derived(page.params.authorId ?? '');
@@ -53,7 +51,7 @@
         <div>
           <h1>{author.canonicalName}</h1>
           <p>Sorted as {author.sortName} · {author.kind}</p>
-          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} · <code>{author.authorId}</code></p>
+          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, true)} · <code>{author.authorId}</code></p>
           {#if author.warnings.length > 0}<p class="warning">{author.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">

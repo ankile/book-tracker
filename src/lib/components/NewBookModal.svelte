@@ -21,7 +21,7 @@
     extractModsGenres,
     extractModsCoverUrl,
   } from "../utils/nasjonalbiblioteket.ts";
-  import { catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
+  import { catalogAddEdition, catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
@@ -41,13 +41,14 @@
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
   import {
     automaticIsbnSelectionStillApplies,
+    buildCatalogAddEditionRequest,
     buildCatalogCreateRequest,
     buildCatalogSearchRequest,
     createLatestRequestGate,
     exactEditionPreselection,
     linkedBooksForWork,
     selectionForResult,
-  } from "../utils/catalogClient.ts";
+  } from '../utils/catalogClient.ts';
 
   let {
     open, userId, book = null, onclose,
@@ -354,6 +355,47 @@
         return;
       } finally {
         if (request === authorResolutionRequest) resolvingAuthors = false;
+      }
+      prepared = preparedWrite();
+      if (!prepared.valid) {
+        lookupError = prepared.message;
+        return;
+      }
+    }
+    // A chosen work without a matching edition gets this book's edition
+    // added to it, so every linked book stands on an edition (owner
+    // decision 2026-09-01). The callable needs the network; offline the
+    // link cannot be completed and the draft stays for a retry.
+    if (catalogSelection !== null && catalogSelection.editionId === null) {
+      if (!online) {
+        lookupError = 'Connect to add your edition to the shared work, then try again.';
+        return;
+      }
+      const request = buildCatalogAddEditionRequest({
+        workId: catalogSelection.workId,
+        title: prepared.write.input.title,
+        isbn: prepared.write.input.isbn,
+        pageCount: prepared.write.input.pageCount,
+        metadata: $state.snapshot(metadata),
+      });
+      creatingWork = true;
+      try {
+        const added = await catalogAddEdition(request);
+        if (!open) return;
+        // The edition is this account's choice for the book, whatever
+        // provenance the stored link had.
+        catalogSelection = {
+          workId: added.workId,
+          editionId: added.editionId,
+          matchMethod: 'catalog-choice',
+        };
+        catalogChoiceTouched = true;
+      } catch (error) {
+        console.error('Catalog edition creation failed', error);
+        lookupError = 'Could not add your edition to the shared work. Try again, or remove the link to save the book unlinked.';
+        return;
+      } finally {
+        creatingWork = false;
       }
       prepared = preparedWrite();
       if (!prepared.valid) {
