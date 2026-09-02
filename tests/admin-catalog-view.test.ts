@@ -22,6 +22,7 @@ import {
   filterByReview,
   paginate,
   parseConsoleQuery,
+  activeOnly,
   reviewLabel,
   reviewStatus,
   duplicateFindingsFor,
@@ -279,12 +280,24 @@ test('author order, duplicate findings, and creator labels', () => {
 test('the console view round-trips through the URL, drops defaults, and restarts paging when the list changes', () => {
   assert.deepEqual(parseConsoleQuery(new URLSearchParams('')), DEFAULT_CONSOLE_QUERY);
   const query = parseConsoleQuery(new URLSearchParams('tab=authors&q=le+guin&page=3&review=needs&creator=others'));
-  assert.deepEqual(query, {tab: 'authors', q: 'le guin', page: 3, review: 'needs', creator: 'others'});
+  assert.deepEqual(query, {tab: 'authors', q: 'le guin', page: 3, review: 'needs', creator: 'others', inactive: false});
   // Anything unrecognised falls back rather than failing.
   assert.deepEqual(parseConsoleQuery(new URLSearchParams('tab=nope&page=0&review=x&creator=y')), DEFAULT_CONSOLE_QUERY);
   assert.deepEqual(parseConsoleQuery(new URLSearchParams('page=2.5')), DEFAULT_CONSOLE_QUERY);
   assert.equal(consoleHref(query), '/admin?tab=authors&q=le+guin&page=3&review=needs&creator=others');
   assert.equal(consoleHref(query, {page: 4}), '/admin?tab=authors&q=le+guin&page=4&review=needs&creator=others');
+  // Merged aliases and hidden works are out unless asked; asking is a flag
+  // in the URL that, like every other change of list, starts over at page 1.
+  assert.equal(parseConsoleQuery(new URLSearchParams('inactive=1')).inactive, true);
+  assert.equal(parseConsoleQuery(new URLSearchParams('inactive=true')).inactive, false);
+  assert.equal(consoleHref(query, {inactive: true}), '/admin?tab=authors&q=le+guin&review=needs&creator=others&inactive=1');
+  assert.equal(consoleHref({...query, inactive: true}, {inactive: false}), '/admin?tab=authors&q=le+guin&review=needs&creator=others');
+  const rows = [
+    work({workId: 'live'}), work({workId: 'alias', status: 'merged', mergedInto: 'live'}),
+    work({workId: 'shelved', status: 'hidden'}),
+  ];
+  assert.deepEqual(activeOnly(rows, false).map((row) => row.workId), ['live']);
+  assert.deepEqual(activeOnly(rows, true).map((row) => row.workId), ['live', 'alias', 'shelved']);
   // A new search, tab or filter starts at page 1; the same value keeps the page.
   assert.equal(consoleHref(query, {q: 'dune'}), '/admin?tab=authors&q=dune&review=needs&creator=others');
   assert.equal(consoleHref(query, {tab: 'works'}), '/admin?q=le+guin&review=needs&creator=others');

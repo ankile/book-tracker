@@ -190,8 +190,10 @@ are the keys the server wrote.
 
 The console is three pages over that one scan. `/admin` is one tab at a
 time — works, authors, unmatched books, findings — with a search box,
-review and creator filters and pages of fifty; the tab, search, filters and
-page live in the URL (`?tab=&q=&page=&review=&creator=`), so a list can be
+review and creator filters and pages of fifty; merged aliases and hidden
+works are left out of the works and authors tabs unless the "Show merged
+and hidden" toggle is on; the tab, search, filters, toggle and page live in
+the URL (`?tab=&q=&page=&review=&creator=&inactive=1`), so a list can be
 linked to and the browser's history steps back through it. Works and
 authors carry a review mark: `admin.review` stamps or clears `reviewedAt`
 on whole records (one page of ids per call, no recent-auth gate, no audit

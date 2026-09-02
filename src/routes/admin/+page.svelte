@@ -48,6 +48,7 @@
     reviewLabel,
     reviewStatus,
     sortAuthors,
+    activeOnly,
     workSearchText,
   } from '$lib/utils/adminCatalogView.ts';
 
@@ -115,10 +116,11 @@
     (scan?.findings ?? []).filter((finding) => finding.code === 'suspected-duplicate-works'),
   );
 
-  // Works newest first and authors by sort name, narrowed by the search,
-  // then the review and creator filters, then one page of fifty.
-  const allWorks = $derived([...(scan?.works ?? [])].sort(newestFirst));
-  const allAuthors = $derived(sortAuthors(scan?.authors ?? []));
+  // Works newest first and authors by sort name, active ones only unless
+  // asked for the merged and hidden, narrowed by the search, then the review
+  // and creator filters, then one page of fifty.
+  const allWorks = $derived(activeOnly([...(scan?.works ?? [])].sort(newestFirst), query.inactive));
+  const allAuthors = $derived(activeOnly(sortAuthors(scan?.authors ?? []), query.inactive));
   const searchedWorks = $derived(filterByCreator(
     filterRows(allWorks, query.q, (work) => workSearchText(work, names)), query.creator, ADMIN_UID,
   ));
@@ -202,8 +204,8 @@
   );
   const tabCount = (tab: ConsoleTab): number => {
     if (scan === null) return 0;
-    if (tab === 'works') return scan.works.length;
-    if (tab === 'authors') return scan.authors.length;
+    if (tab === 'works') return allWorks.length;
+    if (tab === 'authors') return allAuthors.length;
     if (tab === 'books') return unmatchedBooks.length;
     return duplicateWorkFindings.length + unmatchedWithCandidates.length + scan.findings.length;
   };
@@ -242,6 +244,9 @@
     {#each creatorChips as chip (chip.id)}
       <a href={consoleHref(query, {creator: chip.id})} aria-current={query.creator === chip.id ? 'true' : undefined}>{chip.label}</a>
     {/each}
+  </div>
+  <div class="chips" role="group" aria-label="Merged and hidden records">
+    <a href={consoleHref(query, {inactive: !query.inactive})} aria-current={query.inactive ? 'true' : undefined}>Show merged and hidden</a>
   </div>
 {/snippet}
 

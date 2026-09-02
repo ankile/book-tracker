@@ -589,6 +589,10 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.getByRole('link', {name: 'Reviewed', exact: true}).click();
       await expect(page).toHaveURL(/review=done$/);
       await expect(page.getByRole('row').filter({hasText: workId})).toHaveCount(1);
+      // Merged aliases and hidden works stay out of the list unless asked, by a flag in the URL.
+      await page.getByRole('link', {name: 'Show merged and hidden', exact: true}).click();
+      await expect(page).toHaveURL(/review=done&inactive=1$/);
+      await expect(page.getByRole('link', {name: 'Show merged and hidden', exact: true})).toHaveAttribute('aria-current', 'true');
       await navigateInApp(page, `/admin/works/${workId}`);
 
       // The edition the title-only save minted is listed with its reader's

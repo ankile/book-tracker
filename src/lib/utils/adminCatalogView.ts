@@ -507,9 +507,10 @@ export function isoDay(ms: number): string {
 }
 
 // ---- The overview's view state lives in the URL: which tab, the search
-// text, the page and the review and creator filters (?tab=&q=&page=&review=
-// &creator=), so a list can be linked to and the browser's history steps
-// back through it. Defaults are left out of the URL.
+// text, the page, the review and creator filters and whether merged and
+// hidden records are shown (?tab=&q=&page=&review=&creator=&inactive=1), so
+// a list can be linked to and the browser's history steps back through it.
+// Defaults are left out of the URL.
 
 export type ConsoleTab = 'works' | 'authors' | 'books' | 'findings';
 export type ReviewFilter = 'all' | 'needs' | 'done';
@@ -521,10 +522,16 @@ export interface ConsoleQuery {
   page: number;
   review: ReviewFilter;
   creator: CreatorFilter;
+  // A merged work or author is an alias of its survivor and a hidden work
+  // is soft-deleted; the lists leave both out unless asked (owner decision
+  // 2026-09-02).
+  inactive: boolean;
 }
 
 export const CONSOLE_PAGE_SIZE = 50;
-export const DEFAULT_CONSOLE_QUERY: ConsoleQuery = { tab: 'works', q: '', page: 1, review: 'all', creator: 'all' };
+export const DEFAULT_CONSOLE_QUERY: ConsoleQuery = {
+  tab: 'works', q: '', page: 1, review: 'all', creator: 'all', inactive: false,
+};
 const CONSOLE_TABS: readonly ConsoleTab[] = ['works', 'authors', 'books', 'findings'];
 const REVIEW_FILTERS: readonly ReviewFilter[] = ['all', 'needs', 'done'];
 const CREATOR_FILTERS: readonly CreatorFilter[] = ['all', 'others', 'me'];
@@ -543,6 +550,7 @@ export function parseConsoleQuery(params: URLSearchParams): ConsoleQuery {
     page: Number.isSafeInteger(page) && page >= 1 ? page : 1,
     review: oneOf(params.get('review'), REVIEW_FILTERS, DEFAULT_CONSOLE_QUERY.review),
     creator: oneOf(params.get('creator'), CREATOR_FILTERS, DEFAULT_CONSOLE_QUERY.creator),
+    inactive: params.get('inactive') === '1',
   };
 }
 
@@ -551,13 +559,14 @@ export function parseConsoleQuery(params: URLSearchParams): ConsoleQuery {
 // different list.
 export function consoleHref(query: ConsoleQuery, patch: Partial<ConsoleQuery> = {}): string {
   const next: ConsoleQuery = { ...query, ...patch };
-  const restarts = (['tab', 'q', 'review', 'creator'] as const)
+  const restarts = (['tab', 'q', 'review', 'creator', 'inactive'] as const)
     .some((key) => patch[key] !== undefined && patch[key] !== query[key]);
   if (restarts && patch.page === undefined) next.page = 1;
   const params = new URLSearchParams();
   for (const key of ['tab', 'q', 'page', 'review', 'creator'] as const) {
     if (next[key] !== DEFAULT_CONSOLE_QUERY[key]) params.set(key, String(next[key]));
   }
+  if (next.inactive) params.set('inactive', '1');
   const search = params.toString();
   return search === '' ? '/admin' : `/admin?${search}`;
 }
@@ -582,6 +591,10 @@ export function reviewLabel(row: ReviewMarks): string {
   if (row.reviewedAt === null) return 'needs review';
   const day = isoDay(row.reviewedAt);
   return row.activityAt > row.reviewedAt ? `changed since review ${day}` : `reviewed ${day}`;
+}
+
+export function activeOnly<T extends { status: string }>(rows: readonly T[], showInactive: boolean): T[] {
+  return showInactive ? [...rows] : rows.filter((row) => row.status === 'active');
 }
 
 export function filterByReview<T extends ReviewMarks>(rows: readonly T[], filter: ReviewFilter): T[] {
