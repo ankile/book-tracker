@@ -131,6 +131,11 @@ export interface AdminCatalogEditionRow {
   // admin-created editions.
   createdBy: string | null;
   createdAt: number;
+  // A merged edition is an alias of mergedInto (same work); the survivor
+  // lists its aliases in mergedFrom. Stored status is absent until a merge.
+  status: 'active' | 'merged';
+  mergedInto: string | null;
+  mergedFrom: string[];
 }
 
 export interface AdminCatalogBookTarget {
@@ -247,6 +252,7 @@ const AUTHOR_FIELDS = [
 const EDITION_FIELDS = [
   'workId', 'isbn13', 'title', 'publisher', 'publishedDate', 'language', 'translatorNames',
   'format', 'suggestedPageCount', 'coverUrl', 'externalIds', 'createdBy', 'createdAt', 'updatedAt',
+  'status', 'mergedInto', 'mergedFrom',
 ];
 
 // The admin apply path round-trips whole documents and refuses one with a
@@ -344,7 +350,11 @@ function readAuthor({ id, data }: CatalogScanDocument): ScanAuthor {
 
 function readEdition({ id, data }: CatalogScanDocument): ScanEdition {
   const label = `editions/${id}`;
-  const { externalIds, translatorNames } = data;
+  const { externalIds, translatorNames, mergedFrom } = data;
+  if ((data.status !== undefined && data.status !== 'active' && data.status !== 'merged') ||
+      (mergedFrom !== undefined && !isStringArray(mergedFrom))) {
+    rowError(`Invalid edition redirect fields at ${label}.`);
+  }
   if (typeof data.workId !== 'string' ||
       (data.isbn13 !== null && typeof data.isbn13 !== 'string') ||
       typeof data.title !== 'string' || typeof data.publisher !== 'string' ||
@@ -373,6 +383,9 @@ function readEdition({ id, data }: CatalogScanDocument): ScanEdition {
     externalIds: externalIds as Record<string, string>,
     createdBy: optionalCreator(data.createdBy, label),
     createdAt: millis(data.createdAt, `${label}.createdAt`),
+    status: data.status === 'merged' ? 'merged' : 'active',
+    mergedInto: optionalRedirect(data.mergedInto, label),
+    mergedFrom: mergedFrom === undefined ? [] : mergedFrom,
     unsupportedFields: unsupportedFields(data, EDITION_FIELDS),
   };
 }
@@ -674,7 +687,22 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
 
   const editionCounts = new Map<string, number>();
   for (const [editionId, edition] of editionById) {
-    editionCounts.set(edition.workId, (editionCounts.get(edition.workId) ?? 0) + 1);
+    if (edition.status === 'active') {
+      editionCounts.set(edition.workId, (editionCounts.get(edition.workId) ?? 0) + 1);
+    } else {
+      // An alias redirects one hop to an active edition of the same work.
+      const survivor = edition.mergedInto === null ? undefined : editionById.get(edition.mergedInto);
+      if (survivor === undefined || survivor.status !== 'active' || survivor.workId !== edition.workId) {
+        findings.push({
+          code: 'edition-invariant',
+          severity: 'error',
+          message: 'broken redirect',
+          workIds: [edition.workId],
+          editionIds: [editionId],
+          books: [],
+        });
+      }
+    }
     if (!workById.has(edition.workId)) {
       findings.push({
         code: 'edition-missing-work',
@@ -909,6 +937,9 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       externalIds: edition.externalIds,
       createdBy: edition.createdBy,
       createdAt: edition.createdAt,
+      status: edition.status,
+      mergedInto: edition.mergedInto,
+      mergedFrom: edition.mergedFrom,
     })),
     books,
     findings,

@@ -11,7 +11,7 @@ public whoever contributed it; who read what is not.
 |---|---|---|
 | `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
 | `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
-| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy`, `createdAt`, `updatedAt` |
+| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy`, `createdAt`, `updatedAt`, `status?`, `mergedInto?`, `mergedFrom?` |
 | `isbnIndex` | the ISBN-13 | `workId`, `editionId` |
 | `externalIdIndex` | `sha256(provider + "\0" + externalId)` | `workId`, `editionId`, `provider`, `externalId` |
 | `workTitleIndex` | `sha256(workId + "\0" + titleKey)` | `workId`, `title`, `titleKey`, `status` |
@@ -51,6 +51,20 @@ readership and reach into tombstoned accounts — so a book keeps whatever
 author or work id it was saved with, the Rules accept the alias, and every
 reader (the client's in-memory author map, the callables, the admin scan,
 `db-audit.ts`) resolves it in one hop at read time.
+
+Editions merge the same way (`mergeEditions`: the sources become `merged`
+aliases naming the survivor, which lists them in `mergedFrom`; stored
+`status` is absent until a merge; an alias keeps its ISBN and external-id
+rows, and every lookup that lands on it — search, `catalog.create`,
+`catalog.addedition`, the admin mint — answers with the survivor), with one
+deliberate difference: the books standing on the sources are moved to the
+survivor (owner decision 2026-09-02, so that two records of one edition read
+as one for every reader). That rewrite is bounded to those books, at most one
+page of them, in live accounts; a book in a frozen account stays on its alias
+and resolves at read time. A moved book keeps its link time and inherits only
+the metadata its reader left blank — ISBN, cover, publisher and publication
+date from the survivor; cover fallback, fiction and subjects from the work —
+never its title or page count.
 
 ## Who creates what
 

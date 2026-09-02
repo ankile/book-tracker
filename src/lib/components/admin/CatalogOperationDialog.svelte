@@ -82,10 +82,19 @@
     sortAuthors((scan?.authors ?? []).filter((author) => author.status === 'active')),
   );
   const editions = $derived(scan?.editions ?? []);
+  // Only active editions can be stood on or merged into; a merge's sources
+  // are not offered as its survivor.
   const targetEditions = $derived.by(() => {
     const current = draft;
-    if (current?.type !== 'linkBooks') return [];
-    return editions.filter((edition) => edition.workId === current.targetWorkId);
+    if (current?.type === 'linkBooks') {
+      return editions.filter((edition) => edition.workId === current.targetWorkId && edition.status === 'active');
+    }
+    if (current?.type === 'mergeEditions') {
+      const sources = new Set(current.sourceEditionIds.split(/\s+/u).filter(Boolean));
+      return editions.filter((edition) =>
+        edition.workId === current.workId && edition.status === 'active' && !sources.has(edition.editionId));
+    }
+    return [];
   });
   // A target edition must belong to the target work; changing the work
   // clears an edition that no longer does.
@@ -297,6 +306,17 @@
             <select bind:value={draft.targetWorkId}>
               <option value="">Choose the surviving work</option>
               {#each targetWorks as work (work.workId)}<option value={work.workId}>{work.canonicalTitle} ({work.workId})</option>{/each}
+            </select>
+          </label>
+        </div>
+      {:else if draft.type === 'mergeEditions'}
+        <div class="form-grid">
+          <label>Work ID<input bind:value={draft.workId} autocomplete="off" readonly /></label>
+          <label>Source edition IDs, one per line <small>They become aliases of the survivor; their readers' books move to it and inherit whatever they left blank.</small><textarea bind:value={draft.sourceEditionIds}></textarea></label>
+          <label>Surviving edition
+            <select bind:value={draft.targetEditionId}>
+              <option value="">Choose the surviving edition</option>
+              {#each targetEditions as edition (edition.editionId)}<option value={edition.editionId}>{edition.title}{edition.isbn13 ? ` · ${edition.isbn13}` : ''}{edition.publisher ? ` · ${edition.publisher}` : ''} ({edition.editionId})</option>{/each}
             </select>
           </label>
         </div>

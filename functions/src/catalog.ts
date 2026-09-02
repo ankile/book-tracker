@@ -106,6 +106,13 @@ export interface StoredEdition {
   // admin link or the backfill); absent for migration- or admin-created
   // editions.
   createdBy?: string;
+  // An edition merged into another is an alias: status "merged" and
+  // mergedInto name the survivor, which lists the absorbed ids in
+  // mergedFrom. Absent status is active. The alias keeps its identifiers
+  // and index rows; lookups that land on it answer with the survivor.
+  status?: "active" | "merged";
+  mergedInto?: string;
+  mergedFrom?: string[];
 }
 
 interface ResolvedWork {
@@ -296,7 +303,11 @@ export function storedEdition(
       data.externalIds === null || Array.isArray(data.externalIds) ||
       Object.entries(data.externalIds).some(([provider, id]) =>
         !/^[a-z0-9-]{1,40}$/.test(provider) || typeof id !== "string") ||
-      (data.createdBy !== undefined && typeof data.createdBy !== "string")) {
+      (data.createdBy !== undefined && typeof data.createdBy !== "string") ||
+      (data.status !== undefined && data.status !== "active" && data.status !== "merged") ||
+      (data.mergedInto !== undefined && typeof data.mergedInto !== "string") ||
+      (data.mergedFrom !== undefined && (!Array.isArray(data.mergedFrom) ||
+        data.mergedFrom.some((id: unknown) => typeof id !== "string")))) {
     fail(`Invalid catalog edition ${snapshot.ref.path}.`);
   }
   return {
@@ -312,6 +323,9 @@ export function storedEdition(
     coverUrl: data.coverUrl,
     externalIds: data.externalIds,
     ...(data.createdBy === undefined ? {} : {createdBy: data.createdBy}),
+    ...(data.status === undefined ? {} : {status: data.status}),
+    ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
+    ...(data.mergedFrom === undefined ? {} : {mergedFrom: data.mergedFrom}),
   };
 }
 
@@ -441,6 +455,31 @@ async function resolveWork(
   return {id: work.mergedInto, work: target};
 }
 
+interface ResolvedEdition {
+  id: string;
+  edition: StoredEdition;
+}
+
+// One hop, like works: a merged edition names its survivor, and a survivor
+// that is itself merged is corruption.
+async function resolveEdition(
+  read: SnapshotReader,
+  snapshot: DocumentSnapshot,
+): Promise<ResolvedEdition> {
+  const edition = storedEdition(snapshot);
+  if (edition.status !== "merged") return {id: snapshot.id, edition};
+  if (edition.mergedInto === undefined || edition.mergedInto === snapshot.id) {
+    throw new CatalogDataError(`Broken catalog redirect at ${snapshot.ref.path}.`);
+  }
+  const target = storedEdition(await read(db.collection("editions").doc(edition.mergedInto)));
+  if (target.status === "merged") {
+    throw new CatalogDataError(
+      `Catalog redirect is not one hop at ${snapshot.ref.path}.`,
+    );
+  }
+  return {id: edition.mergedInto, edition: target};
+}
+
 async function workSummary(
   resolved: ResolvedWork,
   authors?: ResolvedAuthor[],
@@ -504,13 +543,16 @@ async function exactIndexResult(
     throw new CatalogDataError(`Catalog index ${index.ref.path} disagrees with its edition.`);
   }
   if (resolved.work.status !== "active") return null;
+  // The index row keeps naming the edition that carries the identifier; a
+  // merged one answers with its survivor.
+  const surviving = await resolveEdition(readSnapshot, editionSnapshot);
   return {
     workId: resolved.id,
-    editionId,
+    editionId: surviving.id,
     confidence: "exact-edition",
     reason,
     work: await workSummary(resolved),
-    edition: editionSummary(editionId, edition, resolved.id),
+    edition: editionSummary(surviving.id, surviving.edition, resolved.id),
   };
 }
 
@@ -724,7 +766,11 @@ export async function createCatalogEntry(
         read,
         await read(db.collection("works").doc(indexedWorkId)),
       );
-      return {workId: resolved.id, editionId: indexedEditionId, created: false};
+      const surviving = await resolveEdition(
+        read,
+        await read(db.collection("editions").doc(indexedEditionId)),
+      );
+      return {workId: resolved.id, editionId: surviving.id, created: false};
     }
     // Every collection this transaction appends to is checked against its
     // bound: the admin scan reads them whole and hard-fails past the caps,
@@ -839,7 +885,11 @@ export async function addCatalogEdition(
         read,
         await read(db.collection("works").doc(indexedWorkId)),
       );
-      return {workId: indexedWork.id, editionId: indexedEditionId, created: false};
+      const surviving = await resolveEdition(
+        read,
+        await read(db.collection("editions").doc(indexedEditionId)),
+      );
+      return {workId: indexedWork.id, editionId: surviving.id, created: false};
     }
     if (!workSnapshot.exists) {
       throw new functions.https.HttpsError("not-found", "Book not found.");
@@ -1265,9 +1315,11 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
     incomplete,
     omittedAttempts,
   );
-  const editions = editionSnapshot.docs.map((snapshot) =>
-    editionSummary(snapshot.id, storedEdition(snapshot), resolved.id),
-  );
+  // Merged aliases are not editions a reader can stand on.
+  const editions = editionSnapshot.docs
+    .map((snapshot) => ({id: snapshot.id, edition: storedEdition(snapshot)}))
+    .filter(({edition}) => edition.status !== "merged")
+    .map(({id, edition}) => editionSummary(id, edition, resolved.id));
   return {
     response: {
       work: await workSummary(resolved),

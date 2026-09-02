@@ -285,7 +285,9 @@ for (const editionDoc of editions.docs) {
   // add-book flow, an admin link, the edition backfill), the operator for a
   // console creation, or the reader whose book first stood on a
   // catalog-build edition (backfilled 2026-09-02).
-  const allowedEditionFields = new Set(requiredEditionFields);
+  // A merged edition is an alias: status "merged" and mergedInto name the
+  // survivor of the same work, which lists it in mergedFrom.
+  const allowedEditionFields = new Set([...requiredEditionFields, 'status', 'mergedInto', 'mergedFrom']);
   for (const field of Object.keys(edition)) {
     if (!allowedEditionFields.has(field)) found('catalog.edition.unexpected-field', path, field);
   }
@@ -316,6 +318,29 @@ for (const editionDoc of editions.docs) {
   }
   if (!(edition.createdAt instanceof Timestamp) || !(edition.updatedAt instanceof Timestamp)) {
     found('catalog.edition.bad-timestamps', path);
+  }
+  if (edition.status !== undefined && edition.status !== 'active' && edition.status !== 'merged') {
+    found('catalog.edition.bad-status', path, String(edition.status));
+  }
+  if (edition.status === 'merged') {
+    const survivor = typeof edition.mergedInto === 'string' ? editionsById.get(edition.mergedInto) : undefined;
+    if (survivor === undefined) found('catalog.edition.broken-redirect', path, String(edition.mergedInto));
+    else if (survivor.status === 'merged') found('catalog.edition.redirect-not-one-hop', path, String(edition.mergedInto));
+    else if (survivor.workId !== edition.workId) found('catalog.edition.redirect-work-mismatch', path, `${String(edition.mergedInto)} in ${String(survivor.workId)}`);
+  } else if (edition.mergedInto !== undefined) {
+    found('catalog.edition.redirect-without-merge', path, String(edition.mergedInto));
+  }
+  if (edition.mergedFrom !== undefined) {
+    if (!Array.isArray(edition.mergedFrom) || edition.mergedFrom.some((id) => typeof id !== 'string')) {
+      found('catalog.edition.bad-merged-from', path, JSON.stringify(edition.mergedFrom));
+    } else {
+      for (const id of edition.mergedFrom) {
+        const alias = editionsById.get(id);
+        if (alias === undefined || alias.status !== 'merged' || alias.mergedInto !== editionDoc.id) {
+          found('catalog.edition.merged-from-mismatch', path, id);
+        }
+      }
+    }
   }
   if (typeof edition.workId !== 'string') {
     found('catalog.edition.bad-work-id', path, String(edition.workId));

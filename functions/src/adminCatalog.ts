@@ -223,6 +223,7 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
     "workId", "isbn13", "title", "publisher",
     "publishedDate", "language", "translatorNames", "format",
     "suggestedPageCount", "coverUrl", "externalIds", "createdBy", "createdAt", "updatedAt",
+    "status", "mergedInto", "mergedFrom",
   ]);
   return {
     ...edition,
@@ -299,6 +300,9 @@ function editionInputData(
     ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    ...(existing?.status === undefined ? {} : {status: existing.status}),
+    ...(existing?.mergedInto === undefined ? {} : {mergedInto: existing.mergedInto}),
+    ...(existing?.mergedFrom === undefined ? {} : {mergedFrom: existing.mergedFrom}),
   };
 }
 
@@ -348,6 +352,9 @@ function wireEdition(edition: EditionData): Record<string, unknown> {
     suggestedPageCount: edition.suggestedPageCount,
     coverUrl: edition.coverUrl,
     externalIds: edition.externalIds,
+    status: edition.status ?? "active",
+    mergedInto: edition.mergedInto ?? null,
+    mergedFrom: edition.mergedFrom ?? [],
     updatedAt: edition.updatedAt.toMillis(),
   };
 }
@@ -538,6 +545,55 @@ async function unmergedWork(
   return {snapshot, work};
 }
 
+async function activeEdition(
+  reader: PlanReader,
+  db: Firestore,
+  editionId: string,
+): Promise<{snapshot: DocumentSnapshot; edition: EditionData}> {
+  const snapshot = await one(reader, db.collection("editions").doc(editionId));
+  const edition = editionFrom(snapshot);
+  if (edition.status === "merged") {
+    failedPrecondition("Operation target must not be a merged edition.", "catalog-invariant");
+  }
+  return {snapshot, edition};
+}
+
+// The metadata a book moved between editions inherits: only fields its
+// reader left blank, from the surviving edition (ISBN, cover, publisher,
+// publication date) and the work (cover fallback, fiction, subjects). The
+// page count and title are the reader's own and are never touched.
+function inheritedBookMetadata(
+  snapshot: DocumentSnapshot,
+  edition: EditionData,
+  work: WorkData,
+): {before: Record<string, unknown>; after: Record<string, unknown>} {
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  const fillText = (field: string, value: string): void => {
+    const current = snapshot.get(field);
+    if (value !== "" && (current === undefined || current === null || current === "")) {
+      before[field] = current ?? null;
+      after[field] = value;
+    }
+  };
+  fillText("isbn", edition.isbn13 ?? "");
+  fillText("coverUrl", edition.coverUrl !== "" ? edition.coverUrl : work.coverUrl);
+  fillText("publisher", edition.publisher);
+  fillText("publishedDate", edition.publishedDate);
+  const fiction = snapshot.get("fiction");
+  if ((fiction === undefined || fiction === null) && work.fiction !== null) {
+    before.fiction = null;
+    after.fiction = work.fiction;
+  }
+  const subjects = snapshot.get("subjects");
+  if ((subjects === undefined || (Array.isArray(subjects) && subjects.length === 0)) &&
+      work.subjects.length > 0) {
+    before.subjects = subjects ?? [];
+    after.subjects = work.subjects;
+  }
+  return {before, after};
+}
+
 async function activeAuthor(
   reader: PlanReader,
   db: Firestore,
@@ -723,8 +779,23 @@ async function mintedEditionFor(
   const existing = await one(reader, ref);
   const versions = [versionOf("edition", existing)];
   if (existing.exists) {
-    if (editionFrom(existing).workId !== workId) {
+    const minted = editionFrom(existing);
+    if (minted.workId !== workId) {
       failedPrecondition("The book's minted edition belongs to another work.", "catalog-invariant");
+    }
+    // A minted edition an operator merged since answers with its survivor.
+    if (minted.status === "merged") {
+      if (minted.mergedInto === undefined) {
+        catalogInvariant(`Broken catalog redirect at ${existing.ref.path}.`);
+      }
+      const survivor = await activeEdition(reader, db, minted.mergedInto);
+      versions.push(versionOf("edition", survivor.snapshot));
+      if (survivor.edition.workId !== workId) {
+        failedPrecondition("The book's minted edition was merged into another work.", "catalog-invariant");
+      }
+      return {
+        editionId: minted.mergedInto, versions, changes: [], createdEdition: false, createdIsbn: false,
+      };
     }
     return {editionId, versions, changes: [], createdEdition: false, createdIsbn: false};
   }
@@ -801,11 +872,7 @@ async function linkChanges(
   if (target !== null && validateTarget) {
     const resolved = await unmergedWork(reader, db, target.workId);
     if (target.editionId !== null) {
-      const editionSnapshot = await one(
-        reader,
-        db.collection("editions").doc(target.editionId),
-      );
-      const edition = editionFrom(editionSnapshot);
+      const {edition} = await activeEdition(reader, db, target.editionId);
       if (edition.workId !== resolved.snapshot.id) {
         failedPrecondition("Edition belongs to another work.", "catalog-invariant");
       }
@@ -1212,6 +1279,95 @@ async function planOperation(
     );
     changes.push(...targetIndexes.changes);
     catalog.push(...targetIndexes.versions);
+  } else if (operation.type === "mergeEditions") {
+    // Editions merge like works: the sources become aliases that keep their
+    // identifiers and index rows, and the survivor lists them. Unlike a work
+    // merge this rewrites personal books — the owner's reading (2026-09-02)
+    // is that two records of one edition should read as one for every
+    // reader — but only the books on the sources, at most a page of them,
+    // in live accounts; a book in a frozen account stays on its alias and
+    // resolves one hop at read time. A moved book keeps its link time and
+    // inherits only the metadata its reader left blank.
+    const work = await unmergedWork(reader, db, operation.workId);
+    catalog.push(versionOf("work", work.snapshot));
+    const target = await activeEdition(reader, db, operation.targetEditionId);
+    catalog.push(versionOf("edition", target.snapshot));
+    if (target.edition.workId !== work.snapshot.id) {
+      failedPrecondition("Target edition belongs to another work.", "catalog-invariant");
+    }
+    const sources = await Promise.all(operation.sourceEditionIds.map((id) =>
+      activeEdition(reader, db, id),
+    ));
+    for (const source of sources) {
+      catalog.push(versionOf("edition", source.snapshot));
+      if (source.edition.workId !== work.snapshot.id) {
+        failedPrecondition("Source edition belongs to another work.", "catalog-invariant");
+      }
+    }
+    const absorbed = [...new Set(sources.flatMap(({snapshot, edition}) =>
+      [snapshot.id, ...(edition.mergedFrom ?? [])],
+    ))];
+    const mergedFrom = [...new Set([...(target.edition.mergedFrom ?? []), ...absorbed])];
+    if (mergedFrom.length > 29 || mergedFrom.includes(target.snapshot.id)) {
+      failedPrecondition("A canonical edition may have at most 29 aliases.", "catalog-invariant");
+    }
+    const aliases = await Promise.all(absorbed.map((id) =>
+      one(reader, db.collection("editions").doc(id)),
+    ));
+    catalog.push(...aliases.map((snapshot) => versionOf("edition", snapshot)));
+    for (const alias of aliases) {
+      const old = editionFrom(alias);
+      const next: EditionData = {
+        ...old, status: "merged", mergedInto: target.snapshot.id, mergedFrom: [], updatedAt: now,
+      };
+      changes.push(change(
+        "edition", alias.ref, "update", wireEdition(old), wireEdition(next),
+        {type: "set", data: {...next}},
+      ));
+    }
+    const nextTarget: EditionData = {...target.edition, mergedFrom, updatedAt: now};
+    changes.push(change(
+      "edition", target.snapshot.ref, "update",
+      wireEdition(target.edition), wireEdition(nextTarget),
+      {type: "set", data: {...nextTarget}},
+    ));
+    const linked = await many(reader, db.collectionGroup("books")
+      .where("editionId", "in", absorbed).limit(MAX_LINKED_EDITION_BOOKS + 1));
+    if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
+    const owners = new Map<string, DocumentSnapshot>();
+    const moved: AdminCatalogExpected["books"] = [];
+    for (const snapshot of linked.docs) {
+      const path = snapshot.ref.path.split("/");
+      const owner = snapshot.get("owner") as {path?: unknown} | undefined;
+      if (path.length !== 4 || path[0] !== "users" || path[2] !== "books" ||
+          owner?.path !== `users/${path[1]}`) {
+        failedPrecondition("Personal book owner is missing or forged.", "catalog-invariant");
+      }
+      const uid = path[1];
+      if (!owners.has(uid)) owners.set(uid, await one(reader, db.collection("users").doc(uid)));
+      const account = owners.get(uid)!;
+      if (!account.exists || account.get("deletedAt") !== undefined) continue;
+      const before = linkFrom(snapshot);
+      const inherited = inheritedBookMetadata(snapshot, target.edition, work.work);
+      const after: LinkState = {
+        ...before,
+        workId: work.snapshot.id,
+        editionId: target.snapshot.id,
+        matchMethod: "admin",
+      };
+      moved.push(bookVersion(snapshot, {uid, bookId: path[3]}));
+      changes.push(change(
+        "book", snapshot.ref, "update",
+        {...before, ...inherited.before}, {...after, ...inherited.after},
+        {type: "set", data: {
+          workId: after.workId,
+          editionId: after.editionId,
+          matchMethod: after.matchMethod,
+          ...inherited.after,
+        }},
+      ));
+    }
+    books = moved;
   } else if (operation.type === "upsertEdition") {
     const work = await unmergedWork(reader, db, operation.workId);
     catalog.push(versionOf("work", work.snapshot));
@@ -1219,6 +1375,9 @@ async function planOperation(
     const snapshot = await one(reader, ref);
     catalog.push(versionOf("edition", snapshot));
     const old = snapshot.exists ? editionFrom(snapshot) : undefined;
+    if (old?.status === "merged") {
+      failedPrecondition("Merged editions cannot be edited.", "catalog-invariant");
+    }
     if (old === undefined) {
       await ensureCollectionCapacity(
         reader, db.collection("editions"), MAX_EDITIONS, 1, "editions",
@@ -1310,6 +1469,9 @@ async function planOperation(
     );
     const target = editionFrom(targetSnapshot);
     catalog.push(versionOf("edition", targetSnapshot));
+    if (target.status === "merged") {
+      failedPrecondition("Operation target must not be a merged edition.", "catalog-invariant");
+    }
     const isbnRef = db.collection("isbnIndex").doc(operation.isbn13);
     const isbn = await one(reader, isbnRef);
     catalog.push(versionOf("isbn", isbn));

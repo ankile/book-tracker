@@ -72,6 +72,7 @@ export type OperationDraft =
   | {type: 'mergeAuthors'; sourceAuthorId: string; targetAuthorId: string}
   | {type: 'linkBooks'; bookTargets: string; targetWorkId: string; targetEditionId: string}
   | {type: 'mergeWorks'; sourceWorkIds: string; targetWorkId: string}
+  | {type: 'mergeEditions'; workId: string; sourceEditionIds: string; targetEditionId: string}
   | ({type: 'upsertEdition'} & EditionDraftFields)
   | {type: 'repointIsbn'; isbn: string; editionId: string};
 
@@ -164,6 +165,16 @@ export function mergeWorksDraft(
   return {type: 'mergeWorks', sourceWorkIds: lines(sourceWorkIds), targetWorkId};
 }
 
+// Two records of one edition of a work: the sources become aliases of the
+// target and their readers' books move to it.
+export function mergeEditionsDraft(
+  workId: string,
+  sourceEditionIds: readonly string[],
+  targetEditionId = '',
+): OperationDraft {
+  return {type: 'mergeEditions', workId, sourceEditionIds: lines(sourceEditionIds), targetEditionId};
+}
+
 // A duplicate set merges into its oldest member: the one most books
 // already point at. Null when there is nothing to merge.
 export function mergeIntoOldestDraft(works: readonly AdminCatalogWorkRow[]): OperationDraft | null {
@@ -223,6 +234,7 @@ export function operationTitle(draft: OperationDraft): string {
     case 'mergeAuthors': return 'Merge authors';
     case 'linkBooks': return 'Link or unlink books';
     case 'mergeWorks': return 'Merge works';
+    case 'mergeEditions': return 'Merge editions';
     case 'upsertEdition': return 'Create or edit edition';
     case 'repointIsbn': return 'Repoint ISBN';
   }
@@ -344,6 +356,21 @@ export function buildOperation(draft: OperationDraft): AdminCatalogOperation {
         type: 'mergeWorks',
         sourceWorkIds,
         targetWorkId: requireId(draft.targetWorkId, 'Target work ID'),
+      };
+    }
+    case 'mergeEditions': {
+      const sourceEditionIds = parseAdminStringList(draft.sourceEditionIds)
+        .map((id) => requireId(id, 'Source edition ID'));
+      if (sourceEditionIds.length === 0) throw new TypeError('Enter at least one source edition ID.');
+      const targetEditionId = requireId(draft.targetEditionId, 'Surviving edition ID');
+      if (sourceEditionIds.includes(targetEditionId)) {
+        throw new TypeError('The surviving edition cannot also be a source.');
+      }
+      return {
+        type: 'mergeEditions',
+        workId: requireId(draft.workId, 'Work ID'),
+        sourceEditionIds,
+        targetEditionId,
       };
     }
     case 'upsertEdition':

@@ -218,6 +218,12 @@ export type AdminCatalogOperation =
     targetWorkId: string;
   }
   | {
+    type: 'mergeEditions';
+    workId: string;
+    sourceEditionIds: string[];
+    targetEditionId: string;
+  }
+  | {
     type: 'editWork';
     workId: string;
     status: 'active' | 'hidden';

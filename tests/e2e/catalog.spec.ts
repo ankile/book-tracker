@@ -594,6 +594,33 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await expect(page.getByRole('row').filter({hasText: 'Left Hand of Darkness edition'})).toHaveCount(0);
       await expect(page.getByRole('cell', {name: normalEmail})).toBeVisible();
 
+      // Two records of one edition merge: the reader's bare minted edition
+      // becomes an alias of the seeded one, the reader's book moves to the
+      // survivor and inherits the ISBN, cover and publisher it left blank,
+      // while its own page count stays.
+      await page.getByRole('row').filter({hasText: normalEmail}).getByRole('button', {name: 'Merge into…', exact: true}).click();
+      const mergeDialog = page.getByRole('dialog', {name: 'Merge editions'});
+      await expect(mergeDialog).toBeVisible();
+      await mergeDialog.getByLabel('Surviving edition').selectOption(editionId);
+      await mergeDialog.getByRole('button', {name: 'Preview without applying'}).click();
+      await expect(mergeDialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
+      await expect(mergeDialog.getByText(`"isbn": "${isbn}"`)).toBeVisible();
+      page.once('dialog', (confirmation) => confirmation.accept());
+      await mergeDialog.getByRole('button', {name: 'Apply these exact changes'}).click();
+      await expect(page.getByText(/Applied .* documents changed/)).toBeVisible();
+      await expect(mergeDialog).toBeHidden();
+      await expect(page.getByRole('heading', {name: 'Absorbed editions'})).toBeVisible();
+      await expect(page.getByRole('row').filter({hasText: normalEmail})).toHaveCount(0);
+      const mergedBook = await waitForBookByTitle(db, normalUid, 'Left Hand of Darkness');
+      expect(mergedBook.get('editionId')).toBe(editionId);
+      expect(mergedBook.get('matchMethod')).toBe('admin');
+      expect(mergedBook.get('isbn')).toBe(isbn);
+      // The add-book flow had already given the book the work's cover, and a
+      // value the reader has is never replaced; the blank publisher fills.
+      expect(mergedBook.get('coverUrl')).toBe('https://example.test/work-cover.jpg');
+      expect(mergedBook.get('publisher')).toBe('Ace');
+      expect(mergedBook.get('pageCount')).toBe(320);
+
       // Every operation that starts from this work opens as its own dialog;
       // the per-edition buttons appear once per edition, so the first is used.
       for (const [button, title] of [

@@ -405,3 +405,36 @@ test('review marks and activity: a reviewed record moves when something lands on
     ['catalogAuthors/bad-review.reviewedAt must be a timestamp.'],
   );
 });
+
+test('a merged edition is an alias: counted for no work, redirecting one hop, or reported when broken', () => {
+  const scan = scanCatalog(input({
+    works: [workDocument('pair', 'Pair Work'), workDocument('other', 'Other Work')],
+    editions: [
+      editionDocument('survivor', 'pair', { mergedFrom: ['alias', 'chained'] }),
+      editionDocument('alias', 'pair', { status: 'merged', mergedInto: 'survivor' }),
+      editionDocument('chained', 'pair', { status: 'merged', mergedInto: 'alias' }),
+      editionDocument('astray', 'pair', { status: 'merged', mergedInto: 'elsewhere' }),
+      editionDocument('elsewhere', 'other'),
+      editionDocument('bad-status', 'pair', { status: 'gone' }),
+    ],
+    books: [
+      bookDocument('on-alias', { workId: 'pair', editionId: 'alias', matchMethod: 'admin', linkedAt: now }),
+    ],
+  }));
+  assert.equal(scan.works.find(({ workId }) => workId === 'pair')?.editionCount, 1);
+  assert.equal(scan.works.find(({ workId }) => workId === 'other')?.editionCount, 1);
+  const rows = new Map(scan.editions.map(({ editionId, status, mergedInto, mergedFrom }) => [editionId, [status, mergedInto, mergedFrom]]));
+  assert.deepEqual(rows.get('survivor'), ['active', null, ['alias', 'chained']]);
+  assert.deepEqual(rows.get('alias'), ['merged', 'survivor', []]);
+  assert.equal(rows.has('bad-status'), false);
+  // A book on an alias is a linked book of the same work, not an anomaly.
+  assert.equal(scan.books.find(({ bookId }) => bookId === 'on-alias')?.anomaly, null);
+  assert.deepEqual(
+    scan.findings.filter(({ code }) => code === 'edition-invariant').map(({ message, editionIds }) => [message, editionIds]).sort(),
+    [['broken redirect', ['astray']], ['broken redirect', ['chained']]],
+  );
+  assert.deepEqual(
+    scan.findings.filter(({ code }) => code === 'catalog-row-anomaly').map(({ message }) => message),
+    ['Invalid edition redirect fields at editions/bad-status.'],
+  );
+});

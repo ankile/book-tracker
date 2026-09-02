@@ -32,6 +32,7 @@ import {
   hideWorkDraft,
   linkBooksDraft,
   mergeAuthorsDraft,
+  mergeEditionsDraft,
   mergeIntoOldestDraft,
   mergeWorksDraft,
   operationTitle,
@@ -314,4 +315,15 @@ test('paginate windows the rows, clamps the page, and reports positions', () => 
   assert.equal(paginate(rows, 9, 50).page, 3);
   assert.equal(paginate(rows, 0, 50).page, 1);
   assert.deepEqual(paginate([], 4, 50), {rows: [], page: 1, pages: 1, total: 0, from: 0, to: 0});
+});
+
+test('an edition merge names the work, its sources and one survivor that is not a source', () => {
+  const draft = mergeEditionsDraft('work-a', ['edition-b', 'edition-c']);
+  assert.equal(operationTitle(draft), 'Merge editions');
+  assert.throws(() => buildOperation(draft), /Surviving edition ID/);
+  assert.deepEqual(buildOperation({...draft, targetEditionId: 'edition-a'}), {
+    type: 'mergeEditions', workId: 'work-a', sourceEditionIds: ['edition-b', 'edition-c'], targetEditionId: 'edition-a',
+  });
+  assert.throws(() => buildOperation({...draft, targetEditionId: 'edition-b'}), /cannot also be a source/);
+  assert.throws(() => buildOperation(mergeEditionsDraft('work-a', [], 'edition-a')), /at least one source edition ID/);
 });

@@ -815,6 +815,18 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   const rows = new Map<string, Row>([
     ["catalogAuthors/ada", activeAuthor("Ada Lovelace")],
     ["isbnIndex/9780000000002", {workId: "old-work", editionId: "old-edition"}],
+    // The indexed edition was merged since: the index still names it, the
+    // answer is its survivor.
+    ["editions/old-edition", {
+      workId: "canonical-work", isbn13: "9780000000002", title: "Old", publisher: "", publishedDate: "",
+      language: "", translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "",
+      externalIds: {}, status: "merged", mergedInto: "surviving-edition",
+    }],
+    ["editions/surviving-edition", {
+      workId: "canonical-work", isbn13: null, title: "Surviving", publisher: "", publishedDate: "",
+      language: "", translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "",
+      externalIds: {}, mergedFrom: ["old-edition"],
+    }],
     ["works/old-work", {
       canonicalTitle: "Old", alternateTitles: [], titleKeys: ["old"], authorIds: ["ada"],
       coverUrl: "", subjects: [], fiction: null, status: "merged",
@@ -878,13 +890,13 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   assert.equal(created.some(({path, data}) => path.startsWith("workTitleIndex/") &&
     data.workId === result.workId && data.titleKey === "new book"), true);
 
-  // An ISBN the catalog already has resolves to the canonical work — one
-  // merge hop followed — and creates nothing.
+  // An ISBN the catalog already has resolves to the canonical work and the
+  // surviving edition — one merge hop followed on each — and creates nothing.
   created.length = 0;
   const existing = await deployed.catalog.create.run({
     work, edition: {...edition, isbn13: "9780000000002"},
   }, authContext);
-  assert.deepEqual(existing, {workId: "canonical-work", editionId: "old-edition", created: false});
+  assert.deepEqual(existing, {workId: "canonical-work", editionId: "surviving-edition", created: false});
   assert.deepEqual(created, []);
 
   // A client that loaded its author list before an admin merge still
@@ -1341,6 +1353,16 @@ test("users add an edition to an existing work and resolve an indexed identifier
     ["works/old-sheep", workRow("Sheep", {status: "merged", mergedInto: "sheep"})],
     ["works/hidden", workRow("Hidden", {status: "hidden"})],
     ["isbnIndex/9780000000002", {workId: "sheep", editionId: "seeded"}],
+    ["editions/seeded", {
+      workId: "sheep", isbn13: "9780000000002", title: "Seeded", publisher: "", publishedDate: "",
+      language: "", translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "",
+      externalIds: {}, status: "merged", mergedInto: "seeded-survivor",
+    }],
+    ["editions/seeded-survivor", {
+      workId: "sheep", isbn13: null, title: "Survivor", publisher: "", publishedDate: "",
+      language: "", translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "",
+      externalIds: {}, mergedFrom: ["seeded"],
+    }],
   ]);
   const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
   const snap = (reference: Ref) => ({
@@ -1397,7 +1419,7 @@ test("users add an edition to an existing work and resolve an indexed identifier
   created.length = 0;
   assert.deepEqual(await deployed.catalog.addedition.run({
     workId: "sheep", edition: {...edition, isbn13: "9780000000002"},
-  }, authContext), {workId: "sheep", editionId: "seeded", created: false});
+  }, authContext), {workId: "sheep", editionId: "seeded-survivor", created: false});
   assert.deepEqual(created, []);
 
   // A hidden or missing work is not found, and nothing is written.

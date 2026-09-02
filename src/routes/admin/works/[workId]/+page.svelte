@@ -21,6 +21,7 @@
     reviewLabel,
     reviewStatus,
     linkBooksDraft,
+    mergeEditionsDraft,
     mergeIntoOldestDraft,
     mergeWorksDraft,
     repointIsbnDraft,
@@ -51,8 +52,10 @@
     id,
     name: names.get(id) ?? null,
   })));
-  const editions = $derived((scan?.editions ?? []).filter((edition) => edition.workId === workId));
-  const editionById = $derived(new Map(editions.map((edition) => [edition.editionId, edition])));
+  const allEditions = $derived((scan?.editions ?? []).filter((edition) => edition.workId === workId));
+  const editions = $derived(allEditions.filter((edition) => edition.status === 'active'));
+  const absorbedEditions = $derived(allEditions.filter((edition) => edition.status === 'merged'));
+  const editionById = $derived(new Map(allEditions.map((edition) => [edition.editionId, edition])));
   const books = $derived(booksByWork(scan ?? {works: [], books: []}).get(workId) ?? []);
   const duplicates = $derived(duplicateFindingsFor(scan ?? {findings: []}, workId));
 
@@ -153,6 +156,7 @@
                   <td>
                     <div class="actions">
                       <button type="button" onclick={() => (draft = editEditionDraft(edition))}>Edit edition…</button>
+                      {#if editions.length > 1}<button type="button" onclick={() => (draft = mergeEditionsDraft(work.workId, [edition.editionId]))}>Merge into…</button>{/if}
                       {#if edition.isbn13 !== null}<button type="button" onclick={() => (draft = repointIsbnDraft(edition.isbn13 ?? '', ''))}>Repoint ISBN…</button>{/if}
                     </div>
                   </td>
@@ -161,6 +165,15 @@
             </tbody>
           </table>
         </div>
+      {/if}
+      {#if absorbedEditions.length > 0}
+        <h3>Absorbed editions</h3>
+        <p>Aliases of the editions above: they keep their identifiers, and a lookup that lands on one answers with its survivor.</p>
+        <ul>
+          {#each absorbedEditions as alias (alias.editionId)}
+            <li><strong>{alias.title}</strong>{alias.isbn13 ? ` · ${alias.isbn13}` : ''} · <code>{alias.editionId}</code> → {editionById.get(alias.mergedInto ?? '')?.title ?? alias.mergedInto ?? '?'}</li>
+          {/each}
+        </ul>
       {/if}
     </section>
 
@@ -183,7 +196,7 @@
                   <td><code>{book.uid}</code><small>{book.bookId}</small></td>
                   <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td>
                   <td>{book.pageCount ?? '—'}</td>
-                  <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}</td>
+                  <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}{editionById.get(book.editionId ?? '')?.status === 'merged' ? ' · merged alias' : ''}</td>
                   <td>{book.anomaly ?? '—'}</td>
                   <td>
                     <div class="actions">

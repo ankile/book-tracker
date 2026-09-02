@@ -1044,3 +1044,111 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
   );
   assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
 });
+
+test("merging editions aliases the sources, moves their readers' books to the survivor and fills what they left blank", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {
+    coverUrl: "https://covers.test/work.jpg", subjects: ["Romaner"], fiction: true,
+  }));
+  store.write(store.ref("editions/full"), edition("sult", {
+    isbn13: "9788205394810", publisher: "Gyldendal", publishedDate: "2009",
+    coverUrl: "https://covers.test/full.jpg",
+  }));
+  store.write(store.ref("editions/bare"), edition("sult", {createdBy: "magnus", mergedFrom: ["older-alias"]}));
+  store.write(store.ref("editions/older-alias"), edition("sult", {status: "merged", mergedInto: "bare"}));
+  store.write(store.ref("isbnIndex/9788205394810"), {workId: "sult", editionId: "full"});
+  store.write(store.ref("users/magnus"), {uid: "magnus"});
+  store.write(store.ref("users/ghost"), {uid: "ghost", deletedAt: now});
+  store.write(store.ref("users/magnus/books/sult"), {
+    owner: store.ref("users/magnus"), title: "Sult", pageCount: 198, isbn: "", coverUrl: "",
+    publisher: "", publishedDate: "", fiction: null, subjects: [],
+    workId: "sult", editionId: "bare", matchMethod: "migration", linkedAt: Timestamp.fromMillis(500),
+  });
+  store.write(store.ref("users/magnus/books/own-cover"), {
+    owner: store.ref("users/magnus"), title: "Sult", pageCount: 200, isbn: "",
+    coverUrl: "https://covers.test/mine.jpg", publisher: "Own Press", fiction: false, subjects: ["Mine"],
+    workId: "sult", editionId: "older-alias", matchMethod: "admin", linkedAt: Timestamp.fromMillis(600),
+  });
+  store.write(store.ref("users/ghost/books/frozen"), {
+    owner: store.ref("users/ghost"), title: "Sult", pageCount: 198, isbn: "",
+    workId: "sult", editionId: "bare", matchMethod: "migration", linkedAt: Timestamp.fromMillis(700),
+  });
+  const operation = {
+    type: "mergeEditions", workId: "sult", sourceEditionIds: ["bare"], targetEditionId: "full",
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  // The preview names the inherited fields beside the link change.
+  const bookChange = preview.changes.find(({kind, after}) => kind === "book" && after?.isbn === "9788205394810");
+  assert.deepEqual(bookChange?.after, {
+    workId: "sult", editionId: "full", matchMethod: "admin", linkedAt: 500,
+    isbn: "9788205394810", coverUrl: "https://covers.test/full.jpg", publisher: "Gyldendal",
+    publishedDate: "2009", fiction: true, subjects: ["Romaner"],
+  });
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+
+  // The sources, chained aliases included, redirect to the survivor, which lists them.
+  assert.equal(store.rows.get("editions/bare")?.status, "merged");
+  assert.equal(store.rows.get("editions/bare")?.mergedInto, "full");
+  assert.equal(store.rows.get("editions/bare")?.createdBy, "magnus");
+  assert.equal(store.rows.get("editions/older-alias")?.mergedInto, "full");
+  assert.deepEqual(store.rows.get("editions/full")?.mergedFrom, ["bare", "older-alias"]);
+  assert.equal(store.rows.get("editions/full")?.status, undefined);
+  assert.deepEqual(store.rows.get("isbnIndex/9788205394810"), {workId: "sult", editionId: "full"});
+
+  // Magnus's bare book stands on the survivor and inherits what it lacked;
+  // its title, page count and link time are its own.
+  const moved = store.rows.get("users/magnus/books/sult");
+  assert.equal(moved?.editionId, "full");
+  assert.equal(moved?.matchMethod, "admin");
+  assert.equal((moved?.linkedAt as {toMillis(): number}).toMillis(), 500);
+  assert.equal(moved?.isbn, "9788205394810");
+  assert.equal(moved?.coverUrl, "https://covers.test/full.jpg");
+  assert.equal(moved?.publisher, "Gyldendal");
+  assert.equal(moved?.publishedDate, "2009");
+  assert.equal(moved?.fiction, true);
+  assert.deepEqual(moved?.subjects, ["Romaner"]);
+  assert.equal(moved?.pageCount, 198);
+  assert.equal(moved?.title, "Sult");
+  // A reader's own values are never replaced; only blanks fill.
+  const kept = store.rows.get("users/magnus/books/own-cover");
+  assert.equal(kept?.editionId, "full");
+  assert.equal(kept?.coverUrl, "https://covers.test/mine.jpg");
+  assert.equal(kept?.publisher, "Own Press");
+  assert.equal(kept?.fiction, false);
+  assert.deepEqual(kept?.subjects, ["Mine"]);
+  assert.equal(kept?.isbn, "9788205394810");
+  assert.equal(kept?.publishedDate, "2009");
+  // A frozen account's book stays on its alias.
+  assert.equal(store.rows.get("users/ghost/books/frozen")?.editionId, "bare");
+  assert.equal(store.rows.get("users/ghost/books/frozen")?.isbn, "");
+
+  // Aliases are neither targets nor editable nor mergeable again.
+  for (const refused of [
+    {type: "mergeEditions", workId: "sult", sourceEditionIds: ["full"], targetEditionId: "bare"},
+    {type: "mergeEditions", workId: "sult", sourceEditionIds: ["bare"], targetEditionId: "full"},
+    {type: "linkBooks", books: [{uid: "magnus", bookId: "sult"}], target: {workId: "sult", editionId: "bare"}},
+    {type: "upsertEdition", editionId: "bare", workId: "sult", edition: {
+      isbn13: null, title: "Renamed", publisher: "", publishedDate: "", language: "en",
+      translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+    }},
+    {type: "repointIsbn", isbn13: "9788205394810", editionId: "bare"},
+  ]) {
+    await assert.rejects(
+      deployed.admin.catalogpreview.run({operation: refused}, recentAdmin()),
+      (error: {details?: {reason?: string}}) => error.details?.reason === "catalog-invariant",
+      JSON.stringify(refused),
+    );
+  }
+  // Editions of another work do not merge across it.
+  store.write(store.ref("works/other"), activeWork("Other"));
+  store.write(store.ref("editions/elsewhere"), edition("other"));
+  await assert.rejects(
+    deployed.admin.catalogpreview.run({operation: {
+      type: "mergeEditions", workId: "sult", sourceEditionIds: ["elsewhere"], targetEditionId: "full",
+    }}, recentAdmin()),
+    (error: {details?: {reason?: string}}) => error.details?.reason === "catalog-invariant",
+  );
+});

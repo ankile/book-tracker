@@ -823,3 +823,19 @@ test("admin review requests take one kind, up to a page of distinct ids and a fl
     assert.throws(() => decoders.decodeAdminReviewRequest(request), `accepted ${JSON.stringify(request)}`);
   }
 });
+
+test("edition merges name the work, up to ten distinct sources and a survivor outside them", () => {
+  const operation = {type: "mergeEditions", workId: "w", sourceEditionIds: ["a", "b"], targetEditionId: "c"};
+  assert.deepEqual(decoders.decodeAdminCatalogPreviewRequest({operation}), {operation});
+  for (const bad of [
+    {...operation, sourceEditionIds: []},
+    {...operation, sourceEditionIds: ["a", "a"]},
+    {...operation, sourceEditionIds: ["c"]},
+    {...operation, sourceEditionIds: Array.from({length: 11}, (_, index) => `e${index}`)},
+    {...operation, targetEditionId: "x/y"},
+    {...operation, extra: true},
+    {type: "mergeEditions", sourceEditionIds: ["a"], targetEditionId: "c"},
+  ]) {
+    assert.throws(() => decoders.decodeAdminCatalogPreviewRequest({operation: bad}), JSON.stringify(bad));
+  }
+});

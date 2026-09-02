@@ -680,6 +680,12 @@ export type AdminCatalogOperation =
       targetWorkId: string;
     }
   | {
+      type: "mergeEditions";
+      workId: string;
+      sourceEditionIds: string[];
+      targetEditionId: string;
+    }
+  | {
       type: "editWork";
       workId: string;
       status: AdminWorkStatus;
@@ -837,6 +843,22 @@ export function decodeAdminCatalogOperation(
       fail("operation.sourceWorkIds must be unique, non-empty, and exclude the target.");
     }
     return {type, sourceWorkIds, targetWorkId};
+  }
+  if (type === "mergeEditions") {
+    exactKeys(decoded, ["type", "workId", "sourceEditionIds", "targetEditionId"], "operation", fail);
+    const workId = catalogDocumentId(decoded.workId, "operation.workId", fail);
+    const sourceEditionIds = boundedStringArray(
+      decoded.sourceEditionIds, "operation.sourceEditionIds", fail, 10, 100, 1000,
+    ).map((id, index) => catalogDocumentId(id, `operation.sourceEditionIds[${index}]`, fail));
+    const targetEditionId = catalogDocumentId(
+      decoded.targetEditionId, "operation.targetEditionId", fail,
+    );
+    if (sourceEditionIds.length === 0 ||
+        new Set(sourceEditionIds).size !== sourceEditionIds.length ||
+        sourceEditionIds.includes(targetEditionId)) {
+      fail("operation.sourceEditionIds must be unique, non-empty, and exclude the target.");
+    }
+    return {type, workId, sourceEditionIds, targetEditionId};
   }
   if (type === "editWork") {
     exactKeys(decoded, ["type", "workId", "status", "work"], "operation", fail);
