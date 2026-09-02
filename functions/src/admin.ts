@@ -6,14 +6,17 @@ import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime"
 import {
   AdminCatalogApplyRequest,
   AdminCatalogPreviewRequest,
+  AdminReviewRequest,
   DecodeFailure,
   decodeAdminCatalogApplyRequest,
   decodeAdminCatalogPreviewRequest,
+  decodeAdminReviewRequest,
   decodeEmptyCallableRequest,
 } from "./decoders";
 import {
   applyAdminCatalogOperation,
   previewAdminCatalogOperation,
+  reviewCatalogRecords,
 } from "./adminCatalog";
 import {logAppCheckPresence} from "./appCheck";
 import {
@@ -402,4 +405,13 @@ exports.catalogapply = adminCallable<AdminCatalogApplyRequest>(
   decodeAdminCatalogApplyRequest,
   async (request, identity) => applyAdminCatalogOperation(db, identity.uid, request),
   {recentAuth: true},
+);
+
+// A review mark is operator bookkeeping, not a catalog edit: no recent-auth
+// gate and no audit record, but the same App Check, operator and
+// whole-record validation as everything else here.
+exports.review = adminCallable<AdminReviewRequest>(
+  "admin.review",
+  decodeAdminReviewRequest,
+  async (request) => reviewCatalogRecords(db, request),
 );

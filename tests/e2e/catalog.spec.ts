@@ -486,17 +486,31 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await navigateInApp(page, '/admin');
       await expect(page.getByRole('heading', {name: 'Catalog', exact: true})).toBeVisible();
       await expect(page.getByText(/^Live · /)).toBeVisible();
-      await expect(page.getByRole('heading', {name: /New works from readers/})).toBeVisible();
-      await expect(page.getByRole('heading', {name: /Same book, split across records/})).toBeVisible();
-      await expect(page.getByRole('heading', {name: /^Authors/})).toBeVisible();
+      // One tab at a time; the tab, search, filters and page live in the
+      // URL, so the browser's back button steps through them.
+      const sections = page.getByRole('navigation', {name: 'Catalog sections'});
       await expect(page.getByRole('heading', {name: /^Works/})).toBeVisible();
+      await sections.getByRole('link', {name: /^Authors/}).click();
+      await expect(page).toHaveURL(/\/admin\?tab=authors$/);
+      await expect(page.getByRole('heading', {name: /^Authors/})).toBeVisible();
+      await sections.getByRole('link', {name: /^Unmatched books/}).click();
       await expect(page.getByRole('heading', {name: /Unmatched books/})).toBeVisible();
+      await sections.getByRole('link', {name: /^Findings/}).click();
+      await expect(page.getByRole('heading', {name: /Same book, split across records/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Review findings/})).toBeVisible();
+      await page.goBack();
+      await expect(page).toHaveURL(/tab=books$/);
+      await sections.getByRole('link', {name: /^Works/}).click();
+      await expect(page).toHaveURL(/\/admin$/);
 
-      // The work list filters as you type; a row opens the work's own page.
+      // The work list filters as you type and the search lands in the URL;
+      // a row opens the work's own page.
       await page.getByLabel('Filter works').fill('left hand darkness');
+      await expect(page).toHaveURL(/q=left\+hand\+darkness/);
       const row = page.getByRole('row').filter({hasText: workId});
       await expect(row).toHaveCount(1);
+      // The seeded work has never been reviewed, so it is in the queue.
+      await expect(row.getByText('needs review')).toBeVisible();
       await row.getByRole('link', {name: 'The Left Hand of Darkness'}).click();
       await expect(page).toHaveURL(new RegExp(`/admin/works/${workId}$`));
       await expect(page.getByRole('heading', {name: 'The Left Hand of Darkness'})).toBeVisible();
@@ -560,6 +574,20 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await expect(dialog.getByRole('alert')).toContainText('preview is stale');
       await dialog.getByRole('button', {name: 'Cancel'}).click();
       await expect(dialog).toBeHidden();
+
+      // A review mark lands at once and takes the work out of the queue;
+      // the queue is a filter in the URL, so it can be opened directly.
+      await page.getByRole('button', {name: 'Mark reviewed'}).click();
+      await expect(page.getByText(/^reviewed \d{4}-\d{2}-\d{2}$/)).toBeVisible();
+      await expect(page.getByRole('button', {name: 'Mark unreviewed'})).toBeVisible();
+      await navigateInApp(page, '/admin');
+      await page.getByRole('link', {name: /^Needs review/}).click();
+      await expect(page).toHaveURL(/review=needs$/);
+      await expect(page.getByRole('row').filter({hasText: workId})).toHaveCount(0);
+      await page.getByRole('link', {name: 'Reviewed', exact: true}).click();
+      await expect(page).toHaveURL(/review=done$/);
+      await expect(page.getByRole('row').filter({hasText: workId})).toHaveCount(1);
+      await navigateInApp(page, `/admin/works/${workId}`);
 
       // The edition the title-only save minted is listed with its reader's
       // email as creator, beside the seeded one.

@@ -288,3 +288,15 @@ export interface AdminCatalogApplyResponse {
   applied: true;
   touchedDocuments: number;
 }
+
+// admin.review: mark works or authors reviewed (or not). One console page
+// of ids per call.
+export interface AdminReviewRequest {
+  kind: 'work' | 'author';
+  ids: string[];
+  reviewed: boolean;
+}
+
+export interface AdminReviewResponse {
+  updated: number;
+}

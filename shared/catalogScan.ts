@@ -80,6 +80,12 @@ export interface AdminCatalogWorkRow {
   // for migration- or admin-created works.
   createdBy: string | null;
   createdAt: number;
+  // When the operator last marked the work reviewed; null until then.
+  reviewedAt: number | null;
+  // The latest of the work's creation, its editions' creation and its
+  // books' linking: activity after reviewedAt puts the work back in the
+  // review queue.
+  activityAt: number;
   editionCount: number;
   linkedBookCount: number;
   warnings: string[];
@@ -98,6 +104,11 @@ export interface AdminCatalogAuthorRow {
   // migration- or admin-created authors.
   createdBy: string | null;
   createdAt: number;
+  // When the operator last marked the author reviewed; null until then.
+  reviewedAt: number | null;
+  // The latest of the author's creation and the creation of any work
+  // naming it, directly or through a merged alias.
+  activityAt: number;
   workCount: number;
   warnings: string[];
 }
@@ -119,6 +130,7 @@ export interface AdminCatalogEditionRow {
   // flow, an admin link, or the backfill); null for migration- or
   // admin-created editions.
   createdBy: string | null;
+  createdAt: number;
 }
 
 export interface AdminCatalogBookTarget {
@@ -138,6 +150,9 @@ export interface AdminCatalogBookRow extends AdminCatalogBookTarget {
   coverUrl: string;
   workId: string | null;
   editionId: string | null;
+  // When the link was made; null for an unlinked book or a link that
+  // recorded no time.
+  linkedAt: number | null;
   anomaly: string | null;
 }
 
@@ -187,6 +202,7 @@ interface ScanWork {
   mergedFrom: string[];
   createdBy: string | null;
   createdAt: number;
+  reviewedAt: number | null;
   unsupportedFields: string[];
 }
 
@@ -201,6 +217,7 @@ interface ScanAuthor {
   mergedFrom: string[];
   createdBy: string | null;
   createdAt: number;
+  reviewedAt: number | null;
   unsupportedFields: string[];
 }
 
@@ -221,10 +238,11 @@ function isStringArray(value: unknown): value is string[] {
 const WORK_FIELDS = [
   'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds', 'coverUrl', 'subjects',
   'fiction', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt', 'updatedAt',
+  'reviewedAt',
 ];
 const AUTHOR_FIELDS = [
   'canonicalName', 'alternateNames', 'nameKeys', 'sortName', 'kind', 'status', 'mergedInto',
-  'mergedFrom', 'createdBy', 'createdAt', 'updatedAt',
+  'mergedFrom', 'createdBy', 'createdAt', 'updatedAt', 'reviewedAt',
 ];
 const EDITION_FIELDS = [
   'workId', 'isbn13', 'title', 'publisher', 'publishedDate', 'language', 'translatorNames',
@@ -253,6 +271,10 @@ function optionalRedirect(value: unknown, label: string): string | null {
   if (value === undefined) return null;
   if (typeof value !== 'string') rowError(`Invalid redirect at ${label}.`);
   return value;
+}
+
+function optionalMillis(value: unknown, label: string): number | null {
+  return value === undefined ? null : millis(value, label);
 }
 
 function optionalCreator(value: unknown, label: string): string | null {
@@ -288,6 +310,7 @@ function readWork({ id, data }: CatalogScanDocument): ScanWork {
     mergedFrom,
     createdBy: optionalCreator(data.createdBy, label),
     createdAt: millis(data.createdAt, `${label}.createdAt`),
+    reviewedAt: optionalMillis(data.reviewedAt, `${label}.reviewedAt`),
     unsupportedFields: unsupportedFields(data, WORK_FIELDS),
   };
 }
@@ -314,6 +337,7 @@ function readAuthor({ id, data }: CatalogScanDocument): ScanAuthor {
     mergedFrom,
     createdBy: optionalCreator(data.createdBy, label),
     createdAt: millis(data.createdAt, `${label}.createdAt`),
+    reviewedAt: optionalMillis(data.reviewedAt, `${label}.reviewedAt`),
     unsupportedFields: unsupportedFields(data, AUTHOR_FIELDS),
   };
 }
@@ -348,6 +372,7 @@ function readEdition({ id, data }: CatalogScanDocument): ScanEdition {
     coverUrl: data.coverUrl,
     externalIds: externalIds as Record<string, string>,
     createdBy: optionalCreator(data.createdBy, label),
+    createdAt: millis(data.createdAt, `${label}.createdAt`),
     unsupportedFields: unsupportedFields(data, EDITION_FIELDS),
   };
 }
@@ -371,6 +396,7 @@ function scanPageCount(data: Record<string, unknown>): number | null {
 interface LinkState {
   workId: string | null;
   editionId: string | null;
+  linkedAt: number | null;
 }
 
 // The same acceptance the apply path has for a stored link: null or absent
@@ -390,6 +416,7 @@ function linkFrom(data: Record<string, unknown>, label: string): LinkState {
   return {
     workId: (workId as string | null | undefined) ?? null,
     editionId: (editionId as string | null | undefined) ?? null,
+    linkedAt: linkedAt === undefined || linkedAt === null ? null : millis(linkedAt, `${label}.linkedAt`),
   };
 }
 
@@ -514,6 +541,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
         coverUrl: scanText(data, 'coverUrl', label),
         workId: link.workId,
         editionId: link.editionId,
+        linkedAt: link.linkedAt,
       };
     } catch (error) {
       if (!(error instanceof ScanRowError)) throw error;
@@ -803,6 +831,33 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
     });
   }
 
+  // Activity is what can put a reviewed record back in the queue: a work
+  // moves when it is created, gains an edition or has a book linked (an
+  // alias's edition or book counts for the survivor too); an author moves
+  // when it is created or a work names it, directly or through an alias.
+  const workActivity = new Map<string, number>();
+  const authorActivity = new Map<string, number>();
+  const bump = (activity: Map<string, number>, id: string, at: number | null): void => {
+    if (at !== null && at > (activity.get(id) ?? Number.NEGATIVE_INFINITY)) activity.set(id, at);
+  };
+  for (const [id, work] of workById) bump(workActivity, id, work.createdAt);
+  for (const edition of editionById.values()) {
+    bump(workActivity, edition.workId, edition.createdAt);
+    bump(workActivity, resolvedWorkId(edition.workId) ?? edition.workId, edition.createdAt);
+  }
+  for (const book of books) {
+    if (book.workId === null) continue;
+    bump(workActivity, book.workId, book.linkedAt);
+    bump(workActivity, resolvedWorkId(book.workId) ?? book.workId, book.linkedAt);
+  }
+  for (const [id, author] of catalogAuthorById) bump(authorActivity, id, author.createdAt);
+  for (const work of workById.values()) {
+    for (const authorId of work.authorIds) {
+      bump(authorActivity, authorId, work.createdAt);
+      bump(authorActivity, resolvedCatalogAuthorId(authorId) ?? authorId, work.createdAt);
+    }
+  }
+
   return {
     authors: [...catalogAuthorById].map(([authorId, author]) => ({
       authorId,
@@ -815,6 +870,8 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       mergedFrom: author.mergedFrom,
       createdBy: author.createdBy,
       createdAt: author.createdAt,
+      reviewedAt: author.reviewedAt,
+      activityAt: authorActivity.get(authorId) ?? author.createdAt,
       workCount: catalogAuthorWorkCounts.get(authorId) ?? 0,
       warnings: catalogAuthorWarnings.get(authorId) ?? [],
     })),
@@ -831,6 +888,8 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       mergedFrom: work.mergedFrom,
       createdBy: work.createdBy,
       createdAt: work.createdAt,
+      reviewedAt: work.reviewedAt,
+      activityAt: workActivity.get(workId) ?? work.createdAt,
       editionCount: editionCounts.get(workId) ?? 0,
       linkedBookCount: linkedCounts.get(workId) ?? 0,
       warnings: workWarnings.get(workId) ?? [],
@@ -849,6 +908,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       coverUrl: edition.coverUrl,
       externalIds: edition.externalIds,
       createdBy: edition.createdBy,
+      createdAt: edition.createdAt,
     })),
     books,
     findings,

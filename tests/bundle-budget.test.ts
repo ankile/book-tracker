@@ -71,9 +71,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // (src/lib/components/admin, src/lib/utils/adminCatalogView.ts): two
   // routes and the dialog add 7.1 KiB compressed; the build measures
   // 343.1 KiB, the rest is headroom.
+  // Total raised 346 -> 350 KiB for the tabbed overview: URL-backed tabs,
+  // search, paging and filters plus the review-mark action add 3.2 KiB
+  // compressed; the build measures 346.3 KiB, the rest is headroom.
   assert.ok(
-    totalBytes <= 346 * 1024,
-    `Expected at most 346 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 350 * 1024,
+    `Expected at most 350 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

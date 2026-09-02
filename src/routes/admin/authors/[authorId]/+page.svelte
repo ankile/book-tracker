@@ -4,6 +4,7 @@
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
+  import ReviewAction from '$lib/components/admin/ReviewAction.svelte';
   import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import {
     authorNamesById,
@@ -11,6 +12,8 @@
     creatorLabel,
     editAuthorDraft,
     isoDay,
+    reviewLabel,
+    reviewStatus,
     mergeAuthorsDraft,
     worksByAuthor,
     type OperationDraft,
@@ -26,6 +29,11 @@
 
   let draft = $state<OperationDraft | null>(null);
   let statusMessage = $state('');
+  let statusOk = $state(true);
+  function report(message: string, ok: boolean): void {
+    statusMessage = message;
+    statusOk = ok;
+  }
 
   const author = $derived(scan?.authors.find((row) => row.authorId === authorId) ?? null);
   const names = $derived(authorNamesById(scan ?? {authors: []}));
@@ -36,7 +44,7 @@
 
 <main class="catalog-console">
   <CatalogHeader crumbs={[{label: 'Authors', href: '/admin#catalog-authors-heading'}, {label: author?.canonicalName ?? authorId}]} {scan} {progress} />
-  {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
+  {#if statusMessage}<div class="notice {statusOk ? 'success' : 'error'}" role="status">{statusMessage}</div>{/if}
 
   {#if scan === null}
     <CatalogLoading {progress} />
@@ -52,10 +60,12 @@
         <div>
           <h1>{author.canonicalName}</h1>
           <p>Sorted as {author.sortName} · {author.kind}</p>
-          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, emails)} · <code>{author.authorId}</code></p>
+          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, emails)} · <span class="review {reviewStatus(author)}">{reviewLabel(author)}</span> · <code>{author.authorId}</code></p>
           {#if author.warnings.length > 0}<p class="warning">{author.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
+          <ReviewAction kind="author" ids={[author.authorId]} reviewed={reviewStatus(author) !== 'done'}
+            label={reviewStatus(author) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
           {#if author.status === 'active'}
             <button type="button" onclick={() => (draft = editAuthorDraft(author))}>Edit author…</button>
             <button type="button" onclick={() => (draft = mergeAuthorsDraft(author.authorId, ''))}>Merge into another author…</button>
@@ -97,5 +107,5 @@
     </section>
   {/if}
 
-  <CatalogOperationDialog bind:draft {scan} onapplied={(message) => (statusMessage = message)} />
+  <CatalogOperationDialog bind:draft {scan} onapplied={(message) => report(message, true)} />
 </main>

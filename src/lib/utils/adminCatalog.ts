@@ -12,6 +12,7 @@ import type {
   AdminCatalogExpectedDocument,
   AdminCatalogExpectedState,
   AdminCatalogPreviewResponse,
+  AdminReviewResponse,
   CatalogMatchMethod,
   CatalogScan,
 } from '../interfaces/catalog.ts';
@@ -231,6 +232,12 @@ export function decodeAdminCatalogPreviewResponse(value: unknown): AdminCatalogP
       'admin-catalogpreview response.touchedDocuments',
     ),
   };
+}
+
+export function decodeAdminReviewResponse(value: unknown): AdminReviewResponse {
+  const data = record(value, 'admin-review response');
+  exactKeys(data, ['updated'], 'admin-review response');
+  return { updated: nonNegativeInteger(data.updated, 'admin-review response.updated') };
 }
 
 export function decodeAdminCatalogApplyResponse(value: unknown): AdminCatalogApplyResponse {

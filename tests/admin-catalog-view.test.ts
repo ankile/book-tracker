@@ -16,6 +16,14 @@ import {
   createEditionDraft,
   createWorkDraft,
   creatorLabel,
+  consoleHref,
+  DEFAULT_CONSOLE_QUERY,
+  filterByCreator,
+  filterByReview,
+  paginate,
+  parseConsoleQuery,
+  reviewLabel,
+  reviewStatus,
   duplicateFindingsFor,
   editAuthorDraft,
   editEditionDraft,
@@ -259,4 +267,51 @@ test('author order, duplicate findings, and creator labels', () => {
   assert.equal(creatorLabel('abcdefghijk', emails), 'ada@example.test');
   assert.equal(creatorLabel('blank', emails), 'blank');
   assert.equal(creatorLabel('stranger', emails), 'stranger');
+});
+
+test('the console view round-trips through the URL, drops defaults, and restarts paging when the list changes', () => {
+  assert.deepEqual(parseConsoleQuery(new URLSearchParams('')), DEFAULT_CONSOLE_QUERY);
+  const query = parseConsoleQuery(new URLSearchParams('tab=authors&q=le+guin&page=3&review=needs&creator=others'));
+  assert.deepEqual(query, {tab: 'authors', q: 'le guin', page: 3, review: 'needs', creator: 'others'});
+  // Anything unrecognised falls back rather than failing.
+  assert.deepEqual(parseConsoleQuery(new URLSearchParams('tab=nope&page=0&review=x&creator=y')), DEFAULT_CONSOLE_QUERY);
+  assert.deepEqual(parseConsoleQuery(new URLSearchParams('page=2.5')), DEFAULT_CONSOLE_QUERY);
+  assert.equal(consoleHref(query), '/admin?tab=authors&q=le+guin&page=3&review=needs&creator=others');
+  assert.equal(consoleHref(query, {page: 4}), '/admin?tab=authors&q=le+guin&page=4&review=needs&creator=others');
+  // A new search, tab or filter starts at page 1; the same value keeps the page.
+  assert.equal(consoleHref(query, {q: 'dune'}), '/admin?tab=authors&q=dune&review=needs&creator=others');
+  assert.equal(consoleHref(query, {tab: 'works'}), '/admin?q=le+guin&review=needs&creator=others');
+  assert.equal(consoleHref(query, {tab: 'authors'}), consoleHref(query));
+  assert.equal(consoleHref(DEFAULT_CONSOLE_QUERY, {tab: 'works', review: 'all'}), '/admin');
+});
+
+test('review status: never marked, changed since the mark, or done; filters split on it and on the creator', () => {
+  const never = {reviewedAt: null, activityAt: 5000, createdBy: 'me'};
+  const changed = {reviewedAt: 4000, activityAt: 5000, createdBy: 'someone'};
+  const done = {reviewedAt: 5000, activityAt: 5000, createdBy: null};
+  assert.equal(reviewStatus(never), 'never');
+  assert.equal(reviewStatus(changed), 'changed');
+  assert.equal(reviewStatus(done), 'done');
+  assert.equal(reviewLabel(never), 'needs review');
+  assert.equal(reviewLabel(changed), 'changed since review 1970-01-01');
+  assert.equal(reviewLabel(done), 'reviewed 1970-01-01');
+  const rows = [never, changed, done];
+  assert.deepEqual(filterByReview(rows, 'all'), rows);
+  assert.deepEqual(filterByReview(rows, 'needs'), [never, changed]);
+  assert.deepEqual(filterByReview(rows, 'done'), [done]);
+  assert.deepEqual(filterByCreator(rows, 'all', 'me'), rows);
+  assert.deepEqual(filterByCreator(rows, 'me', 'me'), [never]);
+  // Without a creator a record counts as someone else's.
+  assert.deepEqual(filterByCreator(rows, 'others', 'me'), [changed, done]);
+});
+
+test('paginate windows the rows, clamps the page, and reports positions', () => {
+  const rows = Array.from({length: 120}, (_, index) => index + 1);
+  assert.deepEqual(paginate(rows, 1, 50), {rows: rows.slice(0, 50), page: 1, pages: 3, total: 120, from: 1, to: 50});
+  assert.deepEqual(paginate(rows, 3, 50).rows, rows.slice(100));
+  assert.deepEqual(paginate(rows, 3, 50).to, 120);
+  // Past the end lands on the last page; below the start on the first.
+  assert.equal(paginate(rows, 9, 50).page, 3);
+  assert.equal(paginate(rows, 0, 50).page, 1);
+  assert.deepEqual(paginate([], 4, 50), {rows: [], page: 1, pages: 1, total: 0, from: 0, to: 0});
 });

@@ -463,3 +463,118 @@ export function creatorLabel(createdBy: string | null, emails: ReadonlyMap<strin
 export function isoDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
+
+// ---- The overview's view state lives in the URL: which tab, the search
+// text, the page and the review and creator filters (?tab=&q=&page=&review=
+// &creator=), so a list can be linked to and the browser's history steps
+// back through it. Defaults are left out of the URL.
+
+export type ConsoleTab = 'works' | 'authors' | 'books' | 'findings';
+export type ReviewFilter = 'all' | 'needs' | 'done';
+export type CreatorFilter = 'all' | 'others' | 'me';
+
+export interface ConsoleQuery {
+  tab: ConsoleTab;
+  q: string;
+  page: number;
+  review: ReviewFilter;
+  creator: CreatorFilter;
+}
+
+export const CONSOLE_PAGE_SIZE = 50;
+export const DEFAULT_CONSOLE_QUERY: ConsoleQuery = { tab: 'works', q: '', page: 1, review: 'all', creator: 'all' };
+const CONSOLE_TABS: readonly ConsoleTab[] = ['works', 'authors', 'books', 'findings'];
+const REVIEW_FILTERS: readonly ReviewFilter[] = ['all', 'needs', 'done'];
+const CREATOR_FILTERS: readonly CreatorFilter[] = ['all', 'others', 'me'];
+
+function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
+  return allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+// Anything unrecognised falls back to the default rather than failing: a
+// stale or hand-edited URL still opens the console.
+export function parseConsoleQuery(params: URLSearchParams): ConsoleQuery {
+  const page = Number(params.get('page') ?? '1');
+  return {
+    tab: oneOf(params.get('tab'), CONSOLE_TABS, DEFAULT_CONSOLE_QUERY.tab),
+    q: params.get('q') ?? '',
+    page: Number.isSafeInteger(page) && page >= 1 ? page : 1,
+    review: oneOf(params.get('review'), REVIEW_FILTERS, DEFAULT_CONSOLE_QUERY.review),
+    creator: oneOf(params.get('creator'), CREATOR_FILTERS, DEFAULT_CONSOLE_QUERY.creator),
+  };
+}
+
+// The href of a changed view. A change to anything but the page itself
+// starts over at page 1, since the old page number means nothing in a
+// different list.
+export function consoleHref(query: ConsoleQuery, patch: Partial<ConsoleQuery> = {}): string {
+  const next: ConsoleQuery = { ...query, ...patch };
+  const restarts = (['tab', 'q', 'review', 'creator'] as const)
+    .some((key) => patch[key] !== undefined && patch[key] !== query[key]);
+  if (restarts && patch.page === undefined) next.page = 1;
+  const params = new URLSearchParams();
+  for (const key of ['tab', 'q', 'page', 'review', 'creator'] as const) {
+    if (next[key] !== DEFAULT_CONSOLE_QUERY[key]) params.set(key, String(next[key]));
+  }
+  const search = params.toString();
+  return search === '' ? '/admin' : `/admin?${search}`;
+}
+
+// ---- Review marks. A record is reviewed once the operator marks it and
+// nothing has landed on it since; activity after the mark (a new edition,
+// a linked book, a new work naming the author) puts it back in the queue.
+
+export interface ReviewMarks {
+  reviewedAt: number | null;
+  activityAt: number;
+}
+
+export type ReviewStatus = 'never' | 'changed' | 'done';
+
+export function reviewStatus(row: ReviewMarks): ReviewStatus {
+  if (row.reviewedAt === null) return 'never';
+  return row.activityAt > row.reviewedAt ? 'changed' : 'done';
+}
+
+export function reviewLabel(row: ReviewMarks): string {
+  if (row.reviewedAt === null) return 'needs review';
+  const day = isoDay(row.reviewedAt);
+  return row.activityAt > row.reviewedAt ? `changed since review ${day}` : `reviewed ${day}`;
+}
+
+export function filterByReview<T extends ReviewMarks>(rows: readonly T[], filter: ReviewFilter): T[] {
+  if (filter === 'all') return [...rows];
+  return rows.filter((row) => (reviewStatus(row) === 'done') === (filter === 'done'));
+}
+
+// "me" is the operator; a record without a creator counts as someone
+// else's, since the point of the filter is what the operator did not add.
+export function filterByCreator<T extends { createdBy: string | null }>(
+  rows: readonly T[],
+  filter: CreatorFilter,
+  operatorUid: string,
+): T[] {
+  if (filter === 'all') return [...rows];
+  return rows.filter((row) => (row.createdBy === operatorUid) === (filter === 'me'));
+}
+
+export interface ConsolePage<T> {
+  rows: T[];
+  page: number;
+  pages: number;
+  total: number;
+  // 1-based positions of the first and last row shown; 0 when empty.
+  from: number;
+  to: number;
+}
+
+// A page past the end shows the last page rather than nothing, so a link
+// kept from a longer list still lands somewhere.
+export function paginate<T>(rows: readonly T[], page: number, size = CONSOLE_PAGE_SIZE): ConsolePage<T> {
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  const current = Math.min(Math.max(1, page), pages);
+  const slice = rows.slice((current - 1) * size, current * size);
+  const from = slice.length === 0 ? 0 : (current - 1) * size + 1;
+  return { rows: slice, page: current, pages, total, from, to: slice.length === 0 ? 0 : from + slice.length - 1 };
+}

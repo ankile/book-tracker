@@ -1900,3 +1900,30 @@ export function decodeStoredIssue(value: unknown): StoredIssue | null {
     detailEmail,
   };
 }
+
+// admin.review: the operator marks works or authors reviewed (or not). At
+// most one console page of ids per call; the client sends more as several.
+export interface AdminReviewRequest {
+  kind: "work" | "author";
+  ids: string[];
+  reviewed: boolean;
+}
+
+export function decodeAdminReviewRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): AdminReviewRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["kind", "ids", "reviewed"], "request data", fail);
+  if (decoded.kind !== "work" && decoded.kind !== "author") {
+    fail("request data.kind must be work or author.");
+  }
+  const kind = decoded.kind === "author" ? "author" : "work";
+  if (!Array.isArray(decoded.ids) || decoded.ids.length === 0 || decoded.ids.length > 100) {
+    fail("request data.ids must hold between 1 and 100 ids.");
+  }
+  const ids = (decoded.ids as unknown[]).map((id, index) =>
+    documentId(id, `request data.ids[${index}]`, fail));
+  if (new Set(ids).size !== ids.length) fail("request data.ids must not repeat an id.");
+  return {kind, ids, reviewed: boolean(decoded.reviewed, "request data.reviewed", fail)};
+}

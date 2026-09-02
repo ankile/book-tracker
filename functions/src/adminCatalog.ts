@@ -22,6 +22,7 @@ import {
   MATCH_METHODS,
   normalizeIsbn13,
   VersionedKind,
+  AdminReviewRequest,
 } from "./decoders";
 import {
   CatalogDataFail,
@@ -56,11 +57,15 @@ interface WorkData extends StoredWork {
   createdBy?: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  // When the operator last marked the work reviewed (admin.review);
+  // absent until then. Edits keep it; only admin.review moves it.
+  reviewedAt?: Timestamp;
 }
 
 interface AuthorData extends StoredCatalogAuthor {
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  reviewedAt?: Timestamp;
 }
 
 interface EditionData extends StoredEdition {
@@ -145,6 +150,18 @@ function storedTimestamp(snapshot: DocumentSnapshot, field: string): Timestamp {
   return value;
 }
 
+function optionalStoredTimestamp(
+  snapshot: DocumentSnapshot,
+  field: string,
+): {[key: string]: Timestamp} {
+  const value = snapshot.get(field);
+  if (value === undefined) return {};
+  if (!(value instanceof Timestamp)) {
+    catalogInvariant(`${snapshot.ref.path}.${field} must be a timestamp.`);
+  }
+  return {[field]: value};
+}
+
 // The admin path is the only writer that must reject an unknown stored
 // field: it round-trips whole documents, so a field it cannot see would be
 // dropped on the next write.
@@ -171,7 +188,7 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
   assertStoredKeys(snapshot, [
     "canonicalTitle", "alternateTitles", "titleKeys", "authorIds",
     "coverUrl", "subjects", "fiction", "status", "mergedInto", "mergedFrom",
-    "createdBy", "createdAt", "updatedAt",
+    "createdBy", "createdAt", "updatedAt", "reviewedAt",
   ]);
   const createdBy = snapshot.get("createdBy");
   if (createdBy !== undefined && typeof createdBy !== "string") {
@@ -182,6 +199,7 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
     ...(createdBy === undefined ? {} : {createdBy}),
     createdAt: storedTimestamp(snapshot, "createdAt"),
     updatedAt: storedTimestamp(snapshot, "updatedAt"),
+    ...optionalStoredTimestamp(snapshot, "reviewedAt"),
   };
 }
 
@@ -189,12 +207,13 @@ function authorFrom(snapshot: DocumentSnapshot): AuthorData {
   const author = storedCatalogAuthor(snapshot, catalogInvariant);
   assertStoredKeys(snapshot, [
     "canonicalName", "alternateNames", "nameKeys", "sortName", "kind",
-    "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt",
+    "status", "mergedInto", "mergedFrom", "createdBy", "createdAt", "updatedAt", "reviewedAt",
   ]);
   return {
     ...author,
     createdAt: storedTimestamp(snapshot, "createdAt"),
     updatedAt: storedTimestamp(snapshot, "updatedAt"),
+    ...optionalStoredTimestamp(snapshot, "reviewedAt"),
   };
 }
 
@@ -231,6 +250,7 @@ function workInputData(
     ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    ...(existing?.reviewedAt === undefined ? {} : {reviewedAt: existing.reviewedAt}),
   };
 }
 
@@ -263,6 +283,7 @@ function authorInputData(
     ...(existing?.createdBy === undefined ? {} : {createdBy: existing.createdBy}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    ...(existing?.reviewedAt === undefined ? {} : {reviewedAt: existing.reviewedAt}),
   };
 }
 
@@ -1356,6 +1377,42 @@ function wireChanges(changes: PlannedChange[]) {
   return changes.map(({kind, id, action, before, after}) => ({
     kind, id, action, before, after,
   }));
+}
+
+// admin.review: stamp or clear reviewedAt on whole records, in one
+// transaction, so a mark is all-or-nothing and a malformed record refuses
+// the way apply would. updatedAt stays: a review mark is not an edit.
+export async function reviewCatalogRecords(
+  db: Firestore,
+  request: AdminReviewRequest,
+): Promise<{updated: number}> {
+  const collection = request.kind === "work" ? "works" : "catalogAuthors";
+  const now = Timestamp.now();
+  return db.runTransaction(async (transaction) => {
+    // Every record is read and validated before the first write, so a
+    // missing or malformed id refuses the call with nothing written.
+    const records: Array<{ref: DocumentReference; data: WorkData | AuthorData}> = [];
+    for (const id of request.ids) {
+      const snapshot = await transaction.get(db.collection(collection).doc(id));
+      if (!snapshot.exists) {
+        throw new functions.https.HttpsError(
+          "not-found",
+          `${collection}/${id} does not exist.`,
+          {reason: "missing-record"},
+        );
+      }
+      records.push({
+        ref: snapshot.ref,
+        data: request.kind === "work" ? workFrom(snapshot) : authorFrom(snapshot),
+      });
+    }
+    for (const {ref, data} of records) {
+      const next = {...data};
+      delete next.reviewedAt;
+      transaction.set(ref, request.reviewed ? {...next, reviewedAt: now} : next);
+    }
+    return {updated: records.length};
+  });
 }
 
 export async function previewAdminCatalogOperation(

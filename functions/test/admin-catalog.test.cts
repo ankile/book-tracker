@@ -69,6 +69,7 @@ interface Deployed {
   admin: {
     catalogapply: {run(data: unknown, context: unknown): Promise<ApplyResult>};
     catalogpreview: {run(data: unknown, context: unknown): Promise<PreviewResult>};
+    review: {run(data: unknown, context: unknown): Promise<{updated: number}>};
   };
 }
 
@@ -987,4 +988,59 @@ test("an edition the console creates from nothing records the operator", async (
     operationId: preview.operationId, operation, expected: preview.expected,
   }, recentAdmin());
   assert.equal(store.rows.get("editions/made-by-operator")?.createdBy, adminUid);
+});
+
+test("a review mark stamps reviewedAt on whole records, survives edits, clears again, and refuses a missing id", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/seen-work"), activeWork("Seen Work"));
+  store.write(store.ref("works/other-work"), activeWork("Other Work"));
+  const marked = await deployed.admin.review.run(
+    {kind: "work", ids: ["seen-work", "other-work"], reviewed: true}, recentAdmin(),
+  );
+  assert.deepEqual(marked, {updated: 2});
+  const seen = store.rows.get("works/seen-work");
+  assert.ok(seen?.reviewedAt instanceof Timestamp);
+  assert.equal(seen?.canonicalTitle, "Seen Work");
+  // A review mark is not an edit: updatedAt is what it was.
+  assert.equal((seen?.updatedAt as {toMillis(): number}).toMillis(), 1000);
+
+  // An edit through the console keeps the mark.
+  const edit = {
+    type: "editWork",
+    workId: "seen-work",
+    status: "active",
+    work: {
+      canonicalTitle: "Seen Work", alternateTitles: ["Also Seen"], authorIds: ["ada-author"],
+      coverUrl: "", subjects: [], fiction: true,
+    },
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation: edit}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation: edit, expected: preview.expected,
+  }, recentAdmin());
+  assert.ok(store.rows.get("works/seen-work")?.reviewedAt instanceof Timestamp);
+  assert.deepEqual(store.rows.get("works/seen-work")?.alternateTitles, ["Also Seen"]);
+
+  const cleared = await deployed.admin.review.run(
+    {kind: "work", ids: ["seen-work"], reviewed: false}, recentAdmin(),
+  );
+  assert.deepEqual(cleared, {updated: 1});
+  assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
+  assert.ok(store.rows.get("works/other-work")?.reviewedAt instanceof Timestamp);
+
+  store.write(store.ref("catalogAuthors/ada-author"), {
+    canonicalName: "Ada Author", alternateNames: [], nameKeys: ["ada author"], sortName: "Author",
+    kind: "person", status: "active", mergedFrom: [], createdBy: "reader",
+    createdAt: Timestamp.fromMillis(1000), updatedAt: Timestamp.fromMillis(1000),
+  });
+  await deployed.admin.review.run({kind: "author", ids: ["ada-author"], reviewed: true}, recentAdmin());
+  assert.ok(store.rows.get("catalogAuthors/ada-author")?.reviewedAt instanceof Timestamp);
+  assert.equal(store.rows.get("catalogAuthors/ada-author")?.createdBy, "reader");
+
+  // One missing id refuses the whole call; the existing one is untouched.
+  await assert.rejects(
+    deployed.admin.review.run({kind: "work", ids: ["seen-work", "nowhere"], reviewed: true}, recentAdmin()),
+    (error: {code?: string}) => error.code === "not-found",
+  );
+  assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
 });

@@ -4,6 +4,7 @@
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
+  import ReviewAction from '$lib/components/admin/ReviewAction.svelte';
   import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import {
     authorNamesById,
@@ -17,6 +18,8 @@
     editWorkDraft,
     hideWorkDraft,
     isoDay,
+    reviewLabel,
+    reviewStatus,
     linkBooksDraft,
     mergeIntoOldestDraft,
     mergeWorksDraft,
@@ -35,6 +38,11 @@
 
   let draft = $state<OperationDraft | null>(null);
   let statusMessage = $state('');
+  let statusOk = $state(true);
+  function report(message: string, ok: boolean): void {
+    statusMessage = message;
+    statusOk = ok;
+  }
 
   const work = $derived(scan?.works.find((row) => row.workId === workId) ?? null);
   const names = $derived(authorNamesById(scan ?? {authors: []}));
@@ -60,7 +68,7 @@
 
 <main class="catalog-console">
   <CatalogHeader crumbs={[{label: 'Works', href: '/admin#works-heading'}, {label: work?.canonicalTitle ?? workId}]} {scan} {progress} />
-  {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
+  {#if statusMessage}<div class="notice {statusOk ? 'success' : 'error'}" role="status">{statusMessage}</div>{/if}
 
   {#if scan === null}
     <CatalogLoading {progress} />
@@ -78,10 +86,12 @@
           <p>
             {#each authors as author, index (author.id)}{#if index > 0}, {/if}<a href="/admin/authors/{author.id}">{author.name ?? `[Missing ${author.id}]`}</a>{:else}No authors{/each}
           </p>
-          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, emails)} · <code>{work.workId}</code></p>
+          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, emails)} · <span class="review {reviewStatus(work)}">{reviewLabel(work)}</span> · <code>{work.workId}</code></p>
           {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
+          <ReviewAction kind="work" ids={[work.workId]} reviewed={reviewStatus(work) !== 'done'}
+            label={reviewStatus(work) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
           <button type="button" onclick={() => (draft = editWorkDraft(work))}>Edit work…</button>
           {#if work.status === 'active'}<button type="button" onclick={() => (draft = hideWorkDraft(work))}>Hide…</button>{/if}
           {#if work.status !== 'merged'}<button type="button" onclick={() => (draft = mergeWorksDraft([work.workId], ''))}>Merge into another work…</button>{/if}
@@ -191,5 +201,5 @@
     </section>
   {/if}
 
-  <CatalogOperationDialog bind:draft {scan} onapplied={(message) => (statusMessage = message)} />
+  <CatalogOperationDialog bind:draft {scan} onapplied={(message) => report(message, true)} />
 </main>

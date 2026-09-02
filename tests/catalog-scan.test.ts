@@ -359,3 +359,49 @@ test('authors and editions carry their creator; a linked book without an edition
     ['Invalid creator catalogAuthors/bad-creator.'],
   );
 });
+
+test('review marks and activity: a reviewed record moves when something lands on it after the mark', () => {
+  const scan = scanCatalog(input({
+    authors: [
+      authorDocument('ada-author', 'Ada Author', { reviewedAt: at(2500) }),
+      authorDocument('alias-author', 'A. Author', { status: 'merged', mergedInto: 'ada-author', createdAt: at(2100) }),
+      authorDocument('bad-review', 'Bad Review', { reviewedAt: 'yesterday' }),
+    ],
+    works: [
+      workDocument('quiet', 'Quiet Work', { reviewedAt: at(3000) }),
+      workDocument('busy', 'Busy Work', { reviewedAt: at(3000), createdAt: at(2400) }),
+      workDocument('old-busy', 'Old Busy', { status: 'merged', mergedInto: 'busy', authorIds: ['alias-author'], createdAt: at(4100) }),
+      workDocument('fresh', 'Fresh Work'),
+    ],
+    editions: [
+      editionDocument('busy-late', 'busy', { createdAt: at(3500) }),
+      editionDocument('quiet-early', 'quiet', { createdAt: at(1500) }),
+    ],
+    books: [
+      bookDocument('linked-late', { workId: 'old-busy', matchMethod: 'migration', linkedAt: at(4000) }),
+      bookDocument('linked-early', { workId: 'quiet', editionId: 'quiet-early', matchMethod: 'isbn', linkedAt: at(1000) }),
+    ],
+  }));
+  const works = new Map(scan.works.map(({ workId, reviewedAt, activityAt }) => [workId, [reviewedAt, activityAt]]));
+  // Nothing landed on quiet after its review; busy gained an edition at
+  // 3500 and, through its merged alias, a book link at 4000. The alias's
+  // own creation is not survivor activity: only the operator merges, and
+  // merging is a review.
+  assert.deepEqual(works.get('quiet'), [3000, 2000]);
+  assert.deepEqual(works.get('busy'), [3000, 4000]);
+  assert.deepEqual(works.get('old-busy'), [null, 4100]);
+  assert.deepEqual(works.get('fresh'), [null, 2000]);
+  const authors = new Map(scan.authors.map(({ authorId, reviewedAt, activityAt }) => [authorId, [reviewedAt, activityAt]]));
+  // The alias's work at 4100 names the survivor through the alias.
+  assert.deepEqual(authors.get('ada-author'), [2500, 4100]);
+  assert.deepEqual(authors.get('alias-author'), [null, 4100]);
+  assert.equal(scan.editions.find(({ editionId }) => editionId === 'busy-late')?.createdAt, 3500);
+  assert.deepEqual(
+    scan.books.map(({ bookId, linkedAt }) => [bookId, linkedAt]).sort(),
+    [['linked-early', 1000], ['linked-late', 4000]],
+  );
+  assert.deepEqual(
+    scan.findings.filter(({ code }) => code === 'catalog-row-anomaly').map(({ message }) => message),
+    ['catalogAuthors/bad-review.reviewedAt must be a timestamp.'],
+  );
+});

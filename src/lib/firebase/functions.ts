@@ -5,6 +5,8 @@ import type {
   AdminCatalogApplyResponse,
   AdminCatalogPreviewRequest,
   AdminCatalogPreviewResponse,
+  AdminReviewRequest,
+  AdminReviewResponse,
   CatalogAddEditionRequest,
   CatalogAddEditionResponse,
   CatalogCreateRequest,
@@ -19,6 +21,7 @@ import type {
 import {
   decodeAdminCatalogApplyResponse,
   decodeAdminCatalogPreviewResponse,
+  decodeAdminReviewResponse,
 } from '../utils/adminCatalog.ts';
 import {
   decodeCatalogAddEditionResponse,
@@ -133,6 +136,7 @@ const catalogCreateCallable = httpsCallable<CatalogCreateRequest, unknown>(fns, 
 const catalogAddEditionCallable = httpsCallable<CatalogAddEditionRequest, unknown>(fns, 'catalog-addedition');
 const adminCatalogPreviewCallable = httpsCallable<AdminCatalogPreviewRequest, unknown>(fns, 'admin-catalogpreview');
 const adminCatalogApplyCallable = httpsCallable<AdminCatalogApplyRequest, unknown>(fns, 'admin-catalogapply');
+const adminReviewCallable = httpsCallable<AdminReviewRequest, unknown>(fns, 'admin-review');
 
 export async function catalogSearch(request: CatalogSearchRequest): Promise<CatalogSearchResponse> {
   return decodeCatalogSearchResponse((await catalogSearchCallable(request)).data);
@@ -171,4 +175,8 @@ export async function adminCatalogApply(
   request: AdminCatalogApplyRequest,
 ): Promise<AdminCatalogApplyResponse> {
   return decodeAdminCatalogApplyResponse((await adminCatalogApplyCallable(request)).data);
+}
+
+export async function adminReview(request: AdminReviewRequest): Promise<AdminReviewResponse> {
+  return decodeAdminReviewResponse((await adminReviewCallable(request)).data);
 }

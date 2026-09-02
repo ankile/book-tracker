@@ -40,6 +40,7 @@ interface FunctionsBundle {
     catalogapply: DeployedFunction;
     catalogpreview: DeployedFunction;
     overview: DeployedFunction;
+    review: DeployedFunction;
   };
   booksapi: {lookupisbn: DeployedFunction};
   catalog: {
@@ -101,6 +102,7 @@ test("preserves the deployed function export names", () => {
     "catalogapply",
     "catalogpreview",
     "overview",
+    "review",
   ]);
   assert.deepEqual(Object.keys(functions.booksapi), ["lookupisbn"]);
   assert.deepEqual(Object.keys(functions.catalog).sort(), [
@@ -129,6 +131,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.admin.overview,
     functions.admin.catalogapply,
     functions.admin.catalogpreview,
+    functions.admin.review,
     functions.createUserDocument,
     functions.deleteUserDocument,
     functions.booksapi.lookupisbn,
@@ -889,6 +892,7 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
     functions.admin.overview,
     functions.admin.catalogapply,
     functions.admin.catalogpreview,
+    functions.admin.review,
     functions.booksapi.lookupisbn,
     functions.catalog.search,
     functions.catalog.workreaders,
@@ -937,6 +941,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     deleteUserDocument: functions.deleteUserDocument,
     "admin.overview": functions.admin.overview,
     "admin.catalogapply": functions.admin.catalogapply,
+    "admin.review": functions.admin.review,
     "admin.catalogpreview": functions.admin.catalogpreview,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
     "catalog.search": functions.catalog.search,
@@ -1024,6 +1029,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
   const caps: Record<string, number> = {
     "functions.admin.overview": 2,
     "functions.admin.catalogapply": 2,
+    "functions.admin.review": 2,
     "functions.admin.catalogpreview": 2,
     "functions.booksapi.lookupisbn": 10,
     "functions.catalog.create": 10,
@@ -1056,6 +1062,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     functions.admin.overview,
     functions.admin.catalogapply,
     functions.admin.catalogpreview,
+    functions.admin.review,
   ]) {
     assert.equal(adminFunction.__endpoint.availableMemoryMb, 1024);
     assert.equal(adminFunction.__endpoint.timeoutSeconds, 120);

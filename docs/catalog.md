@@ -9,8 +9,8 @@ public whoever contributed it; who read what is not.
 
 | Collection | Document id | Contents |
 |---|---|---|
-| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt` |
-| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt` |
+| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
+| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
 | `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy`, `createdAt`, `updatedAt` |
 | `isbnIndex` | the ISBN-13 | `workId`, `editionId` |
 | `externalIdIndex` | `sha256(provider + "\0" + externalId)` | `workId`, `editionId`, `provider`, `externalId` |
@@ -130,10 +130,19 @@ change. The scan and the identity normalizers live in `shared/`
 `functions/src/shared` by the functions build, so the keys the browser matches
 are the keys the server wrote.
 
-The console is three pages over that one scan. `/admin` holds the review
-queue (works readers created, suspected duplicates, unmatched books with
-candidates), the filterable author and work lists, the findings, and the
-operations that start from no record. `/admin/works/[workId]` is one work:
+The console is three pages over that one scan. `/admin` is one tab at a
+time — works, authors, unmatched books, findings — with a search box,
+review and creator filters and pages of fifty; the tab, search, filters and
+page live in the URL (`?tab=&q=&page=&review=&creator=`), so a list can be
+linked to and the browser's history steps back through it. Works and
+authors carry a review mark: `admin.review` stamps or clears `reviewedAt`
+on whole records (one page of ids per call, no recent-auth gate, no audit
+record), and the scan reports each record's `activityAt` — the latest of
+its creation, its editions' creation and its books' linking (for an author,
+the creation of any work naming it) — so a reviewed record returns to the
+queue when something lands on it after the mark. "Needs review" plus
+"Added by others" is the operator's queue of what other readers added. The
+operations that start from no record sit above the tabs. `/admin/works/[workId]` is one work:
 its record, editions, the readers' books that resolve to it (a book still
 linked to a merged alias counts for the survivor), and its duplicate
 candidates. `/admin/authors/[authorId]` is one author: its record, aliases,

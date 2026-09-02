@@ -800,3 +800,26 @@ function hasCode(error: unknown, code: string): boolean {
     "code" in error &&
     error.code === code;
 }
+
+test("admin review requests take one kind, up to a page of distinct ids and a flag", () => {
+  assert.deepEqual(
+    decoders.decodeAdminReviewRequest({kind: "work", ids: ["a", "b"], reviewed: true}),
+    {kind: "work", ids: ["a", "b"], reviewed: true},
+  );
+  assert.deepEqual(
+    decoders.decodeAdminReviewRequest({kind: "author", ids: ["a"], reviewed: false}),
+    {kind: "author", ids: ["a"], reviewed: false},
+  );
+  for (const request of [
+    {kind: "edition", ids: ["a"], reviewed: true},
+    {kind: "work", ids: [], reviewed: true},
+    {kind: "work", ids: Array(101).fill("a").map((id, index) => `${id}${index}`), reviewed: true},
+    {kind: "work", ids: ["a", "a"], reviewed: true},
+    {kind: "work", ids: ["users/x"], reviewed: true},
+    {kind: "work", ids: ["a"], reviewed: "yes"},
+    {kind: "work", ids: ["a"], reviewed: true, extra: 1},
+    {kind: "work", ids: ["a"]},
+  ]) {
+    assert.throws(() => decoders.decodeAdminReviewRequest(request), `accepted ${JSON.stringify(request)}`);
+  }
+});

@@ -124,7 +124,8 @@ for (const authorDoc of catalogAuthors.docs) {
   // createdBy names the account that brought the author in: the add-book
   // flow's reader, the operator for a console creation, or the reader whose
   // book first stood on a catalog-build author (backfilled 2026-09-02).
-  const allowed = new Set([...required, 'mergedInto', 'mergedFrom']);
+  // reviewedAt is the operator's review mark (admin.review); absent until set.
+  const allowed = new Set([...required, 'mergedInto', 'mergedFrom', 'reviewedAt']);
   for (const field of Object.keys(author)) {
     if (!allowed.has(field)) found('catalog.author.unexpected-field', path, field);
   }
@@ -156,6 +157,9 @@ for (const authorDoc of catalogAuthors.docs) {
   }
   if (!(author.createdAt instanceof Timestamp) || !(author.updatedAt instanceof Timestamp)) {
     found('catalog.author.bad-timestamps', path);
+  }
+  if (author.reviewedAt !== undefined && !(author.reviewedAt instanceof Timestamp)) {
+    found('catalog.author.bad-reviewed-at', path, String(author.reviewedAt));
   }
   const resolution = resolveCatalogAuthor(authorDoc.id);
   if (resolution.cycle) found('catalog.author.merge-cycle', path);
@@ -196,7 +200,8 @@ for (const workDoc of works.docs) {
   // createdBy names the account that brought the work in: the add-book
   // flow's reader, the operator for a console creation, or the reader whose
   // book first stood on a catalog-build work (backfilled 2026-09-02).
-  const allowedWorkFields = new Set([...required, 'mergedInto']);
+  // reviewedAt is the operator's review mark (admin.review); absent until set.
+  const allowedWorkFields = new Set([...required, 'mergedInto', 'reviewedAt']);
   for (const field of Object.keys(work)) {
     if (!allowedWorkFields.has(field)) found('catalog.work.unexpected-field', path, field);
   }
@@ -230,6 +235,9 @@ for (const workDoc of works.docs) {
   }
   if (!(work.createdAt instanceof Timestamp) || !(work.updatedAt instanceof Timestamp)) {
     found('catalog.work.bad-timestamps', path);
+  }
+  if (work.reviewedAt !== undefined && !(work.reviewedAt instanceof Timestamp)) {
+    found('catalog.work.bad-reviewed-at', path, String(work.reviewedAt));
   }
   if (typeof work.canonicalTitle === 'string' && Array.isArray(work.alternateTitles) && work.alternateTitles.every((title) => typeof title === 'string')) {
     const expectedTitleKeys = catalogTitleKeys(work.canonicalTitle, work.alternateTitles);

@@ -9,6 +9,7 @@ import {
   catalogAuthorIdFor,
   classifyAdminCatalogFailure,
   decodeAdminCatalogApplyResponse,
+  decodeAdminReviewResponse,
   decodeAdminCatalogPreviewResponse,
   externalIndexId,
   parseAdminBookTargets,
@@ -125,4 +126,11 @@ test('admin form parsers accept bounded line-oriented targets and metadata', () 
     openlibrary: 'OL1M', google: 'abc=def',
   });
   assert.throws(() => parseAdminExternalIds('missing-separator'), /provider=id/);
+});
+
+test('admin-review responses carry the count of records written and nothing else', () => {
+  assert.deepEqual(decodeAdminReviewResponse({updated: 3}), {updated: 3});
+  assert.throws(() => decodeAdminReviewResponse({updated: -1}), TypeError);
+  assert.throws(() => decodeAdminReviewResponse({updated: 3, extra: true}), TypeError);
+  assert.throws(() => decodeAdminReviewResponse({}), TypeError);
 });
