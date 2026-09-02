@@ -187,6 +187,7 @@ current deployment instructions.
 | `migrate-book-editions.ts` | Put every linked personal book on an edition of its work, minting one per reader per book identity from the book's own fields | Completed historical rollout (2026-09-02: dry-run and emulator rehearsal on the day's snapshot matched the apply — 46 editions created, 47 books linked, nothing for review — second apply 0, audit back at its known baselines). Idempotent; a rerun joins what it minted and plans nothing for a book that carries an edition. See [Book editions backfill](#book-editions-backfill). |
 | `migrate-catalog-creators.ts` | Stamp `createdBy` on every work, edition and catalog author that has none, from the earliest personal book standing on it | Completed historical rollout (2026-09-02: dry-run matched the apply — 541 creators stamped: 203 works, 174 editions, 164 authors, nothing for review — second apply 0, audit back at its 11 known baselines). Idempotent; a record that carries a creator is left alone. See [Catalog creators backfill](#catalog-creators-backfill). |
 | `migrate-work-languages.ts` | Stamp a default `language` on every work that has none, inferred from its editions' overrides or ISBN registration groups, and the carried copy on every personal book that has none | Completed historical rollout (2026-09-02: dry-run matched the apply — 203 works stamped, 174 from ISBN registration groups (156 en, 17 no, 1 de) and 29 without an ISBN left unknown for review in the console; 222 books stamped — second apply 0, audit back at its 11 known baselines). Idempotent; a work that carries the field and a book that carries a language are left alone. See [Work languages backfill](#work-languages-backfill). |
+| `migrate-catalog-creation-dates.ts` | Move `createdAt` on every work, edition and catalog author back to the creation of its creator's first book standing on it, where that is earlier | Completed historical rollout (2026-09-02: dry-run matched the apply — 583 of 587 records redated: 203 works, 218 editions, 162 authors, from the build's 2026-09-01 and the edition backfill's 2026-09-02 to dates from 2020-11 on; second apply 0, audit back at its 11 known baselines). Idempotent; a record dated no later than that book is left alone. See [Catalog creation dates backfill](#catalog-creation-dates-backfill). |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -389,6 +390,21 @@ in the console (`no language` in the row's warnings). Order: Rules, then
 the backend (works are read with the field and written with it; the
 carry-on rewrite lives in the planner), then the client, then the standard
 dry-run, snapshot, apply-twice, audit loop.
+
+## Catalog creation dates backfill
+
+The catalog build dated every work, edition and catalog author it minted
+with its own run (2026-09-01), so the console's Created column said the
+same day for the whole catalog. The date that means something is when the
+record's creator first had the book: `migrate-catalog-creation-dates.ts`
+(planner: `catalog-creation-dates-backfill.ts`) moves each record's
+`createdAt` back to the `createdAt` of the earliest personal book standing
+on it that its `createdBy` owns — the same book the creators backfill
+attributed it to — and only where that is earlier. A record made by the
+add-book flow is dated a moment before its book and does not move; one
+made in the console for a reader's older book takes that book's date.
+Additive, one `update` per record, no Rules change, no audit class; the
+standard dry-run, snapshot, apply-twice, audit loop.
 
 ## finishedAt rollout (completed 2026-09-01)
 

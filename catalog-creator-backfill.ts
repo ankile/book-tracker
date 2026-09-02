@@ -51,16 +51,16 @@ export interface CreatorPlan {
 
 const bookPath = (book: CreatorBook): string => `users/${book.uid}/books/${book.bookId}`;
 
-function createdMillis(book: CreatorBook): number {
+export function bookCreatedMillis(book: CreatorBook): number {
   const value = book.data.createdAt;
   if (!(value instanceof Timestamp)) throw new Error(`${bookPath(book)} has no createdAt timestamp`);
   return value.toMillis();
 }
 
-function earliest(books: readonly CreatorBook[]): CreatorBook | null {
+export function earliestBook(books: readonly CreatorBook[]): CreatorBook | null {
   if (books.length === 0) return null;
   return [...books].sort((left, right) =>
-    createdMillis(left) - createdMillis(right) || bookPath(left).localeCompare(bookPath(right)))[0];
+    bookCreatedMillis(left) - bookCreatedMillis(right) || bookPath(left).localeCompare(bookPath(right)))[0];
 }
 
 // The survivor a merged record redirects to, one hop, or the id itself.
@@ -74,12 +74,23 @@ function push<K>(map: Map<K, CreatorBook[]>, key: K, books: readonly CreatorBook
   map.set(key, [...(map.get(key) ?? []), ...books]);
 }
 
-export function planCatalogCreators(input: CreatorInput): CreatorPlan {
+// The personal books standing on each record: for a work the books linked
+// to it directly or through an alias merged into it, for an edition the
+// books linked to it, for an author the books on the works naming it
+// directly or through a merged alias. Every linked book must carry a
+// createdAt timestamp, which is what the planners order by.
+export interface StandingBooks {
+  works: Map<string, CreatorBook[]>;
+  editions: Map<string, CreatorBook[]>;
+  authors: Map<string, CreatorBook[]>;
+}
+
+export function standingBooks(input: CreatorInput): StandingBooks {
   const booksByWork = new Map<string, CreatorBook[]>();
   const booksByEdition = new Map<string, CreatorBook[]>();
   for (const book of input.books) {
     const { workId, editionId } = book.data;
-    if (typeof workId === 'string' || typeof editionId === 'string') createdMillis(book);
+    if (typeof workId === 'string' || typeof editionId === 'string') bookCreatedMillis(book);
     if (typeof workId === 'string') {
       push(booksByWork, workId, [book]);
       const survivor = survivorOf(input.works, workId);
@@ -98,7 +109,11 @@ export function planCatalogCreators(input: CreatorInput): CreatorPlan {
       if (survivor !== authorId) push(booksByAuthor, survivor, books);
     }
   }
+  return { works: booksByWork, editions: booksByEdition, authors: booksByAuthor };
+}
 
+export function planCatalogCreators(input: CreatorInput): CreatorPlan {
+  const standing = standingBooks(input);
   const creators: PlannedCreator[] = [];
   const review: CreatorReview[] = [];
   const attribute = (
@@ -113,7 +128,7 @@ export function planCatalogCreators(input: CreatorInput): CreatorPlan {
         continue;
       }
       const books = standing.get(id) ?? [];
-      const first = earliest(books);
+      const first = earliestBook(books);
       if (first === null) {
         review.push({ collection, id, reason: 'no personal book stands on it' });
         continue;
@@ -124,8 +139,8 @@ export function planCatalogCreators(input: CreatorInput): CreatorPlan {
       });
     }
   };
-  attribute('works', input.works, booksByWork);
-  attribute('editions', input.editions, booksByEdition);
-  attribute('catalogAuthors', input.authors, booksByAuthor);
+  attribute('works', input.works, standing.works);
+  attribute('editions', input.editions, standing.editions);
+  attribute('catalogAuthors', input.authors, standing.authors);
   return { creators, review };
 }

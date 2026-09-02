@@ -28,6 +28,7 @@ const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url))
 const backfillPath = fileURLToPath(new URL('../migrate-book-editions.ts', import.meta.url))
 const creatorsPath = fileURLToPath(new URL('../migrate-catalog-creators.ts', import.meta.url))
 const languagesPath = fileURLToPath(new URL('../migrate-work-languages.ts', import.meta.url))
+const createdAtPath = fileURLToPath(new URL('../migrate-catalog-creation-dates.ts', import.meta.url))
 const groupKey = 'title:left hand of darkness\0authors:ursula k le guin'
 const workId = deterministicCatalogId('work', groupKey)
 const isbn = '9780441478125'
@@ -521,6 +522,19 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const languagesRerun = runScript(languagesPath, '--apply')
   assert.match(languagesRerun, /^works without a language field: 0 of /m)
   assert.match(languagesRerun, /^applied: 0 works and 0 books stamped$/m)
+
+  // The catalog build dated every record with its own run;
+  // migrate-catalog-creation-dates.ts moves each record's createdAt back to its
+  // creator's first book, same loop. The seeded books predate the build.
+  const createdAtDryRun = runScript(createdAtPath)
+  assert.match(createdAtDryRun, /^records dated after their creator's first book: [1-9]\d* of /m)
+  assert.match(createdAtDryRun, /^SET works\/\S+ createdAt=\S+ was=\S+ first=users\//m)
+  assert.match(createdAtDryRun, /^dry-run: nothing written$/m)
+  const createdAtApplied = runScript(createdAtPath, '--apply')
+  assert.match(createdAtApplied, /^applied: [1-9]\d* records redated$/m)
+  const createdAtRerun = runScript(createdAtPath, '--apply')
+  assert.match(createdAtRerun, /^records dated after their creator's first book: 0 of /m)
+  assert.match(createdAtRerun, /^applied: 0 records redated$/m)
   const audit = runScript(auditPath)
   assert.doesNotMatch(audit, /^catalog\./m)
 

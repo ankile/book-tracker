@@ -120,7 +120,11 @@ the works and books that predate it (MIGRATIONS.md).
   a record created in the console. The catalog build stamped none, and
   `migrate-catalog-creators.ts` attributed each of its records to the reader
   whose book first stood on it (2026-09-02); the audit treats a missing
-  creator as a finding. All three callables are
+  creator as a finding. `createdAt` on a record the build minted is when
+  its creator first had the book: `migrate-catalog-creation-dates.ts` moved it
+  back to the creator's earliest book standing on it (2026-09-02), so the
+  console's Created column reads the library's history rather than the
+  build's day. All three callables are
   bounded by the structural caps in `functions/src/catalogLimits.ts`. There
   is no consent or provenance gate: every account's books may seed the
   catalog.
