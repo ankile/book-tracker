@@ -4,7 +4,7 @@
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
-  import { adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import {
     authorNamesById,
     catalogAuthorNames,
@@ -20,6 +20,7 @@
   // (directly or through an alias merged into it), and the operations that
   // start from it.
   const scan = $derived($adminCatalogScan ?? null);
+  const emails = $derived($adminAccountEmails ?? new Map<string, string>());
   const progress = $derived($adminCatalogProgress);
   const authorId = $derived(page.params.authorId ?? '');
 
@@ -51,7 +52,7 @@
         <div>
           <h1>{author.canonicalName}</h1>
           <p>Sorted as {author.sortName} · {author.kind}</p>
-          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, true)} · <code>{author.authorId}</code></p>
+          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, emails)} · <code>{author.authorId}</code></p>
           {#if author.warnings.length > 0}<p class="warning">{author.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
@@ -82,7 +83,7 @@
               {#each works as work (work.workId)}
                 <tr>
                   <td><strong><a href="/admin/works/{work.workId}">{work.canonicalTitle}</a></strong><small>{catalogAuthorNames(names, work.authorIds)} · {work.workId}</small></td>
-                  <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy)}</small></td>
+                  <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy, emails)}</small></td>
                   <td><span class="status {work.status}">{work.status}</span></td>
                   <td>{work.editionCount}</td>
                   <td>{work.linkedBookCount}</td>

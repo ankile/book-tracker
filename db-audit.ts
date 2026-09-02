@@ -116,14 +116,15 @@ for (const authorDoc of catalogAuthors.docs) {
   const path = authorDoc.ref.path;
   const required = [
     'canonicalName', 'alternateNames', 'nameKeys', 'sortName', 'kind',
-    'status', 'createdAt', 'updatedAt',
+    'status', 'createdBy', 'createdAt', 'updatedAt',
   ];
   for (const field of required) {
     if (author[field] === undefined) found(`catalog.author.missing.${field}`, path);
   }
-  // createdBy names the account whose add-book flow minted the author; the
-  // migration and the admin tools leave it absent.
-  const allowed = new Set([...required, 'mergedInto', 'mergedFrom', 'createdBy']);
+  // createdBy names the account that brought the author in: the add-book
+  // flow's reader, the operator for a console creation, or the reader whose
+  // book first stood on a catalog-build author (backfilled 2026-09-02).
+  const allowed = new Set([...required, 'mergedInto', 'mergedFrom']);
   for (const field of Object.keys(author)) {
     if (!allowed.has(field)) found('catalog.author.unexpected-field', path, field);
   }
@@ -189,12 +190,13 @@ for (const workDoc of works.docs) {
   const required = [
     'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds',
     'coverUrl', 'subjects', 'fiction', 'status', 'mergedFrom',
-    'createdAt', 'updatedAt',
+    'createdBy', 'createdAt', 'updatedAt',
   ];
   for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
-  // createdBy names the verified account whose catalog.create minted the
-  // work; the migration and the admin tools leave it absent.
-  const allowedWorkFields = new Set([...required, 'mergedInto', 'createdBy']);
+  // createdBy names the account that brought the work in: the add-book
+  // flow's reader, the operator for a console creation, or the reader whose
+  // book first stood on a catalog-build work (backfilled 2026-09-02).
+  const allowedWorkFields = new Set([...required, 'mergedInto']);
   for (const field of Object.keys(work)) {
     if (!allowedWorkFields.has(field)) found('catalog.work.unexpected-field', path, field);
   }
@@ -266,15 +268,16 @@ for (const editionDoc of editions.docs) {
   const requiredEditionFields = [
     'workId', 'isbn13', 'title', 'publisher', 'publishedDate',
     'language', 'translatorNames', 'format', 'suggestedPageCount', 'coverUrl',
-    'externalIds', 'createdAt', 'updatedAt',
+    'externalIds', 'createdBy', 'createdAt', 'updatedAt',
   ];
   for (const field of requiredEditionFields) {
     if (edition[field] === undefined) found(`catalog.edition.missing.${field}`, path);
   }
   // createdBy names the account whose book the edition was minted for (the
-  // add-book flow, an admin link, the backfill); migration- and
-  // admin-created editions leave it absent.
-  const allowedEditionFields = new Set([...requiredEditionFields, 'createdBy']);
+  // add-book flow, an admin link, the edition backfill), the operator for a
+  // console creation, or the reader whose book first stood on a
+  // catalog-build edition (backfilled 2026-09-02).
+  const allowedEditionFields = new Set(requiredEditionFields);
   for (const field of Object.keys(edition)) {
     if (!allowedEditionFields.has(field)) found('catalog.edition.unexpected-field', path, field);
   }

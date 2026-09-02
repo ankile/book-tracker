@@ -393,7 +393,7 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
 exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
   "admin.catalogpreview",
   decodeAdminCatalogPreviewRequest,
-  async ({operation}) => previewAdminCatalogOperation(db, operation),
+  async ({operation}, identity) => previewAdminCatalogOperation(db, identity.uid, operation),
   {auditView: true},
 );
 

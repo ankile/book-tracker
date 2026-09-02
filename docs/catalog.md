@@ -9,9 +9,9 @@ public whoever contributed it; who read what is not.
 
 | Collection | Document id | Contents |
 |---|---|---|
-| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy?`, `createdAt`, `updatedAt` |
-| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy?`, `createdAt`, `updatedAt` |
-| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy?`, `createdAt`, `updatedAt` |
+| `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt` |
+| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt` |
+| `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy`, `createdAt`, `updatedAt` |
 | `isbnIndex` | the ISBN-13 | `workId`, `editionId` |
 | `externalIdIndex` | `sha256(provider + "\0" + externalId)` | `workId`, `editionId`, `provider`, `externalId` |
 | `workTitleIndex` | `sha256(workId + "\0" + titleKey)` | `workId`, `title`, `titleKey`, `status` |
@@ -61,8 +61,12 @@ reader (the client's in-memory author map, the callables, the admin scan,
   work. `catalog.ensureauthors` resolves or mints the shared authors a
   personal book references and refuses a name that matches more than one
   active author until an admin merges them. Every work, edition and author
-  a reader's flow mints carries `createdBy`, the account that minted it;
-  the migration and the console leave it absent. All three callables are
+  carries `createdBy`: the account whose add-book flow minted it, the
+  book's owner for an edition minted on an admin link, and the operator for
+  a record created in the console. The catalog build stamped none, and
+  `migrate-catalog-creators.ts` attributed each of its records to the reader
+  whose book first stood on it (2026-09-02); the audit treats a missing
+  creator as a finding. All three callables are
   bounded by the structural caps in `functions/src/catalogLimits.ts`. There
   is no consent or provenance gate: every account's books may seed the
   catalog.
@@ -133,9 +137,9 @@ operations that start from no record. `/admin/works/[workId]` is one work:
 its record, editions, the readers' books that resolve to it (a book still
 linked to a merged alias counts for the survivor), and its duplicate
 candidates. `/admin/authors/[authorId]` is one author: its record, aliases,
-and the works naming it directly or through a merged alias. Works record
-`createdBy`; authors carry no creator, so an author's provenance is its
-creation day plus the creator of each work listed.
+and the works naming it directly or through a merged alias. Works, editions
+and authors record `createdBy`, shown as the account's sign-in email from
+the `users` documents the console already listens to.
 
 Every button opens the same operation dialog with a prefilled draft
 (`src/lib/utils/adminCatalogView.ts` builds and validates the operation from

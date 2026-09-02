@@ -4,7 +4,7 @@
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
   import { CATALOG_LIMITS } from '../../../shared/catalogLimits.ts';
-  import { adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import type { AdminCatalogBookRow, AdminCatalogBookTarget } from '$lib/interfaces/catalog.ts';
   import {
     adminCatalogCandidatesByBook,
@@ -41,6 +41,7 @@
   // change. Nothing here fetches; an applied operation shows up when its
   // writes land, the same way anyone else's would.
   const scan = $derived($adminCatalogScan ?? null);
+  const emails = $derived($adminAccountEmails ?? new Map<string, string>());
   const progress = $derived($adminCatalogProgress);
 
   // Every button on this page prefills the one operation dialog; nothing
@@ -136,7 +137,7 @@
                 <h3><a href="/admin/works/{work.workId}">{work.canonicalTitle}</a></h3>
                 <p>{catalogAuthorNames(names, work.authorIds)}</p>
                 <small>
-                  {isoDay(work.createdAt)} · {creatorLabel(work.createdBy)} ·
+                  {isoDay(work.createdAt)} · {creatorLabel(work.createdBy, emails)} ·
                   {work.editionCount} {work.editionCount === 1 ? 'edition' : 'editions'} ·
                   {linked.length} {linked.length === 1 ? 'reader' : 'readers'}{work.status === 'hidden' ? ' · hidden' : ''}
                 </small>
@@ -247,7 +248,7 @@
             {#each works as work (work.workId)}
               <tr>
                 <td><strong><a href="/admin/works/{work.workId}">{work.canonicalTitle}</a></strong><small>{catalogAuthorNames(names, work.authorIds)} · {work.workId}</small></td>
-                <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy)}</small></td>
+                <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy, emails)}</small></td>
                 <td><span class="status {work.status}">{work.status}</span></td>
                 <td>{work.editionCount}</td>
                 <td>{work.linkedBookCount}</td>

@@ -4,7 +4,7 @@
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
-  import { adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
   import {
     authorNamesById,
     bookKey,
@@ -29,6 +29,7 @@
   // live store the overview renders, so the page is current the moment it
   // opens and updates as writes land.
   const scan = $derived($adminCatalogScan ?? null);
+  const emails = $derived($adminAccountEmails ?? new Map<string, string>());
   const progress = $derived($adminCatalogProgress);
   const workId = $derived(page.params.workId ?? '');
 
@@ -77,7 +78,7 @@
           <p>
             {#each authors as author, index (author.id)}{#if index > 0}, {/if}<a href="/admin/authors/{author.id}">{author.name ?? `[Missing ${author.id}]`}</a>{:else}No authors{/each}
           </p>
-          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, true)} · <code>{work.workId}</code></p>
+          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, emails)} · <code>{work.workId}</code></p>
           {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
@@ -138,7 +139,7 @@
                   <td>{edition.format}</td>
                   <td>{edition.suggestedPageCount ?? '—'}</td>
                   <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
-                  <td>{creatorLabel(edition.createdBy)}</td>
+                  <td>{creatorLabel(edition.createdBy, emails)}</td>
                   <td>
                     <div class="actions">
                       <button type="button" onclick={() => (draft = editEditionDraft(edition))}>Edit edition…</button>

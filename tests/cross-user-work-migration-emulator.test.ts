@@ -26,6 +26,7 @@ const secondUsername = `race-${suffix}`.slice(0, 30)
 const migrationPath = fileURLToPath(new URL('../migrate-cross-user-works.ts', import.meta.url))
 const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url))
 const backfillPath = fileURLToPath(new URL('../migrate-book-editions.ts', import.meta.url))
+const creatorsPath = fileURLToPath(new URL('../migrate-catalog-creators.ts', import.meta.url))
 const groupKey = 'title:left hand of darkness\0authors:ursula k le guin'
 const workId = deterministicCatalogId('work', groupKey)
 const isbn = '9780441478125'
@@ -152,8 +153,8 @@ test('author-kind conflicts preserve legacy rows instead of collapsing them', as
     entityUser.set({uid: kindEntityUid}),
     personAuthor.set({name: 'Same Catalog Name', kind: 'person'}),
     entityAuthor.set({name: 'Same Catalog Name', kind: 'entity'}),
-    personBook.set({title: 'Person Classification', isbn: '', authorIds: ['same-name']}),
-    entityBook.set({title: 'Entity Classification', isbn: '', authorIds: ['same-name']}),
+    personBook.set({title: 'Person Classification', isbn: '', authorIds: ['same-name'], createdAt: Timestamp.now()}),
+    entityBook.set({title: 'Entity Classification', isbn: '', authorIds: ['same-name'], createdAt: Timestamp.now()}),
   ])
 
   const applied = runScript(migrationPath, '--apply')
@@ -191,14 +192,14 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
     tombstonedUser.set({ uid: tombstonedUid, deletedAt: Timestamp.now() }),
     tombstonedBook.set({
       title: 'The Left Hand of Darkness', isbn, authorIds: [leGuinAuthorId],
-      pageCount: 304, updatedAt: originalUpdatedAt,
+      pageCount: 304, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt,
     }),
     operatorUser.set({uid: OPERATOR_UID}, {merge: true}),
     db.doc(`profiles/${username}`).set({ uid: sharingUid, public: true }),
     db.doc(`catalogAuthors/${someoneElseAuthorId}`).set({
       canonicalName: 'Someone Else', alternateNames: [], nameKeys: ['someone else'],
       sortName: 'Else', kind: 'person', status: 'active', mergedFrom: [],
-      createdAt: now, updatedAt: now,
+      createdBy: 'someone-else', createdAt: now, updatedAt: now,
     }),
     sharingUser.collection('settings').doc('bookSharing').set({
       enabled: true,
@@ -225,7 +226,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       title: 'The Left Hand of Darkness', isbn, authorIds: ['ursula-priority'],
       pageCount: 333, publisher: 'Operator Press', publishedDate: '1969',
       coverUrl: 'https://operator.example.test/cover.jpg',
-      subjects: ['Science fiction'], fiction: true, updatedAt: originalUpdatedAt,
+      subjects: ['Science fiction'], fiction: true, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt,
     }),
     sharedBook.set({
       title: 'The Left Hand of Darkness',
@@ -233,18 +234,18 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       authorIds: ['ursula'],
       pageCount: 304,
       coverUrl: 'http://cover.example.test/cover.jpg',
-      updatedAt: originalUpdatedAt,
+      createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt,
     }),
-    unsharedBook.set({ title: 'Left Hand of Darkness, The', isbn, authorIds: ['ursula'], pageCount: 320, updatedAt: originalUpdatedAt }),
+    unsharedBook.set({ title: 'Left Hand of Darkness, The', isbn, authorIds: ['ursula'], pageCount: 320, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt }),
     unsharedMetadataBook.set({
       title: 'The Left Hand of Darkness', isbn: secondIsbn, authorIds: ['ursula'],
       pageCount: 999, publisher: 'Second Press', publishedDate: 'secret-date',
-      coverUrl: 'https://second.example.test/cover.jpg', updatedAt: originalUpdatedAt,
+      coverUrl: 'https://second.example.test/cover.jpg', createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt,
     }),
-    unmatchedBook.set({ title: 'Parable of the Sower', isbn: '', authorIds: ['octavia'], pageCount: 264, updatedAt: originalUpdatedAt }),
-    conflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 304, updatedAt: originalUpdatedAt }),
-    nonSharingConflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 288, updatedAt: originalUpdatedAt }),
-    db.doc(`works/${conflictWorkId}`).set(validWork('A Different Book', conflictTitleKey, [someoneElseAuthorId])),
+    unmatchedBook.set({ title: 'Parable of the Sower', isbn: '', authorIds: ['octavia'], pageCount: 264, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt }),
+    conflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 304, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt }),
+    nonSharingConflictBook.set({ title: 'Kindred', isbn: conflictIsbn, authorIds: ['octavia'], pageCount: 288, createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt }),
+    db.doc(`works/${conflictWorkId}`).set({...validWork('A Different Book', conflictTitleKey, [someoneElseAuthorId]), createdBy: 'someone-else'}),
     db.doc(`editions/${conflictEditionId}`).set({
       workId: conflictWorkId,
       isbn13: conflictIsbn,
@@ -257,7 +258,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
       suggestedPageCount: null,
       coverUrl: '',
       externalIds: {},
-      createdAt: now,
+      createdBy: 'someone-else', createdAt: now,
       updatedAt: now,
     }),
     db.doc(`isbnIndex/${conflictIsbn}`).set({ workId: conflictWorkId, editionId: conflictEditionId }),
@@ -286,7 +287,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   // projection. Remove the skip and the key set below grows.
   const tombstonedCopy = (await tombstonedBook.get()).data()
   assert.deepEqual(Object.keys(tombstonedCopy ?? {}).sort(),
-    ['authorIds', 'isbn', 'pageCount', 'title', 'updatedAt'])
+    ['authorIds', 'createdAt', 'isbn', 'pageCount', 'title', 'updatedAt'])
   assert.equal(
     (await db.collection('sharedWorkOwners').where('uid', '==', tombstonedUid).get()).empty,
     true,
@@ -374,7 +375,7 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const lateAddedBook = nonSharingUser.collection('books').doc('late-added-copy')
   await lateAddedBook.set({
     title: 'The Left Hand of Darkness', isbn: lateIsbn, authorIds: [leGuinAuthorId],
-    pageCount: 777, publisher: 'Third Press', updatedAt: originalUpdatedAt,
+    pageCount: 777, publisher: 'Third Press', createdAt: originalUpdatedAt, updatedAt: originalUpdatedAt,
   })
   // A copy added after the first apply seeds its own edition on the re-run.
   const lateApply = runScript(migrationPath, '--apply')
@@ -490,6 +491,18 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const backfillRerun = runScript(backfillPath, '--apply')
   assert.match(backfillRerun, /^linked books without an edition: 0 of /m)
   assert.match(backfillRerun, /^applied: 0 editions created, 0 books linked$/m)
+
+  // The catalog build stamps no creator; migrate-catalog-creators.ts gives
+  // each record the reader whose book first stood on it, same loop.
+  const creatorsDryRun = runScript(creatorsPath)
+  assert.match(creatorsDryRun, /^records without a creator: [1-9]\d* of /m)
+  assert.doesNotMatch(creatorsDryRun, /^REVIEW /m)
+  assert.match(creatorsDryRun, /^dry-run: nothing written$/m)
+  const creatorsApplied = runScript(creatorsPath, '--apply')
+  assert.match(creatorsApplied, /^applied: [1-9]\d* creators stamped$/m)
+  const creatorsRerun = runScript(creatorsPath, '--apply')
+  assert.match(creatorsRerun, /^records without a creator: 0 of /m)
+  assert.match(creatorsRerun, /^applied: 0 creators stamped$/m)
   const audit = runScript(auditPath)
   assert.doesNotMatch(audit, /^catalog\./m)
 

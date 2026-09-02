@@ -561,10 +561,10 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await dialog.getByRole('button', {name: 'Cancel'}).click();
       await expect(dialog).toBeHidden();
 
-      // The edition the title-only save minted is listed with its reader as
-      // creator, beside the seeded one.
+      // The edition the title-only save minted is listed with its reader's
+      // email as creator, beside the seeded one.
       await expect(page.getByRole('row').filter({hasText: 'Left Hand of Darkness edition'})).toHaveCount(0);
-      await expect(page.getByRole('cell', {name: `reader ${normalUid.slice(0, 8)}…`})).toBeVisible();
+      await expect(page.getByRole('cell', {name: normalEmail})).toBeVisible();
 
       // Every operation that starts from this work opens as its own dialog;
       // the per-edition buttons appear once per edition, so the first is used.

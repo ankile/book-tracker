@@ -454,9 +454,10 @@ export function authorSearchText(author: AdminCatalogAuthorRow): string {
 
 // Works record the account that created them through the add-book flow;
 // the migration and the console leave the field absent.
-export function creatorLabel(createdBy: string | null, full = false): string {
-  if (createdBy === null) return 'migration / admin';
-  return full ? `reader ${createdBy}` : `reader ${createdBy.slice(0, 8)}…`;
+export function creatorLabel(createdBy: string | null, emails: ReadonlyMap<string, string>): string {
+  if (createdBy === null) return 'unknown';
+  const email = emails.get(createdBy);
+  return email === undefined || email === '' ? createdBy : email;
 }
 
 export function isoDay(ms: number): string {

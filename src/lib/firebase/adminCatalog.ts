@@ -75,16 +75,20 @@ const books: Readable<CatalogScanBookDocument[] | undefined> =
     }, listenError('load every reader\'s books for curation')),
   );
 
+const users = documents(query(collection(db, 'users')), 'load the account list for curation');
+
 // Accounts that exist without a tombstone (SEC-006 soft delete); a book
 // owned by any other uid is orphaned data.
-const liveUserIds: Readable<ReadonlySet<string> | undefined> =
-  cachedReadable<ReadonlySet<string> | undefined>(undefined, (set) =>
-    onSnapshot(query(collection(db, 'users')), (snapshot) => {
-      set(new Set(snapshot.docs
-        .filter((document) => document.get('deletedAt') === undefined)
-        .map((document) => document.id)));
-    }, listenError('load the account list for curation')),
-  );
+const liveUserIds: Readable<ReadonlySet<string> | undefined> = derived(users, ($users) =>
+  $users === undefined ? undefined : new Set($users
+    .filter((document) => document.data.deletedAt === undefined)
+    .map((document) => document.id)));
+
+// Every account's sign-in email, tombstoned ones included, so a record's
+// creator reads as a person rather than a uid.
+export const adminAccountEmails: Readable<ReadonlyMap<string, string> | undefined> = derived(users, ($users) =>
+  $users === undefined ? undefined : new Map($users.map((document) =>
+    [document.id, typeof document.data.email === 'string' ? document.data.email : ''])));
 
 // What has arrived so far, for the console's loading line: a fresh device
 // fills the persistent cache from seven listeners, and the operator should

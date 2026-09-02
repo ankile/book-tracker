@@ -320,6 +320,8 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
   });
   assert.deepEqual(second, first);
   assert.equal(store.rows.get("works/new-work")?.canonicalTitle, "The New Work");
+  // A record the console creates is the operator's.
+  assert.equal(store.rows.get("works/new-work")?.createdBy, adminUid);
   const audit = store.rows.get(`adminAudit/${preview.operationId}`);
   assert.ok(audit);
   assert.equal(audit.type, "catalog-mutation");
@@ -562,6 +564,8 @@ test("moving an edition atomically relinks its books and identifier indexes", as
     expected: preview.expected,
   }, recentAdmin());
   assert.equal(store.rows.get("editions/shared-edition")?.workId, "new-work");
+  // A move edits an existing edition: the operator becomes no creator.
+  assert.equal(store.rows.get("editions/shared-edition")?.createdBy, undefined);
   assert.deepEqual(store.rows.get(`externalIdIndex/${externalId}`), {
     workId: "new-work",
     editionId: "shared-edition",
@@ -932,4 +936,55 @@ test("author and edition edits keep the creator the add-book flow recorded", asy
   }, recentAdmin());
   assert.equal(store.rows.get("editions/made-by-reader")?.createdBy, "reader");
   assert.equal(store.rows.get("editions/made-by-reader")?.title, "Renamed");
+});
+
+test("an author the console creates records the operator; an author without a creator keeps none on edit", async (t) => {
+  const store = installCatalogStore(t);
+  const created = {
+    type: "upsertAuthor",
+    authorId: "made-by-operator",
+    author: {canonicalName: "Ursula K. Le Guin", alternateNames: [], sortName: "Le Guin", kind: "person"},
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation: created}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation: created, expected: preview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("catalogAuthors/made-by-operator")?.createdBy, adminUid);
+
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("catalogAuthors/legacy"), {
+    canonicalName: "Legacy Author", alternateNames: [], nameKeys: ["legacy author"],
+    sortName: "Author", kind: "person", status: "active", mergedFrom: [],
+    createdAt: now, updatedAt: now,
+  });
+  const edit = {
+    type: "upsertAuthor",
+    authorId: "legacy",
+    author: {canonicalName: "Legacy Author", alternateNames: ["L. Author"], sortName: "Author", kind: "person"},
+  };
+  const editPreview = await deployed.admin.catalogpreview.run({operation: edit}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: editPreview.operationId, operation: edit, expected: editPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("catalogAuthors/legacy")?.createdBy, undefined);
+  assert.deepEqual(store.rows.get("catalogAuthors/legacy")?.alternateNames, ["L. Author"]);
+});
+
+test("an edition the console creates from nothing records the operator", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/target-work"), activeWork("Target Work"));
+  const operation = {
+    type: "upsertEdition",
+    editionId: "made-by-operator",
+    workId: "target-work",
+    edition: {
+      isbn13: null, title: "Console Edition", publisher: "", publishedDate: "", language: "en",
+      translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+    },
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("editions/made-by-operator")?.createdBy, adminUid);
 });

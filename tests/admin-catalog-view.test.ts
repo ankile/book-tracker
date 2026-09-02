@@ -254,7 +254,9 @@ test('author order, duplicate findings, and creator labels', () => {
   assert.deepEqual(duplicateFindingsFor(scan, 'work-a').map((finding) => finding.code), ['suspected-duplicate-works']);
   assert.deepEqual(duplicateFindingsFor(scan, 'w9'), []);
 
-  assert.equal(creatorLabel(null), 'migration / admin');
-  assert.equal(creatorLabel('abcdefghijk'), 'reader abcdefgh…');
-  assert.equal(creatorLabel('abcdefghijk', true), 'reader abcdefghijk');
+  const emails = new Map([['abcdefghijk', 'ada@example.test'], ['blank', '']]);
+  assert.equal(creatorLabel(null, emails), 'unknown');
+  assert.equal(creatorLabel('abcdefghijk', emails), 'ada@example.test');
+  assert.equal(creatorLabel('blank', emails), 'blank');
+  assert.equal(creatorLabel('stranger', emails), 'stranger');
 });

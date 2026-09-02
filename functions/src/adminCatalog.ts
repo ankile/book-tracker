@@ -884,6 +884,8 @@ async function planOperation(
   db: Firestore,
   operation: AdminCatalogOperation,
   now: Timestamp,
+  // The operator; a record the operation creates from nothing is theirs.
+  creator: string,
 ): Promise<Plan> {
   const catalog: CatalogVersion[] = [];
   let books: AdminCatalogExpected["books"] = [];
@@ -906,7 +908,10 @@ async function planOperation(
         "authors",
       );
     }
-    const next = authorInputData(operation.author, now, current);
+    const next = {
+      ...authorInputData(operation.author, now, current),
+      ...(current === undefined ? {createdBy: creator} : {}),
+    };
     const nameMatches = await many(reader, db.collection("catalogAuthors")
       .where("nameKeys", "array-contains-any", next.nameKeys)
       .limit(MAX_CATALOG_AUTHORS + 1));
@@ -1030,7 +1035,10 @@ async function planOperation(
     catalog.push(...authors.versions);
     // Catalog data is public whoever contributed it: any personal book may
     // seed a work, so no consent check sits here.
-    const work = workInputData({...operation.work, authorIds: authors.authorIds}, operation.status, now);
+    const work = {
+      ...workInputData({...operation.work, authorIds: authors.authorIds}, operation.status, now),
+      createdBy: creator,
+    };
     changes.push(change("work", ref, "create", null, wireWork(work), {
       type: "create", data: {...work},
     }));
@@ -1208,7 +1216,10 @@ async function planOperation(
       const row = {workId: operation.workId, editionId: operation.editionId};
       changes.push(change("isbn", isbn.ref, "create", null, row, {type: "create", data: row}));
     }
-    const next = editionInputData(operation.workId, operation.edition, now, old);
+    const next = {
+      ...editionInputData(operation.workId, operation.edition, now, old),
+      ...(old === undefined ? {createdBy: creator} : {}),
+    };
     changes.push(change(
       "edition", ref, old === undefined ? "create" : "update",
       old === undefined ? null : wireEdition(old), wireEdition(next),
@@ -1349,10 +1360,11 @@ function wireChanges(changes: PlannedChange[]) {
 
 export async function previewAdminCatalogOperation(
   db: Firestore,
+  adminUid: string,
   operation: AdminCatalogOperation,
 ) {
   const reader: PlanReader = {get: async (value) => value.get()};
-  const plan = await planOperation(reader, db, operation, Timestamp.now());
+  const plan = await planOperation(reader, db, operation, Timestamp.now(), adminUid);
   return {
     operationId: randomUUID(),
     operationHash: operationHash(operation),
@@ -1388,7 +1400,7 @@ export async function applyAdminCatalogOperation(
       get: async (value) => transaction.get(value as DocumentReference),
     };
     const now = Timestamp.now();
-    const plan = await planOperation(reader, db, request.operation, now);
+    const plan = await planOperation(reader, db, request.operation, now, adminUid);
     if (!expectedEqual(plan.expected, request.expected)) {
       throw new functions.https.HttpsError(
         "aborted",

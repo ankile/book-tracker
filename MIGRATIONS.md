@@ -185,6 +185,7 @@ current deployment instructions.
 | `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Completed historical rollout (2026-09-01: apply matched the reviewed dry run, second apply 0, audit clean apart from one reviewed-group author the planner did not mint — repaired separately). Idempotent; a rerun links only books that gained unlinked author references since. |
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-book-editions.ts` | Put every linked personal book on an edition of its work, minting one per reader per book identity from the book's own fields | Completed historical rollout (2026-09-02: dry-run and emulator rehearsal on the day's snapshot matched the apply — 46 editions created, 47 books linked, nothing for review — second apply 0, audit back at its known baselines). Idempotent; a rerun joins what it minted and plans nothing for a book that carries an edition. See [Book editions backfill](#book-editions-backfill). |
+| `migrate-catalog-creators.ts` | Stamp `createdBy` on every work, edition and catalog author that has none, from the earliest personal book standing on it | Pending. Idempotent; a record that carries a creator is left alone. See [Catalog creators backfill](#catalog-creators-backfill). |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -347,6 +348,23 @@ relink from the console lands on the backfilled document. Order:
 2. run the standard dry-run, snapshot, apply-twice, audit loop. The audit
    class `catalog.book.linked-without-edition` counts what is left; after the
    apply it is the REVIEW lines only.
+
+## Catalog creators backfill
+
+Every work, edition and catalog author carries `createdBy` (owner decision
+2026-09-02): the reader whose book brought the record in, the operator for a
+record created in the console. The catalog build stamped none.
+`migrate-catalog-creators.ts` (planner: `catalog-creator-backfill.ts`)
+attributes each creator-less record to the owner of the earliest-created
+personal book standing on it — for a work the books linked to it directly or
+through a merged alias, for an edition the books linked to it, for an author
+the books on the works naming it directly or through a merged alias — and
+prints a REVIEW line for a record nothing stands on. Additive, one
+`update` per record, no Rules change; the audit reports a missing creator
+as `catalog.<kind>.missing.createdBy`, so after the apply that class is the
+REVIEW lines only. Order: deploy the backend (console creations stamp the
+operator) and the client (creators shown as emails), then the standard
+dry-run, snapshot, apply-twice, audit loop.
 
 ## finishedAt rollout (completed 2026-09-01)
 
