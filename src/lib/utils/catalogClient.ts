@@ -61,7 +61,7 @@ function decodeWorkSummary(value: unknown, context: string): CatalogWorkSummary 
   const data = record(value, context);
   exactKeys(
     data,
-    ['workId', 'canonicalTitle', 'alternateTitles', 'authors', 'coverUrl', 'subjects', 'fiction', 'mergedFrom'],
+    ['workId', 'canonicalTitle', 'alternateTitles', 'authors', 'coverUrl', 'subjects', 'fiction', 'language', 'mergedFrom'],
     context,
   );
   return {
@@ -74,6 +74,7 @@ function decodeWorkSummary(value: unknown, context: string): CatalogWorkSummary 
     coverUrl: string(data.coverUrl, `${context}.coverUrl`),
     subjects: strings(data.subjects, `${context}.subjects`),
     fiction: data.fiction === null ? null : boolean(data.fiction, `${context}.fiction`),
+    language: string(data.language, `${context}.language`),
     mergedFrom: strings(data.mergedFrom, `${context}.mergedFrom`),
   };
 }
@@ -182,11 +183,13 @@ export function decodeEnsureCatalogAuthorsResponse(
 // resolved author cannot seed a work (a work needs at least one author).
 // The edition a personal book stands for: the book's own bibliographic
 // fields, nothing inferred.
-export function buildCatalogEditionInput({title, isbn, pageCount, metadata}: {
+// `language` is the edition's override: '' inherits the work's default.
+export function buildCatalogEditionInput({title, isbn, pageCount, metadata, language}: {
   title: string;
   isbn: string;
   pageCount: number;
   metadata: BookMetadata;
+  language: string;
 }): CatalogEditionInput {
   const coverUrl = metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '';
   return {
@@ -194,7 +197,7 @@ export function buildCatalogEditionInput({title, isbn, pageCount, metadata}: {
     title,
     publisher: metadata.publisher,
     publishedDate: metadata.publishedDate,
-    language: '',
+    language,
     translatorNames: [],
     format: 'unknown',
     suggestedPageCount: pageCount,
@@ -219,21 +222,27 @@ export function buildCatalogCreateRequest({title, authorIds, isbn, pageCount, me
       coverUrl: metadata.coverUrl.startsWith('https://') ? metadata.coverUrl : '',
       subjects: metadata.subjects,
       fiction: metadata.fiction,
+      // The first reader's book sets the work's default; its edition inherits.
+      language: metadata.language,
     },
-    edition: buildCatalogEditionInput({title, isbn, pageCount, metadata}),
+    edition: buildCatalogEditionInput({title, isbn, pageCount, metadata, language: ''}),
   };
 }
 
 // A chosen work without a matching edition gets this book's edition added
 // to it, so the saved book stands on an edition of its work.
-export function buildCatalogAddEditionRequest({workId, title, isbn, pageCount, metadata}: {
+// The edition overrides the work's language only where the book's differs
+// from it; a book in the work's language, or with none, inherits.
+export function buildCatalogAddEditionRequest({workId, workLanguage, title, isbn, pageCount, metadata}: {
   workId: string;
+  workLanguage: string;
   title: string;
   isbn: string;
   pageCount: number;
   metadata: BookMetadata;
 }): CatalogAddEditionRequest {
-  return {workId, edition: buildCatalogEditionInput({title, isbn, pageCount, metadata})};
+  const language = metadata.language !== workLanguage ? metadata.language : '';
+  return {workId, edition: buildCatalogEditionInput({title, isbn, pageCount, metadata, language})};
 }
 
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {

@@ -18,7 +18,7 @@ export const BOOK_FIELDS = [
   'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
   'workId', 'editionId', 'matchMethod', 'linkedAt',
   'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
-  'publisher', 'subjects', 'title', 'updatedAt',
+  'publisher', 'subjects', 'title', 'updatedAt', 'language',
 ] as const;
 
 export const PROFILE_FIELDS = [
@@ -112,6 +112,7 @@ export function bookShapeViolations(book: Record<string, unknown>, ownerPath: st
   if ('coverUrl' in book) v.push(...cappedString('coverUrl', book.coverUrl, 2048));
   if ('publisher' in book) v.push(...cappedString('publisher', book.publisher, 500));
   if ('publishedDate' in book) v.push(...cappedString('publishedDate', book.publishedDate, 64));
+  if ('language' in book) v.push(...cappedString('language', book.language, 16));
   if ('subjects' in book) v.push(...stringListViolations('subjects', book.subjects, 25, 2500));
   if ('fiction' in book && book.fiction !== null && typeof book.fiction !== 'boolean') v.push('fiction.not-bool');
   if ('isbn' in book) v.push(...cappedString('isbn', book.isbn, 32));

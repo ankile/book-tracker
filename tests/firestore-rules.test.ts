@@ -705,6 +705,7 @@ const fullBook = (db: ReturnType<RulesTestContext['firestore']>, uid: string, ov
   publishedDate: '2026',
   subjects: ['Fiction', 'Norway'],
   fiction: true,
+  language: 'no',
   createdAt: Timestamp.now(),
   ...overrides,
 });
@@ -731,6 +732,8 @@ const bookShapeRejections = (
     coverUrl: { coverUrl: 'https://' + 'c'.repeat(2048) },
     publisher: { publisher: 'p'.repeat(501) },
     publishedDate: { publishedDate: 'd'.repeat(65) },
+    language: { language: 'l'.repeat(17) },
+    languageList: { language: ['en'] },
     isbn: { isbn: '9'.repeat(33) },
     title: { title: 't'.repeat(501) },
     tooManySubjects: { subjects: Array.from({ length: 26 }, (_, i) => `s${i}`) },

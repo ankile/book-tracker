@@ -101,6 +101,7 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
     coverUrl: "",
     subjects: [],
     fiction: null,
+    language: "",
   };
   const edition = {
     isbn13: null,

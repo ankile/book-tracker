@@ -16,10 +16,11 @@ export const EMPTY_METADATA: BookMetadata = {
   publishedDate: "",
   subjects: [],
   fiction: null,
+  language: "",
 };
 
 export const METADATA_FIELDS = [
-  'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction',
+  'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction', 'language',
 ] as const satisfies readonly (keyof BookMetadata)[];
 
 const MAX_SUBJECTS = 25;
@@ -97,6 +98,8 @@ export function parseOpenLibraryBook(value: unknown): BookLookupResult {
     publishedDate: optionalString(record.publish_date) ?? "",
     subjects,
     fiction: deriveFiction(subjects),
+    // The data API carries no language field.
+    language: "",
   };
 }
 
@@ -154,6 +157,13 @@ export function selectLookupMetadata(
       google?.fiction,
       nationalLibrary?.fiction,
       openLibrary?.fiction,
+    ]),
+    // Google states the volume's language outright; the national library
+    // records it in MODS; Open Library's data API has none.
+    language: firstText([
+      google?.language,
+      nationalLibrary?.language,
+      openLibrary?.language,
     ]),
   };
 }

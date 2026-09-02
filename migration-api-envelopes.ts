@@ -31,6 +31,7 @@ const LOOKUP_RESULT_KEYS = new Set([
   "publishedDate",
   "subjects",
   "fiction",
+  "language",
 ]);
 
 function requireString(value: unknown, source: string): string {
@@ -71,6 +72,8 @@ function decodeBookLookupResult(value: unknown, source: string): BookLookupResul
     publishedDate: requireString(result.publishedDate, `${source}.publishedDate`),
     subjects: requireStringArray(result.subjects, `${source}.subjects`),
     fiction: result.fiction,
+    // Envelopes recorded before the language field carry none.
+    language: result.language === undefined ? "" : requireString(result.language, `${source}.language`),
   };
 }
 

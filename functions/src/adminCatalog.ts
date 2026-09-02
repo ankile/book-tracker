@@ -38,6 +38,7 @@ import {
   titleIndexRow,
 } from "./catalog";
 import {CATALOG_LIMITS} from "./shared/catalogLimits";
+import {effectiveLanguage} from "./shared/language";
 
 const MAX_WORKS = CATALOG_LIMITS.works;
 const MAX_CATALOG_AUTHORS = CATALOG_LIMITS.catalogAuthors;
@@ -187,7 +188,7 @@ function workFrom(snapshot: DocumentSnapshot): WorkData {
   const work = storedWork(snapshot, catalogInvariant);
   assertStoredKeys(snapshot, [
     "canonicalTitle", "alternateTitles", "titleKeys", "authorIds",
-    "coverUrl", "subjects", "fiction", "status", "mergedInto", "mergedFrom",
+    "coverUrl", "subjects", "fiction", "language", "status", "mergedInto", "mergedFrom",
     "createdBy", "createdAt", "updatedAt", "reviewedAt",
   ]);
   const createdBy = snapshot.get("createdBy");
@@ -318,6 +319,7 @@ function wireWork(work: WorkData): Record<string, unknown> {
     coverUrl: work.coverUrl,
     subjects: work.subjects,
     fiction: work.fiction,
+    language: work.language,
     status: work.status,
     mergedInto: work.mergedInto ?? null,
     mergedFrom: work.mergedFrom,
@@ -580,6 +582,7 @@ function inheritedBookMetadata(
   fillText("coverUrl", edition.coverUrl !== "" ? edition.coverUrl : work.coverUrl);
   fillText("publisher", edition.publisher);
   fillText("publishedDate", edition.publishedDate);
+  fillText("language", effectiveLanguage(edition.language, work.language));
   const fiction = snapshot.get("fiction");
   if ((fiction === undefined || fiction === null) && work.fiction !== null) {
     before.fiction = null;
@@ -763,6 +766,7 @@ async function mintedEditionFor(
   snapshot: DocumentSnapshot,
   target: AdminBookTarget,
   workId: string,
+  workLanguage: string,
   now: Timestamp,
 ): Promise<{
   editionId: string;
@@ -830,13 +834,16 @@ async function mintedEditionFor(
   }
   const pageCount = snapshot.get("pageCount");
   const coverUrl = text("coverUrl");
+  // The book's language becomes the edition's override only where it
+  // differs from the work's default; otherwise the edition inherits.
+  const bookLanguage = text("language");
   const data: EditionData = {
     workId,
     isbn13,
     title,
     publisher: text("publisher"),
     publishedDate: text("publishedDate"),
-    language: "",
+    language: bookLanguage !== workLanguage ? bookLanguage : "",
     translatorNames: [],
     format: "unknown",
     suggestedPageCount: typeof pageCount === "number" && Number.isSafeInteger(pageCount) &&
@@ -857,24 +864,125 @@ async function mintedEditionFor(
   return {editionId, versions, changes, createdEdition: true, createdIsbn: isbn13 !== null};
 }
 
+// The personal books a query names, with their owners checked: a book whose
+// owner reference does not match its path is forged, and a book under a
+// missing or tombstoned account is left alone (SEC-006: a deleted account
+// keeps its documents, untouched). Bounded like every book rewrite.
+async function liveLinkedBooks(
+  reader: PlanReader,
+  db: Firestore,
+  query: Query,
+): Promise<Array<{snapshot: DocumentSnapshot; uid: string; bookId: string}>> {
+  const linked = await many(reader, query.limit(MAX_LINKED_EDITION_BOOKS + 1));
+  if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
+  const owners = new Map<string, DocumentSnapshot>();
+  const live: Array<{snapshot: DocumentSnapshot; uid: string; bookId: string}> = [];
+  for (const snapshot of linked.docs) {
+    const path = snapshot.ref.path.split("/");
+    const owner = snapshot.get("owner") as {path?: unknown} | undefined;
+    if (path.length !== 4 || path[0] !== "users" || path[2] !== "books" ||
+        owner?.path !== `users/${path[1]}`) {
+      failedPrecondition("Personal book owner is missing or forged.", "catalog-invariant");
+    }
+    const uid = path[1];
+    if (!owners.has(uid)) owners.set(uid, await one(reader, db.collection("users").doc(uid)));
+    const account = owners.get(uid)!;
+    if (!account.exists || account.get("deletedAt") !== undefined) continue;
+    live.push({snapshot, uid, bookId: path[3]});
+  }
+  return live;
+}
+
+// A book carries the effective language of the edition it stands on as a
+// copy (users/{uid}/books.language, beside cover and publisher). When that
+// effective language changes, a book still carrying the old value follows
+// it, and so does one that never had any; a book whose reader set something
+// else keeps it. Empty records when nothing changes.
+function carriedLanguage(
+  snapshot: DocumentSnapshot,
+  before: string,
+  after: string,
+): {before: Record<string, unknown>; after: Record<string, unknown>} {
+  if (before === after) return {before: {}, after: {}};
+  const current = snapshot.get("language");
+  if (current !== undefined && current !== null && typeof current !== "string") {
+    catalogInvariant(`${snapshot.ref.path}.language must be a string.`);
+  }
+  const carried = current ?? "";
+  if (carried !== "" && carried !== before) return {before: {}, after: {}};
+  return {before: {language: carried}, after: {language: after}};
+}
+
+// The carried-language changes for the books a query names, where
+// `languages` maps a book's edition override to the effective language
+// before and after the operation. The editions read to learn the override
+// are versioned, so an override that changes underneath the preview makes
+// it stale.
+async function carriedLanguageChanges(
+  reader: PlanReader,
+  db: Firestore,
+  query: Query,
+  languages: (_override: string) => [before: string, after: string],
+): Promise<{
+  changes: PlannedChange[];
+  versions: AdminCatalogExpected["books"];
+  catalog: CatalogVersion[];
+}> {
+  const linked = await liveLinkedBooks(reader, db, query);
+  const overrides = new Map<string, string>();
+  const catalog: CatalogVersion[] = [];
+  const changes: PlannedChange[] = [];
+  const versions: AdminCatalogExpected["books"] = [];
+  for (const {snapshot, uid, bookId} of linked) {
+    const editionId = snapshot.get("editionId");
+    let override = "";
+    if (typeof editionId === "string") {
+      if (!overrides.has(editionId)) {
+        const edition = await one(reader, db.collection("editions").doc(editionId));
+        catalog.push(versionOf("edition", edition));
+        overrides.set(editionId, editionFrom(edition).language);
+      }
+      override = overrides.get(editionId)!;
+    }
+    const [before, after] = languages(override);
+    const carried = carriedLanguage(snapshot, before, after);
+    if (Object.keys(carried.after).length === 0) continue;
+    versions.push(bookVersion(snapshot, {uid, bookId}));
+    changes.push(change(
+      "book", snapshot.ref, "update", carried.before, carried.after,
+      {type: "set", data: carried.after},
+    ));
+  }
+  return {changes, versions, catalog};
+}
+
 async function linkChanges(
   reader: PlanReader,
   db: Firestore,
   targets: AdminBookTarget[],
   target: {workId: string; editionId: string | null} | null,
   now: Timestamp,
-  validateTarget = true,
+  // The work this same plan creates, when the target is not in the catalog
+  // yet (createWork). Otherwise the target work is read and must be
+  // unmerged, and a named edition must belong to it.
+  pendingWork?: WorkData,
 ): Promise<{
   changes: PlannedChange[];
   versions: AdminCatalogExpected["books"];
   catalog: CatalogVersion[];
 }> {
-  if (target !== null && validateTarget) {
-    const resolved = await unmergedWork(reader, db, target.workId);
-    if (target.editionId !== null) {
-      const {edition} = await activeEdition(reader, db, target.editionId);
-      if (edition.workId !== resolved.snapshot.id) {
-        failedPrecondition("Edition belongs to another work.", "catalog-invariant");
+  let workLanguage = "";
+  if (target !== null) {
+    if (pendingWork !== undefined) {
+      workLanguage = pendingWork.language;
+    } else {
+      const resolved = await unmergedWork(reader, db, target.workId);
+      workLanguage = resolved.work.language;
+      if (target.editionId !== null) {
+        const {edition} = await activeEdition(reader, db, target.editionId);
+        if (edition.workId !== resolved.snapshot.id) {
+          failedPrecondition("Edition belongs to another work.", "catalog-invariant");
+        }
       }
     }
   }
@@ -896,7 +1004,7 @@ async function linkChanges(
       // Every linked book stands on an edition of its work (owner decision
       // 2026-09-01): a link that names none mints one per book.
       const minted = await mintedEditionFor(
-        reader, db, snapshot, targets[index], target.workId, now,
+        reader, db, snapshot, targets[index], target.workId, workLanguage, now,
       );
       catalog.push(...minted.versions);
       changes.push(...minted.changes);
@@ -1139,7 +1247,7 @@ async function planOperation(
       operation.books,
       {workId: operation.workId, editionId: null},
       now,
-      false,
+      work,
     );
     changes.push(...linked.changes);
     books = linked.versions;
@@ -1175,6 +1283,23 @@ async function planOperation(
     const indexes = await titleIndexChanges(reader, db, operation.workId, next);
     changes.push(...indexes.changes);
     catalog.push(...indexes.versions);
+    if (current.work.language !== next.language) {
+      // Books on the work, or on an alias merged into it, follow the new
+      // default unless their edition overrides it.
+      const carried = await carriedLanguageChanges(
+        reader,
+        db,
+        db.collectionGroup("books")
+          .where("workId", "in", [operation.workId, ...current.work.mergedFrom]),
+        (override) => [
+          effectiveLanguage(override, current.work.language),
+          effectiveLanguage(override, next.language),
+        ],
+      );
+      changes.push(...carried.changes);
+      catalog.push(...carried.catalog);
+      books = carried.versions;
+    }
   } else if (operation.type === "mergeWorks") {
     const target = await unmergedWork(reader, db, operation.targetWorkId);
     catalog.push(versionOf("work", target.snapshot));
@@ -1224,6 +1349,7 @@ async function planOperation(
       coverUrl: target.work.coverUrl,
       subjects: target.work.subjects,
       fiction: target.work.fiction,
+      language: target.work.language,
     }, target.work.status, now, {...target.work, mergedFrom});
     nextTarget.mergedFrom = mergedFrom;
     changes.push(change(
@@ -1331,22 +1457,11 @@ async function planOperation(
       wireEdition(target.edition), wireEdition(nextTarget),
       {type: "set", data: {...nextTarget}},
     ));
-    const linked = await many(reader, db.collectionGroup("books")
-      .where("editionId", "in", absorbed).limit(MAX_LINKED_EDITION_BOOKS + 1));
-    if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
-    const owners = new Map<string, DocumentSnapshot>();
+    const linked = await liveLinkedBooks(
+      reader, db, db.collectionGroup("books").where("editionId", "in", absorbed),
+    );
     const moved: AdminCatalogExpected["books"] = [];
-    for (const snapshot of linked.docs) {
-      const path = snapshot.ref.path.split("/");
-      const owner = snapshot.get("owner") as {path?: unknown} | undefined;
-      if (path.length !== 4 || path[0] !== "users" || path[2] !== "books" ||
-          owner?.path !== `users/${path[1]}`) {
-        failedPrecondition("Personal book owner is missing or forged.", "catalog-invariant");
-      }
-      const uid = path[1];
-      if (!owners.has(uid)) owners.set(uid, await one(reader, db.collection("users").doc(uid)));
-      const account = owners.get(uid)!;
-      if (!account.exists || account.get("deletedAt") !== undefined) continue;
+    for (const {snapshot, uid, bookId} of linked) {
       const before = linkFrom(snapshot);
       const inherited = inheritedBookMetadata(snapshot, target.edition, work.work);
       const after: LinkState = {
@@ -1355,7 +1470,7 @@ async function planOperation(
         editionId: target.snapshot.id,
         matchMethod: "admin",
       };
-      moved.push(bookVersion(snapshot, {uid, bookId: path[3]}));
+      moved.push(bookVersion(snapshot, {uid, bookId}));
       changes.push(change(
         "book", snapshot.ref, "update",
         {...before, ...inherited.before}, {...after, ...inherited.after},
@@ -1423,6 +1538,21 @@ async function planOperation(
       "external ID indexes",
     );
     changes.push(...external.changes);
+    if (old !== undefined && old.workId === operation.workId && old.language !== next.language) {
+      // An override that changes carries into the books on this edition.
+      const carried = await carriedLanguageChanges(
+        reader,
+        db,
+        db.collectionGroup("books").where("editionId", "==", operation.editionId),
+        () => [
+          effectiveLanguage(old.language, work.work.language),
+          effectiveLanguage(next.language, work.work.language),
+        ],
+      );
+      changes.push(...carried.changes);
+      catalog.push(...carried.catalog);
+      books = carried.versions;
+    }
     if (old !== undefined && old.workId !== operation.workId) {
       const linked = await many(reader, db.collectionGroup("books")
         .where("editionId", "==", operation.editionId)
@@ -1433,6 +1563,12 @@ async function planOperation(
         const path = book.ref.path.split("/");
         return bookVersion(book, {uid: path[1], bookId: path[3]});
       });
+      // The books move between works, so their effective language may
+      // change through the work's default even if the override does not.
+      const previousWorkSnapshot = await one(reader, db.collection("works").doc(old.workId));
+      catalog.push(versionOf("work", previousWorkSnapshot));
+      const languageBefore = effectiveLanguage(old.language, workFrom(previousWorkSnapshot).language);
+      const languageAfter = effectiveLanguage(next.language, work.work.language);
       for (const book of linked.docs) {
         const before = linkFrom(book);
         const after = {
@@ -1441,9 +1577,10 @@ async function planOperation(
           matchMethod: "admin" as const,
           linkedAt: now.toMillis(),
         };
+        const carried = carriedLanguage(book, languageBefore, languageAfter);
         changes.push(change(
-          "book", book.ref, "update", before, after,
-          {type: "set", data: {...after, linkedAt: now}},
+          "book", book.ref, "update", {...before, ...carried.before}, {...after, ...carried.after},
+          {type: "set", data: {...after, linkedAt: now, ...carried.after}},
         ));
       }
       if (old.isbn13 !== null) {

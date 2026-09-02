@@ -45,7 +45,7 @@ import {
 const work = (overrides: Partial<AdminCatalogWorkRow> = {}): AdminCatalogWorkRow => ({
   workId: 'work-a', canonicalTitle: 'The Left Hand of Darkness', alternateTitles: ['Left Hand'],
   authorIds: ['le-guin'], coverUrl: 'https://covers.test/a.jpg', subjects: ['Science fiction'],
-  fiction: true, status: 'active', mergedInto: null, mergedFrom: [], createdBy: null,
+  fiction: true, language: 'en', status: 'active', mergedInto: null, mergedFrom: [], createdBy: null,
   createdAt: 1000, reviewedAt: null, activityAt: 1000, editionCount: 1, linkedBookCount: 0, warnings: [],
   ...overrides,
 });
@@ -63,7 +63,7 @@ const edition = (overrides: Partial<AdminCatalogEditionRow> = {}): AdminCatalogE
 });
 const book = (overrides: Partial<AdminCatalogBookRow> = {}): AdminCatalogBookRow => ({
   uid: 'reader', bookId: 'book-1', title: 'Left Hand', authorNames: ['Ursula K. Le Guin'],
-  isbn13: null, rawIsbn: null, pageCount: 300, publisher: '', coverUrl: '', workId: 'work-a',
+  isbn13: null, rawIsbn: null, pageCount: 300, publisher: '', coverUrl: '', language: '', workId: 'work-a',
   editionId: null, linkedAt: null, anomaly: null, ...overrides,
 });
 
@@ -80,7 +80,7 @@ test('edit and hide drafts round-trip a work row into the edit operation', () =>
     type: 'editWork', workId: 'work-a', status: 'active',
     work: {
       canonicalTitle: 'The Left Hand of Darkness', alternateTitles: ['Left Hand'],
-      authorIds: ['le-guin'], coverUrl: 'https://covers.test/a.jpg', subjects: [], fiction: null,
+      authorIds: ['le-guin'], coverUrl: 'https://covers.test/a.jpg', subjects: [], fiction: null, language: 'en',
     },
   });
   const hidden = operationOf(buildOperation(hideWorkDraft(work())), 'editWork');
@@ -97,6 +97,10 @@ test('work drafts are validated before any preview is requested', () => {
   assert.throws(() => buildOperation(editWorkDraft(work({canonicalTitle: '  '}))), /Canonical title is required/);
   assert.throws(() => buildOperation(editWorkDraft(work({authorIds: []}))), /At least one catalog author ID/);
   assert.throws(() => buildOperation(editWorkDraft(work({workId: 'a/b'}))), /Work ID must be one Firestore document ID/);
+  assert.throws(() => buildOperation(editWorkDraft(work({language: 'English'}))), /two- or three-letter code/);
+  // Typed codes are normalized to lowercase; blank is unknown.
+  assert.equal(operationOf(buildOperation(editWorkDraft(work({language: ' NO '}))), 'editWork').work.language, 'no');
+  assert.equal(operationOf(buildOperation(editWorkDraft(work({language: ''}))), 'editWork').work.language, '');
 
   const draft = createWorkDraft([{uid: 'u', bookId: 'b'}]);
   if (draft.type !== 'createWork') throw new Error('expected a createWork draft');

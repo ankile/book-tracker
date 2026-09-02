@@ -72,6 +72,9 @@ export interface AdminCatalogWorkRow {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  // The work's default language (ISO 639 code, '' unknown): what its
+  // editions are in unless one overrides it.
+  language: string;
   status: WorkStatus;
   // The survivor a merged work redirects to; null unless status is merged.
   mergedInto: string | null;
@@ -153,6 +156,9 @@ export interface AdminCatalogBookRow extends AdminCatalogBookTarget {
   pageCount: number | null;
   publisher: string;
   coverUrl: string;
+  // The language the book carries: a copy of its edition's effective one,
+  // or what a lookup found for an unlinked book; '' unknown.
+  language: string;
   workId: string | null;
   editionId: string | null;
   // When the link was made; null for an unlinked book or a link that
@@ -202,6 +208,7 @@ interface ScanWork {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  language: string;
   status: WorkStatus;
   mergedInto: string | null;
   mergedFrom: string[];
@@ -242,7 +249,7 @@ function isStringArray(value: unknown): value is string[] {
 
 const WORK_FIELDS = [
   'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds', 'coverUrl', 'subjects',
-  'fiction', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt', 'updatedAt',
+  'fiction', 'language', 'status', 'mergedInto', 'mergedFrom', 'createdBy', 'createdAt', 'updatedAt',
   'reviewedAt',
 ];
 const AUTHOR_FIELDS = [
@@ -311,6 +318,7 @@ function readWork({ id, data }: CatalogScanDocument): ScanWork {
     coverUrl: data.coverUrl,
     subjects,
     fiction: data.fiction,
+    language: scanText(data, 'language', label),
     status: data.status,
     mergedInto: optionalRedirect(data.mergedInto, label),
     mergedFrom,
@@ -552,6 +560,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
         pageCount: scanPageCount(data),
         publisher: scanText(data, 'publisher', label),
         coverUrl: scanText(data, 'coverUrl', label),
+        language: scanText(data, 'language', label),
         workId: link.workId,
         editionId: link.editionId,
         linkedAt: link.linkedAt,
@@ -789,6 +798,9 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
         books: [],
       });
     }
+    // A default language is bookkeeping, not an invariant: the row shows
+    // it, the findings list does not.
+    if (work.status === 'active' && work.language === '') warnings.push('no language');
   }
 
   const catalogAuthorWarnings = new Map<string, string[]>();
@@ -911,6 +923,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       coverUrl: work.coverUrl,
       subjects: work.subjects,
       fiction: work.fiction,
+      language: work.language,
       status: work.status,
       mergedInto: work.mergedInto,
       mergedFrom: work.mergedFrom,

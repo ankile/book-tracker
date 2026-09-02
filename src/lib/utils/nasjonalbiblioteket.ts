@@ -1,3 +1,4 @@
+import { normalizeLanguageCode } from '../../../shared/language.ts';
 import type { BookLookupResult } from '../interfaces/metadata.ts';
 
 // Nasjonalbiblioteket (api.nb.no) — the third metadata source, and the
@@ -86,6 +87,7 @@ export function parseNbItem(
   item: unknown,
   genres: unknown = [],
   publicCoverUrl: string = '',
+  language: string = '',
 ): NbBookLookupResult {
   const data = requireRecord(item);
   const md = optionalRecord(data.metadata) ?? {};
@@ -104,6 +106,7 @@ export function parseNbItem(
     publishedDate: optionalString(originInfo?.issued) ?? '',
     subjects,
     fiction: deriveFictionFromNbGenres(validGenres),
+    language: normalizeLanguageCode(language),
     urn: optionalString(identifiers?.urn) ?? '',
   };
 }
@@ -136,6 +139,16 @@ export function extractModsGenres(modsXml: string): string[] {
       .map((match) => match[1].trim())
       .filter((genre) => genre !== '')
   )];
+}
+
+// The record's language is a MODS languageTerm code (ISO 639-2, e.g. nob);
+// the first one is the text's language, later ones are of original or
+// summary. Empty when the record names none.
+export function extractModsLanguage(modsXml: string): string {
+  const match = modsXml.match(
+    /<(?:[a-zA-Z]+:)?languageTerm\b[^>]*\btype\s*=\s*(["'])code\1[^>]*>([^<]*)<\/(?:[a-zA-Z]+:)?languageTerm>/,
+  );
+  return match === null ? '' : match[2].trim();
 }
 
 const PUBLIC_COVER_HOSTS = new Set([

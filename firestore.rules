@@ -204,7 +204,7 @@ service cloud.firestore {
       return book.keys().hasOnly([
                'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
                'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
-               'workId', 'editionId', 'matchMethod', 'linkedAt',
+               'language', 'workId', 'editionId', 'matchMethod', 'linkedAt',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
@@ -231,6 +231,8 @@ service cloud.firestore {
                      && book.subjects.join('').size() <= 2500))
              && (!book.keys().hasAny(['fiction'])
                  || book.fiction == null || book.fiction is bool)
+             && (!book.keys().hasAny(['language'])
+                 || (book.language is string && book.language.size() <= 16))
              && (!book.keys().hasAny(['isbn'])
                  || (book.isbn is string && book.isbn.size() <= 32))
              && (!book.keys().hasAny(['workId'])

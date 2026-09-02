@@ -657,6 +657,7 @@ test("an exact title with the wrong author is not returned", async (t) => {
     coverUrl: "",
     subjects: [],
     fiction: null,
+    language: "",
     status: "active",
     mergedFrom: [],
   };
@@ -763,6 +764,7 @@ test("a title shared by more than one index page still finds the requested autho
     coverUrl: "",
     subjects: [],
     fiction: null,
+    language: "",
     status: "active",
     mergedFrom: [],
   });
@@ -830,11 +832,13 @@ test("users create missing works and resolve existing identifiers", async (t) =>
     ["works/old-work", {
       canonicalTitle: "Old", alternateTitles: [], titleKeys: ["old"], authorIds: ["ada"],
       coverUrl: "", subjects: [], fiction: null, status: "merged",
+      language: "",
       mergedInto: "canonical-work", mergedFrom: [],
     }],
     ["works/canonical-work", {
       canonicalTitle: "Canonical", alternateTitles: [], titleKeys: ["canonical"], authorIds: ["ada"],
       coverUrl: "", subjects: [], fiction: null, status: "active",
+      language: "",
       mergedFrom: ["old-work"],
     }],
   ]);
@@ -876,6 +880,7 @@ test("users create missing works and resolve existing identifiers", async (t) =>
   const work = {
     canonicalTitle: "A New Book", alternateTitles: [], authorIds: ["ada"],
     coverUrl: "", subjects: [], fiction: null,
+    language: "",
   };
   const result = await deployed.catalog.create.run({work, edition}, authContext);
   assert.equal(result.created, true);
@@ -962,6 +967,7 @@ test("creation refuses when an index collection would cross its bound", async (t
   const work = {
     canonicalTitle: "A New Book", alternateTitles: [], authorIds: ["ada"],
     coverUrl: "", subjects: [], fiction: null,
+    language: "",
   };
   const edition = {
     isbn13: null, title: "A New Book", publisher: "", publishedDate: "", language: "",
@@ -1005,6 +1011,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
     coverUrl: "https://example.test/work.jpg",
     subjects: ["Private implementation detail"],
     fiction: true,
+    language: "",
     status: "active",
     mergedFrom: ["old-work"],
   };
@@ -1235,6 +1242,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
     coverUrl: "https://example.test/work.jpg",
     subjects: ["Private implementation detail"],
     fiction: true,
+    language: "",
     mergedFrom: ["old-work"],
   });
   assert.deepEqual(Object.keys(result.editions[0]).sort(), [
@@ -1346,6 +1354,7 @@ test("users add an edition to an existing work and resolve an indexed identifier
   const workRow = (title: string, overrides: Row = {}): Row => ({
     canonicalTitle: title, alternateTitles: [], titleKeys: [title.toLowerCase()], authorIds: ["ada"],
     coverUrl: "", subjects: [], fiction: true, status: "active", mergedFrom: [], ...overrides,
+    language: "",
   });
   const rows = new Map<string, Row>([
     ["catalogAuthors/ada", activeAuthor("Ada Lovelace")],

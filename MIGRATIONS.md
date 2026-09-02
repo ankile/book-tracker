@@ -186,6 +186,7 @@ current deployment instructions.
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
 | `migrate-book-editions.ts` | Put every linked personal book on an edition of its work, minting one per reader per book identity from the book's own fields | Completed historical rollout (2026-09-02: dry-run and emulator rehearsal on the day's snapshot matched the apply — 46 editions created, 47 books linked, nothing for review — second apply 0, audit back at its known baselines). Idempotent; a rerun joins what it minted and plans nothing for a book that carries an edition. See [Book editions backfill](#book-editions-backfill). |
 | `migrate-catalog-creators.ts` | Stamp `createdBy` on every work, edition and catalog author that has none, from the earliest personal book standing on it | Completed historical rollout (2026-09-02: dry-run matched the apply — 541 creators stamped: 203 works, 174 editions, 164 authors, nothing for review — second apply 0, audit back at its 11 known baselines). Idempotent; a record that carries a creator is left alone. See [Catalog creators backfill](#catalog-creators-backfill). |
+| `migrate-work-languages.ts` | Stamp a default `language` on every work that has none, inferred from its editions' overrides or ISBN registration groups, and the carried copy on every personal book that has none | Pending prod rollout. Idempotent; a work that carries the field and a book that carries a language are left alone. See [Work languages backfill](#work-languages-backfill). |
 | `migrate-enrich-books.ts` | Fill gaps from the open catalog | Optional metadata maintenance |
 | `migrate-enrich-google.ts` | Fill remaining gaps from the metered catalog | Optional metadata maintenance; requires approved private credential handling |
 | `migrate-enrich-nb.ts` | Fill remaining gaps from the national catalog | Optional metadata maintenance |
@@ -364,6 +365,29 @@ prints a REVIEW line for a record nothing stands on. Additive, one
 as `catalog.<kind>.missing.createdBy`, so after the apply that class is the
 REVIEW lines only. Order: deploy the backend (console creations stamp the
 operator) and the client (creators shown as emails), then the standard
+dry-run, snapshot, apply-twice, audit loop.
+
+## Work languages backfill
+
+Every work carries a default `language` and every personal book the
+effective language of the edition it stands on (owner decision 2026-09-02;
+semantics in docs/catalog.md, Languages). Neither existed before.
+`migrate-work-languages.ts` (planner: `work-language-backfill.ts`) gives
+each work without the field the one language its active editions agree on
+— an edition's override where it has one, else the language its ISBN's
+registration group implies (`shared/language.ts`: 978-0/1 English, 978-82
+Norwegian, 978-3 German, …) — and `''` with a REVIEW line otherwise (no
+ISBN, an unknown group, or evidence that disagrees, which is where an
+operator's judgment beats a rule). It then stamps every book without a
+language with the effective language of its edition, resolved one hop
+through merged aliases, `''` for an unlinked book. Additive, one `update`
+per record; the Rules admit the book field (a string of at most 16
+characters) and the audit reports a missing one as
+`catalog.work.missing.language` / `book.missing.language`, so after the
+apply those classes are gone and the REVIEW lines are the works to answer
+in the console (`no language` in the row's warnings). Order: Rules, then
+the backend (works are read with the field and written with it; the
+carry-on rewrite lives in the planner), then the client, then the standard
 dry-run, snapshot, apply-twice, audit loop.
 
 ## finishedAt rollout (completed 2026-09-01)

@@ -27,6 +27,7 @@ const migrationPath = fileURLToPath(new URL('../migrate-cross-user-works.ts', im
 const auditPath = fileURLToPath(new URL('../db-audit.ts', import.meta.url))
 const backfillPath = fileURLToPath(new URL('../migrate-book-editions.ts', import.meta.url))
 const creatorsPath = fileURLToPath(new URL('../migrate-catalog-creators.ts', import.meta.url))
+const languagesPath = fileURLToPath(new URL('../migrate-work-languages.ts', import.meta.url))
 const groupKey = 'title:left hand of darkness\0authors:ursula k le guin'
 const workId = deterministicCatalogId('work', groupKey)
 const isbn = '9780441478125'
@@ -503,6 +504,23 @@ test('catalog migration dry-runs, creates once, preserves updatedAt, and reports
   const creatorsRerun = runScript(creatorsPath, '--apply')
   assert.match(creatorsRerun, /^records without a creator: 0 of /m)
   assert.match(creatorsRerun, /^applied: 0 creators stamped$/m)
+
+  // The catalog build predates the language field; migrate-work-languages.ts
+  // infers each work's default from its editions' ISBN group and stamps the
+  // carried copy on every book, same loop. The seeded ISBNs are 978-0
+  // numbers, so those works read English; the one work the build minted
+  // for an ISBN-less book has nothing to infer from and is listed.
+  const languagesDryRun = runScript(languagesPath)
+  assert.match(languagesDryRun, /^works without a language field: [1-9]\d* of /m)
+  assert.match(languagesDryRun, /^SET works\/\S+ language="en" via=isbn-group$/m)
+  assert.equal(languagesDryRun.match(/^REVIEW /gm)?.length, 1)
+  assert.match(languagesDryRun, /^REVIEW works\/\S+: no ISBN$/m)
+  assert.match(languagesDryRun, /^dry-run: nothing written$/m)
+  const languagesApplied = runScript(languagesPath, '--apply')
+  assert.match(languagesApplied, /^applied: [1-9]\d* works and [1-9]\d* books stamped$/m)
+  const languagesRerun = runScript(languagesPath, '--apply')
+  assert.match(languagesRerun, /^works without a language field: 0 of /m)
+  assert.match(languagesRerun, /^applied: 0 works and 0 books stamped$/m)
   const audit = runScript(auditPath)
   assert.doesNotMatch(audit, /^catalog\./m)
 

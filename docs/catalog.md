@@ -10,7 +10,7 @@ public whoever contributed it; who read what is not.
 | Collection | Document id | Contents |
 |---|---|---|
 | `catalogAuthors` | `author_` + 24 hex of `sha256("author\0" + nameKey)` | `canonicalName`, `alternateNames`, `nameKeys` (normalized names), `sortName`, `kind` (`person`/`entity`/`placeholder`), `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
-| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
+| `works` | random (`work-<uuid>`) or migration-deterministic | `canonicalTitle`, `alternateTitles`, `titleKeys`, `authorIds`, `coverUrl`, `subjects`, `fiction`, `language`, `status`, `mergedInto?`, `mergedFrom`, `createdBy`, `createdAt`, `updatedAt`, `reviewedAt?` |
 | `editions` | random (`edition-<uuid>`) or migration-deterministic | `workId`, `isbn13`, `title`, `publisher`, `publishedDate`, `language`, `translatorNames`, `format`, `suggestedPageCount`, `coverUrl`, `externalIds`, `createdBy`, `createdAt`, `updatedAt`, `status?`, `mergedInto?`, `mergedFrom?` |
 | `isbnIndex` | the ISBN-13 | `workId`, `editionId` |
 | `externalIdIndex` | `sha256(provider + "\0" + externalId)` | `workId`, `editionId`, `provider`, `externalId` |
@@ -63,8 +63,33 @@ as one for every reader). That rewrite is bounded to those books, at most one
 page of them, in live accounts; a book in a frozen account stays on its alias
 and resolves at read time. A moved book keeps its link time and inherits only
 the metadata its reader left blank — ISBN, cover, publisher and publication
-date from the survivor; cover fallback, fiction and subjects from the work —
-never its title or page count.
+date from the survivor; cover fallback, fiction, subjects and language from
+the work — never its title or page count.
+
+### Languages
+
+A work carries a default `language` (owner decision 2026-09-02): a lowercase
+ISO 639 code such as `en` or `no` (`shared/language.ts`; Bokmål is stored as
+the macrolanguage `no`), or `''` for unknown, which the console lists as
+`no language` on the work's row. An edition's `language` overrides it when
+set and inherits when `''`, so a translation is an edition that says so and
+every other edition says nothing. The effective language of an edition is
+its override, else its work's default. Each personal book carries the
+effective language of the edition it stands on as a copy in
+`users/{uid}/books.language`, beside cover and publisher, filled at add
+time from the chosen work (the lookup's own answer, from Google Books or
+the national library's MODS record, wins if the reader already had one)
+and by the console's merges and links where the book left it blank. When
+an operator changes a work's default or an edition's override, the books
+still carrying the old effective value follow it, and so do books that
+never had one; a book whose reader's copy says something else keeps it.
+That rewrite is bounded like a merge's: at most one page of books, in live
+accounts. A minted edition takes the book's language as its override only
+where it differs from the work's default. The first reader's book sets a
+new work's default through `catalog.create`; an edition added to a chosen
+work by `catalog.addedition` overrides only where the book's language
+differs from that work's. `migrate-work-languages.ts` stamped the field on
+the works and books that predate it (MIGRATIONS.md).
 
 ## Who creates what
 

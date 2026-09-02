@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { effectiveLanguage, languageLabel } from '../../../shared/language.ts';
   import type { Book } from '../interfaces/book.ts';
   import type { CatalogSearchResult, CatalogSelection } from '../interfaces/catalog.ts';
 
@@ -27,6 +28,7 @@
   const editionDetail = (result: CatalogSearchResult): string => [
     result.edition?.publisher,
     result.edition?.publishedDate,
+    languageLabel(effectiveLanguage(result.edition?.language ?? '', result.work.language)),
     result.edition?.isbn13 ? `ISBN ${result.edition.isbn13}` : '',
     result.edition?.suggestedPageCount ? `${result.edition.suggestedPageCount} suggested pages` : '',
   ].filter(Boolean).join(' · ');

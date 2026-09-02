@@ -249,6 +249,7 @@ function activeWork(title: string, overrides: Row = {}): Row {
     coverUrl: "",
     subjects: [],
     fiction: true,
+    language: "",
     status: "active",
     mergedFrom: [],
     createdAt: now,
@@ -290,6 +291,7 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
     books: [],
   };
@@ -350,6 +352,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
     books: [],
   };
@@ -370,6 +373,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
   };
   const preview = await deployed.admin.catalogpreview.run(
@@ -468,6 +472,7 @@ test("any personal book seeds a work; unsupported stored work fields are rejecte
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
     books: [{uid: "reader", bookId: "seed-book"}],
   };
@@ -496,6 +501,7 @@ test("any personal book seeds a work; unsupported stored work fields are rejecte
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
   };
   await assert.rejects(
@@ -759,6 +765,7 @@ test("an admin read that fails is still audited", async (t) => {
         coverUrl: "",
         subjects: [],
         fiction: true,
+        language: "",
       },
     }}, recentAdmin()),
     (error) => hasCode(error, "failed-precondition"),
@@ -789,6 +796,7 @@ test("work operations resolve a merged author id to its survivor", async (t) => 
       coverUrl: "",
       subjects: [],
       fiction: true,
+      language: "",
     },
     books: [],
   };
@@ -1012,6 +1020,7 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
     work: {
       canonicalTitle: "Seen Work", alternateTitles: ["Also Seen"], authorIds: ["ada-author"],
       coverUrl: "", subjects: [], fiction: true,
+      language: "",
     },
   };
   const preview = await deployed.admin.catalogpreview.run({operation: edit}, recentAdmin());
@@ -1083,7 +1092,7 @@ test("merging editions aliases the sources, moves their readers' books to the su
   assert.deepEqual(bookChange?.after, {
     workId: "sult", editionId: "full", matchMethod: "admin", linkedAt: 500,
     isbn: "9788205394810", coverUrl: "https://covers.test/full.jpg", publisher: "Gyldendal",
-    publishedDate: "2009", fiction: true, subjects: ["Romaner"],
+    publishedDate: "2009", language: "en", fiction: true, subjects: ["Romaner"],
   });
   await deployed.admin.catalogapply.run({
     operationId: preview.operationId, operation, expected: preview.expected,
@@ -1108,6 +1117,7 @@ test("merging editions aliases the sources, moves their readers' books to the su
   assert.equal(moved?.coverUrl, "https://covers.test/full.jpg");
   assert.equal(moved?.publisher, "Gyldendal");
   assert.equal(moved?.publishedDate, "2009");
+  assert.equal(moved?.language, "en");
   assert.equal(moved?.fiction, true);
   assert.deepEqual(moved?.subjects, ["Romaner"]);
   assert.equal(moved?.pageCount, 198);
@@ -1121,6 +1131,7 @@ test("merging editions aliases the sources, moves their readers' books to the su
   assert.deepEqual(kept?.subjects, ["Mine"]);
   assert.equal(kept?.isbn, "9788205394810");
   assert.equal(kept?.publishedDate, "2009");
+  assert.equal(kept?.language, "en");
   // A frozen account's book stays on its alias.
   assert.equal(store.rows.get("users/ghost/books/frozen")?.editionId, "bare");
   assert.equal(store.rows.get("users/ghost/books/frozen")?.isbn, "");
@@ -1151,4 +1162,105 @@ test("merging editions aliases the sources, moves their readers' books to the su
     }}, recentAdmin()),
     (error: {details?: {reason?: string}}) => error.details?.reason === "catalog-invariant",
   );
+});
+
+test("a work's language carries into its books unless an edition overrides or a reader chose", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {language: "no", mergedFrom: ["old-sult"]}));
+  store.write(store.ref("works/old-sult"), activeWork("Sult (old)", {status: "merged", mergedInto: "sult"}));
+  const edition = (overrides: Row): Row => ({
+    workId: "sult", isbn13: null, title: "Sult", publisher: "", publishedDate: "", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "", externalIds: {},
+    createdAt: now, updatedAt: now, ...overrides,
+  });
+  store.write(store.ref("editions/inherits"), edition({}));
+  store.write(store.ref("editions/english"), edition({language: "en"}));
+  store.write(store.ref("users/lars"), {uid: "lars"});
+  store.write(store.ref("users/ghost"), {uid: "ghost", deletedAt: now});
+  const book = (uid: string, id: string, overrides: Row): void => store.write(store.ref(`users/${uid}/books/${id}`), {
+    owner: store.ref(`users/${uid}`), title: "Sult", updatedAt: now,
+    workId: "sult", editionId: "inherits", matchMethod: "migration", linkedAt: now, ...overrides,
+  });
+  book("lars", "carried", {language: "no"});
+  book("lars", "blank", {});
+  book("lars", "own", {language: "nn"});
+  book("lars", "override", {editionId: "english", language: "en"});
+  book("lars", "via-alias", {workId: "old-sult", language: "no"});
+  book("ghost", "frozen", {language: "no"});
+
+  const work = {
+    canonicalTitle: "Sult", alternateTitles: [], authorIds: ["ada-author"], coverUrl: "",
+    subjects: [], fiction: true, language: "sv",
+  };
+  const operation = {type: "editWork", workId: "sult", status: "active", work};
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  // The books still carrying the old default, and the one that never had
+  // any, follow it; the reader's own choice, the overriding edition's book
+  // and the frozen account's book are not touched.
+  const bookChanges = preview.changes.filter(({kind}) => kind === "book");
+  assert.deepEqual(bookChanges.map(({after}) => after), [
+    {language: "sv"}, {language: "sv"}, {language: "sv"},
+  ]);
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("works/sult")?.language, "sv");
+  assert.equal(store.rows.get("users/lars/books/carried")?.language, "sv");
+  assert.equal(store.rows.get("users/lars/books/blank")?.language, "sv");
+  assert.equal(store.rows.get("users/lars/books/via-alias")?.language, "sv");
+  assert.equal(store.rows.get("users/lars/books/own")?.language, "nn");
+  assert.equal(store.rows.get("users/lars/books/override")?.language, "en");
+  assert.equal(store.rows.get("users/ghost/books/frozen")?.language, "no");
+  // The title stays the reader's: the write is a merge of the one field.
+  assert.equal(store.rows.get("users/lars/books/carried")?.title, "Sult");
+
+  // An edit that keeps the language plans no book change at all.
+  const same = await deployed.admin.catalogpreview.run({
+    operation: {...operation, work: {...work, alternateTitles: ["Hunger"]}},
+  }, recentAdmin());
+  assert.equal(same.changes.some(({kind}) => kind === "book"), false);
+
+  // Dropping an edition's override hands its book to the work's default.
+  const editionOperation = {
+    type: "upsertEdition", editionId: "english", workId: "sult",
+    edition: {
+      isbn13: null, title: "Sult", publisher: "", publishedDate: "", language: "",
+      translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "", externalIds: {},
+    },
+  };
+  const editionPreview = await deployed.admin.catalogpreview.run({operation: editionOperation}, recentAdmin());
+  assert.deepEqual(
+    editionPreview.changes.filter(({kind}) => kind === "book").map(({after}) => after),
+    [{language: "sv"}],
+  );
+  await deployed.admin.catalogapply.run({
+    operationId: editionPreview.operationId, operation: editionOperation, expected: editionPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("users/lars/books/override")?.language, "sv");
+  assert.equal(store.rows.get("editions/english")?.language, "");
+});
+
+test("a minted edition overrides the work's language only where the book's differs", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {language: "no"}));
+  store.write(store.ref("users/lars"), {uid: "lars"});
+  for (const [id, language] of [["same", "no"], ["differs", "en"], ["none", undefined]] as const) {
+    store.write(store.ref(`users/lars/books/${id}`), {
+      owner: store.ref("users/lars"), title: `Sult ${id}`, updatedAt: now, pageCount: 198, isbn: "",
+      workId: null, editionId: null, matchMethod: null, linkedAt: null,
+      ...(language === undefined ? {} : {language}),
+    });
+  }
+  const operation = {
+    type: "linkBooks",
+    books: [{uid: "lars", bookId: "same"}, {uid: "lars", bookId: "differs"}, {uid: "lars", bookId: "none"}],
+    target: {workId: "sult", editionId: null},
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const minted = preview.changes.filter(({kind, action}) => kind === "edition" && action === "create");
+  assert.deepEqual(minted.map(({after}) => [after?.title, after?.language]), [
+    ["Sult same", ""], ["Sult differs", "en"], ["Sult none", ""],
+  ]);
 });

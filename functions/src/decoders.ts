@@ -1,6 +1,7 @@
 import {Timestamp} from "firebase-admin/firestore";
 import {Buffer} from "node:buffer";
 import {normalizeCatalogIdentity, normalizeIsbn13} from "./shared/catalogIdentity";
+import {isLanguageCode} from "./shared/language";
 
 // Re-exported so every server module keeps one import for the catalog
 // normalizers; the implementation is shared with the browser.
@@ -415,6 +416,7 @@ export interface CatalogWorkInput {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  language: string;
 }
 
 export interface CatalogAuthorInput {
@@ -437,6 +439,17 @@ export interface CatalogEditionInput {
   externalIds: Record<string, string>;
 }
 
+// A language is a lowercase ISO 639 code or empty: unknown on a work,
+// inherit the work's on an edition (shared/language.ts).
+function languageCode(value: unknown, label: string, fail: DecodeFailure): string {
+  if (typeof value !== "string") fail(`${label} must be a string.`);
+  const code = value.trim().toLowerCase();
+  if (!isLanguageCode(code)) {
+    fail(`${label} must be a two- or three-letter language code or empty.`);
+  }
+  return code;
+}
+
 export function decodeCatalogWorkInput(
   value: unknown,
   fail: DecodeFailure,
@@ -444,7 +457,7 @@ export function decodeCatalogWorkInput(
   const decoded = record(value, "work", fail);
   exactKeys(
     decoded,
-    ["canonicalTitle", "alternateTitles", "authorIds", "coverUrl", "subjects", "fiction"],
+    ["canonicalTitle", "alternateTitles", "authorIds", "coverUrl", "subjects", "fiction", "language"],
     "work",
     fail,
   );
@@ -475,6 +488,7 @@ export function decodeCatalogWorkInput(
       decoded.subjects, "work.subjects", fail, 25, 200, 2500,
     ),
     fiction,
+    language: languageCode(decoded.language, "work.language", fail),
   };
 }
 
@@ -571,9 +585,7 @@ export function decodeCatalogEditionInput(
     publishedDate: boundedPossiblyEmptyString(
       decoded.publishedDate, "edition.publishedDate", fail, 64,
     ).trim(),
-    language: boundedPossiblyEmptyString(
-      decoded.language, "edition.language", fail, 35,
-    ).trim(),
+    language: languageCode(decoded.language, "edition.language", fail),
     translatorNames: boundedStringArray(
       decoded.translatorNames, "edition.translatorNames", fail, 20, 200, 2000,
     ),

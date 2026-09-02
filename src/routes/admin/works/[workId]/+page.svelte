@@ -6,6 +6,7 @@
   import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
   import ReviewAction from '$lib/components/admin/ReviewAction.svelte';
   import { adminAccountEmails, adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import { effectiveLanguage, languageLabel } from '../../../../../shared/language.ts';
   import {
     authorNamesById,
     bookKey,
@@ -110,6 +111,7 @@
         <div><dt>Alternate titles</dt><dd>{work.alternateTitles.join(' · ') || '—'}</dd></div>
         <div><dt>Subjects</dt><dd>{work.subjects.join(' · ') || '—'}</dd></div>
         <div><dt>Fiction</dt><dd>{work.fiction === null ? 'Unknown' : work.fiction ? 'Fiction' : 'Nonfiction'}</dd></div>
+        <div><dt>Language</dt><dd>{work.language === '' ? '—' : `${languageLabel(work.language)} (${work.language})`}</dd></div>
         <div><dt>Merged into</dt><dd>{#if work.mergedInto}<a href="/admin/works/{work.mergedInto}">{workById.get(work.mergedInto)?.canonicalTitle ?? work.mergedInto}</a>{:else}—{/if}</dd></div>
         <div><dt>Absorbed works</dt><dd>{#each work.mergedFrom as id, index (id)}{#if index > 0}, {/if}<a href="/admin/works/{id}">{workById.get(id)?.canonicalTitle ?? id}</a>{:else}—{/each}</dd></div>
         <div><dt>Cover URL</dt><dd>{#if work.coverUrl}<a href={work.coverUrl} rel="noreferrer">{work.coverUrl}</a>{:else}—{/if}</dd></div>
@@ -153,7 +155,7 @@
                   <td>{edition.isbn13 ?? '—'}</td>
                   <td>{edition.publisher || '—'}</td>
                   <td>{edition.publishedDate || '—'}</td>
-                  <td>{edition.language || '—'}</td>
+                  <td>{#if edition.language !== ''}{languageLabel(edition.language)}{:else if work.language !== ''}{languageLabel(work.language)}<small>from the work</small>{:else}—{/if}</td>
                   <td>{edition.format}</td>
                   <td class="numeric">{edition.suggestedPageCount ?? '—'}</td>
                   <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
@@ -190,9 +192,10 @@
       {:else}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Personal book</th><th>Reader</th><th>ISBN</th><th>Pages</th><th>Edition</th><th>Anomaly</th><th class="row-actions"></th></tr></thead>
+            <thead><tr><th>Personal book</th><th>Reader</th><th>ISBN</th><th>Pages</th><th>Edition</th><th>Language</th><th>Anomaly</th><th class="row-actions"></th></tr></thead>
             <tbody>
               {#each books as book (bookKey(book))}
+                {@const carried = effectiveLanguage(editionById.get(book.editionId ?? '')?.language ?? '', work.language)}
                 <tr>
                   <td class="book-cell">
                     {#if book.coverUrl}<img src={book.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
@@ -202,6 +205,7 @@
                   <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td>
                   <td class="numeric">{book.pageCount ?? '—'}</td>
                   <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}{editionById.get(book.editionId ?? '')?.status === 'merged' ? ' · merged alias' : ''}</td>
+                  <td>{book.language === '' ? '—' : languageLabel(book.language)}{#if carried !== '' && book.language !== carried}<small class="warning">edition says {languageLabel(carried)}</small>{/if}</td>
                   <td>{book.anomaly ?? '—'}</td>
                   <td class="row-actions">
                     <div class="actions">

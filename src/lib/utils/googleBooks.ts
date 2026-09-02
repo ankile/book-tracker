@@ -6,6 +6,7 @@
 // Its value over Open Library is the fiction/non-fiction axis: categories
 // are BISAC top-level headings ("Business & Economics", "Science"), which
 // classify a book even when Open Library's free-form subjects don't.
+import { normalizeLanguageCode } from '../../../shared/language.ts';
 import type { BookLookupResult, BookMetadata, BookMetadataPatch } from '../interfaces/metadata.ts';
 import { METADATA_FIELDS } from './bookMetadata.ts';
 
@@ -39,6 +40,7 @@ export interface GoogleVolume {
   pageCount?: number;
   categories?: string[];
   imageLinks?: { thumbnail?: string };
+  language?: string;
 }
 
 type Data = Record<string, unknown>;
@@ -89,6 +91,7 @@ export function parseGoogleVolume(value: unknown): BookLookupResult {
     publishedDate: optionalString(volume.publishedDate) ?? '',
     subjects: categories,
     fiction: deriveFictionFromCategories(categories),
+    language: normalizeLanguageCode(optionalString(volume.language) ?? ''),
   };
 }
 

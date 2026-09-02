@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  parseNbItem, deriveFictionFromNbGenres, extractModsCoverUrl, extractModsGenres,
+  parseNbItem, deriveFictionFromNbGenres, extractModsCoverUrl, extractModsGenres, extractModsLanguage,
   flipCatalogueName, nbCoverCandidate,
 } from "../src/lib/utils/nasjonalbiblioteket.ts";
 
@@ -145,4 +145,15 @@ test("MODS cover extraction rejects restricted, unlabelled, and foreign URLs", (
     extractModsCoverUrl('<mods:url displayLabel="Omslagsbilde">http://media.aja.bs.no/insecure.jpg</mods:url>'),
     "",
   );
+});
+
+test("the MODS language term is the text's language, stored as the catalog's code", () => {
+  const mods = `<mods:mods><mods:language><mods:languageTerm type="code" authority="iso639-2b">nob</mods:languageTerm></mods:language>
+    <mods:language objectPart="translation"><mods:languageTerm type="code">eng</mods:languageTerm></mods:language></mods:mods>`;
+  assert.equal(extractModsLanguage(mods), "nob");
+  assert.equal(extractModsLanguage("<mods:mods><mods:genre>Romaner</mods:genre></mods:mods>"), "");
+  assert.equal(extractModsLanguage('<languageTerm type="text">Norsk</languageTerm>'), "");
+  assert.equal(parseNbItem({ metadata: { title: "Sult" } }, [], "", "nob").language, "no");
+  assert.equal(parseNbItem({ metadata: { title: "Sult" } }, [], "", "nno").language, "nn");
+  assert.equal(parseNbItem({ metadata: { title: "Sult" } }).language, "");
 });

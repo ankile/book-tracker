@@ -187,7 +187,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
         canonicalTitle: 'The Left Hand of Darkness', alternateTitles: [],
         titleKeys: ['left hand of darkness'], authorIds: [leGuinAuthorId],
         coverUrl: 'https://example.test/work-cover.jpg', subjects: ['Science fiction'],
-        fiction: true, status: 'active', mergedFrom: [],
+        fiction: true, language: 'en', status: 'active', mergedFrom: [],
         createdAt: now, updatedAt: now,
       }),
       db.doc(`editions/${editionId}`).set({
@@ -223,7 +223,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       owner: readerRef, authorIds: [leGuinAuthorId], title: 'Personal Left Hand', activeTimer: null,
       currentPage: 304, currentPageUpdateId: null, pageCount: 304, finished: true, finishedAt: now,
       pagesRead: 304, timeRead: 240, isbn, coverUrl: '', publisher: 'Ace', publishedDate: '1987',
-      subjects: [], fiction: true, workId, editionId, matchMethod: 'migration', linkedAt: now,
+      subjects: [], fiction: true, language: 'en', workId, editionId, matchMethod: 'migration', linkedAt: now,
       createdAt: now, updatedAt: now,
     });
     await readerBookRef.collection('updates').doc(`reading-${suffix}`).set({
@@ -234,7 +234,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       owner: normalRef, authorIds: [dahlAuthorId], title: 'Needs catalog review', activeTimer: null,
       currentPage: 0, currentPageUpdateId: null, pageCount: 99, finished: false,
       pagesRead: 0, timeRead: 0, isbn: '', coverUrl: '', publisher: '', publishedDate: '',
-      subjects: [], fiction: null, workId: null, editionId: null, matchMethod: null, linkedAt: null,
+      subjects: [], fiction: null, language: '', workId: null, editionId: null, matchMethod: null, linkedAt: null,
       createdAt: now, updatedAt: now,
     });
     // The projection is only a bounded lookup accelerator. The callable
@@ -516,6 +516,8 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await expect(page.getByRole('heading', {name: 'The Left Hand of Darkness'})).toBeVisible();
       await expect(page.getByRole('heading', {name: /^Editions/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Readers' books/})).toBeVisible();
+      // The work's default language shows as a label; its editions inherit it.
+      await expect(page.getByText('English (en)')).toBeVisible();
 
       // The author link opens the author's page, which lists this work;
       // back returns to the work page rather than to a scrolled list.
@@ -621,6 +623,9 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       expect(mergedBook.get('coverUrl')).toBe('https://example.test/work-cover.jpg');
       expect(mergedBook.get('publisher')).toBe('Ace');
       expect(mergedBook.get('pageCount')).toBe(320);
+      // The language trickled down at add time: the chosen work's default,
+      // through the edition that inherits it, onto the reader's book.
+      expect(mergedBook.get('language')).toBe('en');
 
       // Every operation that starts from this work opens as its own dialog;
       // the per-edition buttons appear once per edition, so the first is used.

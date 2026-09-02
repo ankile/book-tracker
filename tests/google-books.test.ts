@@ -91,23 +91,31 @@ test("unrecognized or empty categories stay unknown", () => {
 });
 
 test("merge fills only empty fields and reports just the patch", () => {
-  const existing = { coverUrl: "", publisher: "Vintage", publishedDate: "", subjects: [], fiction: null };
-  const incoming = { coverUrl: "https://x/y.jpg", publisher: "Little, Brown", publishedDate: "2018", subjects: ["Fiction"], fiction: true };
+  const existing = { coverUrl: "", publisher: "Vintage", publishedDate: "", subjects: [], fiction: null, language: "" };
+  const incoming = { coverUrl: "https://x/y.jpg", publisher: "Little, Brown", publishedDate: "2018", subjects: ["Fiction"], fiction: true, language: "en" };
   assert.deepEqual(mergeMetadata(existing, incoming), {
     coverUrl: "https://x/y.jpg",
     publishedDate: "2018",
     subjects: ["Fiction"],
     fiction: true,
+    language: "en",
   });
 });
 
 test("merge leaves a fully populated book untouched", () => {
-  const existing = { coverUrl: "https://a", publisher: "P", publishedDate: "2001", subjects: ["X"], fiction: false };
-  assert.deepEqual(mergeMetadata(existing, { coverUrl: "https://b", publisher: "Q", publishedDate: "2002", subjects: ["Y"], fiction: true }), {});
+  const existing = { coverUrl: "https://a", publisher: "P", publishedDate: "2001", subjects: ["X"], fiction: false, language: "en" };
+  assert.deepEqual(mergeMetadata(existing, { coverUrl: "https://b", publisher: "Q", publishedDate: "2002", subjects: ["Y"], fiction: true, language: "no" }), {});
 });
 
 test("merge treats fiction:false as filled, not as a gap", () => {
   const existing = { ...EMPTY_METADATA, fiction: false };
   const patch = mergeMetadata(existing, { ...EMPTY_METADATA, fiction: true });
   assert.equal("fiction" in patch, false);
+});
+
+test("the volume's language is stored as a code", () => {
+  assert.equal(parseGoogleVolume({ language: "en-GB" }).language, "en");
+  assert.equal(parseGoogleVolume({ language: "no" }).language, "no");
+  assert.equal(parseGoogleVolume({ language: 7 }).language, "");
+  assert.equal(parseGoogleVolume({}).language, "");
 });

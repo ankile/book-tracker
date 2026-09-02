@@ -41,6 +41,7 @@ const workInput = (title: string, authorId: string) => ({
   coverUrl: '',
   subjects: [],
   fiction: true,
+  language: 'en',
 });
 
 const editionInput = (title: string, isbn13: string | null, externalIds = {}) => ({

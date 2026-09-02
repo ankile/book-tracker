@@ -10,6 +10,7 @@
     groupReaderAttempts,
   } from '$lib/utils/catalogClient.ts';
   import { formatTime } from '$lib/utils/format.ts';
+  import { effectiveLanguage, languageLabel } from '../../../../shared/language.ts';
 
   let response = $state<WorkReadersResponse | null>(null);
   let loading = $state(true);
@@ -118,6 +119,9 @@
         {#if response.work.alternateTitles.length > 0}
           <p class="aliases">Also known as {response.work.alternateTitles.join(' · ')}</p>
         {/if}
+        {#if response.work.language !== ''}
+          <p class="aliases">Language: {languageLabel(response.work.language)}</p>
+        {/if}
       </div>
     </header>
 
@@ -128,7 +132,7 @@
           {#each response.editions as edition (edition.editionId)}
             <article class="edition">
               <strong>{edition.title}</strong>
-              <span>{[edition.publisher, edition.publishedDate, edition.language].filter(Boolean).join(' · ')}</span>
+              <span>{[edition.publisher, edition.publishedDate, languageLabel(effectiveLanguage(edition.language, response.work.language))].filter(Boolean).join(' · ')}</span>
               {#if edition.isbn13}<span>ISBN {edition.isbn13}</span>{/if}
               {#if edition.suggestedPageCount}<span>{edition.suggestedPageCount} suggested pages</span>{/if}
               {#if edition.format !== 'unknown'}<span>{edition.format}</span>{/if}

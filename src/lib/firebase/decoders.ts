@@ -249,6 +249,7 @@ function metadata(data: Data, context: string): BookMetadata {
     publishedDate: string(data.publishedDate ?? '', `${context}.publishedDate`),
     subjects: strings(subjectsValue, `${context}.subjects`),
     fiction: fictionValue,
+    language: string(data.language ?? '', `${context}.language`),
   };
 }
 

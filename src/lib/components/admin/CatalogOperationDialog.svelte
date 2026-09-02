@@ -7,6 +7,7 @@
     AdminCatalogPreviewResponse,
     CatalogScan,
   } from '$lib/interfaces/catalog.ts';
+  import { COMMON_LANGUAGES } from '../../../../shared/language.ts';
   import { catalogAuthorIdFor, classifyAdminCatalogFailure } from '$lib/utils/adminCatalog.ts';
   import {
     buildOperation,
@@ -276,6 +277,7 @@
           <label>Alternate titles, one per line<textarea bind:value={draft.alternateTitles}></textarea></label>
           <label>Status<select bind:value={draft.status}><option value="active">Active</option><option value="hidden">Hidden (soft delete: kept, not searchable)</option></select></label>
           <label>Fiction<select bind:value={draft.fiction}><option value="unknown">Unknown</option><option value="fiction">Fiction</option><option value="nonfiction">Nonfiction</option></select></label>
+          <label>Language <small>The language its editions are in unless one says otherwise; a code such as en or no, blank for unknown.</small><input list="language-codes" bind:value={draft.language} autocomplete="off" /></label>
           <label>Cover URL<input type="url" bind:value={draft.coverUrl} /></label>
           <label>Subjects, one per line<textarea bind:value={draft.subjects}></textarea></label>
           <label>Work ID<input bind:value={draft.workId} autocomplete="off" readonly={draft.type === 'editWork'} /></label>
@@ -334,7 +336,7 @@
           <label>Suggested pages<input bind:value={draft.pageCount} inputmode="numeric" /></label>
           <label>Publisher<input bind:value={draft.publisher} /></label>
           <label>Published date<input bind:value={draft.publishedDate} /></label>
-          <label>Language<input bind:value={draft.language} /></label>
+          <label>Language <small>Blank inherits the work's language; set it only where this edition differs.</small><input list="language-codes" bind:value={draft.language} autocomplete="off" /></label>
           <label>Format<select bind:value={draft.format}><option value="unknown">Unknown</option><option value="full">Full</option><option value="abridged">Abridged</option><option value="revised">Revised</option></select></label>
           <label>Translators, one per line<textarea bind:value={draft.translatorNames}></textarea></label>
           <label>External IDs, provider=id per line<textarea bind:value={draft.externalIds}></textarea></label>
@@ -351,6 +353,10 @@
           </label>
         </div>
       {/if}
+
+      <datalist id="language-codes">
+        {#each COMMON_LANGUAGES as language (language.code)}<option value={language.code}>{language.label}</option>{/each}
+      </datalist>
 
       {#if errorMessage}<div class="notice error" role="alert">{errorMessage}</div>{/if}
       {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}

@@ -438,3 +438,35 @@ test('a merged edition is an alias: counted for no work, redirecting one hop, or
     ['Invalid edition redirect fields at editions/bad-status.'],
   );
 });
+
+test('rows carry the work default and the edition override, and an active work without one is flagged', () => {
+  const scan = scanCatalog(input({
+    works: [
+      workDocument('sult', 'Sult', { language: 'no' }),
+      workDocument('bare', 'Bare'),
+      workDocument('hidden', 'Hidden', { status: 'hidden' }),
+    ],
+    editions: [
+      editionDocument('sult-gyldendal', 'sult'),
+      editionDocument('sult-english', 'sult', { language: 'en' }),
+    ],
+    books: [
+      bookDocument('sult', { workId: 'sult', editionId: 'sult-gyldendal', language: 'no' }),
+      bookDocument('loose'),
+    ],
+  }));
+  const work = (id: string) => scan.works.find((row) => row.workId === id)!;
+  assert.equal(work('sult').language, 'no');
+  assert.equal(work('bare').language, '');
+  assert.deepEqual(work('sult').warnings, []);
+  assert.deepEqual(work('bare').warnings, ['no language']);
+  // A hidden work is out of the catalog; it is not asked for one.
+  assert.deepEqual(work('hidden').warnings, []);
+  // Bookkeeping, not an invariant: no finding.
+  assert.equal(scan.findings.some((finding) => finding.message === 'no language'), false);
+  const edition = (id: string) => scan.editions.find((row) => row.editionId === id)!;
+  assert.equal(edition('sult-gyldendal').language, '');
+  assert.equal(edition('sult-english').language, 'en');
+  assert.equal(scan.books.find((row) => row.bookId === 'sult')?.language, 'no');
+  assert.equal(scan.books.find((row) => row.bookId === 'loose')?.language, '');
+});

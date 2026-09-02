@@ -114,6 +114,7 @@ for (const user of users.docs) {
       publishedDate: b.publishedDate,
       subjects: b.subjects,
       fiction: b.fiction,
+      language: b.language ?? '',
     }, nb);
     if (Object.keys(patch).length === 0) {
       nothingToAdd += 1;

@@ -50,6 +50,7 @@ export function parseGoodreadsHtml(html: string): BookLookupResult | null {
     publishedDate: '',
     subjects: genres,
     fiction: deriveFictionFromGenres(genres),
+    language: '',
   };
 }
 

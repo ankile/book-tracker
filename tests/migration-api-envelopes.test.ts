@@ -16,6 +16,7 @@ const cachedLookup = {
   publishedDate: '2018',
   subjects: ['Fiction'],
   fiction: true,
+  language: '',
 };
 
 test('lookup cache decodes nullable results and omitted optional page counts', () => {

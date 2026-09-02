@@ -8,6 +8,7 @@
 //
 //   node db-audit.ts            # emulator
 //   node db-audit.ts --prod     # production (read-only)
+import { isLanguageCode } from './shared/language.ts';
 import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
@@ -193,7 +194,7 @@ for (const workDoc of works.docs) {
   const path = workDoc.ref.path;
   const required = [
     'canonicalTitle', 'alternateTitles', 'titleKeys', 'authorIds',
-    'coverUrl', 'subjects', 'fiction', 'status', 'mergedFrom',
+    'coverUrl', 'subjects', 'fiction', 'language', 'status', 'mergedFrom',
     'createdBy', 'createdAt', 'updatedAt',
   ];
   for (const field of required) if (work[field] === undefined) found(`catalog.work.missing.${field}`, path);
@@ -232,6 +233,11 @@ for (const workDoc of works.docs) {
   }
   if (work.fiction !== null && typeof work.fiction !== 'boolean') {
     found('catalog.work.bad-fiction', path, JSON.stringify(work.fiction));
+  }
+  // The default language (migrate-work-languages.ts stamped it): a code or
+  // '' for unknown, which the console lists as needing one.
+  if (work.language !== undefined && (typeof work.language !== 'string' || !isLanguageCode(work.language))) {
+    found('catalog.work.bad-language', path, JSON.stringify(work.language));
   }
   if (!(work.createdAt instanceof Timestamp) || !(work.updatedAt instanceof Timestamp)) {
     found('catalog.work.bad-timestamps', path);
@@ -304,6 +310,11 @@ for (const editionDoc of editions.docs) {
     if (typeof edition[field] !== 'string') {
       found(`catalog.edition.bad-${field}`, path, JSON.stringify(edition[field]));
     }
+  }
+  // An edition's language is its override of the work's default: a code, or
+  // '' to inherit.
+  if (typeof edition.language === 'string' && !isLanguageCode(edition.language)) {
+    found('catalog.edition.bad-language', path, JSON.stringify(edition.language));
   }
   if (!Array.isArray(edition.translatorNames) ||
       edition.translatorNames.some((name) => typeof name !== 'string')) {
@@ -715,7 +726,7 @@ for (const user of users) {
     const p = book.ref.path;
     for (const violation of bookShapeViolations(b, user.path)) found('book.rules-shape', p, violation);
 
-    const requiredBookFields = ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction'];
+    const requiredBookFields = ['createdAt', 'updatedAt', 'authorIds', 'isbn', 'owner', 'pagesRead', 'timeRead', 'finished', 'currentPage', 'currentPageUpdateId', 'pageCount', 'coverUrl', 'publisher', 'publishedDate', 'subjects', 'fiction', 'language'];
     if (!tombstoned) requiredBookFields.push('workId', 'editionId', 'matchMethod', 'linkedAt');
     for (const field of requiredBookFields) {
       if (b[field] === undefined) found(`book.missing.${field}`, p);
@@ -766,6 +777,9 @@ for (const user of users) {
     }
     if (b.fiction !== undefined && b.fiction !== null && typeof b.fiction !== 'boolean') {
       found('book.bad-fiction', p, String(b.fiction));
+    }
+    if (b.language !== undefined && (typeof b.language !== 'string' || !isLanguageCode(b.language))) {
+      found('book.bad-language', p, String(b.language));
     }
     for (const field of ['currentPage', 'pageCount', 'pagesRead', 'timeRead']) {
       if (b[field] !== undefined && !Number.isFinite(b[field])) {

@@ -120,6 +120,7 @@ test("Google cover and classification win while Open Library subjects stay detai
     publishedDate: "1982",
     subjects: ["Industrial management", "Strategy", "Corporate planning"],
     fiction: false,
+    language: "",
   });
 });
 
@@ -144,6 +145,7 @@ test("metadata selection falls back field by field when preferred sources have g
     publishedDate: "2020",
     subjects: ["Historical Fiction"],
     fiction: false,
+    language: "",
   });
 });
 
@@ -168,4 +170,12 @@ test("fiction: no signal means unknown (null)", () => {
 
 test("fiction: 'nonfiction' does not read as a fiction word match", () => {
   assert.equal(deriveFiction(["Creative nonfiction"]), false);
+});
+
+test("language comes from Google first, then the national library", () => {
+  const google = { ...EMPTY_METADATA, language: "en" };
+  const nationalLibrary = { ...EMPTY_METADATA, language: "no" };
+  assert.equal(selectLookupMetadata(null, google, nationalLibrary).language, "en");
+  assert.equal(selectLookupMetadata(null, null, nationalLibrary).language, "no");
+  assert.equal(selectLookupMetadata({ ...EMPTY_METADATA }, { ...EMPTY_METADATA }, null).language, "");
 });

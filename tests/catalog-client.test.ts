@@ -31,6 +31,7 @@ const work = {
   coverUrl: '',
   subjects: ['Science fiction'],
   fiction: true,
+  language: 'en',
   mergedFrom: ['old-work'],
 };
 const edition = {
@@ -235,10 +236,11 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
 test('the add-edition request carries the book\'s own edition to a named work', () => {
   const metadata = {
     coverUrl: 'https://covers.test/a.jpg', publisher: 'Ace', publishedDate: '1987',
-    subjects: ['Science fiction'], fiction: true,
+    subjects: ['Science fiction'], fiction: true, language: 'en',
   };
+  // A book in the work's language inherits it; the edition overrides nothing.
   const request = buildCatalogAddEditionRequest({
-    workId: 'work', title: 'Left Hand of Darkness', isbn: '0-441-47812-3', pageCount: 320, metadata,
+    workId: 'work', workLanguage: 'en', title: 'Left Hand of Darkness', isbn: '0-441-47812-3', pageCount: 320, metadata,
   });
   assert.deepEqual(request, {
     workId: 'work',
@@ -252,9 +254,19 @@ test('the add-edition request carries the book\'s own edition to a named work', 
     title: 'Left Hand of Darkness', authorIds: ['le-guin'], isbn: '0-441-47812-3', pageCount: 320, metadata,
   });
   assert.deepEqual(created?.edition, request.edition);
+  // The first reader's book sets the new work's default language.
+  assert.equal(created?.work.language, 'en');
+  // A book whose language differs from the work's makes its edition an
+  // override; a book with none inherits whatever the work says.
+  assert.equal(buildCatalogAddEditionRequest({
+    workId: 'work', workLanguage: 'no', title: 'T', isbn: '', pageCount: 1, metadata,
+  }).edition.language, 'en');
+  assert.equal(buildCatalogAddEditionRequest({
+    workId: 'work', workLanguage: 'no', title: 'T', isbn: '', pageCount: 1, metadata: {...metadata, language: ''},
+  }).edition.language, '');
   // An http cover and an invalid ISBN are dropped, not stored.
   const bare = buildCatalogAddEditionRequest({
-    workId: 'work', title: 'T', isbn: '123', pageCount: 1, metadata: {...metadata, coverUrl: 'http://x'},
+    workId: 'work', workLanguage: 'en', title: 'T', isbn: '123', pageCount: 1, metadata: {...metadata, coverUrl: 'http://x'},
   });
   assert.equal(bare.edition.isbn13, null);
   assert.equal(bare.edition.coverUrl, '');

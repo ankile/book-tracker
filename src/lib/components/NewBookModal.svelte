@@ -14,11 +14,13 @@
     selectLookupMetadata,
   } from "../utils/bookMetadata.ts";
   import { parseGoogleVolume } from "../utils/googleBooks.ts";
+  import { effectiveLanguage, languageLabel } from "../../../shared/language.ts";
   import {
     nbSearchUrl,
     nbModsUrl,
     parseNbItem,
     extractModsGenres,
+    extractModsLanguage,
     extractModsCoverUrl,
   } from "../utils/nasjonalbiblioteket.ts";
   import { catalogAddEdition, catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
@@ -145,6 +147,7 @@
       publishedDate: book?.publishedDate ?? "",
       subjects: book?.subjects ?? [],
       fiction: book?.fiction ?? null,
+      language: book?.language ?? "",
     };
     catalogSelection = book?.workId
       ? {
@@ -291,6 +294,11 @@
       publishedDate: fillMissingText(metadata.publishedDate, result.edition?.publishedDate ?? ''),
       subjects: fillMissingItems(metadata.subjects, result.work.subjects),
       fiction: metadata.fiction ?? result.work.fiction,
+      // The edition's language where it overrides, else the work's default.
+      language: fillMissingText(
+        metadata.language,
+        effectiveLanguage(result.edition?.language ?? '', result.work.language),
+      ),
     };
   }
 
@@ -373,6 +381,7 @@
       }
       const request = buildCatalogAddEditionRequest({
         workId: catalogSelection.workId,
+        workLanguage: selectedCatalogResult?.work.language ?? '',
         title: prepared.write.input.title,
         isbn: prepared.write.input.isbn,
         pageCount: prepared.write.input.pageCount,
@@ -571,6 +580,7 @@
         item,
         extractModsGenres(modsXml),
         extractModsCoverUrl(modsXml),
+        extractModsLanguage(modsXml),
       );
       return {
         title: parsed.title,
@@ -581,6 +591,7 @@
         publishedDate: parsed.publishedDate,
         subjects: parsed.subjects,
         fiction: parsed.fiction,
+        language: parsed.language,
       };
     } catch (error) {
       console.error("Nasjonalbiblioteket lookup failed", error);
@@ -856,6 +867,9 @@
         {/if}
         {#if metadata.publisher || metadata.publishedDate}
           <div>{[metadata.publisher, metadata.publishedDate].filter(Boolean).join(", ")}</div>
+        {/if}
+        {#if metadata.language}
+          <div>{languageLabel(metadata.language)}</div>
         {/if}
       </div>
     </div>

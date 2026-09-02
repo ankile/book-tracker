@@ -48,6 +48,9 @@ export interface CatalogWorkSummary {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  // The work's default language (ISO 639 code, '' unknown); an edition's
+  // own language overrides it when set (shared/language.ts).
+  language: string;
   mergedFrom: string[];
 }
 
@@ -105,6 +108,7 @@ export interface CatalogWorkInput {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  language: string;
 }
 
 export interface CatalogAuthorInput {

@@ -3,6 +3,7 @@
 // draft of text fields), the prefill each page button starts from, the
 // operation built and validated from a draft, and the lookups the pages
 // render all live here, where the root tests reach them without a browser.
+import { isLanguageCode } from '../../../shared/language.ts';
 import type {
   AdminCatalogAuthorRow,
   AdminCatalogBookRow,
@@ -38,6 +39,7 @@ export interface WorkDraftFields {
   coverUrl: string;
   subjects: string;
   fiction: FictionDraft;
+  language: string;
 }
 
 export interface EditionDraftFields {
@@ -96,6 +98,7 @@ function workFields(work: AdminCatalogWorkRow, status: WorkDraftStatus): WorkDra
     coverUrl: work.coverUrl,
     subjects: lines(work.subjects),
     fiction: work.fiction === null ? 'unknown' : work.fiction ? 'fiction' : 'nonfiction',
+    language: work.language,
   };
 }
 
@@ -120,6 +123,7 @@ export function createWorkDraft(books: readonly AdminCatalogBookTarget[] = []): 
     coverUrl: '',
     subjects: '',
     fiction: 'unknown',
+    language: '',
     bookTargets: lines(books.map(bookKey)),
   };
 }
@@ -240,6 +244,16 @@ export function operationTitle(draft: OperationDraft): string {
   }
 }
 
+// Typed as a code (en, no); blank is unknown on a work and inherit on an
+// edition. The server rejects anything else too.
+function languageCode(value: string): string {
+  const code = value.trim().toLowerCase();
+  if (!isLanguageCode(code)) {
+    throw new TypeError('Language must be a two- or three-letter code such as en or no, or blank.');
+  }
+  return code;
+}
+
 function requireId(value: string, label: string): string {
   const id = value.trim();
   if (id === '' || id.includes('/')) {
@@ -260,6 +274,7 @@ function workInput(draft: WorkDraftFields): CatalogWorkInput {
     coverUrl: draft.coverUrl.trim(),
     subjects: parseAdminStringList(draft.subjects),
     fiction: draft.fiction === 'unknown' ? null : draft.fiction === 'fiction',
+    language: languageCode(draft.language),
   };
 }
 
@@ -294,7 +309,7 @@ function editionInput(draft: EditionDraftFields): CatalogEditionInput {
     title,
     publisher: draft.publisher.trim(),
     publishedDate: draft.publishedDate.trim(),
-    language: draft.language.trim(),
+    language: languageCode(draft.language),
     translatorNames: parseAdminStringList(draft.translatorNames),
     format: draft.format,
     suggestedPageCount: pageCount,

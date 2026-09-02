@@ -71,6 +71,9 @@ export interface StoredWork {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  // The work's default language (ISO 639 code, '' unknown): what its
+  // editions are in unless one overrides it (shared/language.ts).
+  language: string;
   status: WorkStatus;
   mergedInto?: string;
   mergedFrom: string[];
@@ -128,6 +131,7 @@ interface WorkSummary {
   coverUrl: string;
   subjects: string[];
   fiction: boolean | null;
+  language: string;
   mergedFrom: string[];
 }
 
@@ -270,6 +274,10 @@ export function storedWork(
   if (data.mergedInto !== undefined && typeof data.mergedInto !== "string") {
     fail(`Invalid work redirect at ${snapshot.ref.path}.`);
   }
+  // Absent on works that predate the language field; migrate-work-languages.ts
+  // stamps every work, and until then an absent language is unknown.
+  const language = data.language ?? "";
+  if (typeof language !== "string") fail(`Invalid work language at ${snapshot.ref.path}.`);
   return {
     canonicalTitle: data.canonicalTitle,
     alternateTitles: data.alternateTitles,
@@ -278,6 +286,7 @@ export function storedWork(
     coverUrl: data.coverUrl,
     subjects: data.subjects,
     fiction: data.fiction,
+    language,
     status: data.status,
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
     mergedFrom: data.mergedFrom,
@@ -492,6 +501,7 @@ async function workSummary(
     coverUrl: resolved.work.coverUrl,
     subjects: resolved.work.subjects,
     fiction: resolved.work.fiction,
+    language: resolved.work.language,
     mergedFrom: resolved.work.mergedFrom,
   };
 }
@@ -803,6 +813,7 @@ export async function createCatalogEntry(
       coverUrl: request.work.coverUrl,
       subjects: request.work.subjects,
       fiction: request.work.fiction,
+      language: request.work.language,
       status: "active",
       mergedFrom: [],
       createdBy,
