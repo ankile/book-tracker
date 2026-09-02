@@ -3,7 +3,7 @@ title: Pages and navigation
 ---
 flowchart LR
   accTitle: Book Tracker pages and navigation
-  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and catalog curation pages. The separate route access matrix lists readers and writes for every page.
+  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and the catalog console, whose lists open one page per work and per author. The separate route access matrix lists readers and writes for every page.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
@@ -32,7 +32,9 @@ flowchart LR
     isbns["<b>Book metadata</b><br/><code>/isbns</code><br/>Find missing or unresolved ISBN data"]:::page
     work["<b>Shared Work</b><br/><code>/books/[workId]</code><br/>Work metadata · opted-in reader summaries"]:::page
     profile["<b>Reading profile</b><br/><code>/profiles/[username]</code><br/>Stats · heatmap · records · links"]:::public
-    admin["<b>Catalog console</b><br/><code>/admin</code><br/>Authors · Works · Editions · matching"]:::admin
+    admin["<b>Catalog console</b><br/><code>/admin</code><br/>Review queue · author and work lists · matching"]:::admin
+    adminwork["<b>Work page</b><br/><code>/admin/works/[workId]</code><br/>Editions · readers' books · operations"]:::admin
+    adminauthor["<b>Author page</b><br/><code>/admin/authors/[authorId]</code><br/>Aliases · works · operations"]:::admin
     adminusers["<b>Accounts and issues</b><br/><code>/admin/users</code><br/>Operational summary"]:::admin
   end
 
@@ -41,6 +43,10 @@ flowchart LR
   publicentry --> profile
   operator --> admin
   operator --> adminusers
+  admin -->|"Work row"| adminwork
+  admin -->|"Author row"| adminauthor
+  adminwork -->|"Author link"| adminauthor
+  adminauthor -->|"Work row"| adminwork
 
   shell -->|"Currently Reading"| current
   shell -->|"Finished"| finished

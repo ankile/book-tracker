@@ -3,12 +3,12 @@ import type { Unsubscriber } from 'svelte/store';
 import { adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
 import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
 
-// Two consoles with two data paths. /admin is the catalog: bibliographic
-// data and catalog links, read live through Firestore listeners the rules
-// grant the operator. /admin/users is the accounts and issues page: Auth
+// Two consoles with two data paths. /admin is the catalog (the overview
+// and one page per work and per author): bibliographic data and catalog
+// links, read live through Firestore listeners the rules grant the operator. /admin/users is the accounts and issues page: Auth
 // metadata and the issue log, which only the Admin SDK can read, so it stays
 // a callable that runs when the page is opened and never as a prefetch.
-export const ADMIN_ROUTES = ['/admin', '/admin/users'];
+export const ADMIN_ROUTES = ['/admin', '/admin/works/*', '/admin/authors/*', '/admin/users'];
 
 // The accounts callable takes 5–7 seconds in production (Auth user list
 // plus per-account aggregates and the issue feed). Its answer is kept for

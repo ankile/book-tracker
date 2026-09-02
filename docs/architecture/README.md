@@ -96,7 +96,9 @@ part of this public map package.
 | `/isbns` | Find incomplete book information and open the edit dialog | Signed-in owner read and write |
 | `/books/[workId]` | Shared Work metadata and opted-in reader summaries | Signed-in reader; no writes on this page |
 | `/profiles/[username]` | Shared reading statistics, activity, records, yearly data, and links | Anyone when published; the owner can view a private profile; no writes on this page |
-| `/admin` | Live catalog console: review reader-created works, merge duplicates, link books; preview and apply shared author, Work, Edition, and matching changes | Authorized operator read (data permissions) and write (audited operations) |
+| `/admin` | Live catalog console: review reader-created works, merge duplicates, link books; filterable author and Work lists that open one page per record; create records and preview and apply shared author, Work, Edition, and matching changes | Authorized operator read (data permissions) and write (audited operations) |
+| `/admin/works/[workId]` | One shared Work: record, Editions, readers' linked books, duplicate candidates; edit, hide, merge, add or edit Editions, move or unlink books | Authorized operator read (data permissions) and write (audited operations) |
+| `/admin/authors/[authorId]` | One shared author: record, aliases, works naming it; edit or merge | Authorized operator read (data permissions) and write (audited operations) |
 | `/admin/users` | Restricted operational summary: accounts and issue log | Authorized operator read only; operational access may be audited |
 
 ## Public sanitization rules

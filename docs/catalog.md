@@ -120,12 +120,35 @@ anomalous books appear as the data changes and cost only the documents that
 change. The scan and the identity normalizers live in `shared/`
 (`catalogScan.ts`, `catalogIdentity.ts`), imported by the app and copied into
 `functions/src/shared` by the functions build, so the keys the browser matches
-are the keys the server wrote. Changes go through two callables: a preview
-that plans one operation, and an apply that re-plans it inside a transaction
-and refuses if the state moved under the preview. The operations are
-`upsertAuthor`, `mergeAuthors`, `createWork`, `linkBooks`, `mergeWorks`,
-`editWork`, `upsertEdition` and `repointIsbn`. Every apply is idempotent by
-operation id and writes an `adminAudit` record.
+are the keys the server wrote.
+
+The console is three pages over that one scan. `/admin` holds the review
+queue (works readers created, suspected duplicates, unmatched books with
+candidates), the filterable author and work lists, the findings, and the
+operations that start from no record. `/admin/works/[workId]` is one work:
+its record, editions, the readers' books that resolve to it (a book still
+linked to a merged alias counts for the survivor), and its duplicate
+candidates. `/admin/authors/[authorId]` is one author: its record, aliases,
+and the works naming it directly or through a merged alias. Works record
+`createdBy`; authors carry no creator, so an author's provenance is its
+creation day plus the creator of each work listed.
+
+Every button opens the same operation dialog with a prefilled draft
+(`src/lib/utils/adminCatalogView.ts` builds and validates the operation from
+it). Changes go through two callables: a preview that plans one operation,
+and an apply that re-plans it inside a transaction and refuses if the state
+moved under the preview. The operations are `upsertAuthor`, `mergeAuthors`,
+`createWork`, `linkBooks`, `mergeWorks`, `editWork`, `upsertEdition` and
+`repointIsbn`. A new author's id is derived from its canonical name the way
+`catalog.ensureauthors` derives it, so a reader adding the same name later
+lands on the console's document. Every apply is idempotent by operation id
+and writes an `adminAudit` record.
+
+A work with no edition is a legitimate state, not drift: the migration
+minted one edition per distinct ISBN among a work's books, so a work whose
+books carried no ISBN has none, while `catalog.create` always writes one.
+Search returns such a work with `editionId: null` and books link to it
+without an edition.
 
 `/admin/users` is the accounts and issues page: the Auth user list,
 per-account reading aggregates and the issue log, which only the Admin SDK

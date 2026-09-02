@@ -1,0 +1,192 @@
+<script lang="ts">
+  import '$lib/components/admin/catalog.css';
+  import { page } from '$app/state';
+  import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
+  import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
+  import CatalogOperationDialog from '$lib/components/admin/CatalogOperationDialog.svelte';
+  import { adminCatalogProgress, adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
+  import {
+    authorNamesById,
+    bookKey,
+    booksByWork,
+    catalogAuthorNames,
+    createEditionDraft,
+    creatorLabel,
+    duplicateFindingsFor,
+    editEditionDraft,
+    editWorkDraft,
+    hideWorkDraft,
+    isoDay,
+    linkBooksDraft,
+    mergeIntoOldestDraft,
+    mergeWorksDraft,
+    repointIsbnDraft,
+    type OperationDraft,
+  } from '$lib/utils/adminCatalogView.ts';
+
+  // One work: its record, its editions, the readers' books that resolve
+  // to it, and every operation that starts from it. The scan is the same
+  // live store the overview renders, so the page is current the moment it
+  // opens and updates as writes land.
+  const scan = $derived($adminCatalogScan ?? null);
+  const progress = $derived($adminCatalogProgress);
+  const workId = $derived(page.params.workId ?? '');
+
+  let draft = $state<OperationDraft | null>(null);
+  let statusMessage = $state('');
+
+  const work = $derived(scan?.works.find((row) => row.workId === workId) ?? null);
+  const names = $derived(authorNamesById(scan ?? {authors: []}));
+  const workById = $derived(new Map((scan?.works ?? []).map((row) => [row.workId, row])));
+  const authors = $derived((work?.authorIds ?? []).map((id) => ({
+    id,
+    name: names.get(id) ?? null,
+  })));
+  const editions = $derived((scan?.editions ?? []).filter((edition) => edition.workId === workId));
+  const editionById = $derived(new Map(editions.map((edition) => [edition.editionId, edition])));
+  const books = $derived(booksByWork(scan ?? {works: [], books: []}).get(workId) ?? []);
+  const duplicates = $derived(duplicateFindingsFor(scan ?? {findings: []}, workId));
+
+  function mergeDuplicates(ids: readonly string[]): void {
+    draft = mergeIntoOldestDraft(ids.flatMap((id) => {
+      const row = workById.get(id);
+      return row === undefined ? [] : [row];
+    }));
+  }
+</script>
+
+<svelte:head><title>{work?.canonicalTitle ?? 'Work'} · Catalog · Book Tracker</title></svelte:head>
+
+<main class="catalog-console">
+  <CatalogHeader crumbs={[{label: 'Works', href: '/admin#works-heading'}, {label: work?.canonicalTitle ?? workId}]} {scan} {progress} />
+  {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
+
+  {#if scan === null}
+    <CatalogLoading {progress} />
+  {:else if work === null}
+    <section class="card">
+      <h1>Work not found</h1>
+      <p>No work <code>{workId}</code> is in the catalog. <a href="/admin">Back to the catalog</a>.</p>
+    </section>
+  {:else}
+    <section class="card">
+      <div class="entity-head">
+        {#if work.coverUrl}<img src={work.coverUrl} alt="" referrerpolicy="no-referrer" />{:else}<div class="no-cover"></div>{/if}
+        <div>
+          <h1>{work.canonicalTitle}</h1>
+          <p>
+            {#each authors as author, index (author.id)}{#if index > 0}, {/if}<a href="/admin/authors/{author.id}">{author.name ?? `[Missing ${author.id}]`}</a>{:else}No authors{/each}
+          </p>
+          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, true)} · <code>{work.workId}</code></p>
+          {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
+        </div>
+        <div class="actions">
+          <button type="button" onclick={() => (draft = editWorkDraft(work))}>Edit work…</button>
+          {#if work.status === 'active'}<button type="button" onclick={() => (draft = hideWorkDraft(work))}>Hide…</button>{/if}
+          {#if work.status !== 'merged'}<button type="button" onclick={() => (draft = mergeWorksDraft([work.workId], ''))}>Merge into another work…</button>{/if}
+          <button type="button" onclick={() => (draft = createEditionDraft(work))}>New edition…</button>
+        </div>
+      </div>
+      <dl class="facts">
+        <div><dt>Alternate titles</dt><dd>{work.alternateTitles.join(' · ') || '—'}</dd></div>
+        <div><dt>Subjects</dt><dd>{work.subjects.join(' · ') || '—'}</dd></div>
+        <div><dt>Fiction</dt><dd>{work.fiction === null ? 'Unknown' : work.fiction ? 'Fiction' : 'Nonfiction'}</dd></div>
+        <div><dt>Merged into</dt><dd>{#if work.mergedInto}<a href="/admin/works/{work.mergedInto}">{workById.get(work.mergedInto)?.canonicalTitle ?? work.mergedInto}</a>{:else}—{/if}</dd></div>
+        <div><dt>Absorbed works</dt><dd>{#each work.mergedFrom as id, index (id)}{#if index > 0}, {/if}<a href="/admin/works/{id}">{workById.get(id)?.canonicalTitle ?? id}</a>{:else}—{/each}</dd></div>
+        <div><dt>Cover URL</dt><dd>{#if work.coverUrl}<a href={work.coverUrl} rel="noreferrer">{work.coverUrl}</a>{:else}—{/if}</dd></div>
+      </dl>
+    </section>
+
+    {#if duplicates.length > 0}
+      <section class="card" aria-labelledby="duplicates-heading">
+        <h2 id="duplicates-heading">Looks like the same book as</h2>
+        <div class="dupe-list">
+          {#each duplicates as finding (finding.workIds.join('/'))}
+            <div class="dupe">
+              <div>
+                <p>{finding.message}</p>
+                <ul>
+                  {#each finding.workIds.filter((id) => id !== workId) as id (id)}
+                    {@const other = workById.get(id)}
+                    <li><strong><a href="/admin/works/{id}">{other?.canonicalTitle ?? id}</a></strong><small>{other?.linkedBookCount ?? 0} readers · {other?.editionCount ?? 0} editions · <code>{id}</code></small></li>
+                  {/each}
+                </ul>
+              </div>
+              <button class="primary" type="button" onclick={() => mergeDuplicates(finding.workIds)}>Merge into the oldest…</button>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    <section class="card" aria-labelledby="editions-heading">
+      <h2 id="editions-heading">Editions <span>{editions.length}</span></h2>
+      {#if editions.length === 0}
+        <p class="empty">No editions. The catalog build minted one edition per ISBN, so a work whose readers' books carried no ISBN has none; a work created through the add-book flow always has one. Add one with “New edition…” when an ISBN or publisher is known.</p>
+      {:else}
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Edition</th><th>ISBN</th><th>Publisher</th><th>Published</th><th>Language</th><th>Format</th><th>Pages</th><th>External IDs</th><th></th></tr></thead>
+            <tbody>
+              {#each editions as edition (edition.editionId)}
+                <tr>
+                  <td><strong>{edition.title}</strong><small>{edition.translatorNames.length > 0 ? `tr. ${edition.translatorNames.join(', ')} · ` : ''}{edition.editionId}</small></td>
+                  <td>{edition.isbn13 ?? '—'}</td>
+                  <td>{edition.publisher || '—'}</td>
+                  <td>{edition.publishedDate || '—'}</td>
+                  <td>{edition.language || '—'}</td>
+                  <td>{edition.format}</td>
+                  <td>{edition.suggestedPageCount ?? '—'}</td>
+                  <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
+                  <td>
+                    <div class="actions">
+                      <button type="button" onclick={() => (draft = editEditionDraft(edition))}>Edit edition…</button>
+                      {#if edition.isbn13 !== null}<button type="button" onclick={() => (draft = repointIsbnDraft(edition.isbn13 ?? '', ''))}>Repoint ISBN…</button>{/if}
+                    </div>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+
+    <section class="card" aria-labelledby="readers-heading">
+      <h2 id="readers-heading">Readers' books <span>{books.length}</span></h2>
+      <p>Personal books that resolve to this work, including any still linked to a work merged into it. Only identity metadata is shown.</p>
+      {#if books.length === 0}
+        <p class="empty">No reader has a book linked to this work.</p>
+      {:else}
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Personal book</th><th>Reader</th><th>ISBN</th><th>Pages</th><th>Edition</th><th>Anomaly</th><th></th></tr></thead>
+            <tbody>
+              {#each books as book (bookKey(book))}
+                <tr>
+                  <td class="book-cell">
+                    {#if book.coverUrl}<img src={book.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
+                    <span><strong>{book.title}</strong><small>{book.authorNames.join(', ')}{book.workId !== workId ? ` · via merged ${book.workId}` : ''}</small></span>
+                  </td>
+                  <td><code>{book.uid}</code><small>{book.bookId}</small></td>
+                  <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td>
+                  <td>{book.pageCount ?? '—'}</td>
+                  <td>{book.editionId === null ? '—' : editionById.get(book.editionId)?.title ?? book.editionId}</td>
+                  <td>{book.anomaly ?? '—'}</td>
+                  <td>
+                    <div class="actions">
+                      <button type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: book.editionId}))}>Move…</button>
+                      <button type="button" onclick={() => (draft = linkBooksDraft([book], null))}>Unlink…</button>
+                    </div>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+  {/if}
+
+  <CatalogOperationDialog bind:draft {scan} onapplied={(message) => (statusMessage = message)} />
+</main>

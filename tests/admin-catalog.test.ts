@@ -6,6 +6,7 @@ import { FunctionsError } from 'firebase/functions';
 import {
   adminCatalogCandidatesByBook,
   adminCatalogCandidatesForBook,
+  catalogAuthorIdFor,
   classifyAdminCatalogFailure,
   decodeAdminCatalogApplyResponse,
   decodeAdminCatalogPreviewResponse,
@@ -23,7 +24,7 @@ import type {
 const work: AdminCatalogWorkRow = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, status: 'hidden',
-  mergedFrom: [], createdBy: null, createdAt: 900,
+  mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900,
   editionCount: 1, linkedBookCount: 1, warnings: [],
 };
 const book: AdminCatalogBookRow = {
@@ -59,6 +60,15 @@ test('the browser-side external index id is the server digest', async () => {
   const expected = createHash('sha256').update('open-library\0OL1M').digest('hex');
   assert.equal(await externalIndexId('open-library', 'OL1M'), expected);
   assert.notEqual(await externalIndexId('open-library', 'OL1N'), expected);
+});
+
+// A console-created author must land on the document catalog.ensureauthors
+// would mint for the same name, normalization included.
+test('a console-created author gets the id the add-book flow would mint', async () => {
+  const expected = `author_${createHash('sha256').update('author\0ursula k le guin').digest('hex').slice(0, 24)}`;
+  assert.equal(await catalogAuthorIdFor('Ursula K. Le Guin'), expected);
+  assert.equal(await catalogAuthorIdFor('  URSULA K. LE GUIN '), expected);
+  assert.notEqual(await catalogAuthorIdFor('Ursula Le Guin'), expected);
 });
 
 test('admin preview and apply decoders retain exact before/after differences', () => {

@@ -1,5 +1,8 @@
 import { FunctionsError } from 'firebase/functions';
-import { externalIndexDigestInput } from '../../../shared/catalogIdentity.ts';
+import {
+  externalIndexDigestInput,
+  normalizeCatalogIdentity,
+} from '../../../shared/catalogIdentity.ts';
 import type {
   AdminCatalogApplyResponse,
   AdminCatalogBookRow,
@@ -71,15 +74,26 @@ function decodeBookTarget(value: unknown, context: string): AdminCatalogBookTarg
   };
 }
 
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 // The externalIdIndex document id, computed the way the server computes it
 // (functions/src/catalog.ts externalIndexId) so the live scan can check
 // every index row against its own provider and external id.
 export async function externalIndexId(provider: string, id: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(externalIndexDigestInput(provider, id)),
-  );
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return sha256Hex(externalIndexDigestInput(provider, id));
+}
+
+// The id catalog.ensureauthors mints for a new author (functions/src/catalog.ts
+// catalogAuthorId): "author_" and the first 24 hex digits of the SHA-256 of
+// "author\0" + the normalized canonical name. The console derives it for an
+// author it creates so a reader who later adds the same name lands on that
+// document instead of minting a duplicate.
+export async function catalogAuthorIdFor(canonicalName: string): Promise<string> {
+  const digest = await sha256Hex(`author\0${normalizeCatalogIdentity(canonicalName)}`);
+  return `author_${digest.slice(0, 24)}`;
 }
 
 export interface AdminCatalogCandidate {

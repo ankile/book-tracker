@@ -73,6 +73,8 @@ export interface AdminCatalogWorkRow {
   subjects: string[];
   fiction: boolean | null;
   status: WorkStatus;
+  // The survivor a merged work redirects to; null unless status is merged.
+  mergedInto: string | null;
   mergedFrom: string[];
   // uid of the user who created the work through the add-book flow; null
   // for migration- or admin-created works.
@@ -90,7 +92,10 @@ export interface AdminCatalogAuthorRow {
   sortName: string;
   kind: CatalogAuthorKind;
   status: CatalogAuthorStatus;
+  mergedInto: string | null;
   mergedFrom: string[];
+  // Authors carry no creator: the add-book flow mints them without a uid.
+  createdAt: number;
   workCount: number;
   warnings: string[];
 }
@@ -187,6 +192,7 @@ interface ScanAuthor {
   status: CatalogAuthorStatus;
   mergedInto: string | null;
   mergedFrom: string[];
+  createdAt: number;
   unsupportedFields: string[];
 }
 
@@ -295,6 +301,7 @@ function readAuthor({ id, data }: CatalogScanDocument): ScanAuthor {
     status: data.status,
     mergedInto: optionalRedirect(data.mergedInto, label),
     mergedFrom,
+    createdAt: millis(data.createdAt, `${label}.createdAt`),
     unsupportedFields: unsupportedFields(data, AUTHOR_FIELDS),
   };
 }
@@ -779,7 +786,9 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       sortName: author.sortName,
       kind: author.kind,
       status: author.status,
+      mergedInto: author.mergedInto,
       mergedFrom: author.mergedFrom,
+      createdAt: author.createdAt,
       workCount: catalogAuthorWorkCounts.get(authorId) ?? 0,
       warnings: catalogAuthorWarnings.get(authorId) ?? [],
     })),
@@ -792,6 +801,7 @@ export function scanCatalog(input: CatalogScanInput): CatalogScan {
       subjects: work.subjects,
       fiction: work.fiction,
       status: work.status,
+      mergedInto: work.mergedInto,
       mergedFrom: work.mergedFrom,
       createdBy: work.createdBy,
       createdAt: work.createdAt,

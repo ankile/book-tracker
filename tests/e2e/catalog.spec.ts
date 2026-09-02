@@ -55,7 +55,7 @@ async function login(page: Page, email: string): Promise<void> {
   await page.getByLabel('Email address', {exact: true}).fill(email);
   await page.getByLabel('Password', {exact: true}).fill(PASSWORD);
   await page.getByRole('button', {name: 'Log in', exact: true}).click();
-  await expect(page.getByRole('navigation')).toBeVisible();
+  await expect(page.getByRole('navigation', {name: 'Primary navigation'})).toBeVisible();
 }
 
 async function chooseExistingAuthor(page: Page, name: string): Promise<void> {
@@ -465,59 +465,104 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await expect(page.getByText(/^Live · /)).toBeVisible();
       await expect(page.getByRole('heading', {name: /New works from readers/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Same book, split across records/})).toBeVisible();
-      await page.getByText(/All catalog data/).click();
+      await expect(page.getByRole('heading', {name: /^Authors/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /^Works/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Unmatched books/})).toBeVisible();
       await expect(page.getByRole('heading', {name: /Review findings/})).toBeVisible();
-      await expect(page.getByRole('heading', {name: 'Work detail'})).toBeVisible();
 
+      // The work list filters as you type; a row opens the work's own page.
+      await page.getByLabel('Filter works').fill('left hand darkness');
       const row = page.getByRole('row').filter({hasText: workId});
-      await row.getByRole('button', {name: 'Inspect'}).click();
-      await page.getByRole('button', {name: 'Edit this work'}).click();
-      await page.getByLabel('Alternate titles, one per line').fill('Left Hand');
-      await page.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(page.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
-      await expect(page.getByText('Before', {exact: true}).first()).toBeVisible();
-      await expect(page.getByText('After', {exact: true}).first()).toBeVisible();
+      await expect(row).toHaveCount(1);
+      await row.getByRole('link', {name: 'The Left Hand of Darkness'}).click();
+      await expect(page).toHaveURL(new RegExp(`/admin/works/${workId}$`));
+      await expect(page.getByRole('heading', {name: 'The Left Hand of Darkness'})).toBeVisible();
+      await expect(page.getByRole('heading', {name: /^Editions/})).toBeVisible();
+      await expect(page.getByRole('heading', {name: /Readers' books/})).toBeVisible();
 
-      await page.getByLabel('Alternate titles, one per line').fill('Left Hand\nDraft changed');
-      await expect(page.getByRole('button', {name: 'Apply these exact changes'})).toHaveCount(0);
-      await expect(page.getByText('The draft changed. Create a fresh preview before applying.')).toBeVisible();
-      await page.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(page.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
+      // The author link opens the author's page, which lists this work;
+      // back returns to the work page rather than to a scrolled list.
+      await page.getByRole('link', {name: 'Ursula K. Le Guin'}).first().click();
+      await expect(page).toHaveURL(new RegExp(`/admin/authors/${leGuinAuthorId}$`));
+      await expect(page.getByRole('heading', {name: 'Ursula K. Le Guin'})).toBeVisible();
+      await expect(page.getByRole('row').filter({hasText: workId})).toHaveCount(1);
+      await expect(page.getByRole('button', {name: 'Edit author…'})).toBeVisible();
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`/admin/works/${workId}$`));
+
+      // Edit opens the operation dialog in place; the preview lists the exact changes.
+      await page.getByRole('button', {name: 'Edit work…'}).click();
+      const dialog = page.getByRole('dialog', {name: 'Edit work'});
+      await expect(dialog).toBeVisible();
+      await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand');
+      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
+      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
+      await expect(dialog.getByText('Before', {exact: true}).first()).toBeVisible();
+      await expect(dialog.getByText('After', {exact: true}).first()).toBeVisible();
+
+      await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand\nDraft changed');
+      await expect(dialog.getByRole('button', {name: 'Apply these exact changes'})).toHaveCount(0);
+      await expect(dialog.getByText('The draft changed. Create a fresh preview before applying.')).toBeVisible();
+      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
+      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
 
       await agePersistedAuthSession(context, page, ADMIN_UID, adminEmail);
-      page.once('dialog', (dialog) => dialog.accept());
-      await page.getByRole('button', {name: 'Apply these exact changes'}).click();
+      page.once('dialog', (confirmation) => confirmation.accept());
+      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
       await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toBeVisible();
       await expect(page.getByLabel('Administrator password')).toBeFocused();
       await page.keyboard.press('Escape');
       await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toHaveCount(0);
-      await expect(page.getByRole('button', {name: 'Apply these exact changes'})).toBeFocused();
+      await expect(dialog.getByRole('button', {name: 'Apply these exact changes'})).toBeFocused();
 
-      page.once('dialog', (dialog) => dialog.accept());
-      await page.getByRole('button', {name: 'Apply these exact changes'}).click();
+      page.once('dialog', (confirmation) => confirmation.accept());
+      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
       await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toBeVisible();
       await page.getByLabel('Administrator password').fill(PASSWORD);
       await page.getByRole('button', {name: 'Reauthenticate and retry'}).click();
+      // A landed apply closes the dialog; the page reports it and the live
+      // listener shows the new alias without a reload.
       await expect(page.getByText(/Applied .* documents changed/)).toBeVisible();
+      await expect(dialog).toBeHidden();
+      await expect(page.getByText('Left Hand · Draft changed')).toBeVisible();
 
-      await page.getByRole('button', {name: 'Edit this work'}).click();
-      await page.getByLabel('Alternate titles, one per line').fill('Left Hand\nThe Left Hand');
-      await page.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(page.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
+      // A preview goes stale when the document changes underneath it.
+      await page.getByRole('button', {name: 'Edit work…'}).click();
+      await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand\nThe Left Hand');
+      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
+      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
       await db.doc(`works/${workId}`).update({subjects: ['Concurrent correction'], updatedAt: FieldValue.serverTimestamp()});
-      page.once('dialog', (dialog) => dialog.accept());
-      await page.getByRole('button', {name: 'Apply these exact changes'}).click();
-      await expect(page.getByRole('alert')).toContainText('preview is stale');
+      page.once('dialog', (confirmation) => confirmation.accept());
+      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
+      await expect(dialog.getByRole('alert')).toContainText('preview is stale');
+      await dialog.getByRole('button', {name: 'Cancel'}).click();
+      await expect(dialog).toBeHidden();
 
-      const operationSelect = page.getByLabel('Operation', {exact: true});
-      for (const option of [
-        'Create work', 'Link or unlink books', 'Merge works', 'Edit work',
-        'Create or edit edition', 'Repoint ISBN', 'Create or edit author', 'Merge authors',
+      // Every operation that starts from this work opens as its own dialog.
+      for (const [button, title] of [
+        ['Hide…', 'Edit work'], ['Merge into another work…', 'Merge works'],
+        ['New edition…', 'Create or edit edition'], ['Edit edition…', 'Create or edit edition'],
+        ['Repoint ISBN…', 'Repoint ISBN'],
       ]) {
-        await operationSelect.selectOption({label: option});
-        await expect(page.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
+        await page.getByRole('button', {name: button, exact: true}).click();
+        const opened = page.getByRole('dialog', {name: title});
+        await expect(opened.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
+        await opened.getByRole('button', {name: 'Cancel'}).click();
+        await expect(opened).toBeHidden();
+      }
+
+      // And the record-less operations from the overview.
+      await navigateInApp(page, '/admin');
+      for (const [button, title] of [
+        ['New author…', 'New author'], ['New work…', 'New work'],
+        ['New edition…', 'Create or edit edition'], ['Repoint an ISBN…', 'Repoint ISBN'],
+        ['Merge works…', 'Merge works'], ['Merge authors…', 'Merge authors'],
+      ]) {
+        await page.getByRole('button', {name: button, exact: true}).click();
+        const opened = page.getByRole('dialog', {name: title});
+        await expect(opened.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
+        await opened.getByRole('button', {name: 'Cancel'}).click();
+        await expect(opened).toBeHidden();
       }
     } finally {
       await context.close();
