@@ -145,7 +145,7 @@
       {:else}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Edition</th><th>ISBN</th><th>Publisher</th><th>Published</th><th>Language</th><th>Format</th><th>Pages</th><th>External IDs</th><th>Added by</th><th></th></tr></thead>
+            <thead><tr><th>Edition</th><th>ISBN</th><th>Publisher</th><th>Published</th><th>Language</th><th>Format</th><th>Pages</th><th>External IDs</th><th>Added by</th><th class="row-actions"></th></tr></thead>
             <tbody>
               {#each editions as edition (edition.editionId)}
                 <tr>
@@ -158,7 +158,7 @@
                   <td class="numeric">{edition.suggestedPageCount ?? '—'}</td>
                   <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
                   <td>{creatorLabel(edition.createdBy, emails)}</td>
-                  <td>
+                  <td class="row-actions">
                     <div class="actions">
                       <button type="button" onclick={() => (draft = editEditionDraft(edition))}>Edit edition…</button>
                       {#if editions.length > 1}<button type="button" onclick={() => (draft = mergeEditionsDraft(work.workId, [edition.editionId]))}>Merge into…</button>{/if}
@@ -190,7 +190,7 @@
       {:else}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Personal book</th><th>Reader</th><th>ISBN</th><th>Pages</th><th>Edition</th><th>Anomaly</th><th></th></tr></thead>
+            <thead><tr><th>Personal book</th><th>Reader</th><th>ISBN</th><th>Pages</th><th>Edition</th><th>Anomaly</th><th class="row-actions"></th></tr></thead>
             <tbody>
               {#each books as book (bookKey(book))}
                 <tr>
@@ -203,7 +203,7 @@
                   <td class="numeric">{book.pageCount ?? '—'}</td>
                   <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}{editionById.get(book.editionId ?? '')?.status === 'merged' ? ' · merged alias' : ''}</td>
                   <td>{book.anomaly ?? '—'}</td>
-                  <td>
+                  <td class="row-actions">
                     <div class="actions">
                       {#if book.editionId === null}<button class="primary" type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: null}))}>Mint edition…</button>{/if}
                       <button type="button" onclick={() => (draft = linkBooksDraft([book], {workId: work.workId, editionId: book.editionId}))}>Move…</button>

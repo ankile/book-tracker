@@ -620,6 +620,7 @@
   margin-top: 0.15rem;
   color: var(--muted);
   font-size: 0.8rem;
+  overflow-wrap: anywhere;
 }
 
 .admin-console td .actions {
@@ -631,6 +632,17 @@
   padding: 0.3rem 0.65rem;
   font-size: 0.82rem;
   white-space: nowrap;
+}
+
+/* A wide table scrolls sideways inside its card, and macOS hides the
+   scrollbar: the actions column is pinned to the right edge so the row's
+   buttons are in view whatever the table's width. */
+.admin-console th.row-actions,
+.admin-console td.row-actions {
+  position: sticky;
+  right: 0;
+  background: white;
+  box-shadow: -8px 0 8px -8px rgba(0, 0, 0, 0.18);
 }
 
 .admin-console table.compact th,
