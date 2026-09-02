@@ -52,19 +52,34 @@ author or work id it was saved with, the Rules accept the alias, and every
 reader (the client's in-memory author map, the callables, the admin scan,
 `db-audit.ts`) resolves it in one hop at read time.
 
+A merge is the union of its records, survivor first (owner decision
+2026-09-02): the survivor keeps every value it has and takes what it lacks
+from the sources in the order given. For works that is the titles (as
+aliases), the subjects it did not list, and a blank cover, unknown fiction
+flag or unknown language. Personal books are not rewritten by a work merge.
+
 Editions merge the same way (`mergeEditions`: the sources become `merged`
 aliases naming the survivor, which lists them in `mergedFrom`; stored
-`status` is absent until a merge; an alias keeps its ISBN and external-id
-rows, and every lookup that lands on it — search, `catalog.create`,
-`catalog.addedition`, the admin mint — answers with the survivor), with one
-deliberate difference: the books standing on the sources are moved to the
-survivor (owner decision 2026-09-02, so that two records of one edition read
-as one for every reader). That rewrite is bounded to those books, at most one
-page of them, in live accounts; a book in a frozen account stays on its alias
-and resolves at read time. A moved book keeps its link time and inherits only
-the metadata its reader left blank — ISBN, cover, publisher and publication
-date from the survivor; cover fallback, fiction, subjects and language from
-the work — never its title or page count.
+`status` is absent until a merge). The survivor takes a blank publisher,
+date, cover or language override, empty translators, an unknown format and
+a missing page count from the first source that has them. An identifier it
+lacks — its ISBN, an external id for a provider it has none for — moves
+rather than copies: the survivor takes it together with its index row and
+the alias drops it, because an index row names exactly one edition and its
+key must be that edition's own identifier. An alias keeps the identifiers
+the survivor already had, and every lookup that lands on one — search,
+`catalog.create`, `catalog.addedition`, the admin mint — answers with the
+survivor. The one deliberate difference from a work merge: personal books
+are rewritten. Every book on the merged edition, on the survivor already or
+on a source, inherits from the merged survivor what its reader left blank —
+ISBN, cover, publisher and publication date from the edition; cover
+fallback, fiction and subjects from the work — and its language follows the
+merged edition's effective one unless the reader set another; the books on
+the sources move to the survivor. That rewrite is bounded to those books, at
+most one page of them, in live accounts; a book in a frozen account stays on
+its alias and resolves at read time (if the survivor took the alias's ISBN,
+such a book's ISBN provenance now names the survivor, which the audit
+reports). A book never loses its title, page count or link time.
 
 ### Languages
 

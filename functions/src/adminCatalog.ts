@@ -582,7 +582,6 @@ function inheritedBookMetadata(
   fillText("coverUrl", edition.coverUrl !== "" ? edition.coverUrl : work.coverUrl);
   fillText("publisher", edition.publisher);
   fillText("publishedDate", edition.publishedDate);
-  fillText("language", effectiveLanguage(edition.language, work.language));
   const fiction = snapshot.get("fiction");
   if ((fiction === undefined || fiction === null) && work.fiction !== null) {
     before.fiction = null;
@@ -896,20 +895,20 @@ async function liveLinkedBooks(
 // A book carries the effective language of the edition it stands on as a
 // copy (users/{uid}/books.language, beside cover and publisher). When that
 // effective language changes, a book still carrying the old value follows
-// it, and so does one that never had any; a book whose reader set something
-// else keeps it. Empty records when nothing changes.
+// it; a book that never had any takes the edition's whether or not it
+// changed; a book whose reader set something else keeps it. Empty records
+// when nothing changes.
 function carriedLanguage(
   snapshot: DocumentSnapshot,
   before: string,
   after: string,
 ): {before: Record<string, unknown>; after: Record<string, unknown>} {
-  if (before === after) return {before: {}, after: {}};
   const current = snapshot.get("language");
   if (current !== undefined && current !== null && typeof current !== "string") {
     catalogInvariant(`${snapshot.ref.path}.language must be a string.`);
   }
   const carried = current ?? "";
-  if (carried !== "" && carried !== before) return {before: {}, after: {}};
+  if (carried === after || (carried !== "" && carried !== before)) return {before: {}, after: {}};
   return {before: {language: carried}, after: {language: after}};
 }
 
@@ -1342,14 +1341,26 @@ async function planOperation(
     if (alternateTitles.length > 20) {
       failedPrecondition("Merged title aliases exceed the catalog limit.", "catalog-invariant");
     }
+    // The survivor keeps its own values and takes what it lacks from the
+    // sources, in the order given: a blank cover, an unknown fiction flag
+    // or an unknown language, and every subject it did not already list
+    // (owner decision 2026-09-02: a merge is the union, survivor first).
+    const sourceWorks = sources.map(({work}) => work);
+    const subjects = [...new Set([...target.work.subjects, ...sourceWorks.flatMap((work) => work.subjects)])];
+    if (subjects.length > 25) {
+      failedPrecondition("Merged subjects exceed the catalog limit.", "catalog-invariant");
+    }
     const nextTarget = workInputData({
       canonicalTitle: target.work.canonicalTitle,
       alternateTitles,
       authorIds: target.work.authorIds,
-      coverUrl: target.work.coverUrl,
-      subjects: target.work.subjects,
-      fiction: target.work.fiction,
-      language: target.work.language,
+      coverUrl: target.work.coverUrl !== "" ? target.work.coverUrl :
+        sourceWorks.find((work) => work.coverUrl !== "")?.coverUrl ?? "",
+      subjects,
+      fiction: target.work.fiction ??
+        sourceWorks.find((work) => work.fiction !== null)?.fiction ?? null,
+      language: target.work.language !== "" ? target.work.language :
+        sourceWorks.find((work) => work.language !== "")?.language ?? "",
     }, target.work.status, now, {...target.work, mergedFrom});
     nextTarget.mergedFrom = mergedFrom;
     changes.push(change(
@@ -1406,14 +1417,17 @@ async function planOperation(
     changes.push(...targetIndexes.changes);
     catalog.push(...targetIndexes.versions);
   } else if (operation.type === "mergeEditions") {
-    // Editions merge like works: the sources become aliases that keep their
-    // identifiers and index rows, and the survivor lists them. Unlike a work
-    // merge this rewrites personal books — the owner's reading (2026-09-02)
-    // is that two records of one edition should read as one for every
-    // reader — but only the books on the sources, at most a page of them,
-    // in live accounts; a book in a frozen account stays on its alias and
-    // resolves one hop at read time. A moved book keeps its link time and
-    // inherits only the metadata its reader left blank.
+    // Editions merge like works: the sources become aliases and the
+    // survivor lists them. The survivor keeps its own values and takes what
+    // it lacks from the aliases (owner decision 2026-09-02: a merge is the
+    // union, survivor first); an identifier it takes moves with its index
+    // row, so an alias keeps only the identifiers the survivor already had.
+    // Unlike a work merge this rewrites personal books — the owner's reading
+    // (2026-09-02) is that two records of one edition should read as one for
+    // every reader — but only the books on the merged edition, at most a page
+    // of them, in live accounts; a book in a frozen account stays on its
+    // alias and resolves one hop at read time. A book keeps its link time
+    // and title and inherits only the metadata its reader left blank.
     const work = await unmergedWork(reader, db, operation.workId);
     catalog.push(versionOf("work", work.snapshot));
     const target = await activeEdition(reader, db, operation.targetEditionId);
@@ -1441,48 +1455,138 @@ async function planOperation(
       one(reader, db.collection("editions").doc(id)),
     ));
     catalog.push(...aliases.map((snapshot) => versionOf("edition", snapshot)));
-    for (const alias of aliases) {
-      const old = editionFrom(alias);
+    const donors = aliases.map((snapshot) => ({id: snapshot.id, snapshot, edition: editionFrom(snapshot)}));
+
+    const merged: EditionData = {...target.edition, mergedFrom, updatedAt: now};
+    const firstText = (field: "publisher" | "publishedDate" | "language" | "coverUrl"): string =>
+      donors.find(({edition}) => edition[field] !== "")?.edition[field] ?? "";
+    if (merged.publisher === "") merged.publisher = firstText("publisher");
+    if (merged.publishedDate === "") merged.publishedDate = firstText("publishedDate");
+    if (merged.language === "") merged.language = firstText("language");
+    if (merged.coverUrl === "") merged.coverUrl = firstText("coverUrl");
+    if (merged.translatorNames.length === 0) {
+      merged.translatorNames =
+        donors.find(({edition}) => edition.translatorNames.length > 0)?.edition.translatorNames ?? [];
+    }
+    if (merged.format === "unknown") {
+      merged.format = donors.find(({edition}) => edition.format !== "unknown")?.edition.format ?? "unknown";
+    }
+    if (merged.suggestedPageCount === null) {
+      merged.suggestedPageCount =
+        donors.find(({edition}) => edition.suggestedPageCount !== null)?.edition.suggestedPageCount ?? null;
+    }
+    // Identifiers move rather than copy: an index row names one edition and
+    // its key must be that edition's own identifier.
+    const gave = new Map<string, {isbn13: boolean; providers: Set<string>}>();
+    const giving = (id: string): {isbn13: boolean; providers: Set<string>} => {
+      const entry = gave.get(id) ?? {isbn13: false, providers: new Set<string>()};
+      gave.set(id, entry);
+      return entry;
+    };
+    if (merged.isbn13 === null) {
+      const donor = donors.flatMap(({id, edition}) =>
+        edition.isbn13 === null ? [] : [{id, isbn13: edition.isbn13}])[0];
+      if (donor !== undefined) {
+        const isbnRef = db.collection("isbnIndex").doc(donor.isbn13);
+        const isbn = await one(reader, isbnRef);
+        catalog.push(versionOf("isbn", isbn));
+        if (!isbn.exists || isbn.get("editionId") !== donor.id) {
+          failedPrecondition("Edition ISBN index is missing or owned elsewhere.", "catalog-invariant");
+        }
+        const row = {workId: work.snapshot.id, editionId: target.snapshot.id};
+        changes.push(change("isbn", isbnRef, "update", isbn.data() ?? null, row, {type: "set", data: row}));
+        merged.isbn13 = donor.isbn13;
+        giving(donor.id).isbn13 = true;
+      }
+    }
+    const externalIds = {...merged.externalIds};
+    for (const donor of donors) {
+      for (const [provider, id] of Object.entries(donor.edition.externalIds)) {
+        if (provider in externalIds) continue;
+        const ref = db.collection("externalIdIndex").doc(externalIndexId({provider, id}));
+        const index = await one(reader, ref);
+        catalog.push(versionOf("external-id", index));
+        if (!index.exists || index.get("editionId") !== donor.id) {
+          failedPrecondition("External identifier index is missing or owned elsewhere.", "catalog-invariant");
+        }
+        const row = {workId: work.snapshot.id, editionId: target.snapshot.id, provider, externalId: id};
+        changes.push(change("external-id", ref, "update", index.data() ?? null, row, {type: "set", data: row}));
+        externalIds[provider] = id;
+        giving(donor.id).providers.add(provider);
+      }
+    }
+    if (Object.keys(externalIds).length > 10) {
+      failedPrecondition("Edition has too many external identifiers.", "catalog-invariant");
+    }
+    merged.externalIds = externalIds;
+
+    for (const {id, snapshot: alias, edition: old} of donors) {
+      const given = gave.get(id);
       const next: EditionData = {
-        ...old, status: "merged", mergedInto: target.snapshot.id, mergedFrom: [], updatedAt: now,
+        ...old,
+        ...(given?.isbn13 ? {isbn13: null} : {}),
+        ...(given !== undefined && given.providers.size > 0 ? {
+          externalIds: Object.fromEntries(
+            Object.entries(old.externalIds).filter(([provider]) => !given.providers.has(provider)),
+          ),
+        } : {}),
+        status: "merged", mergedInto: target.snapshot.id, mergedFrom: [], updatedAt: now,
       };
       changes.push(change(
         "edition", alias.ref, "update", wireEdition(old), wireEdition(next),
         {type: "set", data: {...next}},
       ));
     }
-    const nextTarget: EditionData = {...target.edition, mergedFrom, updatedAt: now};
     changes.push(change(
       "edition", target.snapshot.ref, "update",
-      wireEdition(target.edition), wireEdition(nextTarget),
-      {type: "set", data: {...nextTarget}},
+      wireEdition(target.edition), wireEdition(merged),
+      {type: "set", data: {...merged}},
     ));
+
+    // Every reader's book on the merged edition, on the survivor already or
+    // on an alias, inherits what it left blank from the merged survivor and
+    // follows its effective language unless the reader chose otherwise; the
+    // books on aliases move.
+    const overrideBefore = new Map<string, string>([
+      [target.snapshot.id, target.edition.language],
+      ...donors.map(({id, edition}): [string, string] => [id, edition.language]),
+    ]);
+    const languageAfter = effectiveLanguage(merged.language, work.work.language);
     const linked = await liveLinkedBooks(
-      reader, db, db.collectionGroup("books").where("editionId", "in", absorbed),
+      reader, db,
+      db.collectionGroup("books").where("editionId", "in", [target.snapshot.id, ...absorbed]),
     );
-    const moved: AdminCatalogExpected["books"] = [];
+    const touched: AdminCatalogExpected["books"] = [];
     for (const {snapshot, uid, bookId} of linked) {
       const before = linkFrom(snapshot);
-      const inherited = inheritedBookMetadata(snapshot, target.edition, work.work);
-      const after: LinkState = {
+      const inherited = inheritedBookMetadata(snapshot, merged, work.work);
+      const carried = carriedLanguage(
+        snapshot,
+        effectiveLanguage(overrideBefore.get(before.editionId ?? "") ?? "", work.work.language),
+        languageAfter,
+      );
+      const moves = before.editionId !== target.snapshot.id;
+      const after: LinkState = moves ? {
         ...before,
         workId: work.snapshot.id,
         editionId: target.snapshot.id,
         matchMethod: "admin",
+      } : before;
+      const data: Record<string, unknown> = {
+        ...(moves ? {workId: after.workId, editionId: after.editionId, matchMethod: after.matchMethod} : {}),
+        ...inherited.after,
+        ...carried.after,
       };
-      moved.push(bookVersion(snapshot, {uid, bookId}));
+      if (Object.keys(data).length === 0) continue;
+      touched.push(bookVersion(snapshot, {uid, bookId}));
       changes.push(change(
         "book", snapshot.ref, "update",
-        {...before, ...inherited.before}, {...after, ...inherited.after},
-        {type: "set", data: {
-          workId: after.workId,
-          editionId: after.editionId,
-          matchMethod: after.matchMethod,
-          ...inherited.after,
-        }},
+        {...before, ...inherited.before, ...carried.before},
+        {...after, ...inherited.after, ...carried.after},
+        {type: "set", data},
       ));
     }
-    books = moved;
+    books = touched;
   } else if (operation.type === "upsertEdition") {
     const work = await unmergedWork(reader, db, operation.workId);
     catalog.push(versionOf("work", work.snapshot));

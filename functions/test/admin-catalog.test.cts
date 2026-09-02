@@ -1264,3 +1264,166 @@ test("a minted edition overrides the work's language only where the book's diffe
     ["Sult same", ""], ["Sult differs", "en"], ["Sult none", ""],
   ]);
 });
+
+test("merging editions gives the survivor what it lacks, moves identifiers with their index rows, and fills every reader's book", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {language: "no", coverUrl: "https://covers.test/work.jpg"}));
+  const edition = (overrides: Row): Row => ({
+    workId: "sult", isbn13: null, title: "Sult", publisher: "", publishedDate: "", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "", externalIds: {},
+    createdAt: now, updatedAt: now, ...overrides,
+  });
+  store.write(store.ref("editions/bare"), edition({createdBy: "magnus"}));
+  store.write(store.ref("editions/rich"), edition({
+    isbn13: "9788205394810", publisher: "Gyldendal", publishedDate: "2009", language: "en",
+    translatorNames: ["Sverre Lyngstad"], format: "full", suggestedPageCount: 198,
+    coverUrl: "https://covers.test/rich.jpg", externalIds: {"open-library": "OL1M"}, createdBy: "lars",
+  }));
+  store.write(store.ref("editions/other"), edition({
+    isbn13: "9780441478125", publisher: "Other Press", externalIds: {"open-library": "OL2M", "google-books": "abc"},
+  }));
+  store.write(store.ref("isbnIndex/9788205394810"), {workId: "sult", editionId: "rich"});
+  store.write(store.ref("isbnIndex/9780441478125"), {workId: "sult", editionId: "other"});
+  const olRich = externalIndexId({provider: "open-library", id: "OL1M"});
+  const olOther = externalIndexId({provider: "open-library", id: "OL2M"});
+  const google = externalIndexId({provider: "google-books", id: "abc"});
+  store.write(store.ref(`externalIdIndex/${olRich}`), {workId: "sult", editionId: "rich", provider: "open-library", externalId: "OL1M"});
+  store.write(store.ref(`externalIdIndex/${olOther}`), {workId: "sult", editionId: "other", provider: "open-library", externalId: "OL2M"});
+  store.write(store.ref(`externalIdIndex/${google}`), {workId: "sult", editionId: "other", provider: "google-books", externalId: "abc"});
+  store.write(store.ref("users/lars"), {uid: "lars"});
+  store.write(store.ref("users/magnus"), {uid: "magnus"});
+  const book = (uid: string, id: string, overrides: Row): void => store.write(store.ref(`users/${uid}/books/${id}`), {
+    owner: store.ref(`users/${uid}`), title: "Sult", pageCount: 200, updatedAt: now, isbn: "",
+    coverUrl: "", publisher: "", publishedDate: "", fiction: null, subjects: [],
+    workId: "sult", editionId: "bare", matchMethod: "migration", linkedAt: now, ...overrides,
+  });
+  // On the survivor already: blank, carrying the work's default, and set by the reader.
+  book("magnus", "blank", {});
+  book("magnus", "carried", {language: "no"});
+  book("magnus", "own", {publisher: "Own Press", language: "nn", isbn: "9780000000000"});
+  // On the sources: they move and fill.
+  book("lars", "moved", {editionId: "rich", language: "en"});
+  book("lars", "moved-other", {editionId: "other"});
+
+  const operation = {
+    type: "mergeEditions", workId: "sult", sourceEditionIds: ["rich", "other"], targetEditionId: "bare",
+  };
+  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const survivor = preview.changes.find(({kind, after}) =>
+    kind === "edition" && after?.status === "active" && after?.publisher === "Gyldendal");
+  const {updatedAt: _stamped, ...survivorAfter} = survivor?.after ?? {};
+  assert.deepEqual(survivorAfter, {
+    workId: "sult", isbn13: "9788205394810", title: "Sult", publisher: "Gyldendal", publishedDate: "2009",
+    language: "en", translatorNames: ["Sverre Lyngstad"], format: "full", suggestedPageCount: 198,
+    coverUrl: "https://covers.test/rich.jpg",
+    externalIds: {"open-library": "OL1M", "google-books": "abc"},
+    status: "active", mergedInto: null, mergedFrom: ["rich", "other"],
+  });
+  await deployed.admin.catalogapply.run({
+    operationId: preview.operationId, operation, expected: preview.expected,
+  }, recentAdmin());
+
+  // The survivor keeps its own record and took the first source's values;
+  // the second source's publisher lost to the first's, and its ISBN stayed
+  // with it because the survivor already had one by then.
+  const bare = store.rows.get("editions/bare");
+  assert.equal(bare?.isbn13, "9788205394810");
+  assert.equal(bare?.publisher, "Gyldendal");
+  assert.equal(bare?.createdBy, "magnus");
+  assert.deepEqual(bare?.externalIds, {"open-library": "OL1M", "google-books": "abc"});
+  // Moved identifiers left their aliases and their index rows name the survivor.
+  const rich = store.rows.get("editions/rich");
+  assert.equal(rich?.status, "merged");
+  assert.equal(rich?.isbn13, null);
+  assert.deepEqual(rich?.externalIds, {});
+  assert.equal(rich?.publisher, "Gyldendal");
+  const other = store.rows.get("editions/other");
+  assert.equal(other?.isbn13, "9780441478125");
+  assert.deepEqual(other?.externalIds, {"open-library": "OL2M"});
+  assert.deepEqual(store.rows.get("isbnIndex/9788205394810"), {workId: "sult", editionId: "bare"});
+  assert.deepEqual(store.rows.get("isbnIndex/9780441478125"), {workId: "sult", editionId: "other"});
+  assert.equal(store.rows.get(`externalIdIndex/${olRich}`)?.editionId, "bare");
+  assert.equal(store.rows.get(`externalIdIndex/${google}`)?.editionId, "bare");
+  assert.equal(store.rows.get(`externalIdIndex/${olOther}`)?.editionId, "other");
+
+  // Every book on the merged edition inherits what it left blank from the
+  // merged survivor; the language follows the edition's new override unless
+  // the reader chose; a reader's own values stay.
+  const blank = store.rows.get("users/magnus/books/blank");
+  assert.equal(blank?.editionId, "bare");
+  assert.equal(blank?.isbn, "9788205394810");
+  assert.equal(blank?.publisher, "Gyldendal");
+  assert.equal(blank?.publishedDate, "2009");
+  assert.equal(blank?.coverUrl, "https://covers.test/rich.jpg");
+  assert.equal(blank?.language, "en");
+  assert.equal(blank?.fiction, true);
+  assert.equal(blank?.pageCount, 200);
+  assert.equal(store.rows.get("users/magnus/books/carried")?.language, "en");
+  const own = store.rows.get("users/magnus/books/own");
+  assert.equal(own?.publisher, "Own Press");
+  assert.equal(own?.language, "nn");
+  assert.equal(own?.isbn, "9780000000000");
+  assert.equal(own?.publishedDate, "2009");
+  const moved = store.rows.get("users/lars/books/moved");
+  assert.equal(moved?.editionId, "bare");
+  assert.equal(moved?.matchMethod, "admin");
+  assert.equal(moved?.language, "en");
+  const movedOther = store.rows.get("users/lars/books/moved-other");
+  assert.equal(movedOther?.editionId, "bare");
+  assert.equal(movedOther?.isbn, "9788205394810");
+  assert.equal(movedOther?.language, "en");
+
+  // A survivor that already has an identifier takes none: the ISBN stays
+  // with its alias and its index row still names the alias.
+  store.write(store.ref("editions/keeps"), edition({isbn13: "9781000000009"}));
+  store.write(store.ref("editions/donor"), edition({isbn13: "9781000000010", externalIds: {}}));
+  store.write(store.ref("isbnIndex/9781000000009"), {workId: "sult", editionId: "keeps"});
+  store.write(store.ref("isbnIndex/9781000000010"), {workId: "sult", editionId: "donor"});
+  const keep = {type: "mergeEditions", workId: "sult", sourceEditionIds: ["donor"], targetEditionId: "keeps"};
+  const keepPreview = await deployed.admin.catalogpreview.run({operation: keep}, recentAdmin());
+  await deployed.admin.catalogapply.run({
+    operationId: keepPreview.operationId, operation: keep, expected: keepPreview.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("editions/keeps")?.isbn13, "9781000000009");
+  assert.equal(store.rows.get("editions/donor")?.isbn13, "9781000000010");
+  assert.deepEqual(store.rows.get("isbnIndex/9781000000010"), {workId: "sult", editionId: "donor"});
+});
+
+test("merging works gives the survivor the cover, fiction flag, language and subjects it lacks, survivor first", async (t) => {
+  const store = installCatalogStore(t);
+  store.write(store.ref("works/target"), activeWork("Target", {
+    coverUrl: "", fiction: null, language: "", subjects: ["Novels"],
+  }));
+  store.write(store.ref("works/first"), activeWork("First", {
+    coverUrl: "https://covers.test/first.jpg", fiction: true, language: "no", subjects: ["Novels", "Norway"],
+  }));
+  store.write(store.ref("works/second"), activeWork("Second", {
+    coverUrl: "https://covers.test/second.jpg", fiction: false, language: "en", subjects: ["Hunger"],
+  }));
+  const preview = await deployed.admin.catalogpreview.run({operation: {
+    type: "mergeWorks", sourceWorkIds: ["first", "second"], targetWorkId: "target",
+  }}, recentAdmin());
+  const target = preview.changes.find(({kind, after}) => kind === "work" && after?.canonicalTitle === "Target");
+  assert.equal(target?.after?.coverUrl, "https://covers.test/first.jpg");
+  assert.equal(target?.after?.fiction, true);
+  assert.equal(target?.after?.language, "no");
+  assert.deepEqual(target?.after?.subjects, ["Novels", "Norway", "Hunger"]);
+  assert.deepEqual(target?.after?.alternateTitles, ["First", "Second"]);
+
+  // A survivor with its own values keeps every one of them.
+  store.write(store.ref("works/full"), activeWork("Full", {
+    coverUrl: "https://covers.test/full.jpg", fiction: false, language: "en", subjects: ["Own"],
+  }));
+  store.write(store.ref("works/donor"), activeWork("Donor", {
+    coverUrl: "https://covers.test/donor.jpg", fiction: true, language: "no", subjects: ["Own", "Theirs"],
+  }));
+  const kept = await deployed.admin.catalogpreview.run({operation: {
+    type: "mergeWorks", sourceWorkIds: ["donor"], targetWorkId: "full",
+  }}, recentAdmin());
+  const full = kept.changes.find(({kind, after}) => kind === "work" && after?.canonicalTitle === "Full");
+  assert.equal(full?.after?.coverUrl, "https://covers.test/full.jpg");
+  assert.equal(full?.after?.fiction, false);
+  assert.equal(full?.after?.language, "en");
+  assert.deepEqual(full?.after?.subjects, ["Own", "Theirs"]);
+});

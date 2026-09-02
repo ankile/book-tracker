@@ -303,7 +303,7 @@
         </div>
       {:else if draft.type === 'mergeWorks'}
         <div class="form-grid">
-          <label>Source work IDs, one per line <small>They become aliases of the target.</small><textarea bind:value={draft.sourceWorkIds}></textarea></label>
+          <label>Source work IDs, one per line <small>They become aliases of the target, which keeps its own values and takes the titles, subjects, cover, fiction flag and language it lacks.</small><textarea bind:value={draft.sourceWorkIds}></textarea></label>
           <label>Canonical target work
             <select bind:value={draft.targetWorkId}>
               <option value="">Choose the surviving work</option>
@@ -314,7 +314,7 @@
       {:else if draft.type === 'mergeEditions'}
         <div class="form-grid">
           <label>Work ID<input bind:value={draft.workId} autocomplete="off" readonly /></label>
-          <label>Source edition IDs, one per line <small>They become aliases of the survivor; their readers' books move to it and inherit whatever they left blank.</small><textarea bind:value={draft.sourceEditionIds}></textarea></label>
+          <label>Source edition IDs, one per line <small>They become aliases of the survivor. The survivor keeps its own values and takes what it lacks from them (ISBN, external IDs, publisher, date, cover, language, translators, format, pages); every reader's book on the merged edition inherits what it left blank.</small><textarea bind:value={draft.sourceEditionIds}></textarea></label>
           <label>Surviving edition
             <select bind:value={draft.targetEditionId}>
               <option value="">Choose the surviving edition</option>
