@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
+import { Timestamp, getFirestore } from 'firebase-admin/firestore';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 const PROJECT_ID = 'book-tracker-d8f24';
@@ -79,60 +79,6 @@ async function navigateInApp(page: Page, path: string): Promise<void> {
     link.click();
   }, path);
   await page.waitForURL(`**${path}`);
-}
-
-function unsignedEmulatorIdToken({
-  uid,
-  email,
-  authTime,
-}: {
-  uid: string;
-  email: string;
-  authTime: number;
-}): string {
-  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const now = Math.floor(Date.now() / 1000);
-  return `${encode({alg: 'none', typ: 'JWT'})}.${encode({
-    iss: `https://securetoken.google.com/${PROJECT_ID}`,
-    aud: PROJECT_ID,
-    auth_time: authTime,
-    user_id: uid,
-    sub: uid,
-    iat: now,
-    exp: now + 3600,
-    email,
-    email_verified: true,
-    firebase: {identities: {email: [email]}, sign_in_provider: 'password'},
-  })}.`;
-}
-
-async function agePersistedAuthSession(
-  context: BrowserContext,
-  page: Page,
-  uid: string,
-  email: string,
-): Promise<void> {
-  const authKey = await page.evaluate(() => (
-    Object.keys(localStorage).find((key) => key.startsWith('firebase:authUser:')) ?? null
-  ));
-  if (authKey === null) throw new Error('Firebase Auth persistence key was not found.');
-  const staleToken = unsignedEmulatorIdToken({
-    uid,
-    email,
-    authTime: Math.floor(Date.now() / 1000) - 901,
-  });
-  const writer = await context.newPage();
-  await writer.goto('/');
-  await writer.evaluate(({key, token}) => {
-    const raw = localStorage.getItem(key);
-    if (raw === null) throw new Error('Firebase Auth persistence entry disappeared.');
-    const value = JSON.parse(raw) as {stsTokenManager: {accessToken: string; expirationTime: number}};
-    value.stsTokenManager.accessToken = token;
-    value.stsTokenManager.expirationTime = Date.now() + 60 * 60 * 1000;
-    localStorage.setItem(key, JSON.stringify(value));
-  }, {key: authKey, token: staleToken});
-  await writer.close();
-  await page.waitForTimeout(250);
 }
 
 test.describe.serial('shared catalog through Auth, Firestore, and Functions emulators', () => {
@@ -471,7 +417,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
     }
   });
 
-  test('admin gate, bounded sections, recent-auth retry, apply, and stale-preview errors work in-browser', async ({browser}) => {
+  test('admin gate, bounded sections, one-click apply, review marks and merges work in-browser', async ({browser}) => {
     const nonAdminContext: BrowserContext = await browser.newContext();
     const nonAdminPage = await nonAdminContext.newPage();
     await login(nonAdminPage, normalEmail);
@@ -529,53 +475,18 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await page.goBack();
       await expect(page).toHaveURL(new RegExp(`/admin/works/${workId}$`));
 
-      // Edit opens the operation dialog in place; the preview lists the exact changes.
+      // Edit opens the operation dialog in place; Apply lands the change in
+      // one call, with no preview and no password prompt. The dialog closes,
+      // the page reports it and the live listener shows the new alias
+      // without a reload.
       await page.getByRole('button', {name: 'Edit work…'}).click();
       const dialog = page.getByRole('dialog', {name: 'Edit work'});
       await expect(dialog).toBeVisible();
-      await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand');
-      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
-      await expect(dialog.getByText('Before', {exact: true}).first()).toBeVisible();
-      await expect(dialog.getByText('After', {exact: true}).first()).toBeVisible();
-
       await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand\nDraft changed');
-      await expect(dialog.getByRole('button', {name: 'Apply these exact changes'})).toHaveCount(0);
-      await expect(dialog.getByText('The draft changed. Create a fresh preview before applying.')).toBeVisible();
-      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
-
-      await agePersistedAuthSession(context, page, ADMIN_UID, adminEmail);
-      page.once('dialog', (confirmation) => confirmation.accept());
-      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
-      await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toBeVisible();
-      await expect(page.getByLabel('Administrator password')).toBeFocused();
-      await page.keyboard.press('Escape');
-      await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toHaveCount(0);
-      await expect(dialog.getByRole('button', {name: 'Apply these exact changes'})).toBeFocused();
-
-      page.once('dialog', (confirmation) => confirmation.accept());
-      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
-      await expect(page.getByRole('heading', {name: 'Confirm recent authentication'})).toBeVisible();
-      await page.getByLabel('Administrator password').fill(PASSWORD);
-      await page.getByRole('button', {name: 'Reauthenticate and retry'}).click();
-      // A landed apply closes the dialog; the page reports it and the live
-      // listener shows the new alias without a reload.
-      await expect(page.getByText(/Applied .* documents changed/)).toBeVisible();
+      await dialog.getByRole('button', {name: 'Apply', exact: true}).click();
+      await expect(page.getByText(/Applied: \d+ documents changed/)).toBeVisible();
       await expect(dialog).toBeHidden();
       await expect(page.getByText('Left Hand · Draft changed')).toBeVisible();
-
-      // A preview goes stale when the document changes underneath it.
-      await page.getByRole('button', {name: 'Edit work…'}).click();
-      await dialog.getByLabel('Alternate titles, one per line').fill('Left Hand\nThe Left Hand');
-      await dialog.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(dialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
-      await db.doc(`works/${workId}`).update({subjects: ['Concurrent correction'], updatedAt: FieldValue.serverTimestamp()});
-      page.once('dialog', (confirmation) => confirmation.accept());
-      await dialog.getByRole('button', {name: 'Apply these exact changes'}).click();
-      await expect(dialog.getByRole('alert')).toContainText('preview is stale');
-      await dialog.getByRole('button', {name: 'Cancel'}).click();
-      await expect(dialog).toBeHidden();
 
       // A review mark lands at once and takes the work out of the queue;
       // the queue is a filter in the URL, so it can be opened directly.
@@ -601,6 +512,19 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       const editionsTable = page.getByRole('region', {name: /^Editions/});
       await expect(editionsTable.getByRole('cell', {name: normalEmail, exact: true})).toBeVisible();
 
+      // A refused operation stays open with the server's reason and applies
+      // nothing: the seeded ISBN belongs to another edition.
+      await editionsTable.getByRole('row').filter({hasText: normalEmail}).getByRole('button', {name: 'Edit edition…', exact: true}).click();
+      const editDialog = page.getByRole('dialog', {name: 'Create or edit edition'});
+      await expect(editDialog).toBeVisible();
+      await editDialog.getByLabel('ISBN', {exact: true}).fill(isbn);
+      await editDialog.getByRole('button', {name: 'Apply', exact: true}).click();
+      await expect(editDialog.getByRole('alert')).toContainText('already assigned elsewhere');
+      await expect(editDialog).toBeVisible();
+      await editDialog.getByRole('button', {name: 'Cancel'}).click();
+      await expect(editDialog).toBeHidden();
+      expect((await waitForBookByTitle(db, normalUid, 'Left Hand of Darkness')).get('isbn')).not.toBe(isbn);
+
       // Two records of one edition merge: the reader's bare minted edition
       // becomes an alias of the seeded one, the reader's book moves to the
       // survivor and inherits the ISBN, cover and publisher it left blank,
@@ -613,12 +537,8 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       const survivorPicker = mergeDialog.locator('.picker').filter({has: page.getByLabel('Surviving edition')});
       await survivorPicker.getByLabel('Surviving edition').fill(isbn);
       await survivorPicker.getByRole('button', {name: new RegExp(editionId)}).click();
-      await mergeDialog.getByRole('button', {name: 'Preview without applying'}).click();
-      await expect(mergeDialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
-      await expect(mergeDialog.getByText(`"isbn": "${isbn}"`)).toBeVisible();
-      page.once('dialog', (confirmation) => confirmation.accept());
-      await mergeDialog.getByRole('button', {name: 'Apply these exact changes'}).click();
-      await expect(page.getByText(/Applied .* documents changed/)).toBeVisible();
+      await mergeDialog.getByRole('button', {name: 'Apply', exact: true}).click();
+      await expect(page.getByText(/Applied: \d+ documents changed/)).toBeVisible();
       await expect(mergeDialog).toBeHidden();
       await expect(page.getByRole('heading', {name: 'Absorbed editions'})).toBeVisible();
       await expect(editionsTable.getByRole('row').filter({hasText: normalEmail})).toHaveCount(0);
@@ -660,7 +580,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       ]) {
         await page.getByRole('button', {name: button, exact: true}).first().click();
         const opened = page.getByRole('dialog', {name: title});
-        await expect(opened.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
+        await expect(opened.getByRole('button', {name: 'Apply', exact: true})).toBeVisible();
         await opened.getByRole('button', {name: 'Cancel'}).click();
         await expect(opened).toBeHidden();
       }
@@ -674,7 +594,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       ]) {
         await page.getByRole('button', {name: button, exact: true}).click();
         const opened = page.getByRole('dialog', {name: title});
-        await expect(opened.getByRole('button', {name: 'Preview without applying'})).toBeVisible();
+        await expect(opened.getByRole('button', {name: 'Apply', exact: true})).toBeVisible();
         await opened.getByRole('button', {name: 'Cancel'}).click();
         await expect(opened).toBeHidden();
       }

@@ -134,10 +134,11 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
     {type: "upsertEdition", editionId: "edition", workId: "work", edition},
     {type: "repointIsbn", isbn13: "9780000000002", editionId: "edition"},
   ];
+  const operationId = "123e4567-e89b-12d3-a456-426614174000";
   for (const operation of operations) {
     assert.deepEqual(
-      decoders.decodeAdminCatalogPreviewRequest({operation}),
-      {operation},
+      decoders.decodeAdminCatalogApplyRequest({operationId, operation}),
+      {operationId, operation},
     );
   }
   for (const operation of [
@@ -146,45 +147,20 @@ test("admin catalog decoders admit only the bounded tagged operations", () => {
     {type: "mergeWorks", sourceWorkIds: ["same"], targetWorkId: "same"},
     {type: "deleteWork", workId: "work"},
   ]) {
-    assert.throws(() => decoders.decodeAdminCatalogPreviewRequest({operation}));
+    assert.throws(() => decoders.decodeAdminCatalogApplyRequest({operationId, operation}));
   }
-  const operationId = "123e4567-e89b-12d3-a456-426614174000";
-  const expected = {
-    catalog: [{
-      kind: "external-id", id: "index", exists: true, updatedAt: 123,
-    }, {
-      kind: "title-index", id: "title-index", exists: false, updatedAt: null,
-    }],
-    books: [{
-      uid: "owner", bookId: "book", workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null,
-    }],
-  };
-  assert.deepEqual(decoders.decodeAdminCatalogApplyRequest({
-    operationId,
-    operation: operations[1],
-    expected,
-  }), {operationId, operation: operations[1], expected});
-  const bookVersion = expected.books[0];
-  assert.doesNotThrow(() => decoders.decodeAdminCatalogApplyRequest({
-    operationId,
-    operation: operations[1],
-    expected: {...expected, books: Array.from({length: 200}, (_, index) => ({
-      ...bookVersion, bookId: `book-${index}`,
-    }))},
+  // The id must be a UUID, and the request carries nothing else: the
+  // retired preview protocol's expected-state field is refused like any
+  // other extra key.
+  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
+    operationId: "not-a-uuid", operation: operations[1],
+  }), /UUID/);
+  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({operation: operations[1]}));
+  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
+    operationId, operation: operations[1], expected: {catalog: [], books: []},
   }));
   assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
-    operationId,
-    operation: operations[1],
-    expected: {...expected, books: Array.from({length: 201}, (_, index) => ({
-      ...bookVersion, bookId: `book-${index}`,
-    }))},
-  }), /at most 200/);
-  assert.throws(() => decoders.decodeAdminCatalogApplyRequest({
-    operationId,
-    operation: operations[1],
-    expected,
-    arbitraryPatch: {activeTimer: null},
+    operationId, operation: operations[1], arbitraryPatch: {activeTimer: null},
   }));
 });
 
@@ -827,7 +803,8 @@ test("admin review requests take one kind, up to a page of distinct ids and a fl
 
 test("edition merges name the work, up to ten distinct sources and a survivor outside them", () => {
   const operation = {type: "mergeEditions", workId: "w", sourceEditionIds: ["a", "b"], targetEditionId: "c"};
-  assert.deepEqual(decoders.decodeAdminCatalogPreviewRequest({operation}), {operation});
+  const operationId = "123e4567-e89b-12d3-a456-426614174000";
+  assert.deepEqual(decoders.decodeAdminCatalogApplyRequest({operationId, operation}), {operationId, operation});
   for (const bad of [
     {...operation, sourceEditionIds: []},
     {...operation, sourceEditionIds: ["a", "a"]},
@@ -837,6 +814,6 @@ test("edition merges name the work, up to ten distinct sources and a survivor ou
     {...operation, extra: true},
     {type: "mergeEditions", sourceEditionIds: ["a"], targetEditionId: "c"},
   ]) {
-    assert.throws(() => decoders.decodeAdminCatalogPreviewRequest({operation: bad}), JSON.stringify(bad));
+    assert.throws(() => decoders.decodeAdminCatalogApplyRequest({operationId, operation: bad}), JSON.stringify(bad));
   }
 });

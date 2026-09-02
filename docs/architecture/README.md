@@ -78,7 +78,7 @@ deterministic SVG generator.
 | Published profiles | Publication state and a bounded output projection decide what a visitor can receive. Private and missing profiles do not reveal private content. |
 | Restricted overview | A server-side authorization check protects operational summaries. Hiding navigation alone is insufficient. |
 | Catalog console reads | Data permissions grant the operator's identity read access to shared catalog data and catalog links; every other identity keeps owner-only access. |
-| Catalog curation | Server-side authorization, recent authentication, preview/apply checks, and bounded transactions protect shared catalog changes. |
+| Catalog curation | Server-side authorization, whole-operation validation, and bounded audited transactions protect shared catalog changes. |
 | External integrations | Server-only credentials remain outside public responses and browser-readable state. |
 | Background work | Managed lifecycle events invoke bounded workers. Workers apply the same ownership and retention expectations as interactive operations. |
 

@@ -7,12 +7,11 @@ import {
   QuerySnapshot,
   Timestamp,
 } from "firebase-admin/firestore";
-import {createHash, randomUUID} from "node:crypto";
+import {createHash} from "node:crypto";
 import {Buffer} from "node:buffer";
 import {
   AdminBookTarget,
   AdminCatalogApplyRequest,
-  AdminCatalogExpected,
   AdminCatalogOperation,
   CatalogAuthorInput,
   CatalogEditionInput,
@@ -21,7 +20,6 @@ import {
   normalizeCatalogIdentity,
   MATCH_METHODS,
   normalizeIsbn13,
-  VersionedKind,
   AdminReviewRequest,
 } from "./decoders";
 import {
@@ -83,15 +81,11 @@ type LinkState = {
   linkedAt: number | null;
 };
 
-interface CatalogVersion {
-  kind: VersionedKind;
-  id: string;
-  exists: boolean;
-  updatedAt: number | null;
-}
+type CatalogDocumentKind =
+  "author" | "work" | "edition" | "isbn" | "external-id" | "title-index";
 
 interface PlannedChange {
-  kind: VersionedKind | "book";
+  kind: CatalogDocumentKind | "book";
   id: string;
   action: "create" | "update" | "delete";
   before: Record<string, unknown> | null;
@@ -99,11 +93,6 @@ interface PlannedChange {
   ref: DocumentReference;
   write: {type: "create" | "set"; data: Record<string, unknown>} |
     {type: "delete"};
-}
-
-interface Plan {
-  expected: AdminCatalogExpected;
-  changes: PlannedChange[];
 }
 
 type Readable = DocumentReference | Query;
@@ -396,7 +385,7 @@ async function repointIsbnBookChanges(
   target: {workId: string; editionId: string},
   nextIsbn13: string,
   now: Timestamp,
-): Promise<{changes: PlannedChange[]; versions: AdminCatalogExpected["books"]}> {
+): Promise<PlannedChange[]> {
   const snapshots = new Map<string, DocumentSnapshot>();
   for (const editionId of new Set(editionIds)) {
     const linked = await many(reader, db.collectionGroup("books")
@@ -410,15 +399,7 @@ async function repointIsbnBookChanges(
   const affected = [...snapshots.values()];
   if (affected.length > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
   await validateLinkOwners(reader, db, affected);
-  const versions = affected.map((snapshot) => {
-    const path = snapshot.ref.path.split("/");
-    return bookVersion(
-      snapshot,
-      {uid: path[1], bookId: path[3]},
-      normalizeIsbn13(snapshot.get("isbn")),
-    );
-  });
-  const changes = affected.map((snapshot) => {
+  return affected.map((snapshot) => {
     const before = linkFrom(snapshot);
     if (before.workId === null) {
       failedPrecondition("ISBN-derived book has no work.", "catalog-invariant");
@@ -444,21 +425,6 @@ async function repointIsbnBookChanges(
       {type: "set", data: {...after, linkedAt: now}},
     );
   });
-  return {changes, versions};
-}
-
-function bookVersion(
-  snapshot: DocumentSnapshot,
-  target: AdminBookTarget,
-  decisionIsbn13: string | null = null,
-) {
-  if (!snapshot.exists) failedPrecondition("Personal book no longer exists.", "catalog-invariant");
-  return {
-    uid: target.uid,
-    bookId: target.bookId,
-    ...linkFrom(snapshot),
-    decisionIsbn13,
-  };
 }
 
 async function validateLinkOwners(
@@ -484,20 +450,6 @@ async function validateLinkOwners(
       failedPrecondition("Personal book owner is missing or deleted.", "catalog-invariant");
     }
   }
-}
-
-function versionOf(
-  kind: CatalogVersion["kind"],
-  snapshot: DocumentSnapshot,
-): CatalogVersion {
-  if (!snapshot.exists) return {kind, id: snapshot.id, exists: false, updatedAt: null};
-  // Firestore stamps every existing document; without it the apply-time
-  // comparison would silently accept any concurrent edit.
-  const updateTime = snapshot.updateTime;
-  if (updateTime === undefined) {
-    throw new Error(`Missing update time for ${snapshot.ref.path}.`);
-  }
-  return {kind, id: snapshot.id, exists: true, updatedAt: updateTime.toMillis()};
 }
 
 function change(
@@ -612,19 +564,16 @@ async function activeAuthor(
 // Works carry canonical author ids (the scan reports a stale alias on one,
 // and mergeAuthors rewrites them), so an id that names a merged author —
 // an admin form or client that loaded its list before the merge — resolves
-// one hop to the survivor rather than failing the operation. Both documents
-// are versioned: the plan is stale if either moves under the preview.
+// one hop to the survivor rather than failing the operation.
 async function resolveWorkAuthors(
   reader: PlanReader,
   db: Firestore,
   authorIds: readonly string[],
-): Promise<{authorIds: string[]; versions: CatalogVersion[]}> {
-  const versions: CatalogVersion[] = [];
+): Promise<string[]> {
   const resolved: string[] = [];
   for (const authorId of authorIds) {
     const snapshot = await one(reader, db.collection("catalogAuthors").doc(authorId));
     const author = authorFrom(snapshot);
-    versions.push(versionOf("author", snapshot));
     if (author.status === "active") {
       resolved.push(snapshot.id);
       continue;
@@ -636,10 +585,9 @@ async function resolveWorkAuthors(
     if (authorFrom(target).status !== "active") {
       failedPrecondition(`Author redirect is not one hop at ${snapshot.ref.path}.`, "catalog-invariant");
     }
-    versions.push(versionOf("author", target));
     resolved.push(target.id);
   }
-  return {authorIds: [...new Set(resolved)], versions};
+  return [...new Set(resolved)];
 }
 
 async function titleIndexChanges(
@@ -647,7 +595,7 @@ async function titleIndexChanges(
   db: Firestore,
   workId: string,
   work: WorkData,
-): Promise<{changes: PlannedChange[]; versions: CatalogVersion[]}> {
+): Promise<PlannedChange[]> {
   const existing = await many(
     reader,
     db.collection("workTitleIndex").where("workId", "==", workId).limit(22),
@@ -671,9 +619,6 @@ async function titleIndexChanges(
     ] as const;
   }));
   const changes: PlannedChange[] = [];
-  const versions = existing.docs.map((snapshot) =>
-    versionOf("title-index", snapshot),
-  );
   for (const snapshot of existing.docs) {
     const next = desired.get(snapshot.id);
     if (next === undefined) {
@@ -691,15 +636,12 @@ async function titleIndexChanges(
   for (const [id, row] of desired) {
     const ref = db.collection("workTitleIndex").doc(id);
     const snapshot = await one(reader, ref);
-    if (!versions.some((version) => version.id === id)) {
-      versions.push(versionOf("title-index", snapshot));
-    }
     if (snapshot.exists) {
       failedPrecondition("Title index is owned by another work.", "catalog-invariant");
     }
     changes.push(change("title-index", ref, "create", null, row, {type: "create", data: row}));
   }
-  return {changes, versions};
+  return changes;
 }
 
 async function externalIndexChanges(
@@ -708,7 +650,7 @@ async function externalIndexChanges(
   editionId: string,
   workId: string,
   desiredIds: Record<string, string>,
-): Promise<{changes: PlannedChange[]; versions: CatalogVersion[]}> {
+): Promise<PlannedChange[]> {
   const existing = await many(reader, db.collection("externalIdIndex")
     .where("editionId", "==", editionId).limit(11));
   if (existing.size > 10) {
@@ -719,9 +661,7 @@ async function externalIndexChanges(
     {workId, editionId, provider, externalId: id},
   ]));
   const changes: PlannedChange[] = [];
-  const versions: CatalogVersion[] = [];
   for (const snapshot of existing.docs) {
-    versions.push(versionOf("external-id", snapshot));
     const next = desired.get(snapshot.id);
     if (next === undefined) {
       changes.push(change(
@@ -738,7 +678,6 @@ async function externalIndexChanges(
   for (const [id, row] of desired) {
     const ref = db.collection("externalIdIndex").doc(id);
     const snapshot = await one(reader, ref);
-    versions.push(versionOf("external-id", snapshot));
     if (snapshot.exists && snapshot.get("editionId") !== editionId) {
       failedPrecondition("External identifier is already assigned.", "identifier-conflict");
     }
@@ -748,14 +687,14 @@ async function externalIndexChanges(
       {type: snapshot.exists ? "set" : "create", data: row},
     ));
   }
-  return {changes, versions};
+  return changes;
 }
 
 // The edition a book stands for when an admin links it without naming one,
 // minted from the book's own fields with the book's owner as creator. Its
 // id is a digest of the work and the book path — the formula the backfill
-// (book-edition-backfill.ts) uses too — so a preview, its apply, a repeated
-// apply and a later relink all name one document: an edition already
+// (book-edition-backfill.ts) uses too — so an apply, a repeated apply and a
+// later relink all name one document: an edition already
 // there is reused, and an ISBN already indexed to the work joins that
 // edition instead. An ISBN indexed to another work is a conflict for the
 // operator, not a guess.
@@ -771,7 +710,6 @@ async function mintedEditionFor(
   editionId: string;
   // The edition the book ends up on: minted here, found, or a survivor.
   edition: EditionData;
-  versions: CatalogVersion[];
   changes: PlannedChange[];
   createdEdition: boolean;
   createdIsbn: boolean;
@@ -782,7 +720,6 @@ async function mintedEditionFor(
     .slice(0, 24)}`;
   const ref = db.collection("editions").doc(editionId);
   const existing = await one(reader, ref);
-  const versions = [versionOf("edition", existing)];
   if (existing.exists) {
     const minted = editionFrom(existing);
     if (minted.workId !== workId) {
@@ -794,16 +731,15 @@ async function mintedEditionFor(
         catalogInvariant(`Broken catalog redirect at ${existing.ref.path}.`);
       }
       const survivor = await activeEdition(reader, db, minted.mergedInto);
-      versions.push(versionOf("edition", survivor.snapshot));
       if (survivor.edition.workId !== workId) {
         failedPrecondition("The book's minted edition was merged into another work.", "catalog-invariant");
       }
       return {
-        editionId: minted.mergedInto, edition: survivor.edition, versions, changes: [],
+        editionId: minted.mergedInto, edition: survivor.edition, changes: [],
         createdEdition: false, createdIsbn: false,
       };
     }
-    return {editionId, edition: minted, versions, changes: [], createdEdition: false, createdIsbn: false};
+    return {editionId, edition: minted, changes: [], createdEdition: false, createdIsbn: false};
   }
   const text = (field: string): string => {
     const value = snapshot.get(field);
@@ -820,7 +756,6 @@ async function mintedEditionFor(
   if (isbn13 !== null) {
     isbnRef = db.collection("isbnIndex").doc(isbn13);
     const isbn = await one(reader, isbnRef);
-    versions.push(versionOf("isbn", isbn));
     if (isbn.exists) {
       const indexedEditionId = isbn.get("editionId");
       if (isbn.get("workId") !== workId || typeof indexedEditionId !== "string") {
@@ -830,9 +765,8 @@ async function mintedEditionFor(
         );
       }
       const indexed = await one(reader, db.collection("editions").doc(indexedEditionId));
-      versions.push(versionOf("edition", indexed));
       return {
-        editionId: indexedEditionId, edition: editionFrom(indexed), versions, changes,
+        editionId: indexedEditionId, edition: editionFrom(indexed), changes,
         createdEdition: false, createdIsbn: false,
       };
     }
@@ -866,7 +800,7 @@ async function mintedEditionFor(
     const row = {workId, editionId};
     changes.push(change("isbn", isbnRef, "create", null, row, {type: "create", data: row}));
   }
-  return {editionId, edition: data, versions, changes, createdEdition: true, createdIsbn: isbn13 !== null};
+  return {editionId, edition: data, changes, createdEdition: true, createdIsbn: isbn13 !== null};
 }
 
 // The personal books a query names, with their owners checked: a book whose
@@ -920,31 +854,22 @@ function carriedLanguage(
 
 // The carried-language changes for the books a query names, where
 // `languages` maps a book's edition override to the effective language
-// before and after the operation. The editions read to learn the override
-// are versioned, so an override that changes underneath the preview makes
-// it stale.
+// before and after the operation.
 async function carriedLanguageChanges(
   reader: PlanReader,
   db: Firestore,
   query: Query,
   languages: (_override: string) => [before: string, after: string],
-): Promise<{
-  changes: PlannedChange[];
-  versions: AdminCatalogExpected["books"];
-  catalog: CatalogVersion[];
-}> {
+): Promise<PlannedChange[]> {
   const linked = await liveLinkedBooks(reader, db, query);
   const overrides = new Map<string, string>();
-  const catalog: CatalogVersion[] = [];
   const changes: PlannedChange[] = [];
-  const versions: AdminCatalogExpected["books"] = [];
-  for (const {snapshot, uid, bookId} of linked) {
+  for (const {snapshot} of linked) {
     const editionId = snapshot.get("editionId");
     let override = "";
     if (typeof editionId === "string") {
       if (!overrides.has(editionId)) {
         const edition = await one(reader, db.collection("editions").doc(editionId));
-        catalog.push(versionOf("edition", edition));
         overrides.set(editionId, editionFrom(edition).language);
       }
       override = overrides.get(editionId)!;
@@ -952,13 +877,12 @@ async function carriedLanguageChanges(
     const [before, after] = languages(override);
     const carried = carriedLanguage(snapshot, before, after);
     if (Object.keys(carried.after).length === 0) continue;
-    versions.push(bookVersion(snapshot, {uid, bookId}));
     changes.push(change(
       "book", snapshot.ref, "update", carried.before, carried.after,
       {type: "set", data: carried.after},
     ));
   }
-  return {changes, versions, catalog};
+  return changes;
 }
 
 async function linkChanges(
@@ -971,11 +895,7 @@ async function linkChanges(
   // yet (createWork). Otherwise the target work is read and must be
   // unmerged, and a named edition must belong to it.
   pendingWork?: WorkData,
-): Promise<{
-  changes: PlannedChange[];
-  versions: AdminCatalogExpected["books"];
-  catalog: CatalogVersion[];
-}> {
+): Promise<PlannedChange[]> {
   let targetWork: WorkData | null = null;
   let targetEdition: EditionData | null = null;
   if (target !== null) {
@@ -998,10 +918,9 @@ async function linkChanges(
     one(reader, db.doc(`users/${uid}/books/${bookId}`)),
   ));
   if (target !== null) await validateLinkOwners(reader, db, snapshots);
-  const versions = snapshots.map((snapshot, index) =>
-    bookVersion(snapshot, targets[index]),
-  );
-  const catalog: CatalogVersion[] = [];
+  for (const snapshot of snapshots) {
+    if (!snapshot.exists) failedPrecondition("Personal book no longer exists.", "catalog-invariant");
+  }
   const changes: PlannedChange[] = [];
   let mintedEditions = 0;
   let mintedIsbns = 0;
@@ -1015,7 +934,6 @@ async function linkChanges(
       const minted = await mintedEditionFor(
         reader, db, snapshot, targets[index], target.workId, workLanguage, now,
       );
-      catalog.push(...minted.versions);
       changes.push(...minted.changes);
       mintedEditions += minted.createdEdition ? 1 : 0;
       mintedIsbns += minted.createdIsbn ? 1 : 0;
@@ -1060,42 +978,7 @@ async function linkChanges(
   await ensureCollectionCapacity(
     reader, db.collection("isbnIndex"), MAX_ISBN_INDEXES, mintedIsbns, "ISBN indexes",
   );
-  return {changes, versions, catalog};
-}
-
-// One document may be versioned twice by one plan (an alias that is also a
-// merge source, say). The two readings must agree: collapsing disagreeing
-// versions would compare the preview against a state neither side saw.
-function collapseVersions<Version>(
-  versions: readonly Version[],
-  keyOf: (_version: Version) => string,
-): Version[] {
-  const byKey = new Map<string, Version>();
-  for (const version of versions) {
-    const key = keyOf(version);
-    const prior = byKey.get(key);
-    if (prior !== undefined && JSON.stringify(prior) !== JSON.stringify(version)) {
-      failedPrecondition(
-        `Catalog plan disagrees about ${key}.`,
-        "catalog-invariant",
-      );
-    }
-    byKey.set(key, version);
-  }
-  return [...byKey.values()].sort((left, right) =>
-    keyOf(left).localeCompare(keyOf(right)),
-  );
-}
-
-function sortExpected(expected: AdminCatalogExpected): AdminCatalogExpected {
-  return {
-    catalog: collapseVersions(expected.catalog, (version) =>
-      `${version.kind}/${version.id}`,
-    ),
-    books: collapseVersions(expected.books, (version) =>
-      `${version.uid}/${version.bookId}`,
-    ),
-  };
+  return changes;
 }
 
 async function planOperation(
@@ -1105,15 +988,12 @@ async function planOperation(
   now: Timestamp,
   // The operator; a record the operation creates from nothing is theirs.
   creator: string,
-): Promise<Plan> {
-  const catalog: CatalogVersion[] = [];
-  let books: AdminCatalogExpected["books"] = [];
+): Promise<PlannedChange[]> {
   const changes: PlannedChange[] = [];
 
   if (operation.type === "upsertAuthor") {
     const ref = db.collection("catalogAuthors").doc(operation.authorId);
     const snapshot = await one(reader, ref);
-    catalog.push(versionOf("author", snapshot));
     const current = snapshot.exists ? authorFrom(snapshot) : undefined;
     if (current?.status === "merged") {
       failedPrecondition("Merged catalog authors cannot be edited.", "catalog-invariant");
@@ -1156,10 +1036,6 @@ async function planOperation(
   } else if (operation.type === "mergeAuthors") {
     const source = await activeAuthor(reader, db, operation.sourceAuthorId);
     const target = await activeAuthor(reader, db, operation.targetAuthorId);
-    catalog.push(
-      versionOf("author", source.snapshot),
-      versionOf("author", target.snapshot),
-    );
     const absorbed = [...new Set([source.snapshot.id, ...source.author.mergedFrom])];
     const mergedFrom = [...new Set([...target.author.mergedFrom, ...absorbed])];
     if (mergedFrom.length > 29 || mergedFrom.includes(target.snapshot.id)) {
@@ -1170,7 +1046,6 @@ async function planOperation(
     ));
     for (const alias of aliases) {
       const old = authorFrom(alias);
-      catalog.push(versionOf("author", alias));
       const next: AuthorData = {
         ...old,
         status: "merged",
@@ -1222,7 +1097,6 @@ async function planOperation(
     }
     for (const snapshot of affectedWorks.values()) {
       const old = workFrom(snapshot);
-      catalog.push(versionOf("work", snapshot));
       const next = {
         ...old,
         authorIds: [...new Set(old.authorIds.map((authorId) =>
@@ -1245,71 +1119,46 @@ async function planOperation(
   } else if (operation.type === "createWork") {
     const ref = db.collection("works").doc(operation.workId);
     const snapshot = await one(reader, ref);
-    catalog.push(versionOf("work", snapshot));
     if (snapshot.exists) failedPrecondition("Work ID already exists.", "catalog-invariant");
     await ensureCollectionCapacity(
       reader, db.collection("works"), MAX_WORKS, 1, "works",
     );
-    const authors = await resolveWorkAuthors(reader, db, operation.work.authorIds);
-    catalog.push(...authors.versions);
+    const authorIds = await resolveWorkAuthors(reader, db, operation.work.authorIds);
     // Catalog data is public whoever contributed it: any personal book may
     // seed a work, so no consent check sits here.
     const work = {
-      ...workInputData({...operation.work, authorIds: authors.authorIds}, operation.status, now),
+      ...workInputData({...operation.work, authorIds}, operation.status, now),
       createdBy: creator,
     };
     changes.push(change("work", ref, "create", null, wireWork(work), {
       type: "create", data: {...work},
     }));
-    const indexes = await titleIndexChanges(reader, db, operation.workId, work);
-    changes.push(...indexes.changes);
-    catalog.push(...indexes.versions);
-    const linked = await linkChanges(
+    changes.push(...await titleIndexChanges(reader, db, operation.workId, work));
+    changes.push(...await linkChanges(
       reader,
       db,
       operation.books,
       {workId: operation.workId, editionId: null},
       now,
       work,
-    );
-    changes.push(...linked.changes);
-    books = linked.versions;
-    catalog.push(...linked.catalog);
+    ));
   } else if (operation.type === "linkBooks") {
-    const linked = await linkChanges(reader, db, operation.books, operation.target, now);
-    changes.push(...linked.changes);
-    books = linked.versions;
-    catalog.push(...linked.catalog);
-    if (operation.target !== null) {
-      const workSnapshot = await one(
-        reader, db.collection("works").doc(operation.target.workId),
-      );
-      catalog.push(versionOf("work", workSnapshot));
-      if (operation.target.editionId !== null) {
-        catalog.push(versionOf("edition", await one(
-          reader, db.collection("editions").doc(operation.target.editionId),
-        )));
-      }
-    }
+    changes.push(...await linkChanges(reader, db, operation.books, operation.target, now));
   } else if (operation.type === "editWork") {
     const current = await unmergedWork(reader, db, operation.workId);
-    catalog.push(versionOf("work", current.snapshot));
-    const authors = await resolveWorkAuthors(reader, db, operation.work.authorIds);
-    catalog.push(...authors.versions);
+    const authorIds = await resolveWorkAuthors(reader, db, operation.work.authorIds);
     const next = workInputData(
-      {...operation.work, authorIds: authors.authorIds}, operation.status, now, current.work,
+      {...operation.work, authorIds}, operation.status, now, current.work,
     );
     changes.push(change(
       "work", current.snapshot.ref, "update", wireWork(current.work), wireWork(next),
       {type: "set", data: {...next}},
     ));
-    const indexes = await titleIndexChanges(reader, db, operation.workId, next);
-    changes.push(...indexes.changes);
-    catalog.push(...indexes.versions);
+    changes.push(...await titleIndexChanges(reader, db, operation.workId, next));
     if (current.work.language !== next.language) {
       // Books on the work, or on an alias merged into it, follow the new
       // default unless their edition overrides it.
-      const carried = await carriedLanguageChanges(
+      changes.push(...await carriedLanguageChanges(
         reader,
         db,
         db.collectionGroup("books")
@@ -1318,18 +1167,13 @@ async function planOperation(
           effectiveLanguage(override, current.work.language),
           effectiveLanguage(override, next.language),
         ],
-      );
-      changes.push(...carried.changes);
-      catalog.push(...carried.catalog);
-      books = carried.versions;
+      ));
     }
   } else if (operation.type === "mergeWorks") {
     const target = await unmergedWork(reader, db, operation.targetWorkId);
-    catalog.push(versionOf("work", target.snapshot));
     const sources = await Promise.all(operation.sourceWorkIds.map((id) =>
       unmergedWork(reader, db, id),
     ));
-    catalog.push(...sources.map(({snapshot}) => versionOf("work", snapshot)));
     const absorbed = [...new Set(sources.flatMap(({snapshot, work}) =>
       [snapshot.id, ...work.mergedFrom],
     ))];
@@ -1340,7 +1184,6 @@ async function planOperation(
     const aliases = await Promise.all(absorbed.map((id) =>
       one(reader, db.collection("works").doc(id)),
     ));
-    catalog.push(...aliases.map((snapshot) => versionOf("work", snapshot)));
     for (const alias of aliases) {
       const old = workFrom(alias);
       const next: WorkData = {
@@ -1396,7 +1239,6 @@ async function planOperation(
     if (editionRows.size > MAX_EDITIONS) operationTooLarge();
     for (const snapshot of editionRows.docs) {
       const old = editionFrom(snapshot);
-      catalog.push(versionOf("edition", snapshot));
       const next = {...old, workId: target.snapshot.id, updatedAt: now};
       changes.push(change(
         "edition", snapshot.ref, "update", wireEdition(old), wireEdition(next),
@@ -1407,7 +1249,6 @@ async function planOperation(
       .where("workId", "in", absorbed).limit(MAX_ISBN_INDEXES + 1));
     if (isbnRows.size > MAX_ISBN_INDEXES) operationTooLarge();
     for (const snapshot of isbnRows.docs) {
-      catalog.push(versionOf("isbn", snapshot));
       const next = {...snapshot.data(), workId: target.snapshot.id};
       changes.push(change(
         "isbn", snapshot.ref, "update", snapshot.data(), next,
@@ -1418,7 +1259,6 @@ async function planOperation(
       .where("workId", "in", absorbed).limit(MAX_EXTERNAL_ID_INDEXES + 1));
     if (externalRows.size > MAX_EXTERNAL_ID_INDEXES) operationTooLarge();
     for (const snapshot of externalRows.docs) {
-      catalog.push(versionOf("external-id", snapshot));
       const next = {...snapshot.data(), workId: target.snapshot.id};
       changes.push(change(
         "external-id", snapshot.ref, "update", snapshot.data(), next,
@@ -1429,17 +1269,12 @@ async function planOperation(
       const indexes = await many(reader, db.collection("workTitleIndex")
         .where("workId", "==", sourceId).limit(22));
       for (const snapshot of indexes.docs) {
-        catalog.push(versionOf("title-index", snapshot));
         changes.push(change(
           "title-index", snapshot.ref, "delete", snapshot.data(), null, {type: "delete"},
         ));
       }
     }
-    const targetIndexes = await titleIndexChanges(
-      reader, db, target.snapshot.id, nextTarget,
-    );
-    changes.push(...targetIndexes.changes);
-    catalog.push(...targetIndexes.versions);
+    changes.push(...await titleIndexChanges(reader, db, target.snapshot.id, nextTarget));
   } else if (operation.type === "mergeEditions") {
     // Editions merge like works: the sources become aliases and the
     // survivor lists them. The survivor keeps its own values and takes what
@@ -1453,9 +1288,7 @@ async function planOperation(
     // alias and resolves one hop at read time. A book keeps its link time
     // and title and inherits only the metadata its reader left blank.
     const work = await unmergedWork(reader, db, operation.workId);
-    catalog.push(versionOf("work", work.snapshot));
     const target = await activeEdition(reader, db, operation.targetEditionId);
-    catalog.push(versionOf("edition", target.snapshot));
     if (target.edition.workId !== work.snapshot.id) {
       failedPrecondition("Target edition belongs to another work.", "catalog-invariant");
     }
@@ -1463,7 +1296,6 @@ async function planOperation(
       activeEdition(reader, db, id),
     ));
     for (const source of sources) {
-      catalog.push(versionOf("edition", source.snapshot));
       if (source.edition.workId !== work.snapshot.id) {
         failedPrecondition("Source edition belongs to another work.", "catalog-invariant");
       }
@@ -1478,7 +1310,6 @@ async function planOperation(
     const aliases = await Promise.all(absorbed.map((id) =>
       one(reader, db.collection("editions").doc(id)),
     ));
-    catalog.push(...aliases.map((snapshot) => versionOf("edition", snapshot)));
     const donors = aliases.map((snapshot) => ({id: snapshot.id, snapshot, edition: editionFrom(snapshot)}));
 
     const merged: EditionData = {...target.edition, mergedFrom, updatedAt: now};
@@ -1513,7 +1344,6 @@ async function planOperation(
       if (donor !== undefined) {
         const isbnRef = db.collection("isbnIndex").doc(donor.isbn13);
         const isbn = await one(reader, isbnRef);
-        catalog.push(versionOf("isbn", isbn));
         if (!isbn.exists || isbn.get("editionId") !== donor.id) {
           failedPrecondition("Edition ISBN index is missing or owned elsewhere.", "catalog-invariant");
         }
@@ -1529,7 +1359,6 @@ async function planOperation(
         if (provider in externalIds) continue;
         const ref = db.collection("externalIdIndex").doc(externalIndexId({provider, id}));
         const index = await one(reader, ref);
-        catalog.push(versionOf("external-id", index));
         if (!index.exists || index.get("editionId") !== donor.id) {
           failedPrecondition("External identifier index is missing or owned elsewhere.", "catalog-invariant");
         }
@@ -1580,8 +1409,7 @@ async function planOperation(
       reader, db,
       db.collectionGroup("books").where("editionId", "in", [target.snapshot.id, ...absorbed]),
     );
-    const touched: AdminCatalogExpected["books"] = [];
-    for (const {snapshot, uid, bookId} of linked) {
+    for (const {snapshot} of linked) {
       const before = linkFrom(snapshot);
       const inherited = inheritedBookMetadata(snapshot, merged, work.work);
       const carried = carriedLanguage(
@@ -1602,7 +1430,6 @@ async function planOperation(
         ...carried.after,
       };
       if (Object.keys(data).length === 0) continue;
-      touched.push(bookVersion(snapshot, {uid, bookId}));
       changes.push(change(
         "book", snapshot.ref, "update",
         {...before, ...inherited.before, ...carried.before},
@@ -1610,13 +1437,10 @@ async function planOperation(
         {type: "set", data},
       ));
     }
-    books = touched;
   } else if (operation.type === "upsertEdition") {
     const work = await unmergedWork(reader, db, operation.workId);
-    catalog.push(versionOf("work", work.snapshot));
     const ref = db.collection("editions").doc(operation.editionId);
     const snapshot = await one(reader, ref);
-    catalog.push(versionOf("edition", snapshot));
     const old = snapshot.exists ? editionFrom(snapshot) : undefined;
     if (old?.status === "merged") {
       failedPrecondition("Merged editions cannot be edited.", "catalog-invariant");
@@ -1634,7 +1458,6 @@ async function planOperation(
       if (previousIsbn !== null) {
         const priorRef = db.collection("isbnIndex").doc(previousIsbn);
         const prior = await one(reader, priorRef);
-        catalog.push(versionOf("isbn", prior));
         if (!prior.exists || prior.get("editionId") !== operation.editionId) {
           failedPrecondition("Edition ISBN index is missing or owned elsewhere.", "catalog-invariant");
         }
@@ -1642,7 +1465,6 @@ async function planOperation(
       }
       if (operation.edition.isbn13 !== null) {
         const isbn = await one(reader, db.collection("isbnIndex").doc(operation.edition.isbn13));
-        catalog.push(versionOf("isbn", isbn));
         if (isbn.exists) {
           failedPrecondition("ISBN is already assigned to another edition; repoint it instead.", "identifier-conflict");
         }
@@ -1669,9 +1491,8 @@ async function planOperation(
       operation.workId,
       operation.edition.externalIds,
     );
-    catalog.push(...external.versions);
-    const externalAdditions = external.changes.filter(({action}) => action === "create").length -
-      external.changes.filter(({action}) => action === "delete").length;
+    const externalAdditions = external.filter(({action}) => action === "create").length -
+      external.filter(({action}) => action === "delete").length;
     await ensureCollectionCapacity(
       reader,
       db.collection("externalIdIndex"),
@@ -1679,7 +1500,7 @@ async function planOperation(
       externalAdditions,
       "external ID indexes",
     );
-    changes.push(...external.changes);
+    changes.push(...external);
     if (old !== undefined && old.workId === operation.workId) {
       // The books on the edition inherit from the edited record what their
       // readers left blank (an ISBN or cover the edit added, say), and a
@@ -1689,19 +1510,16 @@ async function planOperation(
       const linked = await liveLinkedBooks(
         reader, db, db.collectionGroup("books").where("editionId", "==", operation.editionId),
       );
-      const touched: AdminCatalogExpected["books"] = [];
-      for (const {snapshot: book, uid, bookId} of linked) {
+      for (const {snapshot: book} of linked) {
         const inherited = inheritedBookMetadata(book, next, work.work);
         const carried = carriedLanguage(book, languageBefore, languageAfter);
         const data = {...inherited.after, ...carried.after};
         if (Object.keys(data).length === 0) continue;
-        touched.push(bookVersion(book, {uid, bookId}));
         changes.push(change(
           "book", book.ref, "update",
           {...inherited.before, ...carried.before}, data, {type: "set", data},
         ));
       }
-      books = touched;
     }
     if (old !== undefined && old.workId !== operation.workId) {
       const linked = await many(reader, db.collectionGroup("books")
@@ -1709,14 +1527,9 @@ async function planOperation(
         .limit(MAX_LINKED_EDITION_BOOKS + 1));
       if (linked.size > MAX_LINKED_EDITION_BOOKS) operationTooLarge();
       await validateLinkOwners(reader, db, linked.docs);
-      books = linked.docs.map((book) => {
-        const path = book.ref.path.split("/");
-        return bookVersion(book, {uid: path[1], bookId: path[3]});
-      });
       // The books move between works, so their effective language may
       // change through the work's default even if the override does not.
       const previousWorkSnapshot = await one(reader, db.collection("works").doc(old.workId));
-      catalog.push(versionOf("work", previousWorkSnapshot));
       const languageBefore = effectiveLanguage(old.language, workFrom(previousWorkSnapshot).language);
       const languageAfter = effectiveLanguage(next.language, work.work.language);
       for (const book of linked.docs) {
@@ -1738,7 +1551,6 @@ async function planOperation(
       }
       if (old.isbn13 !== null) {
         const isbn = await one(reader, db.collection("isbnIndex").doc(old.isbn13));
-        catalog.push(versionOf("isbn", isbn));
         if (!isbn.exists || isbn.get("editionId") !== operation.editionId ||
             isbn.get("workId") !== old.workId) {
           failedPrecondition(
@@ -1758,20 +1570,17 @@ async function planOperation(
       reader, db.collection("editions").doc(operation.editionId),
     );
     const target = editionFrom(targetSnapshot);
-    catalog.push(versionOf("edition", targetSnapshot));
     if (target.status === "merged") {
       failedPrecondition("Operation target must not be a merged edition.", "catalog-invariant");
     }
     const isbnRef = db.collection("isbnIndex").doc(operation.isbn13);
     const isbn = await one(reader, isbnRef);
-    catalog.push(versionOf("isbn", isbn));
     const oldEditionId = isbn.exists ? isbn.get("editionId") : null;
     if (oldEditionId !== null && typeof oldEditionId !== "string") {
       throw new Error(`Invalid ISBN index ${isbn.ref.path}.`);
     }
     if (oldEditionId !== null && oldEditionId !== operation.editionId) {
       const oldSnapshot = await one(reader, db.collection("editions").doc(oldEditionId));
-      catalog.push(versionOf("edition", oldSnapshot));
       if (oldSnapshot.exists) {
         const old = editionFrom(oldSnapshot);
         if (old.isbn13 === operation.isbn13) {
@@ -1786,7 +1595,6 @@ async function planOperation(
     if (target.isbn13 !== null && target.isbn13 !== operation.isbn13) {
       const priorRef = db.collection("isbnIndex").doc(target.isbn13);
       const prior = await one(reader, priorRef);
-      catalog.push(versionOf("isbn", prior));
       if (prior.exists && prior.get("editionId") === operation.editionId) {
         changes.push(change(
           "isbn", priorRef, "delete", prior.data() ?? null, null, {type: "delete"},
@@ -1811,18 +1619,14 @@ async function planOperation(
       operation.isbn13,
       now,
     );
-    changes.push(...repairedBooks.changes);
-    books = repairedBooks.versions;
+    changes.push(...repairedBooks);
   }
 
   const byPath = new Map<string, PlannedChange>();
   for (const planned of changes) byPath.set(planned.ref.path, planned);
   const deduplicated = [...byPath.values()];
   if (deduplicated.length + 1 > MAX_TOUCHED_DOCUMENTS) operationTooLarge();
-  return {
-    expected: sortExpected({catalog, books}),
-    changes: deduplicated,
-  };
+  return deduplicated;
 }
 
 function wireChanges(changes: PlannedChange[]) {
@@ -1867,29 +1671,6 @@ export async function reviewCatalogRecords(
   });
 }
 
-export async function previewAdminCatalogOperation(
-  db: Firestore,
-  adminUid: string,
-  operation: AdminCatalogOperation,
-) {
-  const reader: PlanReader = {get: async (value) => value.get()};
-  const plan = await planOperation(reader, db, operation, Timestamp.now(), adminUid);
-  return {
-    operationId: randomUUID(),
-    operationHash: operationHash(operation),
-    expected: plan.expected,
-    changes: wireChanges(plan.changes),
-    touchedDocuments: plan.changes.length + 1,
-  };
-}
-
-function expectedEqual(
-  left: AdminCatalogExpected,
-  right: AdminCatalogExpected,
-): boolean {
-  return JSON.stringify(sortExpected(left)) === JSON.stringify(sortExpected(right));
-}
-
 export async function applyAdminCatalogOperation(
   db: Firestore,
   adminUid: string,
@@ -1909,15 +1690,8 @@ export async function applyAdminCatalogOperation(
       get: async (value) => transaction.get(value as DocumentReference),
     };
     const now = Timestamp.now();
-    const plan = await planOperation(reader, db, request.operation, now, adminUid);
-    if (!expectedEqual(plan.expected, request.expected)) {
-      throw new functions.https.HttpsError(
-        "aborted",
-        "Catalog state changed after preview.",
-        {reason: "stale-preview"},
-      );
-    }
-    for (const planned of plan.changes) {
+    const changes = await planOperation(reader, db, request.operation, now, adminUid);
+    for (const planned of changes) {
       if (planned.write.type === "delete") transaction.delete(planned.ref);
       else if (planned.write.type === "create") {
         transaction.create(planned.ref, planned.write.data);
@@ -1932,7 +1706,7 @@ export async function applyAdminCatalogOperation(
     const result = {
       operationId: request.operationId,
       applied: true as const,
-      touchedDocuments: plan.changes.length + 1,
+      touchedDocuments: changes.length + 1,
     };
     const audit = {
       type: "catalog-mutation",
@@ -1943,7 +1717,7 @@ export async function applyAdminCatalogOperation(
       at: now,
       expiresAt: Timestamp.fromMillis(now.toMillis() + AUDIT_RETENTION_MS),
       touchedDocuments: result.touchedDocuments,
-      beforeAfter: wireChanges(plan.changes),
+      beforeAfter: wireChanges(changes),
       result,
     };
     if (Buffer.byteLength(JSON.stringify(audit), "utf8") > MAX_AUDIT_BYTES) {

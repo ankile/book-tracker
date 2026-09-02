@@ -67,8 +67,8 @@
   const query = $derived(parseConsoleQuery(page.url.searchParams));
 
   // Every button on this page prefills the one operation dialog; nothing
-  // changes until the operator previews and applies there. Review marks are
-  // the one exception: they are operator bookkeeping and land at once.
+  // changes until the operator applies there. Review marks are the one
+  // exception: they are operator bookkeeping and land at once.
   let draft = $state<OperationDraft | null>(null);
   let statusMessage = $state('');
   let statusOk = $state(true);

@@ -5,7 +5,7 @@ import {deleteApp as deleteClientApp, initializeApp as initializeClientApp} from
 import {connectAuthEmulator, getAuth, signInWithEmailAndPassword} from 'firebase/auth';
 import {deleteApp, initializeApp} from 'firebase-admin/app';
 import {getAuth as getAdminAuth} from 'firebase-admin/auth';
-import {FieldValue, Timestamp, getFirestore, type QuerySnapshot} from 'firebase-admin/firestore';
+import {Timestamp, getFirestore, type QuerySnapshot} from 'firebase-admin/firestore';
 import {externalIndexDigestInput} from '../shared/catalogIdentity.ts';
 import {scanCatalog} from '../shared/catalogScan.ts';
 import type {AdminCatalogOperation} from '../src/lib/interfaces/catalog.ts';
@@ -99,25 +99,14 @@ test('all admin catalog operations use real callable transactions and preserve p
     return payload.result as T;
   }
 
-  async function preview(operation: AdminCatalogOperation) {
-    return callable<{
-      operationId: string;
-      expected: {catalog: unknown[]; books: unknown[]};
-      changes: unknown[];
-      touchedDocuments: number;
-    }>('admin-catalogpreview', {operation});
-  }
-
-  async function previewAndApply(operation: AdminCatalogOperation) {
-    const planned = await preview(operation);
+  // One callable plans and applies; the client mints the operation id.
+  async function apply(operation: AdminCatalogOperation, operationId = randomUUID()) {
     const result = await callable<{operationId: string; applied: true; touchedDocuments: number}>(
-      'admin-catalogapply',
-      {operationId: planned.operationId, operation, expected: planned.expected},
+      'admin-catalogapply', {operationId, operation},
     );
     assert.equal(result.applied, true);
-    assert.equal(result.operationId, planned.operationId);
-    assert.equal(result.touchedDocuments, planned.touchedDocuments);
-    return {planned, result};
+    assert.equal(result.operationId, operationId);
+    return result;
   }
 
   const targetWorkId = `target-${suffix}`;
@@ -137,7 +126,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   const isbnF = '9780306406157';
   const isbnG = '9780975229804';
 
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: catalogAuthorId,
     author: {
@@ -145,7 +134,7 @@ test('all admin catalog operations use real callable transactions and preserve p
       sortName: 'Author', kind: 'person',
     },
   });
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: catalogAuthorOtherId,
     author: {
@@ -154,7 +143,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     },
   });
   await assert.rejects(
-    preview({
+    apply({
       type: 'upsertAuthor',
       authorId: `duplicate-author-${suffix}`,
       author: {
@@ -164,7 +153,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     }),
     (error: unknown) => (error as {status?: string}).status === 'FAILED_PRECONDITION',
   );
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: catalogAuthorAliasId,
     author: {
@@ -172,7 +161,7 @@ test('all admin catalog operations use real callable transactions and preserve p
       sortName: 'Author', kind: 'person',
     },
   });
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: catalogAuthorOtherId,
     author: {
@@ -183,7 +172,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   });
   const renamedOther = (await db.doc(`catalogAuthors/${catalogAuthorOtherId}`).get()).data()!;
   assert.deepEqual(renamedOther.alternateNames, ['Other-Catalog-Author']);
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: catalogAuthorOtherId,
     author: {
@@ -200,8 +189,8 @@ test('all admin catalog operations use real callable transactions and preserve p
     work: workInput(`Target Work ${suffix}`, catalogAuthorId),
     books: [],
   };
-  await previewAndApply(createTarget);
-  await previewAndApply({
+  await apply(createTarget);
+  await apply({
     type: 'createWork',
     workId: sourceWorkId,
     status: 'hidden',
@@ -210,13 +199,13 @@ test('all admin catalog operations use real callable transactions and preserve p
   });
   assert.equal((await db.doc(`works/${targetWorkId}`).get()).get('status'), 'active');
 
-  await previewAndApply({
+  await apply({
     type: 'upsertEdition',
     editionId: targetEditionId,
     workId: targetWorkId,
     edition: editionInput('Target Edition', isbnA, {'open-library': `OL-${suffix}`}),
   });
-  await previewAndApply({
+  await apply({
     type: 'upsertEdition',
     editionId: sourceEditionId,
     workId: sourceWorkId,
@@ -248,22 +237,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     sourceAuthorId: catalogAuthorAliasId,
     targetAuthorId: catalogAuthorId,
   };
-  // A concurrent edit to any catalog document the plan read (here the work
-  // carrying the absorbed author) must abort the apply as stale.
-  const staleAuthorPreview = await preview(mergeAuthorOperation);
-  await db.doc(`works/${sourceWorkId}`).update({subjects: ['touched between preview and apply']});
-  await assert.rejects(
-    callable('admin-catalogapply', {
-      operationId: staleAuthorPreview.operationId,
-      operation: mergeAuthorOperation,
-      expected: staleAuthorPreview.expected,
-    }),
-    (error: unknown) => {
-      const callableError = error as {status?: string; details?: {reason?: string}};
-      return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
-    },
-  );
-  await previewAndApply(mergeAuthorOperation);
+  await apply(mergeAuthorOperation);
   // The personal book is deliberately untouched: its alias id resolves
   // through the merged record, so the merge never fans out into (possibly
   // tombstoned) user libraries. Catalog works do get rewritten.
@@ -290,7 +264,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     db.doc(`catalogAuthors/${punctuationTargetId}`).set(directAuthor('J R R Tolkien')),
     db.doc(`catalogAuthors/${punctuationSourceId}`).set(directAuthor('J.R.R. Tolkien')),
   ]);
-  await previewAndApply({
+  await apply({
     type: 'mergeAuthors',
     sourceAuthorId: punctuationSourceId,
     targetAuthorId: punctuationTargetId,
@@ -299,7 +273,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     (await db.doc(`catalogAuthors/${punctuationTargetId}`).get()).get('alternateNames'),
     [],
   );
-  await previewAndApply({
+  await apply({
     type: 'upsertAuthor',
     authorId: punctuationTargetId,
     author: {
@@ -314,7 +288,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     books: [{uid: personalUid, bookId: personalBookId}],
     target: {workId: targetWorkId, editionId: targetEditionId},
   };
-  await previewAndApply(linkOperation);
+  await apply(linkOperation);
   const linkedPersonal = (await personalRef.get()).data()!;
   assert.equal(linkedPersonal.workId, targetWorkId);
   assert.equal(linkedPersonal.editionId, targetEditionId);
@@ -339,7 +313,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     }),
   ]);
 
-  await previewAndApply({type: 'repointIsbn', isbn13: isbnB, editionId: targetEditionId});
+  await apply({type: 'repointIsbn', isbn13: isbnB, editionId: targetEditionId});
   assert.equal((await db.doc(`editions/${targetEditionId}`).get()).get('isbn13'), isbnB);
   assert.equal((await db.doc(`editions/${sourceEditionId}`).get()).get('isbn13'), null);
   assert.equal((await db.doc(`isbnIndex/${isbnB}`).get()).get('editionId'), targetEditionId);
@@ -358,7 +332,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   assert.equal((await targetPriorIsbnRef.get()).get('updatedAt').toMillis(), personalUpdatedAt.toMillis());
 
   const sameWorkEditionId = `same-work-edition-${suffix}`;
-  await previewAndApply({
+  await apply({
     type: 'upsertEdition', editionId: sameWorkEditionId, workId: targetWorkId,
     edition: editionInput('Same-work Edition', isbnC),
   });
@@ -368,7 +342,7 @@ test('all admin catalog operations use real callable transactions and preserve p
     workId: targetWorkId, editionId: sameWorkEditionId, matchMethod: 'isbn',
     linkedAt: Timestamp.now(), updatedAt: personalUpdatedAt,
   });
-  await previewAndApply({type: 'repointIsbn', isbn13: isbnC, editionId: targetEditionId});
+  await apply({type: 'repointIsbn', isbn13: isbnC, editionId: targetEditionId});
   assert.equal((await sameWorkIsbnRef.get()).get('workId'), targetWorkId);
   assert.equal((await sameWorkIsbnRef.get()).get('editionId'), targetEditionId);
   assert.equal((await sameWorkIsbnRef.get()).get('matchMethod'), 'isbn');
@@ -378,45 +352,26 @@ test('all admin catalog operations use real callable transactions and preserve p
   assert.equal((await db.doc(`isbnIndex/${isbnB}`).get()).exists, false);
   assert.equal((await db.doc(`isbnIndex/${isbnC}`).get()).get('editionId'), targetEditionId);
 
-  const staleRepoint: AdminCatalogOperation = {
-    type: 'repointIsbn', isbn13: isbnD, editionId: targetEditionId,
-  };
-  const staleRepointPreview = await preview(staleRepoint);
-  await sameWorkIsbnRef.update({isbn: isbnD});
-  await assert.rejects(
-    callable('admin-catalogapply', {
-      operationId: staleRepointPreview.operationId,
-      operation: staleRepoint,
-      expected: staleRepointPreview.expected,
-    }),
-    (error: unknown) => {
-      const callableError = error as {status?: string; details?: {reason?: string}};
-      return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
-    },
-  );
-  assert.equal((await db.doc(`isbnIndex/${isbnD}`).get()).exists, false);
-  await sameWorkIsbnRef.update({isbn: isbnC});
-
   const danglingRepairEditionId = `dangling-repair-${suffix}`;
-  await previewAndApply({
+  await apply({
     type: 'upsertEdition', editionId: danglingRepairEditionId, workId: targetWorkId,
     edition: editionInput('Dangling repair target', null),
   });
   await db.doc(`isbnIndex/${isbnD}`).set({
     workId: sourceWorkId, editionId: `missing-edition-${suffix}`,
   });
-  await previewAndApply({type: 'repointIsbn', isbn13: isbnD, editionId: danglingRepairEditionId});
+  await apply({type: 'repointIsbn', isbn13: isbnD, editionId: danglingRepairEditionId});
   assert.deepEqual((await db.doc(`isbnIndex/${isbnD}`).get()).data(), {
     workId: targetWorkId, editionId: danglingRepairEditionId,
   });
 
   const corruptRepairEditionId = `corrupt-repair-${suffix}`;
-  await previewAndApply({
+  await apply({
     type: 'upsertEdition', editionId: corruptRepairEditionId, workId: targetWorkId,
     edition: editionInput('Corrupt repair target', null),
   });
   await db.doc(`isbnIndex/${isbnE}`).set({workId: sourceWorkId, editionId: sourceEditionId});
-  await previewAndApply({type: 'repointIsbn', isbn13: isbnE, editionId: corruptRepairEditionId});
+  await apply({type: 'repointIsbn', isbn13: isbnE, editionId: corruptRepairEditionId});
   assert.equal((await db.doc(`editions/${sourceEditionId}`).get()).get('isbn13'), null);
   assert.deepEqual((await db.doc(`isbnIndex/${isbnE}`).get()).data(), {
     workId: targetWorkId, editionId: corruptRepairEditionId,
@@ -454,7 +409,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   }
   await capacityBatch.commit();
   await assert.rejects(
-    preview({type: 'repointIsbn', isbn13: isbnG, editionId: capacityTargetEditionId}),
+    apply({type: 'repointIsbn', isbn13: isbnG, editionId: capacityTargetEditionId}),
     (error: unknown) => {
       const callableError = error as {status?: string; details?: {reason?: string}};
       return callableError.status === 'RESOURCE_EXHAUSTED' &&
@@ -475,57 +430,25 @@ test('all admin catalog operations use real callable transactions and preserve p
     status: 'active',
     work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['The Target Alias']},
   };
-  const edit = await previewAndApply(editOperation);
-  const replay = await callable<{operationId: string; applied: true; touchedDocuments: number}>(
-    'admin-catalogapply',
-    {operationId: edit.planned.operationId, operation: editOperation, expected: edit.planned.expected},
-  );
-  assert.deepEqual(replay, edit.result);
+  // The same operation id again replays the recorded result and writes no
+  // second audit record.
+  const editOperationId = randomUUID();
+  const edit = await apply(editOperation, editOperationId);
+  const replay = await apply(editOperation, editOperationId);
+  assert.deepEqual(replay, edit);
   const replayAudits = await db.collection('adminAudit')
-    .where('operationId', '==', edit.planned.operationId).get();
+    .where('operationId', '==', editOperationId).get();
   assert.equal(replayAudits.size, 1);
 
   await db.doc(`users/${ADMIN_UID}`).set({uid: ADMIN_UID});
 
-  await previewAndApply({
+  await apply({
     type: 'mergeWorks',
     sourceWorkIds: [sourceWorkId],
     targetWorkId,
   });
   assert.equal((await db.doc(`works/${sourceWorkId}`).get()).get('mergedInto'), targetWorkId);
   assert.equal((await db.doc(`editions/${sourceEditionId}`).get()).get('workId'), targetWorkId);
-
-  const staleBookId = `stale-${suffix}`;
-  const staleRef = db.doc(`users/${personalUid}/books/${staleBookId}`);
-  await staleRef.set({
-    owner: db.doc(`users/${personalUid}`),
-    title: 'Concurrent link', workId: null, editionId: null, matchMethod: null,
-    linkedAt: null, updatedAt: personalUpdatedAt,
-  });
-  const staleOperation: AdminCatalogOperation = {
-    type: 'linkBooks',
-    books: [{uid: personalUid, bookId: staleBookId}],
-    target: {workId: targetWorkId, editionId: targetEditionId},
-  };
-  const stalePreview = await preview(staleOperation);
-  await staleRef.update({
-    workId: sourceWorkId,
-    editionId: sourceEditionId,
-    matchMethod: 'catalog-choice',
-    linkedAt: FieldValue.serverTimestamp(),
-  });
-  await assert.rejects(
-    callable('admin-catalogapply', {
-      operationId: stalePreview.operationId,
-      operation: staleOperation,
-      expected: stalePreview.expected,
-    }),
-    (error: unknown) => {
-      const callableError = error as {status?: string; details?: {reason?: string}};
-      return callableError.status === 'ABORTED' && callableError.details?.reason === 'stale-preview';
-    },
-  );
-  assert.equal((await staleRef.get()).get('matchMethod'), 'catalog-choice');
 
   // Open-signup data: one account with 600 books, a malformed personal row
   // and a hundred and fifty unrelated accounts, all of which the scan must
@@ -631,9 +554,8 @@ test('all admin catalog operations use real callable transactions and preserve p
     finding.code === 'book-link-anomaly' &&
     finding.books.some((book) => book.uid === personalUid && book.bookId === overLimitBookId),
   ), true);
-  // personal, cross-ISBN, prior-target-ISBN, same-work-ISBN, and the stale
-  // book relinked to the merged source.
-  assert.equal(scan.works.find((work) => work.workId === targetWorkId)?.linkedBookCount, 5);
+  // personal, cross-ISBN, prior-target-ISBN and same-work-ISBN.
+  assert.equal(scan.works.find((work) => work.workId === targetWorkId)?.linkedBookCount, 4);
   // Every index row the operations left behind agrees with its edition.
   assert.deepEqual(scan.findings.filter((finding) =>
     finding.code === 'isbn-index-mismatch' || finding.code === 'external-id-index-mismatch' ||
@@ -665,7 +587,7 @@ test('all admin catalog operations use real callable transactions and preserve p
   }
   await batch.commit();
   await assert.rejects(
-    preview({type: 'mergeWorks', sourceWorkIds: [largeSourceId], targetWorkId: largeTargetId}),
+    apply({type: 'mergeWorks', sourceWorkIds: [largeSourceId], targetWorkId: largeTargetId}),
     (error: unknown) => {
       const callableError = error as {status?: string; details?: {reason?: string; maxTouchedDocuments?: number}};
       return callableError.status === 'RESOURCE_EXHAUSTED' &&
@@ -678,13 +600,13 @@ test('all admin catalog operations use real callable transactions and preserve p
     type: 'editWork', workId: targetWorkId, status: 'active',
     work: {...workInput(`Target Work ${suffix}`, catalogAuthorId), alternateTitles: ['Post-delete denial']},
   };
-  const postDeletePreview = await preview(postDeleteOperation);
+  // The operator's account marker, not the ID token, is what admits the
+  // call: the same operation lands before the tombstone and is refused after.
+  await apply(postDeleteOperation);
   await db.doc(`users/${ADMIN_UID}`).update({deletedAt: Timestamp.now()});
   const denied = (error: unknown) => (error as {status?: string}).status === 'NOT_FOUND';
-  await assert.rejects(callable('admin-catalogpreview', {operation: postDeleteOperation}), denied);
-  await assert.rejects(callable('admin-catalogapply', {
-    operationId: postDeletePreview.operationId,
-    operation: postDeleteOperation,
-    expected: postDeletePreview.expected,
-  }), denied);
+  await assert.rejects(
+    callable('admin-catalogapply', {operationId: randomUUID(), operation: postDeleteOperation}),
+    denied,
+  );
 });

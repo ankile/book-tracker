@@ -196,8 +196,8 @@ and hidden" toggle is on; the tab, search, filters, toggle and page live in
 the URL (`?tab=&q=&page=&review=&creator=&inactive=1`), so a list can be
 linked to and the browser's history steps back through it. Works and
 authors carry a review mark: `admin.review` stamps or clears `reviewedAt`
-on whole records (one page of ids per call, no recent-auth gate, no audit
-record), and the scan reports each record's `activityAt` — the latest of
+on whole records (one page of ids per call, no audit record), and the scan
+reports each record's `activityAt` — the latest of
 its creation, its editions' creation and its books' linking (for an author,
 the creation of any work naming it) — so a reviewed record returns to the
 queue when something lands on it after the mark. "Needs review" plus
@@ -212,9 +212,10 @@ the `users` documents the console already listens to.
 
 Every button opens the same operation dialog with a prefilled draft
 (`src/lib/utils/adminCatalogView.ts` builds and validates the operation from
-it). Changes go through two callables: a preview that plans one operation,
-and an apply that re-plans it inside a transaction and refuses if the state
-moved under the preview. The operations are `upsertAuthor`, `mergeAuthors`,
+it). A change is one callable, `admin.catalogapply`, which plans the
+operation and writes it inside one transaction; the console shows no
+document-level preview, the dialog's fields are the whole decision. The
+operations are `upsertAuthor`, `mergeAuthors`,
 `createWork`, `linkBooks`, `mergeWorks`, `editWork`, `upsertEdition` and
 `repointIsbn`. An edition edit may add, change or drop the edition's ISBN and
 its index row follows; an ISBN another edition holds is refused there and
@@ -227,8 +228,9 @@ same for the book it links: what the reader left blank comes from the
 edition the book lands on and its work. A merged work or author is an
 alias: its console page offers no operation, only the survivor. A new author's id is derived from its canonical name the way
 `catalog.ensureauthors` derives it, so a reader adding the same name later
-lands on the console's document. Every apply is idempotent by operation id
-and writes an `adminAudit` record.
+lands on the console's document. Every apply is idempotent by an operation
+id the client mints and writes an `adminAudit` record carrying the
+before/after of every document it touched.
 
 Every personal book linked to a work stands on an edition of that work
 (owner decision 2026-09-01): the add-book flow mints one through

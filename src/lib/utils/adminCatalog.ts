@@ -7,24 +7,14 @@ import type {
   AdminCatalogApplyResponse,
   AdminCatalogBookRow,
   AdminCatalogBookTarget,
-  AdminCatalogChange,
-  AdminCatalogExpectedBook,
-  AdminCatalogExpectedDocument,
-  AdminCatalogExpectedState,
-  AdminCatalogPreviewResponse,
   AdminReviewResponse,
-  CatalogMatchMethod,
   CatalogScan,
 } from '../interfaces/catalog.ts';
 import {
-  boolean,
   type Data,
   exactKeys,
-  finiteNumber,
   integer,
   nonEmptyString,
-  nullableNumber,
-  nullableString,
   record,
 } from './decodePrimitives.ts';
 
@@ -32,47 +22,6 @@ function nonNegativeInteger(value: unknown, context: string): number {
   const decoded = integer(value, context);
   if (decoded < 0) throw new TypeError(`${context}: expected a non-negative integer`);
   return decoded;
-}
-
-function array<T>(value: unknown, context: string, decode: (entry: unknown, context: string) => T): T[] {
-  if (!Array.isArray(value)) throw new TypeError(`${context}: expected an array`);
-  return value.map((entry, index) => decode(entry, `${context}[${index}]`));
-}
-
-function catalogMatchMethod(value: unknown, context: string): CatalogMatchMethod | null {
-  if (value === null) return null;
-  if (
-    value !== 'isbn' && value !== 'external-id' && value !== 'catalog-choice' &&
-    value !== 'migration' && value !== 'admin'
-  ) {
-    throw new TypeError(`${context}: expected a catalog match method or null`);
-  }
-  return value;
-}
-
-function jsonValue(value: unknown, context: string): unknown {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') return finiteNumber(value, context);
-  if (Array.isArray(value)) return value.map((entry, index) => jsonValue(entry, `${context}[${index}]`));
-  const data = record(value, context);
-  return Object.fromEntries(Object.entries(data).map(([key, entry]) => [
-    key,
-    jsonValue(entry, `${context}.${key}`),
-  ]));
-}
-
-function jsonObject(value: unknown, context: string): Record<string, unknown> | null {
-  if (value === null) return null;
-  return jsonValue(record(value, context), context) as Record<string, unknown>;
-}
-
-function decodeBookTarget(value: unknown, context: string): AdminCatalogBookTarget {
-  const data = record(value, context);
-  exactKeys(data, ['uid', 'bookId'], context);
-  return {
-    uid: nonEmptyString(data.uid, `${context}.uid`),
-    bookId: nonEmptyString(data.bookId, `${context}.bookId`),
-  };
 }
 
 async function sha256Hex(input: string): Promise<string> {
@@ -153,87 +102,6 @@ export function adminCatalogCandidatesByBook(
     .map((book) => [`${book.uid}/${book.bookId}`, adminCatalogCandidatesForBook(scan, book)]));
 }
 
-function decodeExpectedDocument(value: unknown, context: string): AdminCatalogExpectedDocument {
-  const data = record(value, context);
-  exactKeys(data, ['kind', 'id', 'exists', 'updatedAt'], context);
-  if (data.kind !== 'author' && data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
-      data.kind !== 'external-id' && data.kind !== 'title-index') {
-    throw new TypeError(`${context}.kind: expected a versioned catalog document kind`);
-  }
-  return {
-    kind: data.kind,
-    id: nonEmptyString(data.id, `${context}.id`),
-    exists: boolean(data.exists, `${context}.exists`),
-    updatedAt: nullableNumber(data.updatedAt, `${context}.updatedAt`),
-  };
-}
-
-function decodeExpectedBook(value: unknown, context: string): AdminCatalogExpectedBook {
-  const data = record(value, context);
-  exactKeys(data, [
-    'uid', 'bookId', 'workId', 'editionId', 'matchMethod', 'linkedAt',
-    'decisionIsbn13',
-  ], context);
-  return {
-    ...decodeBookTarget({uid: data.uid, bookId: data.bookId}, `${context}.target`),
-    workId: nullableString(data.workId, `${context}.workId`),
-    editionId: nullableString(data.editionId, `${context}.editionId`),
-    matchMethod: catalogMatchMethod(data.matchMethod, `${context}.matchMethod`),
-    linkedAt: nullableNumber(data.linkedAt, `${context}.linkedAt`),
-    decisionIsbn13: nullableString(data.decisionIsbn13, `${context}.decisionIsbn13`),
-  };
-}
-
-function decodeExpected(value: unknown, context: string): AdminCatalogExpectedState {
-  const data = record(value, context);
-  exactKeys(data, ['catalog', 'books'], context);
-  return {
-    catalog: array(data.catalog, `${context}.catalog`, decodeExpectedDocument),
-    books: array(data.books, `${context}.books`, decodeExpectedBook),
-  };
-}
-
-function decodeChange(value: unknown, context: string): AdminCatalogChange {
-  const data = record(value, context);
-  exactKeys(data, ['kind', 'id', 'action', 'before', 'after'], context);
-  if (
-    data.kind !== 'author' && data.kind !== 'work' && data.kind !== 'edition' && data.kind !== 'isbn' &&
-    data.kind !== 'external-id' &&
-    data.kind !== 'book' && data.kind !== 'title-index'
-  ) {
-    throw new TypeError(`${context}.kind: expected a catalog change kind`);
-  }
-  if (data.action !== 'create' && data.action !== 'update' && data.action !== 'delete') {
-    throw new TypeError(`${context}.action: expected create, update, or delete`);
-  }
-  return {
-    kind: data.kind,
-    id: nonEmptyString(data.id, `${context}.id`),
-    action: data.action,
-    before: jsonObject(data.before, `${context}.before`),
-    after: jsonObject(data.after, `${context}.after`),
-  };
-}
-
-export function decodeAdminCatalogPreviewResponse(value: unknown): AdminCatalogPreviewResponse {
-  const data = record(value, 'admin-catalogpreview response');
-  exactKeys(
-    data,
-    ['operationId', 'operationHash', 'expected', 'changes', 'touchedDocuments'],
-    'admin-catalogpreview response',
-  );
-  return {
-    operationId: nonEmptyString(data.operationId, 'admin-catalogpreview response.operationId'),
-    operationHash: nonEmptyString(data.operationHash, 'admin-catalogpreview response.operationHash'),
-    expected: decodeExpected(data.expected, 'admin-catalogpreview response.expected'),
-    changes: array(data.changes, 'admin-catalogpreview response.changes', decodeChange),
-    touchedDocuments: nonNegativeInteger(
-      data.touchedDocuments,
-      'admin-catalogpreview response.touchedDocuments',
-    ),
-  };
-}
-
 export function decodeAdminReviewResponse(value: unknown): AdminReviewResponse {
   const data = record(value, 'admin-review response');
   exactKeys(data, ['updated'], 'admin-review response');
@@ -255,8 +123,6 @@ export function decodeAdminCatalogApplyResponse(value: unknown): AdminCatalogApp
 }
 
 export type AdminCatalogFailure =
-  | {kind: 'recent-auth-required'; maxAgeSeconds: number}
-  | {kind: 'stale-preview'}
   | {kind: 'operation-too-large'; maxTouchedDocuments: number}
   | {kind: 'catalog-capacity'; collection: string; maximum: number}
   | {kind: 'catalog-invariant'}
@@ -269,13 +135,6 @@ export function classifyAdminCatalogFailure(error: unknown): AdminCatalogFailure
     return {kind: 'unknown'};
   }
   const details = error.details as Data;
-  if (error.code === 'functions/failed-precondition' && details.reason === 'recent-auth-required' &&
-      Number.isSafeInteger(details.maxAgeSeconds) && Number(details.maxAgeSeconds) > 0) {
-    return {kind: 'recent-auth-required', maxAgeSeconds: Number(details.maxAgeSeconds)};
-  }
-  if (error.code === 'functions/aborted' && details.reason === 'stale-preview') {
-    return {kind: 'stale-preview'};
-  }
   if (error.code === 'functions/resource-exhausted' && details.reason === 'operation-too-large' &&
       Number.isSafeInteger(details.maxTouchedDocuments) && Number(details.maxTouchedDocuments) > 0) {
     return {kind: 'operation-too-large', maxTouchedDocuments: Number(details.maxTouchedDocuments)};

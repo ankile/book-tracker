@@ -1,16 +1,10 @@
 <script lang="ts">
-  import { tick } from 'svelte';
   import { FunctionsError } from 'firebase/functions';
-  import { reauthenticateWithPassword } from '$lib/firebase/auth.ts';
-  import { adminCatalogApply, adminCatalogPreview, lookupIsbn } from '$lib/firebase/functions.ts';
+  import { adminCatalogApply, lookupIsbn } from '$lib/firebase/functions.ts';
   import { normalizeIsbn } from '$lib/utils/isbn.ts';
   import { lookupIsbnSources, primaryLookup } from '$lib/utils/isbnLookup.ts';
   import { selectLookupMetadata } from '$lib/utils/bookMetadata.ts';
-  import type {
-    AdminCatalogOperation,
-    AdminCatalogPreviewResponse,
-    CatalogScan,
-  } from '$lib/interfaces/catalog.ts';
+  import type { AdminCatalogOperation, CatalogScan } from '$lib/interfaces/catalog.ts';
   import { COMMON_LANGUAGES } from '../../../../shared/language.ts';
   import RecordPicker from './RecordPicker.svelte';
   import { catalogAuthorIdFor, classifyAdminCatalogFailure, parseAdminStringList } from '$lib/utils/adminCatalog.ts';
@@ -29,9 +23,9 @@
 
   // One dialog per console page. The page opens it by assigning a prefilled
   // draft (src/lib/utils/adminCatalogView.ts) and the dialog closes itself
-  // by assigning null: on cancel, or once an apply has landed. Preview and
-  // apply are the two callables; a preview is pinned to the draft it was
-  // made from and dropped the moment the draft changes.
+  // by assigning null: on cancel, or once an apply has landed. Submitting
+  // the form applies the operation in one call: the fields are the whole
+  // decision, there is no document-level preview and no second prompt.
   interface Props {
     draft: OperationDraft | null;
     scan: CatalogScan | null;
@@ -40,50 +34,20 @@
 
   let { draft = $bindable(), scan, onapplied }: Props = $props();
 
-  type PreviewState = {operation: AdminCatalogOperation; response: AdminCatalogPreviewResponse};
   let dialog = $state<HTMLDialogElement>();
-  let preview = $state<PreviewState | null>(null);
-  let previewFingerprint = $state<string | null>(null);
   let pending = $state(false);
   let lookingUp = $state(false);
   let errorMessage = $state('');
   let statusMessage = $state('');
 
-  let passwordPromptOpen = $state(false);
-  let password = $state('');
-  let passwordPending = $state(false);
-  let passwordInput = $state<HTMLInputElement>();
-  let passwordDialog = $state<HTMLDialogElement>();
-  let applyButton = $state<HTMLButtonElement>();
-  let passwordReturnFocus: HTMLElement | null = null;
-
   const open = $derived(draft !== null);
   $effect(() => {
     if (open && dialog !== undefined && !dialog.open) {
-      preview = null;
-      previewFingerprint = null;
       errorMessage = '';
       statusMessage = '';
       dialog.showModal();
     } else if (!open && dialog?.open) {
       dialog.close();
-    }
-  });
-
-  $effect(() => {
-    if (passwordPromptOpen && passwordDialog !== undefined && !passwordDialog.open) {
-      passwordDialog.showModal();
-    } else if (!passwordPromptOpen && passwordDialog?.open) {
-      passwordDialog.close();
-    }
-  });
-
-  const fingerprint = $derived(JSON.stringify(draft));
-  $effect(() => {
-    if (preview !== null && previewFingerprint !== null && fingerprint !== previewFingerprint) {
-      preview = null;
-      previewFingerprint = null;
-      statusMessage = 'The draft changed. Create a fresh preview before applying.';
     }
   });
 
@@ -144,7 +108,9 @@
 
   // Form validation throws TypeError; anything else (the callable, a
   // response decoder) is reported as a failure of the operation itself.
-  async function requestPreview(): Promise<void> {
+  // The operation id is minted here so a retry after a lost response
+  // replays the same operation instead of applying a second one.
+  async function apply(): Promise<void> {
     const current = draft;
     if (current === null) return;
     errorMessage = '';
@@ -163,15 +129,12 @@
     }
     pending = true;
     try {
-      const response = await adminCatalogPreview({operation});
-      preview = {operation, response};
-      previewFingerprint = fingerprint;
-      statusMessage = `Preview ready: ${response.touchedDocuments} documents would be touched.`;
+      const result = await adminCatalogApply({operationId: crypto.randomUUID(), operation});
+      onapplied(`Applied: ${result.touchedDocuments} documents changed. The page updates as the writes land.`);
+      draft = null;
     } catch (error) {
-      console.error('Admin catalog preview failed', error);
-      errorMessage = failureMessage(
-        error, 'Preview failed. Nothing was changed; review the operation and try again.',
-      );
+      console.error('Admin catalog apply failed', error);
+      errorMessage = failureMessage(error);
     } finally {
       pending = false;
     }
@@ -227,17 +190,9 @@
 
   // The server's own reason rides along where it has one, so "identity
   // invariant" names the invariant.
-  function failureMessage(
-    error: unknown,
-    fallback = 'The catalog operation failed. Nothing was applied.',
-  ): string {
+  function failureMessage(error: unknown): string {
     const reason = error instanceof FunctionsError && error.message !== '' ? ` (${error.message})` : '';
     const failure = classifyAdminCatalogFailure(error);
-    if (failure.kind === 'stale-preview') {
-      preview = null;
-      previewFingerprint = null;
-      return 'This preview is stale because catalog links or metadata changed. Nothing was applied; create a fresh preview.';
-    }
     if (failure.kind === 'operation-too-large') {
       return `This operation would touch more than ${failure.maxTouchedDocuments} documents. Split it into smaller operations.`;
     }
@@ -250,78 +205,7 @@
     if (failure.kind === 'identifier-conflict') {
       return `An ISBN or external identifier is already assigned elsewhere${reason}. Nothing was applied.`;
     }
-    return `${fallback}${reason}`;
-  }
-
-  async function applyPreview(confirmFirst = true): Promise<void> {
-    if (preview === null) return;
-    if (confirmFirst && !confirm(
-      `Apply operation ${preview.response.operationId} and its ${preview.response.changes.length} exact changes?`,
-    )) return;
-    pending = true;
-    errorMessage = '';
-    statusMessage = '';
-    try {
-      const result = await adminCatalogApply({
-        operationId: preview.response.operationId,
-        operation: preview.operation,
-        expected: preview.response.expected,
-      });
-      preview = null;
-      previewFingerprint = null;
-      onapplied(`Applied ${result.operationId}: ${result.touchedDocuments} documents changed. The page updates as the writes land.`);
-      draft = null;
-    } catch (error) {
-      const failure = classifyAdminCatalogFailure(error);
-      if (failure.kind === 'recent-auth-required') {
-        await promptForRecentAuthentication();
-      } else {
-        console.error('Admin catalog apply failed', error);
-        errorMessage = failureMessage(error);
-      }
-    } finally {
-      pending = false;
-    }
-  }
-
-  async function promptForRecentAuthentication(): Promise<void> {
-    passwordReturnFocus = applyButton ?? (
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    );
-    passwordPromptOpen = true;
-    password = '';
-    await tick();
-    passwordInput?.focus();
-  }
-
-  async function closePasswordPrompt(): Promise<void> {
-    passwordPromptOpen = false;
-    password = '';
-    await tick();
-    passwordReturnFocus?.focus();
-    passwordReturnFocus = null;
-  }
-
-  async function reauthenticateAndRetry(): Promise<void> {
-    if (password === '') {
-      errorMessage = 'Enter the administrator password to continue.';
-      return;
-    }
-    passwordPending = true;
-    errorMessage = '';
-    try {
-      await reauthenticateWithPassword(password);
-      await closePasswordPrompt();
-      await applyPreview(false);
-    } catch (error) {
-      console.error('Admin reauthentication failed', error);
-      errorMessage = 'Reauthentication failed. Check the password and try again; nothing was applied.';
-      password = '';
-      await tick();
-      passwordInput?.focus();
-    } finally {
-      passwordPending = false;
-    }
+    return `The catalog operation failed. Nothing was applied.${reason}`;
   }
 </script>
 
@@ -340,9 +224,9 @@
   bind:this={dialog}
   class="operation"
   aria-labelledby="operation-heading"
-  oncancel={(event) => { event.preventDefault(); if (!passwordPromptOpen) close(); }}>
+  oncancel={(event) => { event.preventDefault(); close(); }}>
   {#if draft !== null}
-    <form onsubmit={(event) => { event.preventDefault(); void requestPreview(); }}>
+    <form onsubmit={(event) => { event.preventDefault(); void apply(); }}>
       <h2 id="operation-heading">{operationTitle(draft)}</h2>
 
       {#if draft.type === 'upsertAuthor'}
@@ -434,43 +318,11 @@
       {#if errorMessage}<div class="notice error" role="alert">{errorMessage}</div>{/if}
       {#if statusMessage}<div class="notice success" role="status">{statusMessage}</div>{/if}
 
-      {#if preview}
-        <section class="preview" aria-labelledby="preview-heading">
-          <h3 id="preview-heading">Exact preview</h3>
-          <p><code>{preview.response.operationId}</code> · hash <code>{preview.response.operationHash}</code> · {preview.response.touchedDocuments} touched documents</p>
-          <details><summary>Operation payload</summary><pre>{JSON.stringify(preview.operation, null, 2)}</pre></details>
-          <ol>
-            {#each preview.response.changes as change (`${change.kind}:${change.id}:${change.action}`)}
-              <li><strong>{change.action} {change.kind} {change.id}</strong><div class="diff"><div><span>Before</span><pre>{JSON.stringify(change.before, null, 2)}</pre></div><div><span>After</span><pre>{JSON.stringify(change.after, null, 2)}</pre></div></div></li>
-            {/each}
-          </ol>
-        </section>
-      {/if}
-
       <div class="dialog-actions">
         <button type="button" onclick={close} disabled={pending}>Cancel</button>
-        <button class="primary" type="submit" disabled={pending}>{pending ? 'Working…' : 'Preview without applying'}</button>
-        {#if preview}
-          <button bind:this={applyButton} class="danger" type="button" disabled={pending} onclick={() => void applyPreview()}>Apply these exact changes</button>
-        {/if}
+        <button class="primary" type="submit" disabled={pending}>{pending ? 'Applying…' : 'Apply'}</button>
       </div>
     </form>
-  {/if}
-
-  {#if passwordPromptOpen}
-    <dialog
-      bind:this={passwordDialog}
-      class="reauth"
-      aria-labelledby="reauth-heading"
-      oncancel={(event) => { event.preventDefault(); void closePasswordPrompt(); }}>
-      <form onsubmit={(event) => { event.preventDefault(); void reauthenticateAndRetry(); }}>
-        <h2 id="reauth-heading">Confirm recent authentication</h2>
-        <p>The server requires a password check from the last 15 minutes before catalog mutations. The preview has not been applied.</p>
-        <label for="admin-password">Administrator password</label>
-        <input id="admin-password" bind:this={passwordInput} bind:value={password} type="password" autocomplete="current-password" />
-        <div class="dialog-actions"><button type="button" onclick={() => void closePasswordPrompt()}>Cancel</button><button class="primary" type="submit" disabled={passwordPending}>{passwordPending ? 'Checking…' : 'Reauthenticate and retry'}</button></div>
-      </form>
-    </dialog>
   {/if}
 </dialog>
 
@@ -496,23 +348,6 @@
     max-height: calc(100vh - 2rem);
     padding: 1.5rem 1.75rem;
     box-sizing: border-box;
-  }
-
-  .reauth {
-    width: min(500px, calc(100vw - 2rem));
-    padding: 1.5rem 1.75rem;
-    box-sizing: border-box;
-  }
-
-  .reauth form {
-    display: grid;
-    gap: 0.8rem;
-  }
-
-  .reauth p {
-    margin: 0;
-    color: #4a5754;
-    font-size: 0.93rem;
   }
 
   h2 {
@@ -599,75 +434,6 @@
     white-space: nowrap;
   }
 
-  .preview {
-    margin-top: 1.25rem;
-    padding: 1.15rem 1.25rem;
-    background: #f5f9f9;
-    border: 1px solid #cfe0e0;
-    border-radius: 10px;
-  }
-
-  .preview h3 {
-    margin: 0 0 0.35rem;
-    font-size: 1.05rem;
-    font-weight: 700;
-  }
-
-  .preview > p {
-    margin: 0 0 0.75rem;
-    color: #4a5754;
-    font-size: 0.9rem;
-  }
-
-  .preview summary {
-    color: #2f666b;
-    font-weight: 650;
-    cursor: pointer;
-  }
-
-  .preview ol {
-    margin: 0.75rem 0 0;
-    padding-left: 1.4rem;
-  }
-
-  .preview li {
-    margin: 0.9rem 0;
-  }
-
-  .preview li strong {
-    display: block;
-    margin-bottom: 0.35rem;
-    font-weight: 650;
-  }
-
-  .diff {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.7rem;
-  }
-
-  .diff span {
-    display: block;
-    margin-bottom: 0.25rem;
-    color: #6b7673;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  pre {
-    max-height: 320px;
-    margin: 0.4rem 0 0;
-    padding: 0.7rem 0.8rem;
-    overflow: auto;
-    color: #e7f0ee;
-    font-size: 0.75rem;
-    white-space: pre-wrap;
-    background: #1c2726;
-    border-radius: 8px;
-  }
-
   .dialog-actions {
     display: flex;
     flex-wrap: wrap;
@@ -679,13 +445,11 @@
   }
 
   @media (max-width: 700px) {
-    .operation,
-    .reauth {
+    .operation {
       padding: 1.15rem 1.15rem;
     }
 
-    .form-grid,
-    .diff {
+    .form-grid {
       grid-template-columns: 1fr;
     }
 

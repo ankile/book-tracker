@@ -12,10 +12,3 @@ test('auth initialization does not rewrite shared persistence on every tab load'
     /initializeAuth\(app,\s*\{[\s\S]*?persistence:\s*browserLocalPersistence,[\s\S]*?popupRedirectResolver:\s*undefined,[\s\S]*?\}\)/,
   );
 });
-
-test('admin password reauthentication refreshes auth_time through a real credential check', () => {
-  assert.match(authSource, /EmailAuthProvider\.credential\(currentUser\.email, password\)/);
-  assert.match(authSource, /await reauthenticateWithCredential\(currentUser, credential\)/);
-  assert.match(authSource, /await currentUser\.getIdToken\(true\)/);
-  assert.match(authSource, /currentUser === null \|\| currentUser\.email === null/);
-});

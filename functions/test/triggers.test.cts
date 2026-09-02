@@ -38,7 +38,6 @@ interface DeployedFunction extends EndpointFunction {
 interface FunctionsBundle {
   admin: {
     catalogapply: DeployedFunction;
-    catalogpreview: DeployedFunction;
     overview: DeployedFunction;
     review: DeployedFunction;
   };
@@ -100,7 +99,6 @@ test("preserves the deployed function export names", () => {
   ]);
   assert.deepEqual(Object.keys(functions.admin).sort(), [
     "catalogapply",
-    "catalogpreview",
     "overview",
     "review",
   ]);
@@ -130,7 +128,6 @@ test("keeps every function in europe-west1 on its required generation", () => {
   const gen1Functions = [
     functions.admin.overview,
     functions.admin.catalogapply,
-    functions.admin.catalogpreview,
     functions.admin.review,
     functions.createUserDocument,
     functions.deleteUserDocument,
@@ -891,7 +888,6 @@ test("the emulator fixture covers every bound secret with loopback-only data", (
   const deployedFunctions = [
     functions.admin.overview,
     functions.admin.catalogapply,
-    functions.admin.catalogpreview,
     functions.admin.review,
     functions.booksapi.lookupisbn,
     functions.catalog.search,
@@ -942,7 +938,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "admin.overview": functions.admin.overview,
     "admin.catalogapply": functions.admin.catalogapply,
     "admin.review": functions.admin.review,
-    "admin.catalogpreview": functions.admin.catalogpreview,
     "booksapi.lookupisbn": functions.booksapi.lookupisbn,
     "catalog.search": functions.catalog.search,
     "catalog.create": functions.catalog.create,
@@ -1030,7 +1025,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.admin.overview": 2,
     "functions.admin.catalogapply": 2,
     "functions.admin.review": 2,
-    "functions.admin.catalogpreview": 2,
     "functions.booksapi.lookupisbn": 10,
     "functions.catalog.create": 10,
     "functions.catalog.addedition": 10,
@@ -1061,7 +1055,6 @@ test("runs every function as its dedicated least-privilege identity", () => {
   for (const adminFunction of [
     functions.admin.overview,
     functions.admin.catalogapply,
-    functions.admin.catalogpreview,
     functions.admin.review,
   ]) {
     assert.equal(adminFunction.__endpoint.availableMemoryMb, 1024);

@@ -715,41 +715,14 @@ export type AdminCatalogOperation =
       editionId: string;
     };
 
-export const VERSIONED_KINDS = [
-  "author", "work", "edition", "isbn", "external-id", "title-index",
-] as const;
-export type VersionedKind = typeof VERSIONED_KINDS[number];
-
 export const MATCH_METHODS = [
   "isbn", "external-id", "catalog-choice", "migration", "admin",
 ] as const;
 export type MatchMethod = typeof MATCH_METHODS[number];
 
-export interface AdminCatalogExpected {
-  catalog: Array<{
-    kind: VersionedKind;
-    id: string;
-    exists: boolean;
-    updatedAt: number | null;
-  }>;
-  books: Array<{
-    uid: string;
-    bookId: string;
-    workId: string | null;
-    editionId: string | null;
-    matchMethod: MatchMethod | null;
-    linkedAt: number | null;
-    decisionIsbn13: string | null;
-  }>;
-}
-
-export interface AdminCatalogPreviewRequest {
-  operation: AdminCatalogOperation;
-}
-
-export interface AdminCatalogApplyRequest extends AdminCatalogPreviewRequest {
+export interface AdminCatalogApplyRequest {
   operationId: string;
-  expected: AdminCatalogExpected;
+  operation: AdminCatalogOperation;
 }
 
 function decodeAdminBookTargets(
@@ -901,111 +874,12 @@ export function decodeAdminCatalogOperation(
   fail("operation.type is unsupported.");
 }
 
-export function decodeAdminCatalogPreviewRequest(
-  value: unknown,
-  fail: DecodeFailure = throwDecodeError,
-): AdminCatalogPreviewRequest {
-  const decoded = record(value, "request data", fail);
-  exactKeys(decoded, ["operation"], "request data", fail);
-  return {operation: decodeAdminCatalogOperation(decoded.operation, fail)};
-}
-
-function nullableDocumentId(
-  value: unknown,
-  label: string,
-  fail: DecodeFailure,
-): string | null {
-  return value === null ? null : documentId(value, label, fail);
-}
-
-function nullableMillis(
-  value: unknown,
-  label: string,
-  fail: DecodeFailure,
-): number | null {
-  if (value === null) return null;
-  const decoded = finiteNumber(value, label, fail);
-  if (!Number.isSafeInteger(decoded) || decoded < 0) {
-    fail(`${label} must be null or non-negative epoch milliseconds.`);
-  }
-  return decoded;
-}
-
-function decodeAdminCatalogExpected(
-  value: unknown,
-  fail: DecodeFailure,
-): AdminCatalogExpected {
-  const decoded = record(value, "expected", fail);
-  exactKeys(decoded, ["catalog", "books"], "expected", fail);
-  if (!Array.isArray(decoded.catalog) || decoded.catalog.length > 200) {
-    fail("expected.catalog must contain at most 200 versions.");
-  }
-  const catalog = decoded.catalog.map((entry, index) => {
-    const version = record(entry, `expected.catalog[${index}]`, fail);
-    exactKeys(
-      version,
-      ["kind", "id", "exists", "updatedAt"],
-      `expected.catalog[${index}]`,
-      fail,
-    );
-    if (typeof version.kind !== "string" ||
-        !VERSIONED_KINDS.includes(version.kind as VersionedKind)) {
-      fail(`expected.catalog[${index}].kind is unsupported.`);
-    }
-    return {
-      kind: version.kind as VersionedKind,
-      id: documentId(version.id, `expected.catalog[${index}].id`, fail),
-      exists: boolean(version.exists, `expected.catalog[${index}].exists`, fail),
-      updatedAt: nullableMillis(
-        version.updatedAt, `expected.catalog[${index}].updatedAt`, fail,
-      ),
-    };
-  });
-  if (!Array.isArray(decoded.books) || decoded.books.length > 200) {
-    fail("expected.books must contain at most 200 link versions.");
-  }
-  const books = decoded.books.map((entry, index) => {
-    const book = record(entry, `expected.books[${index}]`, fail);
-    exactKeys(
-      book,
-      [
-        "uid", "bookId", "workId", "editionId", "matchMethod", "linkedAt",
-        "decisionIsbn13",
-      ],
-      `expected.books[${index}]`,
-      fail,
-    );
-    const matchMethod = book.matchMethod;
-    if (matchMethod !== null &&
-        (typeof matchMethod !== "string" ||
-         !MATCH_METHODS.includes(matchMethod as MatchMethod))) {
-      fail(`expected.books[${index}].matchMethod is unsupported.`);
-    }
-    return {
-      uid: documentId(book.uid, `expected.books[${index}].uid`, fail),
-      bookId: documentId(book.bookId, `expected.books[${index}].bookId`, fail),
-      workId: nullableDocumentId(book.workId, `expected.books[${index}].workId`, fail),
-      editionId: nullableDocumentId(
-        book.editionId, `expected.books[${index}].editionId`, fail,
-      ),
-      matchMethod: matchMethod as MatchMethod | null,
-      linkedAt: nullableMillis(book.linkedAt, `expected.books[${index}].linkedAt`, fail),
-      decisionIsbn13: book.decisionIsbn13 === null ? null : checksumValidIsbn13(
-        book.decisionIsbn13,
-        `expected.books[${index}].decisionIsbn13`,
-        fail,
-      ),
-    };
-  });
-  return {catalog, books};
-}
-
 export function decodeAdminCatalogApplyRequest(
   value: unknown,
   fail: DecodeFailure = throwDecodeError,
 ): AdminCatalogApplyRequest {
   const decoded = record(value, "request data", fail);
-  exactKeys(decoded, ["operationId", "operation", "expected"], "request data", fail);
+  exactKeys(decoded, ["operationId", "operation"], "request data", fail);
   const operationId = string(decoded.operationId, "operationId", fail, 100);
   if (!/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(operationId)) {
     fail("operationId must be a UUID.");
@@ -1013,7 +887,6 @@ export function decodeAdminCatalogApplyRequest(
   return {
     operationId,
     operation: decodeAdminCatalogOperation(decoded.operation, fail),
-    expected: decodeAdminCatalogExpected(decoded.expected, fail),
   };
 }
 

@@ -2,7 +2,7 @@ require("./setup.cts");
 
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const test: typeof import("node:test").test = require("node:test");
-const {createHash}: typeof import("node:crypto") = require("node:crypto");
+const {createHash, randomUUID}: typeof import("node:crypto") = require("node:crypto");
 const {getFirestore, Timestamp}: typeof import("firebase-admin/firestore") = require("firebase-admin/firestore");
 const {logger}: typeof import("firebase-functions") = require("firebase-functions");
 
@@ -51,24 +51,17 @@ interface CatalogStore {
   ref(path: string): Reference;
   write(reference: Reference, data: Row, merge?: boolean): void;
 }
-interface PreviewResult {
-  operationId: string;
-  touchedDocuments: number;
-  expected: {
-    catalog: Array<{kind: string; exists: boolean}>;
-    books: unknown[];
-  };
-  changes: Array<{kind: string; action: string; after: Row | null}>;
-}
 interface ApplyResult {
   operationId: string;
   applied: boolean;
   touchedDocuments: number;
 }
+interface Applied extends ApplyResult {
+  changes: Array<{kind: string; action: string; after: Row | null}>;
+}
 interface Deployed {
   admin: {
     catalogapply: {run(data: unknown, context: unknown): Promise<ApplyResult>};
-    catalogpreview: {run(data: unknown, context: unknown): Promise<PreviewResult>};
     review: {run(data: unknown, context: unknown): Promise<{updated: number}>};
   };
 }
@@ -80,17 +73,23 @@ const {externalIndexId}: typeof import("../src/catalog") = require("../lib/catal
 const {CATALOG_LIMITS}: typeof import("../src/shared/catalogLimits") = require("../lib/shared/catalogLimits");
 const db = getFirestore();
 const adminUid = "1Cf0CaNfgnVSvTrF5dYjzRd9Xri2";
-const recentAdmin = () => ({
-  auth: {
-    uid: adminUid,
-    token: {
-      email_verified: true,
-      auth_time: Math.floor(Date.now() / 1000),
-    },
-  },
+const operator = () => ({
+  auth: {uid: adminUid, token: {email_verified: true}},
 });
 
-test("the hidden admin gate and recent-auth check run before decoding or reads", async (t) => {
+// One callable plans and applies, under an operation id the client mints.
+// The audit record it writes carries the planned before/after of every
+// document it touched, which is what the assertions about a plan read.
+async function apply(store: CatalogStore, operation: unknown): Promise<Applied> {
+  const operationId = randomUUID();
+  const result = await deployed.admin.catalogapply.run({operationId, operation}, operator());
+  const audit = store.rows.get(`adminAudit/${operationId}`);
+  assert.ok(audit, "an apply writes its audit record");
+  assert.ok(Array.isArray(audit.beforeAfter));
+  return {...result, changes: audit.beforeAfter as Applied["changes"]};
+}
+
+test("the hidden admin gate runs before decoding or reads", async (t) => {
   let touched = false;
   t.mock.method(db, "collection", (name: string) => {
     touched = true;
@@ -108,26 +107,24 @@ test("the hidden admin gate and recent-auth check run before decoding or reads",
   );
   assert.equal(touched, false);
   await assert.rejects(
-    deployed.admin.catalogapply.run({attacker: true}, {
-      auth: {
-        uid: adminUid,
-        token: {
-          email_verified: true,
-          auth_time: Math.floor(Date.now() / 1000) - 901,
-        },
-      },
-    }),
-    (error) => hasCode(error, "failed-precondition") &&
-      detail(error, "reason") === "recent-auth-required" &&
-      detail(error, "maxAgeSeconds") === 900,
-  );
-  assert.equal(touched, true);
-  touched = false;
-  await assert.rejects(
-    deployed.admin.catalogapply.run({attacker: true}, recentAdmin()),
+    deployed.admin.catalogapply.run({attacker: true}, operator()),
     (error) => hasCode(error, "invalid-argument"),
   );
   assert.equal(touched, true);
+  // The retired preview protocol's request shape is refused whole: an
+  // operation id and an operation, nothing else.
+  await assert.rejects(
+    deployed.admin.catalogapply.run({
+      operationId: randomUUID(),
+      operation: {
+        type: "upsertAuthor",
+        authorId: "someone",
+        author: {canonicalName: "Someone", alternateNames: [], sortName: "Someone", kind: "person"},
+      },
+      expected: {catalog: [], books: []},
+    }, operator()),
+    (error) => hasCode(error, "invalid-argument"),
+  );
 });
 
 function installCatalogStore(t: TestContext): CatalogStore {
@@ -278,7 +275,7 @@ function edition(workId: string, overrides: Row = {}): Row {
   };
 }
 
-test("preview is read-only and apply is one audited idempotent transaction", async (t) => {
+test("apply is one audited idempotent transaction under a client-minted operation id", async (t) => {
   const store = installCatalogStore(t);
   const operation = {
     type: "createWork",
@@ -295,45 +292,31 @@ test("preview is read-only and apply is one audited idempotent transaction", asy
     },
     books: [],
   };
-  const preview = await deployed.admin.catalogpreview.run(
-    {operation},
-    recentAdmin(),
-  );
-  assert.equal(store.rows.has("works/new-work"), false);
-  assert.equal(preview.touchedDocuments, 3);
-  assert.deepEqual(preview.expected.catalog.map(({kind, exists}) => [kind, exists]), [
-    ["author", true],
-    ["title-index", false],
-    ["work", false],
-  ]);
-  assert.deepEqual(preview.expected.books, []);
-  assert.equal(preview.changes.filter(({action}) => action === "create").length, 2);
-
-  const request = {
-    operationId: preview.operationId,
-    operation,
-    expected: preview.expected,
-  };
-  const first = await deployed.admin.catalogapply.run(request, recentAdmin());
-  const second = await deployed.admin.catalogapply.run(request, recentAdmin());
-  assert.deepEqual(first, {
-    operationId: preview.operationId,
-    applied: true,
-    touchedDocuments: 3,
-  });
+  const operationId = randomUUID();
+  const request = {operationId, operation};
+  const first = await deployed.admin.catalogapply.run(request, operator());
+  const second = await deployed.admin.catalogapply.run(request, operator());
+  assert.deepEqual(first, {operationId, applied: true, touchedDocuments: 3});
   assert.deepEqual(second, first);
   assert.equal(store.rows.get("works/new-work")?.canonicalTitle, "The New Work");
   // A record the console creates is the operator's.
   assert.equal(store.rows.get("works/new-work")?.createdBy, adminUid);
-  const audit = store.rows.get(`adminAudit/${preview.operationId}`);
+  const audit = store.rows.get(`adminAudit/${operationId}`);
   assert.ok(audit);
   assert.equal(audit.type, "catalog-mutation");
   assert.equal(audit.operationType, "createWork");
   assert.equal(audit.uid, adminUid);
   const beforeAfter = audit.beforeAfter;
   assert.ok(Array.isArray(beforeAfter));
+  assert.equal(beforeAfter.filter((row: unknown) => isRow(row) && row.action === "create").length, 2);
   assert.equal(beforeAfter.some((row: unknown) => isRow(row) && row.kind === "work"), true);
   assert.doesNotMatch(JSON.stringify(audit), /session|currentPage|activeTimer|pagesRead/);
+  // The same id with another operation is a reuse, not a replay.
+  await assert.rejects(
+    deployed.admin.catalogapply.run({operationId, operation: {...operation, workId: "another-work"}}, operator()),
+    (error) => hasCode(error, "failed-precondition") && detail(error, "reason") === "catalog-invariant",
+  );
+  assert.equal(store.rows.has("works/another-work"), false);
 });
 
 test("catalog creation stops at the scan capacity while repair edits remain available", async (t) => {
@@ -357,7 +340,7 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
     books: [],
   };
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: create}, recentAdmin()),
+    apply(store, create),
     (error) => hasCode(error, "resource-exhausted") &&
       detail(error, "reason") === "catalog-capacity" &&
       detail(error, "collection") === "works" && detail(error, "maximum") === CATALOG_LIMITS.works,
@@ -376,13 +359,12 @@ test("catalog creation stops at the scan capacity while repair edits remain avai
       language: "",
     },
   };
-  const preview = await deployed.admin.catalogpreview.run(
-    {operation: repair}, recentAdmin(),
-  );
-  assert.equal(preview.changes.some(({kind}) => kind === "work"), true);
+  const repaired = await apply(store, repair);
+  assert.equal(repaired.changes.some(({kind}) => kind === "work"), true);
+  assert.equal(store.rows.get("works/work-0")?.canonicalTitle, "Repaired Work");
 });
 
-test("book relinking detects link races but ignores unrelated personal edits", async (t) => {
+test("an admin link is a merge into the reader's book: its unrelated fields stay", async (t) => {
   const store = installCatalogStore(t);
   store.write(store.ref("works/target-work"), activeWork("Target Work"));
   store.write(store.ref("users/reader"), {uid: "reader"});
@@ -401,24 +383,10 @@ test("book relinking detects link races but ignores unrelated personal edits", a
     books: [{uid: "reader", bookId: "book-one"}],
     target: {workId: "target-work", editionId: null},
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  store.write(bookRef, {title: "Edited after preview"}, true);
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId,
-    operation,
-    expected: preview.expected,
-  }, recentAdmin());
-  assert.equal(store.rows.get(bookRef.path)?.title, "Edited after preview");
+  await apply(store, operation);
+  assert.equal(store.rows.get(bookRef.path)?.title, "Personal title");
   assert.equal(store.rows.get(bookRef.path)?.workId, "target-work");
-
-  const stalePreview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  store.write(bookRef, {workId: "other-work"}, true);
-  await assert.rejects(deployed.admin.catalogapply.run({
-    operationId: stalePreview.operationId,
-    operation,
-    expected: stalePreview.expected,
-  }, recentAdmin()), (error) => hasCode(error, "aborted") &&
-    detail(error, "reason") === "stale-preview");
+  assert.equal(store.rows.get(bookRef.path)?.matchMethod, "admin");
 });
 
 test("non-null admin links require a live self-owned book while unlink repairs remain available", async (t) => {
@@ -432,19 +400,19 @@ test("non-null admin links require a live self-owned book while unlink repairs r
     target: {workId: "target-work", editionId: null},
   };
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: link}, recentAdmin()),
+    apply(store, link),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "catalog-invariant",
   );
   store.write(bookRef, {owner: store.ref("users/other")}, true);
   store.write(store.ref("users/reader"), {uid: "reader", deletedAt: Timestamp.fromMillis(1)});
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: link}, recentAdmin()),
+    apply(store, link),
     (error) => hasCode(error, "failed-precondition"),
   );
   const unlink = {...link, target: null};
-  const preview = await deployed.admin.catalogpreview.run({operation: unlink}, recentAdmin());
-  assert.equal(preview.changes[0].after?.workId, null);
+  const applied = await apply(store, unlink);
+  assert.equal(applied.changes[0].after?.workId, null);
 });
 
 // Catalog data is public whoever contributed it: any reader's book may seed
@@ -476,9 +444,9 @@ test("any personal book seeds a work; unsupported stored work fields are rejecte
     },
     books: [{uid: "reader", bookId: "seed-book"}],
   };
-  const created = await deployed.admin.catalogpreview.run({operation: create}, recentAdmin());
+  const created = await apply(store, create);
   assert.equal(created.changes.some(({kind}) => kind === "work"), true);
-  assert.equal(created.expected.books.length, 1);
+  assert.equal(created.changes.some(({kind}) => kind === "book"), true);
 
   store.write(store.ref("works/hidden-work"), activeWork("Hidden Work", {
     status: "hidden",
@@ -505,7 +473,7 @@ test("any personal book seeds a work; unsupported stored work fields are rejecte
     },
   };
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: edit}, recentAdmin()),
+    apply(store, edit),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "catalog-invariant" &&
       messageMatches(error, /unsupported field unsupportedField/),
@@ -562,14 +530,7 @@ test("moving an edition atomically relinks its books and identifier indexes", as
       externalIds: {"google-books": "volume-one"},
     },
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  assert.equal(preview.expected.catalog.some(({kind}) => kind === "external-id"), true);
-  assert.equal(preview.expected.books.length, 1);
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId,
-    operation,
-    expected: preview.expected,
-  }, recentAdmin());
+  await apply(store, operation);
   assert.equal(store.rows.get("editions/shared-edition")?.workId, "new-work");
   // A move edits an existing edition: the operator becomes no creator.
   assert.equal(store.rows.get("editions/shared-edition")?.createdBy, undefined);
@@ -611,8 +572,6 @@ test("moving an edition out of a hidden work needs no consent", async (t) => {
       externalIds: {},
     },
   };
-  const unlinked = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  assert.equal(unlinked.expected.books.length, 0);
   store.write(store.ref("users/reader"), {uid: "reader"});
   store.write(store.ref("users/reader/books/seed"), {
     owner: store.ref("users/reader"),
@@ -621,8 +580,10 @@ test("moving an edition out of a hidden work needs no consent", async (t) => {
     matchMethod: "catalog-choice",
     linkedAt: Timestamp.fromMillis(100),
   });
-  const linked = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  assert.equal(linked.expected.books.length, 1);
+  const moved = await apply(store, operation);
+  assert.equal(moved.changes.some(({kind}) => kind === "book"), true);
+  assert.equal(store.rows.get("editions/moved-edition")?.workId, "public-work");
+  assert.equal(store.rows.get("users/reader/books/seed")?.workId, "public-work");
 });
 
 test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
@@ -643,7 +604,7 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
     },
   };
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation}, recentAdmin()),
+    apply(store, operation),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "catalog-invariant",
   );
@@ -651,7 +612,7 @@ test("moving an edition refuses a missing or foreign ISBN index", async (t) => {
     workId: "old-work", editionId: "another-edition",
   });
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation}, recentAdmin()),
+    apply(store, operation),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "catalog-invariant",
   );
@@ -668,10 +629,10 @@ test("hidden sources merge into an active target and redirect to it", async (t) 
     workId: "linked", editionId: null, matchMethod: "isbn",
     linkedAt: Timestamp.fromMillis(1),
   });
-  const preview = await deployed.admin.catalogpreview.run({operation: {
+  const applied = await apply(store, {
     type: "mergeWorks", sourceWorkIds: ["linked", "orphan"], targetWorkId: "target",
-  }}, recentAdmin());
-  const works = preview.changes
+  });
+  const works = applied.changes
     .filter(({kind, action}) => kind === "work" && action === "update")
     .map((change) => [change.after?.canonicalTitle, change.after?.status, change.after?.mergedInto ?? null, change.after?.mergedFrom])
     .sort();
@@ -715,12 +676,7 @@ test("merging works keeps old personal links one-hop while moving editions and i
     sourceWorkIds: ["source-work"],
     targetWorkId: "target-work",
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId,
-    operation,
-    expected: preview.expected,
-  }, recentAdmin());
+  const applied = await apply(store, operation);
   assert.equal(store.rows.get("works/source-work")?.status, "merged");
   assert.equal(store.rows.get("works/source-work")?.mergedInto, "target-work");
   assert.deepEqual(store.rows.get("works/target-work")?.mergedFrom, ["source-work"]);
@@ -754,7 +710,7 @@ test("an admin read that fails is still audited", async (t) => {
   const store = installCatalogStore(t);
   store.write(store.ref("works/corrupt-work"), activeWork("Corrupt", {status: "invented"}));
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: {
+    apply(store, {
       type: "editWork",
       workId: "corrupt-work",
       status: "active",
@@ -767,7 +723,7 @@ test("an admin read that fails is still audited", async (t) => {
         fiction: true,
         language: "",
       },
-    }}, recentAdmin()),
+    }),
     (error) => hasCode(error, "failed-precondition"),
   );
   assert.equal(store.rows.get("adminAudit/view-audit")?.uid, adminUid);
@@ -800,22 +756,16 @@ test("work operations resolve a merged author id to its survivor", async (t) => 
     },
     books: [],
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  // The alias and its survivor are both versioned (each document once):
-  // the plan is stale if either moves under the preview.
-  assert.equal(preview.expected.catalog.filter(({kind}) => kind === "author").length, 2);
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
+  await apply(store, operation);
   assert.deepEqual(store.rows.get("works/aliased-work")?.authorIds, ["ada-author"]);
 
   store.write(store.ref("catalogAuthors/ada-author"), {
     ...store.rows.get("catalogAuthors/ada-author"), status: "merged", mergedInto: "elsewhere",
   });
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: {
+    apply(store, {
       ...operation, workId: "chained-work", work: {...operation.work, authorIds: ["ada-alias"]},
-    }}, recentAdmin()),
+    }),
     (error) => hasCode(error, "failed-precondition") && messageMatches(error, /not one hop/),
   );
 });
@@ -840,15 +790,11 @@ test("an admin link without an edition mints one per book and reuses it on a rel
   };
   const editionId = `edition_${createHash("sha256")
     .update("edition\0target-work\0reader/book-one").digest("hex").slice(0, 24)}`;
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const applied = await apply(store, operation);
   assert.deepEqual(
-    preview.changes.map(({kind, action}) => `${kind}:${action}`).sort(),
+    applied.changes.map(({kind, action}) => `${kind}:${action}`).sort(),
     ["book:update", "edition:create", "isbn:create"],
   );
-  assert.equal(preview.expected.catalog.some(({kind, exists}) => kind === "edition" && !exists), true);
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
   const minted = store.rows.get(`editions/${editionId}`);
   assert.equal(minted?.workId, "target-work");
   assert.equal(minted?.isbn13, "9780441478125");
@@ -864,16 +810,10 @@ test("an admin link without an edition mints one per book and reuses it on a rel
 
   // Unlink, then the same link again: the edition is reused, not duplicated.
   const unlink = {...operation, target: null};
-  const unlinkPreview = await deployed.admin.catalogpreview.run({operation: unlink}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: unlinkPreview.operationId, operation: unlink, expected: unlinkPreview.expected,
-  }, recentAdmin());
+  const unlinkApplied = await apply(store, unlink);
   assert.equal(store.rows.get(bookRef.path)?.editionId, null);
-  const relink = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const relink = await apply(store, operation);
   assert.deepEqual(relink.changes.map(({kind, action}) => `${kind}:${action}`), ["book:update"]);
-  await deployed.admin.catalogapply.run({
-    operationId: relink.operationId, operation, expected: relink.expected,
-  }, recentAdmin());
   assert.equal([...store.rows.keys()].filter((path) => path.startsWith("editions/")).length, 1);
   assert.equal(store.rows.get(bookRef.path)?.editionId, editionId);
 });
@@ -896,15 +836,15 @@ test("an admin link joins an ISBN indexed to this work and refuses one indexed e
     target: {workId: "target-work", editionId: null},
   };
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation}, recentAdmin()),
+    apply(store, operation),
     (error) => hasCode(error, "failed-precondition") &&
       detail(error, "reason") === "identifier-conflict",
   );
   store.write(store.ref("editions/other-edition"), edition("target-work", {isbn13: "9780000000002"}));
   store.write(store.ref("isbnIndex/9780000000002"), {workId: "target-work", editionId: "other-edition"});
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const applied = await apply(store, operation);
   assert.deepEqual(
-    preview.changes.map(({kind, action, after}) => [kind, action, after?.editionId]),
+    applied.changes.map(({kind, action, after}) => [kind, action, after?.editionId]),
     [["book", "update", "other-edition"]],
   );
 });
@@ -924,10 +864,7 @@ test("author and edition edits keep the creator the add-book flow recorded", asy
     authorId: "made-by-reader",
     author: {canonicalName: "Octavia E. Butler", alternateNames: [], sortName: "Butler", kind: "person"},
   };
-  const authorPreview = await deployed.admin.catalogpreview.run({operation: authorEdit}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: authorPreview.operationId, operation: authorEdit, expected: authorPreview.expected,
-  }, recentAdmin());
+  const authorApplied = await apply(store, authorEdit);
   assert.equal(store.rows.get("catalogAuthors/made-by-reader")?.createdBy, "reader");
   assert.equal(store.rows.get("catalogAuthors/made-by-reader")?.canonicalName, "Octavia E. Butler");
   const editionEdit = {
@@ -939,10 +876,7 @@ test("author and edition edits keep the creator the add-book flow recorded", asy
       translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
     },
   };
-  const editionPreview = await deployed.admin.catalogpreview.run({operation: editionEdit}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: editionPreview.operationId, operation: editionEdit, expected: editionPreview.expected,
-  }, recentAdmin());
+  const editionApplied = await apply(store, editionEdit);
   assert.equal(store.rows.get("editions/made-by-reader")?.createdBy, "reader");
   assert.equal(store.rows.get("editions/made-by-reader")?.title, "Renamed");
 });
@@ -954,10 +888,7 @@ test("an author the console creates records the operator; an author without a cr
     authorId: "made-by-operator",
     author: {canonicalName: "Ursula K. Le Guin", alternateNames: [], sortName: "Le Guin", kind: "person"},
   };
-  const preview = await deployed.admin.catalogpreview.run({operation: created}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation: created, expected: preview.expected,
-  }, recentAdmin());
+  const applied = await apply(store, created);
   assert.equal(store.rows.get("catalogAuthors/made-by-operator")?.createdBy, adminUid);
 
   const now = Timestamp.fromMillis(1000);
@@ -971,10 +902,7 @@ test("an author the console creates records the operator; an author without a cr
     authorId: "legacy",
     author: {canonicalName: "Legacy Author", alternateNames: ["L. Author"], sortName: "Author", kind: "person"},
   };
-  const editPreview = await deployed.admin.catalogpreview.run({operation: edit}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: editPreview.operationId, operation: edit, expected: editPreview.expected,
-  }, recentAdmin());
+  const editApplied = await apply(store, edit);
   assert.equal(store.rows.get("catalogAuthors/legacy")?.createdBy, undefined);
   assert.deepEqual(store.rows.get("catalogAuthors/legacy")?.alternateNames, ["L. Author"]);
 });
@@ -991,10 +919,7 @@ test("an edition the console creates from nothing records the operator", async (
       translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
     },
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
+  const applied = await apply(store, operation);
   assert.equal(store.rows.get("editions/made-by-operator")?.createdBy, adminUid);
 });
 
@@ -1003,7 +928,7 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
   store.write(store.ref("works/seen-work"), activeWork("Seen Work"));
   store.write(store.ref("works/other-work"), activeWork("Other Work"));
   const marked = await deployed.admin.review.run(
-    {kind: "work", ids: ["seen-work", "other-work"], reviewed: true}, recentAdmin(),
+    {kind: "work", ids: ["seen-work", "other-work"], reviewed: true}, operator(),
   );
   assert.deepEqual(marked, {updated: 2});
   const seen = store.rows.get("works/seen-work");
@@ -1023,15 +948,12 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
       language: "",
     },
   };
-  const preview = await deployed.admin.catalogpreview.run({operation: edit}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation: edit, expected: preview.expected,
-  }, recentAdmin());
+  const applied = await apply(store, edit);
   assert.ok(store.rows.get("works/seen-work")?.reviewedAt instanceof Timestamp);
   assert.deepEqual(store.rows.get("works/seen-work")?.alternateTitles, ["Also Seen"]);
 
   const cleared = await deployed.admin.review.run(
-    {kind: "work", ids: ["seen-work"], reviewed: false}, recentAdmin(),
+    {kind: "work", ids: ["seen-work"], reviewed: false}, operator(),
   );
   assert.deepEqual(cleared, {updated: 1});
   assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
@@ -1042,13 +964,13 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
     kind: "person", status: "active", mergedFrom: [], createdBy: "reader",
     createdAt: Timestamp.fromMillis(1000), updatedAt: Timestamp.fromMillis(1000),
   });
-  await deployed.admin.review.run({kind: "author", ids: ["ada-author"], reviewed: true}, recentAdmin());
+  await deployed.admin.review.run({kind: "author", ids: ["ada-author"], reviewed: true}, operator());
   assert.ok(store.rows.get("catalogAuthors/ada-author")?.reviewedAt instanceof Timestamp);
   assert.equal(store.rows.get("catalogAuthors/ada-author")?.createdBy, "reader");
 
   // One missing id refuses the whole call; the existing one is untouched.
   await assert.rejects(
-    deployed.admin.review.run({kind: "work", ids: ["seen-work", "nowhere"], reviewed: true}, recentAdmin()),
+    deployed.admin.review.run({kind: "work", ids: ["seen-work", "nowhere"], reviewed: true}, operator()),
     (error: {code?: string}) => error.code === "not-found",
   );
   assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
@@ -1086,17 +1008,14 @@ test("merging editions aliases the sources, moves their readers' books to the su
   const operation = {
     type: "mergeEditions", workId: "sult", sourceEditionIds: ["bare"], targetEditionId: "full",
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  // The preview names the inherited fields beside the link change.
-  const bookChange = preview.changes.find(({kind, after}) => kind === "book" && after?.isbn === "9788205394810");
+  const applied = await apply(store, operation);
+  // The plan names the inherited fields beside the link change.
+  const bookChange = applied.changes.find(({kind, after}) => kind === "book" && after?.isbn === "9788205394810");
   assert.deepEqual(bookChange?.after, {
     workId: "sult", editionId: "full", matchMethod: "admin", linkedAt: 500,
     isbn: "9788205394810", coverUrl: "https://covers.test/full.jpg", publisher: "Gyldendal",
     publishedDate: "2009", language: "en", fiction: true, subjects: ["Romaner"],
   });
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
 
   // The sources, chained aliases included, redirect to the survivor, which lists them.
   assert.equal(store.rows.get("editions/bare")?.status, "merged");
@@ -1148,7 +1067,7 @@ test("merging editions aliases the sources, moves their readers' books to the su
     {type: "repointIsbn", isbn13: "9788205394810", editionId: "bare"},
   ]) {
     await assert.rejects(
-      deployed.admin.catalogpreview.run({operation: refused}, recentAdmin()),
+      apply(store, refused),
       (error: {details?: {reason?: string}}) => error.details?.reason === "catalog-invariant",
       JSON.stringify(refused),
     );
@@ -1157,9 +1076,9 @@ test("merging editions aliases the sources, moves their readers' books to the su
   store.write(store.ref("works/other"), activeWork("Other"));
   store.write(store.ref("editions/elsewhere"), edition("other"));
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: {
+    apply(store, {
       type: "mergeEditions", workId: "sult", sourceEditionIds: ["elsewhere"], targetEditionId: "full",
-    }}, recentAdmin()),
+    }),
     (error: {details?: {reason?: string}}) => error.details?.reason === "catalog-invariant",
   );
 });
@@ -1194,17 +1113,14 @@ test("a work's language carries into its books unless an edition overrides or a 
     subjects: [], fiction: true, language: "sv",
   };
   const operation = {type: "editWork", workId: "sult", status: "active", work};
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
+  const applied = await apply(store, operation);
   // The books still carrying the old default, and the one that never had
   // any, follow it; the reader's own choice, the overriding edition's book
   // and the frozen account's book are not touched.
-  const bookChanges = preview.changes.filter(({kind}) => kind === "book");
+  const bookChanges = applied.changes.filter(({kind}) => kind === "book");
   assert.deepEqual(bookChanges.map(({after}) => after), [
     {language: "sv"}, {language: "sv"}, {language: "sv"},
   ]);
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
   assert.equal(store.rows.get("works/sult")?.language, "sv");
   assert.equal(store.rows.get("users/lars/books/carried")?.language, "sv");
   assert.equal(store.rows.get("users/lars/books/blank")?.language, "sv");
@@ -1216,9 +1132,7 @@ test("a work's language carries into its books unless an edition overrides or a 
   assert.equal(store.rows.get("users/lars/books/carried")?.title, "Sult");
 
   // An edit that keeps the language plans no book change at all.
-  const same = await deployed.admin.catalogpreview.run({
-    operation: {...operation, work: {...work, alternateTitles: ["Hunger"]}},
-  }, recentAdmin());
+  const same = await apply(store, {...operation, work: {...work, alternateTitles: ["Hunger"]}});
   assert.equal(same.changes.some(({kind}) => kind === "book"), false);
 
   // Dropping an edition's override hands its book to the work's default.
@@ -1229,15 +1143,12 @@ test("a work's language carries into its books unless an edition overrides or a 
       translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "", externalIds: {},
     },
   };
-  const editionPreview = await deployed.admin.catalogpreview.run({operation: editionOperation}, recentAdmin());
+  const editionApplied = await apply(store, editionOperation);
   // The edit also fills what the book left blank, here the work's fiction flag.
   assert.deepEqual(
-    editionPreview.changes.filter(({kind}) => kind === "book").map(({after}) => after),
+    editionApplied.changes.filter(({kind}) => kind === "book").map(({after}) => after),
     [{fiction: true, language: "sv"}],
   );
-  await deployed.admin.catalogapply.run({
-    operationId: editionPreview.operationId, operation: editionOperation, expected: editionPreview.expected,
-  }, recentAdmin());
   assert.equal(store.rows.get("users/lars/books/override")?.language, "sv");
   assert.equal(store.rows.get("editions/english")?.language, "");
 });
@@ -1259,8 +1170,8 @@ test("a minted edition overrides the work's language only where the book's diffe
     books: [{uid: "lars", bookId: "same"}, {uid: "lars", bookId: "differs"}, {uid: "lars", bookId: "none"}],
     target: {workId: "sult", editionId: null},
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  const minted = preview.changes.filter(({kind, action}) => kind === "edition" && action === "create");
+  const applied = await apply(store, operation);
+  const minted = applied.changes.filter(({kind, action}) => kind === "edition" && action === "create");
   assert.deepEqual(minted.map(({after}) => [after?.title, after?.language]), [
     ["Sult same", ""], ["Sult differs", "en"], ["Sult none", ""],
   ]);
@@ -1268,7 +1179,7 @@ test("a minted edition overrides the work's language only where the book's diffe
   // takes the effective language of the edition it lands on, the two that
   // already carry it are left alone.
   assert.deepEqual(
-    preview.changes.filter(({kind}) => kind === "book").map(({after}) => [after?.fiction, after?.language]),
+    applied.changes.filter(({kind}) => kind === "book").map(({after}) => [after?.fiction, after?.language]),
     [[true, undefined], [true, undefined], [true, "no"]],
   );
 });
@@ -1292,17 +1203,14 @@ test("linking a book to an existing edition fills what its reader left blank", a
     type: "linkBooks", books: [{uid: "magnus", bookId: "sult"}],
     target: {workId: "sult", editionId: "gyldendal"},
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  const book = preview.changes.find(({kind}) => kind === "book");
+  const applied = await apply(store, operation);
+  const book = applied.changes.find(({kind}) => kind === "book");
   const {linkedAt: _linked, ...after} = book?.after ?? {};
   assert.deepEqual(after, {
     workId: "sult", editionId: "gyldendal", matchMethod: "admin",
     isbn: "9788205394810", coverUrl: "https://covers.test/gyldendal.jpg", publishedDate: "2009",
     fiction: true, subjects: ["Romaner"],
   });
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
   const stored = store.rows.get("users/magnus/books/sult");
   assert.equal(stored?.publisher, "Own Press");
   assert.equal(stored?.language, "nn");
@@ -1354,8 +1262,8 @@ test("merging editions gives the survivor what it lacks, moves identifiers with 
   const operation = {
     type: "mergeEditions", workId: "sult", sourceEditionIds: ["rich", "other"], targetEditionId: "bare",
   };
-  const preview = await deployed.admin.catalogpreview.run({operation}, recentAdmin());
-  const survivor = preview.changes.find(({kind, after}) =>
+  const applied = await apply(store, operation);
+  const survivor = applied.changes.find(({kind, after}) =>
     kind === "edition" && after?.status === "active" && after?.publisher === "Gyldendal");
   const {updatedAt: _stamped, ...survivorAfter} = survivor?.after ?? {};
   assert.deepEqual(survivorAfter, {
@@ -1365,9 +1273,6 @@ test("merging editions gives the survivor what it lacks, moves identifiers with 
     externalIds: {"open-library": "OL1M", "google-books": "abc"},
     status: "active", mergedInto: null, mergedFrom: ["rich", "other"],
   });
-  await deployed.admin.catalogapply.run({
-    operationId: preview.operationId, operation, expected: preview.expected,
-  }, recentAdmin());
 
   // The survivor keeps its own record and took the first source's values;
   // the second source's publisher lost to the first's, and its ISBN stayed
@@ -1426,10 +1331,7 @@ test("merging editions gives the survivor what it lacks, moves identifiers with 
   store.write(store.ref("isbnIndex/9781000000009"), {workId: "sult", editionId: "keeps"});
   store.write(store.ref("isbnIndex/9781000000010"), {workId: "sult", editionId: "donor"});
   const keep = {type: "mergeEditions", workId: "sult", sourceEditionIds: ["donor"], targetEditionId: "keeps"};
-  const keepPreview = await deployed.admin.catalogpreview.run({operation: keep}, recentAdmin());
-  await deployed.admin.catalogapply.run({
-    operationId: keepPreview.operationId, operation: keep, expected: keepPreview.expected,
-  }, recentAdmin());
+  const keepApplied = await apply(store, keep);
   assert.equal(store.rows.get("editions/keeps")?.isbn13, "9781000000009");
   assert.equal(store.rows.get("editions/donor")?.isbn13, "9781000000010");
   assert.deepEqual(store.rows.get("isbnIndex/9781000000010"), {workId: "sult", editionId: "donor"});
@@ -1446,10 +1348,10 @@ test("merging works gives the survivor the cover, fiction flag, language and sub
   store.write(store.ref("works/second"), activeWork("Second", {
     coverUrl: "https://covers.test/second.jpg", fiction: false, language: "en", subjects: ["Hunger"],
   }));
-  const preview = await deployed.admin.catalogpreview.run({operation: {
+  const applied = await apply(store, {
     type: "mergeWorks", sourceWorkIds: ["first", "second"], targetWorkId: "target",
-  }}, recentAdmin());
-  const target = preview.changes.find(({kind, after}) => kind === "work" && after?.canonicalTitle === "Target");
+  });
+  const target = applied.changes.find(({kind, after}) => kind === "work" && after?.canonicalTitle === "Target");
   assert.equal(target?.after?.coverUrl, "https://covers.test/first.jpg");
   assert.equal(target?.after?.fiction, true);
   assert.equal(target?.after?.language, "no");
@@ -1463,9 +1365,9 @@ test("merging works gives the survivor the cover, fiction flag, language and sub
   store.write(store.ref("works/donor"), activeWork("Donor", {
     coverUrl: "https://covers.test/donor.jpg", fiction: true, language: "no", subjects: ["Own", "Theirs"],
   }));
-  const kept = await deployed.admin.catalogpreview.run({operation: {
+  const kept = await apply(store, {
     type: "mergeWorks", sourceWorkIds: ["donor"], targetWorkId: "full",
-  }}, recentAdmin());
+  });
   const full = kept.changes.find(({kind, after}) => kind === "work" && after?.canonicalTitle === "Full");
   assert.equal(full?.after?.coverUrl, "https://covers.test/full.jpg");
   assert.equal(full?.after?.fiction, false);
@@ -1501,7 +1403,7 @@ test("an edition edit adds, changes or drops its ISBN with the index row, and fi
   });
 
   // Adding an ISBN creates its index row and the books inherit what they lacked.
-  const added = await deployed.admin.catalogpreview.run({operation: edit("9788205394810")}, recentAdmin());
+  const added = await apply(store, edit("9788205394810"));
   assert.deepEqual(
     added.changes.filter(({kind}) => kind === "isbn").map(({action, after}) => [action, after]),
     [["create", {workId: "sult", editionId: "bare"}]],
@@ -1513,9 +1415,6 @@ test("an edition edit adds, changes or drops its ISBN with the index row, and fi
       {publishedDate: "2009", fiction: true, language: "no"},
     ],
   );
-  await deployed.admin.catalogapply.run({
-    operationId: added.operationId, operation: edit("9788205394810"), expected: added.expected,
-  }, recentAdmin());
   assert.equal(store.rows.get("editions/bare")?.isbn13, "9788205394810");
   assert.deepEqual(store.rows.get("isbnIndex/9788205394810"), {workId: "sult", editionId: "bare"});
   assert.equal(store.rows.get("users/magnus/books/blank")?.isbn, "9788205394810");
@@ -1525,36 +1424,30 @@ test("an edition edit adds, changes or drops its ISBN with the index row, and fi
   assert.equal(store.rows.get("users/magnus/books/own")?.publishedDate, "2009");
 
   // The same edit again plans nothing for the books.
-  const same = await deployed.admin.catalogpreview.run({operation: edit("9788205394810")}, recentAdmin());
+  const same = await apply(store, edit("9788205394810"));
   assert.equal(same.changes.some(({kind}) => kind === "book"), false);
   assert.equal(same.changes.some(({kind}) => kind === "isbn"), false);
 
   // Changing it drops the old row and creates the new one.
-  const changed = await deployed.admin.catalogpreview.run({operation: edit("9788203368332")}, recentAdmin());
+  const changed = await apply(store, edit("9788203368332"));
   assert.deepEqual(
     changed.changes.filter(({kind}) => kind === "isbn").map(({action, after}) => [action, after]),
     [["delete", null], ["create", {workId: "sult", editionId: "bare"}]],
   );
-  await deployed.admin.catalogapply.run({
-    operationId: changed.operationId, operation: edit("9788203368332"), expected: changed.expected,
-  }, recentAdmin());
   assert.equal(store.rows.has("isbnIndex/9788205394810"), false);
   assert.deepEqual(store.rows.get("isbnIndex/9788203368332"), {workId: "sult", editionId: "bare"});
 
   // An ISBN another edition holds is refused: that is repointIsbn's job.
   await assert.rejects(
-    deployed.admin.catalogpreview.run({operation: edit("9780441478125")}, recentAdmin()),
+    apply(store, edit("9780441478125")),
     (error) => hasCode(error, "failed-precondition") && detail(error, "reason") === "identifier-conflict",
   );
 
   // Dropping it deletes the row and leaves the edition without one.
-  const dropped = await deployed.admin.catalogpreview.run({operation: edit(null)}, recentAdmin());
+  const dropped = await apply(store, edit(null));
   assert.deepEqual(
     dropped.changes.filter(({kind}) => kind === "isbn").map(({action}) => action), ["delete"],
   );
-  await deployed.admin.catalogapply.run({
-    operationId: dropped.operationId, operation: edit(null), expected: dropped.expected,
-  }, recentAdmin());
   assert.equal(store.rows.get("editions/bare")?.isbn13, null);
   assert.equal(store.rows.has("isbnIndex/9788203368332"), false);
 });

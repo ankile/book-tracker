@@ -245,52 +245,12 @@ export type AdminCatalogOperation =
     editionId: string;
   };
 
-export interface AdminCatalogExpectedDocument {
-  kind: 'author' | 'work' | 'edition' | 'isbn' | 'external-id' | 'title-index';
-  id: string;
-  exists: boolean;
-  updatedAt: number | null;
-}
-
-export interface AdminCatalogExpectedBook extends AdminCatalogBookTarget {
-  workId: string | null;
-  editionId: string | null;
-  matchMethod: CatalogMatchMethod | null;
-  linkedAt: number | null;
-  decisionIsbn13: string | null;
-}
-
-export interface AdminCatalogExpectedState {
-  catalog: AdminCatalogExpectedDocument[];
-  books: AdminCatalogExpectedBook[];
-}
-
-export type AdminCatalogDiffValue = Record<string, unknown> | null;
-
-export interface AdminCatalogChange {
-  kind: 'author' | 'work' | 'edition' | 'isbn' | 'external-id' | 'book' | 'title-index';
-  id: string;
-  action: 'create' | 'update' | 'delete';
-  before: AdminCatalogDiffValue;
-  after: AdminCatalogDiffValue;
-}
-
-export interface AdminCatalogPreviewRequest {
-  operation: AdminCatalogOperation;
-}
-
-export interface AdminCatalogPreviewResponse {
-  operationId: string;
-  operationHash: string;
-  expected: AdminCatalogExpectedState;
-  changes: AdminCatalogChange[];
-  touchedDocuments: number;
-}
-
+// admin.catalogapply: one operation, planned and applied in one
+// transaction. The client mints the operation id, so a retried call after a
+// lost response replays as the same operation instead of a second one.
 export interface AdminCatalogApplyRequest {
   operationId: string;
   operation: AdminCatalogOperation;
-  expected: AdminCatalogExpectedState;
 }
 
 export interface AdminCatalogApplyResponse {

@@ -5,17 +5,14 @@ import {AggregateField, getFirestore, Timestamp} from "firebase-admin/firestore"
 import {ADMIN_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {
   AdminCatalogApplyRequest,
-  AdminCatalogPreviewRequest,
   AdminReviewRequest,
   DecodeFailure,
   decodeAdminCatalogApplyRequest,
-  decodeAdminCatalogPreviewRequest,
   decodeAdminReviewRequest,
   decodeEmptyCallableRequest,
 } from "./decoders";
 import {
   applyAdminCatalogOperation,
-  previewAdminCatalogOperation,
   reviewCatalogRecords,
 } from "./adminCatalog";
 import {logAppCheckPresence} from "./appCheck";
@@ -148,7 +145,7 @@ function adminCallable<Request>(
     _request: Request,
     _identity: AdminIdentity,
   ) => Promise<unknown>,
-  options: {recentAuth?: boolean; auditView?: boolean} = {},
+  options: {auditView?: boolean} = {},
 ): functions.HttpsFunction {
   return functions
     .region("europe-west1")
@@ -167,18 +164,6 @@ function adminCallable<Request>(
     .https.onCall(async (data: unknown, context) => {
       logAppCheckPresence(endpointName, context);
       const identity = await requireAdmin(context);
-      if (options.recentAuth === true) {
-        const authTime = context.auth?.token.auth_time;
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        if (typeof authTime !== "number" || !Number.isSafeInteger(authTime) ||
-            authTime < nowSeconds - 900 || authTime > nowSeconds + 60) {
-          throw new functions.https.HttpsError(
-            "failed-precondition",
-            "Recent authentication required.",
-            {reason: "recent-auth-required", maxAgeSeconds: 900},
-          );
-        }
-      }
       const request = decode(data, invalidArgument);
       // Before the handler, not after: a handler that throws half-way
       // through a cross-user read has still read, and an unaudited read is
@@ -393,23 +378,20 @@ exports.overview = adminCallable("admin.overview", decodeEmptyCallableRequest, a
   };
 }, {auditView: true});
 
-exports.catalogpreview = adminCallable<AdminCatalogPreviewRequest>(
-  "admin.catalogpreview",
-  decodeAdminCatalogPreviewRequest,
-  async ({operation}, identity) => previewAdminCatalogOperation(db, identity.uid, operation),
-  {auditView: true},
-);
-
+// One callable plans and applies an operation in one transaction. It reads
+// readers' books to plan, so the view audit lands before the handler like
+// any other cross-user read; the apply itself writes its own
+// catalog-mutation record.
 exports.catalogapply = adminCallable<AdminCatalogApplyRequest>(
   "admin.catalogapply",
   decodeAdminCatalogApplyRequest,
   async (request, identity) => applyAdminCatalogOperation(db, identity.uid, request),
-  {recentAuth: true},
+  {auditView: true},
 );
 
-// A review mark is operator bookkeeping, not a catalog edit: no recent-auth
-// gate and no audit record, but the same App Check, operator and
-// whole-record validation as everything else here.
+// A review mark is operator bookkeeping, not a catalog edit: no audit
+// record, but the same App Check, operator and whole-record validation as
+// everything else here.
 exports.review = adminCallable<AdminReviewRequest>(
   "admin.review",
   decodeAdminReviewRequest,

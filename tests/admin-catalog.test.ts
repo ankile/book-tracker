@@ -10,7 +10,6 @@ import {
   classifyAdminCatalogFailure,
   decodeAdminCatalogApplyResponse,
   decodeAdminReviewResponse,
-  decodeAdminCatalogPreviewResponse,
   externalIndexId,
   parseAdminBookTargets,
   parseAdminExternalIds,
@@ -72,38 +71,19 @@ test('a console-created author gets the id the add-book flow would mint', async 
   assert.notEqual(await catalogAuthorIdFor('Ursula Le Guin'), expected);
 });
 
-test('admin preview and apply decoders retain exact before/after differences', () => {
-  const expected = {
-    catalog: [{kind: 'work', id: 'work', exists: true, updatedAt: 1000}],
-    books: [{
-      uid: 'user', bookId: 'book', workId: null, editionId: null,
-      matchMethod: null, linkedAt: null, decisionIsbn13: null,
-    }],
-  };
-  const preview = decodeAdminCatalogPreviewResponse({
-    operationId: 'operation', operationHash: 'hash', expected,
-    changes: [{
-      kind: 'book', id: 'user/book', action: 'update',
-      before: {workId: null}, after: {workId: 'work', editionId: null},
-    }],
-    touchedDocuments: 2,
-  });
-  assert.deepEqual(preview.changes[0].after, {workId: 'work', editionId: null});
+test('the apply response decoder accepts exactly the applied shape', () => {
   assert.deepEqual(decodeAdminCatalogApplyResponse({
     operationId: 'operation', applied: true, touchedDocuments: 2,
   }), {operationId: 'operation', applied: true, touchedDocuments: 2});
-  assert.throws(() => decodeAdminCatalogPreviewResponse({
-    ...preview, changes: [{...preview.changes[0], after: {bad: Number.NaN}}],
-  }), /finite number/);
+  assert.throws(() => decodeAdminCatalogApplyResponse({
+    operationId: 'operation', applied: false, touchedDocuments: 2,
+  }), /applied: expected true/);
+  assert.throws(() => decodeAdminCatalogApplyResponse({
+    operationId: 'operation', applied: true, touchedDocuments: 2, changes: [],
+  }), /expected only applied, operationId, touchedDocuments/);
 });
 
 test('admin catalog error classifier recognizes only dedicated code and detail pairs', () => {
-  assert.deepEqual(classifyAdminCatalogFailure(new FunctionsError(
-    'failed-precondition', 'Sign in again', {reason: 'recent-auth-required', maxAgeSeconds: 900},
-  )), {kind: 'recent-auth-required', maxAgeSeconds: 900});
-  assert.deepEqual(classifyAdminCatalogFailure(new FunctionsError(
-    'aborted', 'Stale', {reason: 'stale-preview'},
-  )), {kind: 'stale-preview'});
   assert.deepEqual(classifyAdminCatalogFailure(new FunctionsError(
     'resource-exhausted', 'Large', {reason: 'operation-too-large', maxTouchedDocuments: 200},
   )), {kind: 'operation-too-large', maxTouchedDocuments: 200});
@@ -111,9 +91,12 @@ test('admin catalog error classifier recognizes only dedicated code and detail p
     'resource-exhausted', 'Full', {reason: 'catalog-capacity', collection: 'works', maximum: 200},
   )), {kind: 'catalog-capacity', collection: 'works', maximum: 200});
   assert.deepEqual(classifyAdminCatalogFailure(new FunctionsError(
-    'failed-precondition', 'Wrong pairing', {reason: 'stale-preview'},
+    'failed-precondition', 'Wrong pairing', {reason: 'operation-too-large', maxTouchedDocuments: 200},
   )), {kind: 'unknown'});
-  assert.deepEqual(classifyAdminCatalogFailure(new Error('recent-auth-required')), {kind: 'unknown'});
+  assert.deepEqual(classifyAdminCatalogFailure(new FunctionsError(
+    'resource-exhausted', 'No detail', {reason: 'catalog-capacity'},
+  )), {kind: 'unknown'});
+  assert.deepEqual(classifyAdminCatalogFailure(new Error('operation-too-large')), {kind: 'unknown'});
 });
 
 test('admin form parsers accept bounded line-oriented targets and metadata', () => {
