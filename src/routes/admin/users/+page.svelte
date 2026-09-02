@@ -1,5 +1,7 @@
 <script lang="ts">
+  import '$lib/components/admin/admin.css';
   import { onMount } from 'svelte';
+  import AdminHeader from '$lib/components/admin/AdminHeader.svelte';
   import { feedNotes as feedNotesFor, readFailed as readFailedFor } from '$lib/utils/adminFeed.ts';
   import { groupIssues } from '$lib/utils/adminFeed.ts';
   import { overviewCache } from '$lib/admin.ts';
@@ -68,231 +70,31 @@
   }
 </script>
 
-<style lang="scss">
-  .admin-container {
-    max-width: 1280px;
-    margin: 0 auto;
-    padding: 2rem;
-    text-align: left;
-    color: #273331;
-  }
-
-  h1 {
-    margin: 0.5rem 0;
-  }
-
-  .toolbar {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin: -0.75rem 0 1.5rem;
-  }
-
-  .toolbar small { color: #697572; }
-
-  .toolbar button {
-    font: inherit;
-    padding: 0.3rem 0.7rem;
-    border: 1px solid #49736d;
-    border-radius: 4px;
-    background: white;
-    color: #244f49;
-    cursor: pointer;
-  }
-
-  .toolbar button:disabled { opacity: 0.55; cursor: default; }
-
-  nav {
-    font-size: 0.95rem;
-    color: #64706d;
-  }
-
-  nav a { color: #24635a; }
-  nav strong { color: #244f49; }
-
-  .card {
-    background: white;
-    padding: 1.25rem;
-    border-radius: 7px;
-    box-shadow: 0 2px 10px #0002;
-    margin: 1.25rem 0;
-
-    h2 {
-      font-size: 1.5rem;
-      margin: 0 0 0.25rem 0;
-    }
-
-    .card-subtext {
-      font-size: 0.9rem;
-      color: #64706d;
-      margin-bottom: 1.25rem;
-    }
-  }
-
-  .table-scroll {
-    overflow-x: auto;
-  }
-
-  /* Ten columns must fit the 1280px container without a hidden horizontal
-     scroll: compact cells, and the email column truncates with the full
-     address on hover. Narrow screens still scroll the wrapper. */
-  table {
-    width: 100%;
-    border-collapse: collapse;
-
-    th,
-    td {
-      padding: 0.5rem 0.55rem;
-      text-align: left;
-      border-bottom: 1px solid #dfe5e3;
-      white-space: nowrap;
-    }
-
-    th {
-      font-size: 0.76rem;
-      color: #697572;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      font-weight: 600;
-    }
-
-    td {
-      font-size: 0.9rem;
-      color: #273331;
-    }
-
-    td.email {
-      max-width: 230px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    tr:last-child td {
-      border-bottom: none;
-    }
-
-    tr:hover {
-      background-color: #f9f9f9;
-    }
-  }
-
-  td.message {
-    white-space: normal;
-    min-width: 240px;
-    color: #555;
-  }
-
-  .badge-anomaly,
-  .badge-unverified,
-  .badge-malformed {
-    display: inline-block;
-    margin-left: 0.5rem;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    background: #fff3cd;
-    color: #664d03;
-    font-size: 0.75rem;
-    font-weight: 600;
-  }
-
-  .badge-unverified {
-    background: #e9ecef;
-    color: #495057;
-    cursor: help;
-  }
-
-  .badge-malformed {
-    background: #f8d7da;
-    color: #842029;
-  }
-
-  .truncated {
-    margin: -0.75rem 0 1.25rem 0;
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    background: #fff3cd;
-    color: #664d03;
-    font-size: 0.9rem;
-  }
-
-  .level {
-    display: inline-block;
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-
-    &.warn {
-      background: #fff3cd;
-      color: #664d03;
-    }
-
-    &.error {
-      background: #f8d7da;
-      color: #842029;
-    }
-  }
-
-  .empty {
-    color: #3d6d58;
-    font-size: 1.1rem;
-    margin: 0;
-  }
-
-  .repeat {
-    display: inline-block;
-    margin-left: 0.4rem;
-    padding: 0.05rem 0.4rem;
-    border-radius: 4px;
-    background: #e9ecef;
-    color: #495057;
-    font-size: 0.75rem;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .unreadable {
-    color: #b02a37;
-    font-size: 1.1rem;
-  }
-
-  .loading {
-    color: #999;
-    padding: 2rem;
-  }
-
-  @media (max-width: 768px) {
-    .admin-container {
-      padding: 1rem;
-    }
-
-    .card {
-      padding: 1.25rem;
-    }
-  }
-</style>
-
 <svelte:head><title>Accounts and issues · Book Tracker</title></svelte:head>
 
-<div class="admin-container">
-  <nav><a href="/admin">Catalog</a> · <strong>Accounts and issues</strong></nav>
-  <h1>Accounts and issues</h1>
-  <p class="toolbar">
-    <button type="button" disabled={refreshing} onclick={() => void load(true)}>{refreshing && overview ? 'Refreshing…' : refreshing ? 'Loading…' : 'Refresh'}</button>
-    {#if loadedAt !== null}<small>as of {utc(loadedAt)} UTC</small>{/if}
-  </p>
+<main class="admin-console">
+  <AdminHeader active="accounts">
+    {#snippet status()}
+      {#if loadedAt !== null}<span>As of {utc(loadedAt)} UTC</span>{/if}
+      <button type="button" disabled={refreshing} onclick={() => void load(true)}>{refreshing && overview ? 'Refreshing…' : refreshing ? 'Loading…' : 'Refresh'}</button>
+    {/snippet}
+  </AdminHeader>
+  <div class="page-title">
+    <div>
+      <h1>Accounts and issues</h1>
+      <p class="lead">Every account with its activity, and the warnings and errors the app has reported. Read from the server when this page opens, never prefetched.</p>
+    </div>
+  </div>
 
   {#if overview}
-    <div class="card">
-      <h2>Users</h2>
-      <p class="card-subtext">
-        {overview.users.length}
-        {overview.users.length === 1 ? 'user' : 'users'}, sorted by last
-        active (the newest of sign-in, book edit and reading session). Last
-        read counts reading sessions only. All times UTC.
+    <section class="card" aria-labelledby="users-heading">
+      <h2 id="users-heading">Users <span>{overview.users.length}</span></h2>
+      <p>
+        Sorted by last active (the newest of sign-in, book edit and reading
+        session). Last read counts reading sessions only. All times UTC.
       </p>
       <div class="table-scroll">
-        <table>
+        <table class="compact">
           <thead>
             <tr>
               <th>Email</th>
@@ -313,31 +115,30 @@
                 <td class="email" title={u.email ?? u.uid}>
                   {u.email ?? u.uid}
                   {#if u.anomaly}
-                    <span class="badge-anomaly">{u.anomaly}</span>
+                    <span class="badge warn">{u.anomaly}</span>
                   {/if}
                 </td>
-                <td>{utcDay(u.signedUpAt)}</td>
-                <td>{utc(u.lastSignInAt)}</td>
-                <td>{utc(u.lastActiveAt)}</td>
-                <td>{utc(u.lastReadAt)}</td>
-                <td>{u.books}</td>
-                <td>{u.finishedBooks}</td>
-                <td>{u.readingSessions}</td>
-                <td>{u.pagesRead.toLocaleString()}</td>
-                <td>{Math.round(u.timeRead / 60)}</td>
+                <td class="numeric">{utcDay(u.signedUpAt)}</td>
+                <td class="numeric">{utc(u.lastSignInAt)}</td>
+                <td class="numeric">{utc(u.lastActiveAt)}</td>
+                <td class="numeric">{utc(u.lastReadAt)}</td>
+                <td class="numeric">{u.books}</td>
+                <td class="numeric">{u.finishedBooks}</td>
+                <td class="numeric">{u.readingSessions}</td>
+                <td class="numeric">{u.pagesRead.toLocaleString()}</td>
+                <td class="numeric">{Math.round(u.timeRead / 60)}</td>
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
 
-    <div class="card">
-      <h2>Recent issues</h2>
-      <p class="card-subtext">
+    <section class="card" aria-labelledby="issues-heading">
+      <h2 id="issues-heading">Recent issues <span>{overview.issues.length}</span></h2>
+      <p>
         Warnings and errors from the last {overview.issueWindowDays} days,
-        newest first.{#if caps}
-          Each account is read separately and shows at most
+        newest first. {#if caps}Each account is read separately and shows at most
           {caps.perAccount} rows, and the feed cut is shared evenly between
           accounts, so one account's volume never hides another's while
           the accounts with rows fit the feed.{/if} Anonymous rows are no longer written;
@@ -346,7 +147,7 @@
         retention).
       </p>
       {#if feedNotes.length > 0}
-        <div class="truncated">
+        <div class="notice warning">
           <strong>Incomplete feed:</strong>
           <ul>
             {#each feedNotes as note}
@@ -356,12 +157,12 @@
         </div>
       {/if}
       {#if overview.issues.length === 0 && readFailed}
-        <p class="unreadable">Nothing could be shown for this window — see above.</p>
+        <div class="notice error">Nothing could be shown for this window — see above.</div>
       {:else if overview.issues.length === 0}
         <p class="empty">No warnings or errors — all clear.</p>
       {:else}
         <div class="table-scroll">
-          <table>
+          <table class="compact">
             <thead>
               <tr>
                 <th>Time</th>
@@ -375,20 +176,20 @@
             <tbody>
               {#each issueGroups as {row: issue, count, earliestAt} (issue.id)}
                 <tr>
-                  <td>
+                  <td class="numeric">
                     {utcSeconds(issue.at)}
-                    {#if count > 1}<span class="repeat" title={`${count} identical rows, the earliest at ${utcSeconds(earliestAt)} UTC`}>×{count} since {utcSeconds(earliestAt).slice(11)}</span>{/if}
+                    {#if count > 1}<span class="badge help" title={`${count} identical rows, the earliest at ${utcSeconds(earliestAt)} UTC`}>×{count} since {utcSeconds(earliestAt).slice(11)}</span>{/if}
                   </td>
                   <td>
                     {issue.email}
                     {#if issue.malformed}
-                      <span class="badge-malformed">malformed row</span>
+                      <span class="badge bad">malformed row</span>
                     {:else if !issue.emailVerified && issue.uid === null}
-                      <span class="badge-unverified" title="Self-reported by an unauthenticated client; not tied to any account">unverified</span>
+                      <span class="badge help" title="Self-reported by an unauthenticated client; not tied to any account">unverified</span>
                     {/if}
                   </td>
                   <td>{issue.event}</td>
-                  <td><span class="level {issue.level}">{issue.level}</span></td>
+                  <td><span class="badge {issue.level}">{issue.level}</span></td>
                   <td>{issue.code ?? '—'}</td>
                   <td class="message">{issue.message}</td>
                 </tr>
@@ -397,13 +198,15 @@
           </table>
         </div>
       {/if}
-    </div>
+    </section>
   {:else if failed}
-    <div class="card">
+    <section class="card">
       <h2>Couldn't load the accounts</h2>
-      <p class="card-subtext">See the error banner above; Refresh retries.</p>
-    </div>
+      <p>See the error banner above; Refresh retries.</p>
+    </section>
   {:else}
-    <p class="loading">Loading…</p>
+    <section class="card loading" aria-live="polite">
+      <p>Loading the accounts and the issue feed from the server…</p>
+    </section>
   {/if}
-</div>
+</main>

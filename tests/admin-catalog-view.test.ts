@@ -46,23 +46,25 @@ const work = (overrides: Partial<AdminCatalogWorkRow> = {}): AdminCatalogWorkRow
   workId: 'work-a', canonicalTitle: 'The Left Hand of Darkness', alternateTitles: ['Left Hand'],
   authorIds: ['le-guin'], coverUrl: 'https://covers.test/a.jpg', subjects: ['Science fiction'],
   fiction: true, status: 'active', mergedInto: null, mergedFrom: [], createdBy: null,
-  createdAt: 1000, editionCount: 1, linkedBookCount: 0, warnings: [], ...overrides,
+  createdAt: 1000, reviewedAt: null, activityAt: 1000, editionCount: 1, linkedBookCount: 0, warnings: [],
+  ...overrides,
 });
 const author = (overrides: Partial<AdminCatalogAuthorRow> = {}): AdminCatalogAuthorRow => ({
   authorId: 'le-guin', canonicalName: 'Ursula K. Le Guin', alternateNames: ['Ursula Le Guin'],
   sortName: 'Le Guin', kind: 'person', status: 'active', mergedInto: null, mergedFrom: [],
-  createdBy: null, createdAt: 500, workCount: 1, warnings: [], ...overrides,
+  createdBy: null, createdAt: 500, reviewedAt: null, activityAt: 500, workCount: 1, warnings: [], ...overrides,
 });
 const edition = (overrides: Partial<AdminCatalogEditionRow> = {}): AdminCatalogEditionRow => ({
   editionId: 'edition-a', workId: 'work-a', isbn13: '9780441478125',
   title: 'The Left Hand of Darkness', publisher: 'Ace', publishedDate: '1987', language: 'en',
   translatorNames: [], format: 'full', suggestedPageCount: 304, coverUrl: '',
-  externalIds: {'open-library': 'OL1M', 'google-books': 'abc'}, createdBy: null, ...overrides,
+  externalIds: {'open-library': 'OL1M', 'google-books': 'abc'}, createdBy: null, createdAt: 1000,
+  status: 'active', mergedInto: null, mergedFrom: [], ...overrides,
 });
 const book = (overrides: Partial<AdminCatalogBookRow> = {}): AdminCatalogBookRow => ({
   uid: 'reader', bookId: 'book-1', title: 'Left Hand', authorNames: ['Ursula K. Le Guin'],
   isbn13: null, rawIsbn: null, pageCount: 300, publisher: '', coverUrl: '', workId: 'work-a',
-  editionId: null, anomaly: null, ...overrides,
+  editionId: null, linkedAt: null, anomaly: null, ...overrides,
 });
 
 function operationOf<T extends AdminCatalogOperation['type']>(
@@ -321,9 +323,9 @@ test('an edition merge names the work, its sources and one survivor that is not 
   const draft = mergeEditionsDraft('work-a', ['edition-b', 'edition-c']);
   assert.equal(operationTitle(draft), 'Merge editions');
   assert.throws(() => buildOperation(draft), /Surviving edition ID/);
-  assert.deepEqual(buildOperation({...draft, targetEditionId: 'edition-a'}), {
+  assert.deepEqual(buildOperation(mergeEditionsDraft('work-a', ['edition-b', 'edition-c'], 'edition-a')), {
     type: 'mergeEditions', workId: 'work-a', sourceEditionIds: ['edition-b', 'edition-c'], targetEditionId: 'edition-a',
   });
-  assert.throws(() => buildOperation({...draft, targetEditionId: 'edition-b'}), /cannot also be a source/);
+  assert.throws(() => buildOperation(mergeEditionsDraft('work-a', ['edition-b', 'edition-c'], 'edition-b')), /cannot also be a source/);
   assert.throws(() => buildOperation(mergeEditionsDraft('work-a', [], 'edition-a')), /at least one source edition ID/);
 });

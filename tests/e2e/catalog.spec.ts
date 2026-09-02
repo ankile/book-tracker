@@ -592,13 +592,14 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       // The edition the title-only save minted is listed with its reader's
       // email as creator, beside the seeded one.
       await expect(page.getByRole('row').filter({hasText: 'Left Hand of Darkness edition'})).toHaveCount(0);
-      await expect(page.getByRole('cell', {name: normalEmail})).toBeVisible();
+      const editionsTable = page.getByRole('region', {name: /^Editions/});
+      await expect(editionsTable.getByRole('cell', {name: normalEmail, exact: true})).toBeVisible();
 
       // Two records of one edition merge: the reader's bare minted edition
       // becomes an alias of the seeded one, the reader's book moves to the
       // survivor and inherits the ISBN, cover and publisher it left blank,
       // while its own page count stays.
-      await page.getByRole('row').filter({hasText: normalEmail}).getByRole('button', {name: 'Merge into…', exact: true}).click();
+      await editionsTable.getByRole('row').filter({hasText: normalEmail}).getByRole('button', {name: 'Merge into…', exact: true}).click();
       const mergeDialog = page.getByRole('dialog', {name: 'Merge editions'});
       await expect(mergeDialog).toBeVisible();
       await mergeDialog.getByLabel('Surviving edition').selectOption(editionId);
@@ -610,7 +611,7 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await expect(page.getByText(/Applied .* documents changed/)).toBeVisible();
       await expect(mergeDialog).toBeHidden();
       await expect(page.getByRole('heading', {name: 'Absorbed editions'})).toBeVisible();
-      await expect(page.getByRole('row').filter({hasText: normalEmail})).toHaveCount(0);
+      await expect(editionsTable.getByRole('row').filter({hasText: normalEmail})).toHaveCount(0);
       const mergedBook = await waitForBookByTitle(db, normalUid, 'Left Hand of Darkness');
       expect(mergedBook.get('editionId')).toBe(editionId);
       expect(mergedBook.get('matchMethod')).toBe('admin');

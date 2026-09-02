@@ -1,5 +1,5 @@
 <script lang="ts">
-  import '$lib/components/admin/catalog.css';
+  import '$lib/components/admin/admin.css';
   import { untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -211,9 +211,9 @@
 
 <svelte:head><title>Catalog · Book Tracker</title></svelte:head>
 
-{#snippet pager(window: ConsolePage<unknown>)}
+{#snippet pager(window: ConsolePage<unknown>, bottom: boolean)}
   {#if window.total > 0}
-    <nav class="pager" aria-label="Pages">
+    <nav class="pager" class:bottom aria-label="Pages">
       <span>{window.from}–{window.to} of {window.total}</span>
       {#if window.page > 1}
         <a href={consoleHref(query, {page: window.page - 1})} data-sveltekit-noscroll>← Previous</a>
@@ -245,23 +245,29 @@
   </div>
 {/snippet}
 
-<main class="catalog-console">
+<main class="admin-console">
   <CatalogHeader {scan} {progress} />
-  <h1>Catalog</h1>
+  <div class="page-title">
+    <div>
+      <h1>Catalog</h1>
+      <p class="lead">The works, editions and authors every reader shares, and the personal books that stand on them.</p>
+    </div>
+    {#if scan !== null}
+      <div class="ops" role="group" aria-label="Catalog operations">
+        <button type="button" onclick={() => (draft = createWorkDraft())}>New work…</button>
+        <button type="button" onclick={() => (draft = createAuthorDraft())}>New author…</button>
+        <button type="button" onclick={() => (draft = createEditionDraft(null))}>New edition…</button>
+        <button type="button" onclick={() => (draft = repointIsbnDraft('', ''))}>Repoint an ISBN…</button>
+        <button type="button" onclick={() => (draft = mergeWorksDraft([], ''))}>Merge works…</button>
+        <button type="button" onclick={() => (draft = mergeAuthorsDraft('', ''))}>Merge authors…</button>
+      </div>
+    {/if}
+  </div>
   {#if statusMessage}<div class="notice {statusOk ? 'success' : 'error'}" role="status">{statusMessage}</div>{/if}
 
   {#if scan === null}
     <CatalogLoading {progress} />
   {:else}
-    <div class="actions ops">
-      <button type="button" onclick={() => (draft = createWorkDraft())}>New work…</button>
-      <button type="button" onclick={() => (draft = createAuthorDraft())}>New author…</button>
-      <button type="button" onclick={() => (draft = createEditionDraft(null))}>New edition…</button>
-      <button type="button" onclick={() => (draft = repointIsbnDraft('', ''))}>Repoint an ISBN…</button>
-      <button type="button" onclick={() => (draft = mergeWorksDraft([], ''))}>Merge works…</button>
-      <button type="button" onclick={() => (draft = mergeAuthorsDraft('', ''))}>Merge authors…</button>
-    </div>
-
     <nav class="tabs" aria-label="Catalog sections">
       {#each tabs as tab (tab.id)}
         <a href={consoleHref(query, {tab: tab.id})} aria-current={query.tab === tab.id ? 'page' : undefined}>
@@ -281,16 +287,16 @@
 
     {#if query.tab === 'works'}
       <section class="card" aria-labelledby="works-heading">
-        <div class="section-head">
-          <h2 id="works-heading">Works <span>{scan.works.length}/{CATALOG_LIMITS.works}</span></h2>
-        </div>
+        <h2 id="works-heading">Works <span>{scan.works.length}/{CATALOG_LIMITS.works}</span></h2>
         <p>Newest first. Open a work for its editions, its readers' books, and every operation on it. A reviewed work returns to the queue when an edition or a reader's book lands on it.</p>
-        <div class="bulk">
-          <span>{selectedWorkIds.length} selected</span>
-          <ReviewAction kind="work" ids={selectedWorkIds} reviewed={true} label="Mark reviewed" onresult={report} />
-          <ReviewAction kind="work" ids={selectedWorkIds} reviewed={false} label="Mark unreviewed" onresult={report} />
+        <div class="list-bar">
+          <div class="bulk">
+            <span>{selectedWorkIds.length} selected</span>
+            <ReviewAction kind="work" ids={selectedWorkIds} reviewed={true} label="Mark reviewed" onresult={report} />
+            <ReviewAction kind="work" ids={selectedWorkIds} reviewed={false} label="Mark unreviewed" onresult={report} />
+          </div>
+          {@render pager(workRows, false)}
         </div>
-        {@render pager(workRows)}
         <div class="table-scroll">
           <table>
             <thead><tr>
@@ -306,8 +312,8 @@
                   <td><strong><a href="/admin/works/{work.workId}">{work.canonicalTitle}</a></strong><small>{catalogAuthorNames(names, work.authorIds)} · {work.workId}</small></td>
                   <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy, emails)}</small></td>
                   <td><span class="status {work.status}">{work.status}</span></td>
-                  <td>{work.editionCount}</td>
-                  <td>{work.linkedBookCount}</td>
+                  <td class="numeric">{work.editionCount}</td>
+                  <td class="numeric">{work.linkedBookCount}</td>
                   <td><span class="review {reviewStatus(work)}">{reviewLabel(work)}</span></td>
                   <td>{work.warnings.length === 0 ? '—' : work.warnings.join(' · ')}</td>
                 </tr>
@@ -317,20 +323,20 @@
             </tbody>
           </table>
         </div>
-        {@render pager(workRows)}
+        {@render pager(workRows, true)}
       </section>
     {:else if query.tab === 'authors'}
       <section class="card" aria-labelledby="catalog-authors-heading">
-        <div class="section-head">
-          <h2 id="catalog-authors-heading">Authors <span>{scan.authors.length}/{CATALOG_LIMITS.catalogAuthors}</span></h2>
-        </div>
+        <h2 id="catalog-authors-heading">Authors <span>{scan.authors.length}/{CATALOG_LIMITS.catalogAuthors}</span></h2>
         <p>Works reference these entities by ID. Open an author to see their works, aliases, and to edit or merge them. A reviewed author returns to the queue when a new work names them.</p>
-        <div class="bulk">
-          <span>{selectedAuthorIds.length} selected</span>
-          <ReviewAction kind="author" ids={selectedAuthorIds} reviewed={true} label="Mark reviewed" onresult={report} />
-          <ReviewAction kind="author" ids={selectedAuthorIds} reviewed={false} label="Mark unreviewed" onresult={report} />
+        <div class="list-bar">
+          <div class="bulk">
+            <span>{selectedAuthorIds.length} selected</span>
+            <ReviewAction kind="author" ids={selectedAuthorIds} reviewed={true} label="Mark reviewed" onresult={report} />
+            <ReviewAction kind="author" ids={selectedAuthorIds} reviewed={false} label="Mark unreviewed" onresult={report} />
+          </div>
+          {@render pager(authorRows, false)}
         </div>
-        {@render pager(authorRows)}
         <div class="table-scroll">
           <table>
             <thead><tr>
@@ -346,7 +352,7 @@
                   <td><strong><a href="/admin/authors/{author.authorId}">{author.canonicalName}</a></strong><small>{author.sortName}{author.alternateNames.length > 0 ? ` · also ${author.alternateNames.join(', ')}` : ''} · {author.authorId}</small></td>
                   <td>{author.kind}</td>
                   <td><span class="status {author.status}">{author.status}</span></td>
-                  <td>{author.workCount}</td>
+                  <td class="numeric">{author.workCount}</td>
                   <td>{isoDay(author.createdAt)}<small>{creatorLabel(author.createdBy, emails)}</small></td>
                   <td><span class="review {reviewStatus(author)}">{reviewLabel(author)}</span></td>
                   <td>{author.warnings.length === 0 ? '—' : author.warnings.join(' · ')}</td>
@@ -357,7 +363,7 @@
             </tbody>
           </table>
         </div>
-        {@render pager(authorRows)}
+        {@render pager(authorRows, true)}
       </section>
     {:else if query.tab === 'books'}
       <section class="card" aria-labelledby="unmatched-heading">
@@ -366,7 +372,13 @@
         {#if unmatchedBooks.length === 0}
           <p class="empty">No unmatched books.</p>
         {:else}
-          {@render pager(bookRows)}
+          <div class="list-bar">
+            <div class="actions">
+              <button type="button" disabled={selectedBooks.length === 0} onclick={() => (draft = linkBooksDraft(selectedBooks, null))}>Link selected books to a work…</button>
+              <button type="button" disabled={selectedBooks.length === 0} onclick={() => (draft = createWorkDraft(selectedBooks))}>New work from selected books…</button>
+            </div>
+            {@render pager(bookRows, false)}
+          </div>
           <div class="table-scroll">
             <table>
               <thead><tr><th><span class="sr-only">Select</span></th><th>Personal book</th><th>ISBN</th><th>Pages</th><th>Publisher</th><th>Owner/book ID</th><th>Candidates</th><th>Anomaly</th></tr></thead>
@@ -378,7 +390,7 @@
                       {#if book.coverUrl}<img src={book.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
                       <span><strong>{book.title}</strong><small>{book.authorNames.join(', ')}</small></span>
                     </td>
-                    <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td><td>{book.pageCount ?? '—'}</td><td>{book.publisher || '—'}</td>
+                    <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td><td class="numeric">{book.pageCount ?? '—'}</td><td>{book.publisher || '—'}</td>
                     <td><code>{bookKey(book)}</code></td>
                     <td class="candidate-cell">
                       {#each candidatesByBook.get(bookKey(book)) ?? [] as candidate (`${bookKey(book)}/${candidate.workId}`)}
@@ -395,11 +407,7 @@
               </tbody>
             </table>
           </div>
-          <div class="actions">
-            <button type="button" disabled={selectedBooks.length === 0} onclick={() => (draft = linkBooksDraft(selectedBooks, null))}>Link selected books to a work…</button>
-            <button type="button" disabled={selectedBooks.length === 0} onclick={() => (draft = createWorkDraft(selectedBooks))}>New work from selected books…</button>
-          </div>
-          {@render pager(bookRows)}
+          {@render pager(bookRows, true)}
         {/if}
       </section>
     {:else}
@@ -457,7 +465,7 @@
           <ul class="finding-list">
             {#each scan.findings as finding, index (`${finding.code}:${index}`)}
               <li class:error-finding={finding.severity === 'error'}>
-                <strong>{finding.code}</strong> <span>{finding.severity}</span>
+                <strong>{finding.code}</strong> <span class="badge {finding.severity}">{finding.severity}</span>
                 <p>{finding.message}</p>
                 <small>
                   Works: {#each finding.workIds as id, position (id)}{#if position > 0}, {/if}<a href="/admin/works/{id}">{workById.get(id)?.canonicalTitle ?? id}</a>{:else}—{/each}

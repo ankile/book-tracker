@@ -396,33 +396,169 @@
 </dialog>
 
 <style>
-  dialog { border: 0; border-radius: 7px; box-shadow: 0 10px 40px #0006; color: #273331; text-align: left; }
-  dialog::backdrop { background: #0008; }
-  .operation { width: min(960px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 1.25rem 1.5rem; box-sizing: border-box; }
-  .reauth { max-width: 500px; padding: 1.25rem; }
-  .reauth form { display: grid; gap: .8rem; }
-  h2 { margin: 0 0 .5rem; }
-  label { display: grid; gap: .25rem; color: #44514e; font-weight: 600; }
-  label small { font-weight: 400; }
-  input, select, textarea { width: 100%; padding: .48rem; border: 1px solid #aebbb8; border-radius: 4px; background: white; color: #273331; box-sizing: border-box; font: inherit; }
-  input:read-only { background: #f1f4f3; color: #697572; }
-  textarea { min-height: 5rem; resize: vertical; }
-  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; margin: 1rem 0; }
-  .wide { grid-column: 1 / -1; }
-  .notice { margin: 1rem 0; padding: .8rem; border-radius: 5px; }
-  .error { color: #842029; background: #f8d7da; }
-  .success { color: #15583c; background: #ddefe4; }
-  .preview { margin-top: 1.2rem; padding: 1rem; border: 2px solid #27685e; border-radius: 6px; }
-  .preview h3 { margin-top: 0; }
-  .preview ol { padding-left: 1.4rem; }
-  .preview li { margin: 1rem 0; }
-  .diff { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
-  pre { max-height: 320px; overflow: auto; padding: .6rem; background: #17201f; color: #e9f1ef; font-size: .75rem; white-space: pre-wrap; }
-  code { font-size: .82rem; overflow-wrap: anywhere; }
-  .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
-  button { font: inherit; border: 1px solid #49736d; border-radius: 4px; padding: .42rem .7rem; background: white; color: #244f49; cursor: pointer; }
-  button:disabled { opacity: .55; cursor: default; }
-  .primary { background: #27685e; color: white; }
-  .danger { background: #8b2e2e; color: white; border-color: #8b2e2e; }
-  @media (max-width: 700px) { .form-grid, .diff { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+  /* Buttons, fields, notices and code come from admin.css: the dialog sits
+     inside the console page that imports it. Only the dialog's own layout
+     lives here. */
+  dialog {
+    padding: 0;
+    color: #263331;
+    text-align: left;
+    border: 0;
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  }
+
+  dialog::backdrop {
+    background: rgba(18, 30, 30, 0.55);
+  }
+
+  .operation {
+    width: min(960px, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    padding: 1.5rem 1.75rem;
+    box-sizing: border-box;
+  }
+
+  .reauth {
+    width: min(500px, calc(100vw - 2rem));
+    padding: 1.5rem 1.75rem;
+    box-sizing: border-box;
+  }
+
+  .reauth form {
+    display: grid;
+    gap: 0.8rem;
+  }
+
+  .reauth p {
+    margin: 0;
+    color: #4a5754;
+    font-size: 0.93rem;
+  }
+
+  h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1.35rem;
+    font-weight: 700;
+  }
+
+  label {
+    display: grid;
+    gap: 0.3rem;
+    color: #3f4d4a;
+    font-size: 0.86rem;
+    font-weight: 650;
+  }
+
+  label small {
+    color: #6b7673;
+    font-size: 0.8rem;
+    font-weight: 400;
+  }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem 1.25rem;
+    margin: 1.25rem 0;
+  }
+
+  .wide {
+    grid-column: 1 / -1;
+  }
+
+  .preview {
+    margin-top: 1.25rem;
+    padding: 1.15rem 1.25rem;
+    background: #f5f9f9;
+    border: 1px solid #cfe0e0;
+    border-radius: 10px;
+  }
+
+  .preview h3 {
+    margin: 0 0 0.35rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+
+  .preview > p {
+    margin: 0 0 0.75rem;
+    color: #4a5754;
+    font-size: 0.9rem;
+  }
+
+  .preview summary {
+    color: #2f666b;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .preview ol {
+    margin: 0.75rem 0 0;
+    padding-left: 1.4rem;
+  }
+
+  .preview li {
+    margin: 0.9rem 0;
+  }
+
+  .preview li strong {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-weight: 650;
+  }
+
+  .diff {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.7rem;
+  }
+
+  .diff span {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: #6b7673;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  pre {
+    max-height: 320px;
+    margin: 0.4rem 0 0;
+    padding: 0.7rem 0.8rem;
+    overflow: auto;
+    color: #e7f0ee;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    background: #1c2726;
+    border-radius: 8px;
+  }
+
+  .dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.6rem;
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid #e4e9e7;
+  }
+
+  @media (max-width: 700px) {
+    .operation,
+    .reauth {
+      padding: 1.15rem 1.15rem;
+    }
+
+    .form-grid,
+    .diff {
+      grid-template-columns: 1fr;
+    }
+
+    .wide {
+      grid-column: auto;
+    }
+  }
 </style>

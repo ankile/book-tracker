@@ -9,10 +9,11 @@
     ids: readonly string[];
     reviewed: boolean;
     label: string;
+    primary?: boolean;
     onresult: (message: string, ok: boolean) => void;
   }
 
-  let { kind, ids, reviewed, label, onresult }: Props = $props();
+  let { kind, ids, reviewed, label, primary = false, onresult }: Props = $props();
   let pending = $state(false);
 
   async function run(): Promise<void> {
@@ -32,4 +33,4 @@
   }
 </script>
 
-<button type="button" disabled={pending || ids.length === 0} onclick={run}>{pending ? 'Saving…' : label}</button>
+<button type="button" class:primary disabled={pending || ids.length === 0} onclick={run}>{pending ? 'Saving…' : label}</button>

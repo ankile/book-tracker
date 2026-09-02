@@ -1,5 +1,5 @@
 <script lang="ts">
-  import '$lib/components/admin/catalog.css';
+  import '$lib/components/admin/admin.css';
   import { page } from '$app/state';
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
@@ -42,8 +42,8 @@
 
 <svelte:head><title>{author?.canonicalName ?? 'Author'} · Catalog · Book Tracker</title></svelte:head>
 
-<main class="catalog-console">
-  <CatalogHeader crumbs={[{label: 'Authors', href: '/admin#catalog-authors-heading'}, {label: author?.canonicalName ?? authorId}]} {scan} {progress} />
+<main class="admin-console">
+  <CatalogHeader crumbs={[{label: 'Authors', href: '/admin?tab=authors'}, {label: author?.canonicalName ?? authorId}]} {scan} {progress} />
   {#if statusMessage}<div class="notice {statusOk ? 'success' : 'error'}" role="status">{statusMessage}</div>{/if}
 
   {#if scan === null}
@@ -59,12 +59,17 @@
         <div class="no-cover" aria-hidden="true"></div>
         <div>
           <h1>{author.canonicalName}</h1>
-          <p>Sorted as {author.sortName} · {author.kind}</p>
-          <p><span class="status {author.status}">{author.status}</span> · created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, emails)} · <span class="review {reviewStatus(author)}">{reviewLabel(author)}</span> · <code>{author.authorId}</code></p>
+          <p class="byline">Sorted as {author.sortName} · {author.kind}</p>
+          <p class="meta">
+            <span class="status {author.status}">{author.status}</span>
+            <span class="review {reviewStatus(author)}">{reviewLabel(author)}</span>
+            <span>Created {isoDay(author.createdAt)} by {creatorLabel(author.createdBy, emails)}</span>
+            <code>{author.authorId}</code>
+          </p>
           {#if author.warnings.length > 0}<p class="warning">{author.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
-          <ReviewAction kind="author" ids={[author.authorId]} reviewed={reviewStatus(author) !== 'done'}
+          <ReviewAction kind="author" ids={[author.authorId]} reviewed={reviewStatus(author) !== 'done'} primary={reviewStatus(author) !== 'done'}
             label={reviewStatus(author) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
           {#if author.status === 'active'}
             <button type="button" onclick={() => (draft = editAuthorDraft(author))}>Edit author…</button>
@@ -82,7 +87,7 @@
 
     <section class="card" aria-labelledby="author-works-heading">
       <h2 id="author-works-heading">Works <span>{works.length}</span></h2>
-      <p>Every work naming this author, newest first. The creator column is the account whose add-book flow created the work; the catalog build left it blank.</p>
+      <p>Every work naming this author, newest first. The creator is the reader whose book first brought the work into the catalog.</p>
       {#if works.length === 0}
         <p class="empty">No work names this author.</p>
       {:else}
@@ -95,8 +100,8 @@
                   <td><strong><a href="/admin/works/{work.workId}">{work.canonicalTitle}</a></strong><small>{catalogAuthorNames(names, work.authorIds)} · {work.workId}</small></td>
                   <td>{isoDay(work.createdAt)}<small>{creatorLabel(work.createdBy, emails)}</small></td>
                   <td><span class="status {work.status}">{work.status}</span></td>
-                  <td>{work.editionCount}</td>
-                  <td>{work.linkedBookCount}</td>
+                  <td class="numeric">{work.editionCount}</td>
+                  <td class="numeric">{work.linkedBookCount}</td>
                   <td>{work.warnings.length === 0 ? '—' : work.warnings.join(' · ')}</td>
                 </tr>
               {/each}

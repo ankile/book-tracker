@@ -1,5 +1,5 @@
 <script lang="ts">
-  import '$lib/components/admin/catalog.css';
+  import '$lib/components/admin/admin.css';
   import { page } from '$app/state';
   import CatalogHeader from '$lib/components/admin/CatalogHeader.svelte';
   import CatalogLoading from '$lib/components/admin/CatalogLoading.svelte';
@@ -69,8 +69,8 @@
 
 <svelte:head><title>{work?.canonicalTitle ?? 'Work'} · Catalog · Book Tracker</title></svelte:head>
 
-<main class="catalog-console">
-  <CatalogHeader crumbs={[{label: 'Works', href: '/admin#works-heading'}, {label: work?.canonicalTitle ?? workId}]} {scan} {progress} />
+<main class="admin-console">
+  <CatalogHeader crumbs={[{label: 'Works', href: '/admin'}, {label: work?.canonicalTitle ?? workId}]} {scan} {progress} />
   {#if statusMessage}<div class="notice {statusOk ? 'success' : 'error'}" role="status">{statusMessage}</div>{/if}
 
   {#if scan === null}
@@ -86,14 +86,19 @@
         {#if work.coverUrl}<img src={work.coverUrl} alt="" referrerpolicy="no-referrer" />{:else}<div class="no-cover"></div>{/if}
         <div>
           <h1>{work.canonicalTitle}</h1>
-          <p>
+          <p class="byline">
             {#each authors as author, index (author.id)}{#if index > 0}, {/if}<a href="/admin/authors/{author.id}">{author.name ?? `[Missing ${author.id}]`}</a>{:else}No authors{/each}
           </p>
-          <p><span class="status {work.status}">{work.status}</span> · created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, emails)} · <span class="review {reviewStatus(work)}">{reviewLabel(work)}</span> · <code>{work.workId}</code></p>
+          <p class="meta">
+            <span class="status {work.status}">{work.status}</span>
+            <span class="review {reviewStatus(work)}">{reviewLabel(work)}</span>
+            <span>Created {isoDay(work.createdAt)} by {creatorLabel(work.createdBy, emails)}</span>
+            <code>{work.workId}</code>
+          </p>
           {#if work.warnings.length > 0}<p class="warning">{work.warnings.join(' · ')}</p>{/if}
         </div>
         <div class="actions">
-          <ReviewAction kind="work" ids={[work.workId]} reviewed={reviewStatus(work) !== 'done'}
+          <ReviewAction kind="work" ids={[work.workId]} reviewed={reviewStatus(work) !== 'done'} primary={reviewStatus(work) !== 'done'}
             label={reviewStatus(work) === 'done' ? 'Mark unreviewed' : 'Mark reviewed'} onresult={report} />
           <button type="button" onclick={() => (draft = editWorkDraft(work))}>Edit work…</button>
           {#if work.status === 'active'}<button type="button" onclick={() => (draft = hideWorkDraft(work))}>Hide…</button>{/if}
@@ -150,7 +155,7 @@
                   <td>{edition.publishedDate || '—'}</td>
                   <td>{edition.language || '—'}</td>
                   <td>{edition.format}</td>
-                  <td>{edition.suggestedPageCount ?? '—'}</td>
+                  <td class="numeric">{edition.suggestedPageCount ?? '—'}</td>
                   <td>{Object.entries(edition.externalIds).map(([provider, id]) => `${provider}: ${id}`).join(', ') || '—'}</td>
                   <td>{creatorLabel(edition.createdBy, emails)}</td>
                   <td>
@@ -169,9 +174,9 @@
       {#if absorbedEditions.length > 0}
         <h3>Absorbed editions</h3>
         <p>Aliases of the editions above: they keep their identifiers, and a lookup that lands on one answers with its survivor.</p>
-        <ul>
+        <ul class="alias-list">
           {#each absorbedEditions as alias (alias.editionId)}
-            <li><strong>{alias.title}</strong>{alias.isbn13 ? ` · ${alias.isbn13}` : ''} · <code>{alias.editionId}</code> → {editionById.get(alias.mergedInto ?? '')?.title ?? alias.mergedInto ?? '?'}</li>
+            <li><strong>{alias.title}</strong>{#if alias.isbn13}<span>{alias.isbn13}</span>{/if}<code>{alias.editionId}</code><span aria-hidden="true">→</span><span>{editionById.get(alias.mergedInto ?? '')?.title ?? alias.mergedInto ?? '?'}</span></li>
           {/each}
         </ul>
       {/if}
@@ -193,9 +198,9 @@
                     {#if book.coverUrl}<img src={book.coverUrl} alt="" referrerpolicy="no-referrer" />{/if}
                     <span><strong>{book.title}</strong><small>{book.authorNames.join(', ')}{book.workId !== workId ? ` · via merged ${book.workId}` : ''}</small></span>
                   </td>
-                  <td><code>{book.uid}</code><small>{book.bookId}</small></td>
+                  <td>{creatorLabel(book.uid, emails)}<small><code>{book.uid}/{book.bookId}</code></small></td>
                   <td>{book.isbn13 ?? book.rawIsbn ?? '—'}</td>
-                  <td>{book.pageCount ?? '—'}</td>
+                  <td class="numeric">{book.pageCount ?? '—'}</td>
                   <td>{book.editionId === null ? 'none' : editionById.get(book.editionId)?.title ?? book.editionId}{editionById.get(book.editionId ?? '')?.status === 'merged' ? ' · merged alias' : ''}</td>
                   <td>{book.anomaly ?? '—'}</td>
                   <td>

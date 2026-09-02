@@ -25,13 +25,13 @@ import type {
 const work: AdminCatalogWorkRow = {
   workId: 'work', canonicalTitle: 'Book', alternateTitles: [], authorIds: ['author'],
   coverUrl: '', subjects: [], fiction: null, status: 'hidden',
-  mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900,
+  mergedInto: null, mergedFrom: [], createdBy: null, createdAt: 900, reviewedAt: null, activityAt: 900,
   editionCount: 1, linkedBookCount: 1, warnings: [],
 };
 const book: AdminCatalogBookRow = {
   uid: 'user', bookId: 'book', title: 'Personal title', authorNames: ['Author'],
   isbn13: '9780316769488', rawIsbn: null, pageCount: 201, publisher: '',
-  coverUrl: '', workId: 'work', editionId: 'edition', anomaly: null,
+  coverUrl: '', workId: 'work', editionId: 'edition', linkedAt: null, anomaly: null,
 };
 
 test('admin catalog candidates prioritize exact identity evidence and prefill exact editions', () => {

@@ -1,0 +1,1026 @@
+/* The admin console's shared chrome: the catalog overview, the work and
+   author pages, and the accounts page. One sheet scoped under
+   .admin-console so the four pages (and the operation dialog, which sits
+   inside them) share one look, drawn from the app's own palette: the deep
+   teal of the navbar and footer, white cards on a white page, and the
+   pill badges of the dashboard. Layout that only one component needs
+   stays scoped in that component. */
+.admin-console {
+  --ink: #263331;
+  --ink-2: #4a5754;
+  --muted: #6b7673;
+  --hair: #e4e9e7;
+  --line: #d3dad8;
+  --brand: #294f52;
+  --brand-2: #2f666b;
+  --tint: #edf5f5;
+  --tint-2: #f5f8f8;
+  --ok: #176b42;
+  --ok-bg: #eaf7ef;
+  --warn: #7a4e00;
+  --warn-bg: #fff3dc;
+  --bad: #8f2430;
+  --bad-bg: #fbe9ea;
+  --info: #1f5f78;
+  --info-bg: #eaf5f9;
+  --card-shadow: 0 2px 4px rgba(0, 0, 0, 0.08), 0 8px 24px rgba(0, 0, 0, 0.1);
+  --focus: 0 0 0 3px rgba(47, 102, 107, 0.28);
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0.5rem 1.5rem 3rem;
+  color: var(--ink);
+  text-align: left;
+}
+
+.admin-console a {
+  color: var(--brand-2);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.admin-console a:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.admin-console a:focus-visible,
+.admin-console button:focus-visible,
+.admin-console input:focus-visible,
+.admin-console select:focus-visible,
+.admin-console textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+/* Console bar: which console, where in it, and how live it is */
+.admin-console .console-head {
+  margin-bottom: 1.25rem;
+}
+
+.admin-console .console-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1.5rem;
+  padding: 0.55rem 1rem 0.55rem 1.1rem;
+  background: var(--tint);
+  border: 1px solid #d4e3e3;
+  border-radius: 12px;
+}
+
+.admin-console .console-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.admin-console .console-switch .eyebrow {
+  margin-right: 0.75rem;
+  color: var(--brand);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.admin-console .console-switch a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0.45rem 0.9rem;
+  border-radius: 9px;
+  color: var(--brand);
+  font-weight: 650;
+  line-height: 1;
+  transition: background 0.15s ease-in-out, color 0.15s ease-in-out;
+}
+
+.admin-console .console-switch a:hover {
+  background: rgba(41, 79, 82, 0.09);
+  text-decoration: none;
+}
+
+.admin-console .console-switch a[aria-current='page'] {
+  color: white;
+  background: var(--brand);
+}
+
+.admin-console .console-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  color: var(--ink-2);
+  font-size: 0.86rem;
+}
+
+.admin-console .live-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-console .live-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #24925d;
+  box-shadow: 0 0 0 3px rgba(36, 146, 93, 0.18);
+}
+
+.admin-console .live-line.waiting .live-dot {
+  background: #c9a227;
+  box-shadow: 0 0 0 3px rgba(201, 162, 39, 0.2);
+}
+
+.admin-console .console-status button {
+  min-height: 34px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.84rem;
+}
+
+.admin-console .crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.5rem;
+  margin: 0.9rem 0.35rem 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.admin-console .crumbs a {
+  color: var(--brand-2);
+}
+
+.admin-console .crumbs > span[aria-hidden] {
+  color: #a9b4b1;
+}
+
+/* Page title row */
+.admin-console .page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  margin: 0 0 1.25rem;
+}
+
+.admin-console h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.85rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.admin-console .lead {
+  max-width: 62ch;
+  margin: 0.35rem 0 0;
+  color: var(--ink-2);
+  font-size: 0.95rem;
+}
+
+.admin-console .ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+/* Buttons and fields */
+.admin-console button,
+.admin-console input,
+.admin-console select,
+.admin-console textarea {
+  font: inherit;
+}
+
+.admin-console button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 38px;
+  padding: 0.45rem 0.9rem;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 650;
+  line-height: 1.1;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease-in-out, border-color 0.15s ease-in-out, color 0.15s ease-in-out;
+}
+
+.admin-console button:hover:not(:disabled) {
+  background: var(--tint-2);
+  border-color: #bcc7c4;
+}
+
+.admin-console button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.admin-console button.primary {
+  color: white;
+  background: var(--brand-2);
+  border-color: var(--brand-2);
+}
+
+.admin-console button.primary:hover:not(:disabled) {
+  background: #27575c;
+  border-color: #27575c;
+}
+
+.admin-console button.danger {
+  color: white;
+  background: #a8323d;
+  border-color: #a8323d;
+}
+
+.admin-console button.danger:hover:not(:disabled) {
+  background: var(--bad);
+  border-color: var(--bad);
+}
+
+.admin-console input:not([type='checkbox']),
+.admin-console select,
+.admin-console textarea {
+  width: 100%;
+  min-height: 42px;
+  padding: 0.5rem 0.8rem;
+  color: var(--ink);
+  font-size: 0.95rem;
+  background: white;
+  border: 1px solid #cbd5d3;
+  border-radius: 9px;
+  box-sizing: border-box;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.admin-console input:not([type='checkbox']):focus-visible,
+.admin-console select:focus-visible,
+.admin-console textarea:focus-visible {
+  border-color: var(--brand-2);
+}
+
+.admin-console input:read-only:not([type='checkbox']) {
+  color: var(--muted);
+  background: var(--tint-2);
+}
+
+.admin-console textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.admin-console input[type='checkbox'] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0.15rem 0 0;
+  accent-color: var(--brand-2);
+  cursor: pointer;
+}
+
+.admin-console input[type='search']::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+
+.admin-console .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* Notices */
+.admin-console .notice {
+  margin: 0 0 1.25rem;
+  padding: 0.8rem 1rem;
+  font-size: 0.93rem;
+  border: 1px solid;
+  border-radius: 9px;
+}
+
+.admin-console .notice.success {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: #cde8d8;
+}
+
+.admin-console .notice.error {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: #f0cdd1;
+}
+
+.admin-console .notice.warning {
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-color: #f0dfb6;
+}
+
+.admin-console .notice ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+
+/* Tabs, filters, paging */
+.admin-console .tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 1rem;
+  padding: 0.3rem;
+  background: #eef2f1;
+  border-radius: 12px;
+}
+
+.admin-console .tabs a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 38px;
+  padding: 0.45rem 0.95rem;
+  color: #3f4d4a;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 9px;
+  transition: background 0.15s ease-in-out, color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.admin-console .tabs a:hover {
+  color: var(--brand);
+  background: rgba(41, 79, 82, 0.08);
+  text-decoration: none;
+}
+
+.admin-console .tabs a[aria-current='page'] {
+  color: var(--brand);
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+
+.admin-console .tabs a span {
+  padding: 0.12rem 0.5rem;
+  color: var(--brand);
+  font-size: 0.74rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: rgba(41, 79, 82, 0.1);
+  border-radius: 999px;
+}
+
+.admin-console .tabs a[aria-current='page'] span {
+  color: white;
+  background: var(--brand);
+}
+
+.admin-console .toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin: 0 0 1.25rem;
+}
+
+.admin-console .toolbar-row .filter {
+  flex: 1 1 280px;
+  max-width: 480px;
+}
+
+.admin-console .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.admin-console .chips a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0.35rem 0.85rem;
+  color: #4f5b56;
+  font-size: 0.84rem;
+  font-weight: 650;
+  line-height: 1;
+  background: #f1f3f2;
+  border-radius: 999px;
+  transition: background 0.15s ease-in-out, color 0.15s ease-in-out;
+}
+
+.admin-console .chips a:hover {
+  background: #e4e9e7;
+  text-decoration: none;
+}
+
+.admin-console .chips a[aria-current='true'] {
+  color: white;
+  background: var(--brand-2);
+}
+
+.admin-console .list-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  margin: 1rem 0 0.25rem;
+}
+
+.admin-console .bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.admin-console .bulk > span {
+  margin-right: 0.35rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-console .pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-console .pager.bottom {
+  justify-content: flex-end;
+  margin-top: 0.9rem;
+}
+
+.admin-console .pager a,
+.admin-console .pager [aria-disabled='true'] {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0.3rem 0.7rem;
+  font-weight: 650;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.admin-console .pager a {
+  background: white;
+}
+
+.admin-console .pager a:hover {
+  background: var(--tint-2);
+  text-decoration: none;
+}
+
+.admin-console .pager [aria-disabled='true'] {
+  color: #b3bcba;
+  border-color: transparent;
+}
+
+/* Cards */
+.admin-console .card {
+  margin: 0 0 1.25rem;
+  padding: 1.5rem 1.75rem;
+  background: white;
+  border-radius: 10px;
+  box-shadow: var(--card-shadow);
+}
+
+.admin-console .card h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.admin-console .card h3 {
+  margin: 1.75rem 0 0.5rem;
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.admin-console h2 span,
+.admin-console h3 span {
+  padding: 0.15rem 0.55rem;
+  color: var(--brand);
+  font-size: 0.76rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: var(--tint);
+  border-radius: 999px;
+}
+
+.admin-console .card > p {
+  max-width: 82ch;
+  margin: 0.45rem 0 0;
+  color: var(--ink-2);
+  font-size: 0.92rem;
+}
+
+.admin-console .card > p.empty {
+  max-width: none;
+}
+
+.admin-console .section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+}
+
+.admin-console .section-head h2 {
+  flex: 1 1 auto;
+}
+
+.admin-console .empty {
+  margin: 1rem 0 0;
+  padding: 0.9rem 1rem;
+  color: var(--ink-2);
+  background: var(--tint-2);
+  border-radius: 8px;
+}
+
+.admin-console td.empty {
+  padding: 1.5rem;
+  color: var(--muted);
+  text-align: center;
+  background: none;
+}
+
+.admin-console .warning {
+  color: var(--warn);
+  font-size: 0.86rem;
+}
+
+/* Tables */
+.admin-console .table-scroll {
+  margin: 0.75rem 0 0;
+  overflow-x: auto;
+}
+
+.admin-console table {
+  width: 100%;
+  min-width: 840px;
+  border-collapse: collapse;
+}
+
+.admin-console th,
+.admin-console td {
+  padding: 0.7rem 0.75rem;
+  font-size: 0.92rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--hair);
+}
+
+.admin-console th {
+  color: var(--muted);
+  font-size: 0.73rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  border-bottom: 2px solid #dfe5e3;
+}
+
+.admin-console tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.admin-console tbody tr:hover td {
+  background: #f8fafa;
+}
+
+.admin-console td strong {
+  display: block;
+  font-weight: 650;
+}
+
+.admin-console td small {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.admin-console td .actions {
+  justify-content: flex-end;
+}
+
+.admin-console td .actions button {
+  min-height: 32px;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.admin-console table.compact th,
+.admin-console table.compact td {
+  white-space: nowrap;
+}
+
+.admin-console table.compact td.message {
+  min-width: 260px;
+  color: var(--ink-2);
+  white-space: normal;
+}
+
+.admin-console td.email {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-console td.numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-console code {
+  padding: 0.1rem 0.35rem;
+  color: #4a5654;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  background: #f1f4f3;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+/* Pills: record status, review state, severities */
+.admin-console .status,
+.admin-console .review,
+.admin-console .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.24rem 0.6rem;
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  vertical-align: middle;
+  border-radius: 999px;
+}
+
+.admin-console .status::before,
+.admin-console .review::before {
+  width: 6px;
+  height: 6px;
+  content: '';
+  background: currentColor;
+  border-radius: 50%;
+  opacity: 0.85;
+}
+
+.admin-console .status {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.admin-console .status.hidden {
+  color: #4f5b56;
+  background: #f1f3f2;
+}
+
+.admin-console .status.merged {
+  color: var(--info);
+  background: var(--info-bg);
+}
+
+.admin-console .review.never {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.admin-console .review.changed {
+  color: #8a5a00;
+  background: #fff8e8;
+}
+
+.admin-console .review.done {
+  color: #4f5b56;
+  background: #f1f3f2;
+}
+
+.admin-console .badge {
+  color: #4f5b56;
+  background: #f1f3f2;
+}
+
+.admin-console .badge.warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.admin-console .badge.error,
+.admin-console .badge.bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+}
+
+.admin-console .badge.help {
+  cursor: help;
+}
+
+.admin-console td .badge {
+  margin-left: 0.4rem;
+}
+
+/* Entity pages: the record itself */
+.admin-console .entity-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.admin-console .entity-head img,
+.admin-console .entity-head .no-cover {
+  width: 96px;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  background: linear-gradient(160deg, #e6eeee, #d0dede);
+  border-radius: 6px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+}
+
+.admin-console .entity-head .no-cover {
+  box-shadow: none;
+}
+
+.admin-console .entity-head h1 {
+  margin: 0.15rem 0 0.35rem;
+  font-size: 1.75rem;
+}
+
+.admin-console .entity-head .byline {
+  margin: 0 0 0.7rem;
+  color: var(--ink-2);
+  font-size: 1.05rem;
+}
+
+.admin-console .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.admin-console .entity-head .warning {
+  margin: 0.6rem 0 0;
+}
+
+.admin-console .entity-head .actions {
+  justify-content: flex-end;
+  max-width: 380px;
+}
+
+.admin-console .facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem 1.5rem;
+  margin: 1.5rem 0 0;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--hair);
+}
+
+.admin-console dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.admin-console dd {
+  margin: 0.25rem 0 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* Cells and lists */
+.admin-console .book-cell {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+}
+
+.admin-console .book-cell img {
+  width: 40px;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.admin-console .candidate-cell {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.admin-console .candidate-cell button {
+  display: grid;
+  justify-items: start;
+  gap: 0.1rem;
+  min-height: auto;
+  padding: 0.45rem 0.7rem;
+  text-align: left;
+}
+
+.admin-console .candidate-cell small {
+  margin: 0;
+  font-weight: 400;
+}
+
+.admin-console .alias-list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-console .alias-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.92rem;
+  background: var(--tint-2);
+  border-radius: 8px;
+}
+
+.admin-console .alias-list li strong {
+  font-weight: 650;
+}
+
+.admin-console .finding-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-console .finding-list li {
+  padding: 0.9rem 1rem;
+  background: #fff8e8;
+  border: 1px solid #f1e2bf;
+  border-left: 4px solid #d99a2b;
+  border-radius: 9px;
+}
+
+.admin-console .finding-list li.error-finding {
+  background: var(--bad-bg);
+  border-color: #f0cdd1;
+  border-left-color: #b73340;
+}
+
+.admin-console .finding-list p {
+  margin: 0.35rem 0;
+}
+
+.admin-console .finding-list li > strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+}
+
+.admin-console .finding-list li > small {
+  color: var(--ink-2);
+}
+
+.admin-console .dupe-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.admin-console .dupe {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem 1.25rem;
+  align-items: start;
+  padding: 1rem 1.15rem;
+  background: #fff9ec;
+  border: 1px solid #f0e1bf;
+  border-radius: 9px;
+}
+
+.admin-console .dupe p {
+  margin: 0 0 0.4rem;
+}
+
+.admin-console .dupe ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.admin-console .dupe li small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.admin-console .loading {
+  color: var(--ink-2);
+}
+
+.admin-console .loading p {
+  margin: 0 0 0.9rem;
+}
+
+.admin-console .progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-console .progress li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.8rem;
+  color: #8a9693;
+  font-size: 0.86rem;
+  font-weight: 600;
+  background: #f1f3f2;
+  border-radius: 999px;
+}
+
+.admin-console .progress li.done {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.admin-console .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+@media (max-width: 760px) {
+  .admin-console {
+    padding: 0.25rem 1rem 2rem;
+  }
+
+  .admin-console .card {
+    padding: 1.15rem 1.15rem;
+  }
+
+  .admin-console h1 {
+    font-size: 1.55rem;
+  }
+
+  .admin-console .console-bar {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .admin-console .entity-head,
+  .admin-console .dupe {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-console .entity-head .actions,
+  .admin-console td .actions {
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .admin-console .entity-head img,
+  .admin-console .entity-head .no-cover {
+    width: 76px;
+  }
+}
