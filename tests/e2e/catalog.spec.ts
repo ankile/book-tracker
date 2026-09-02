@@ -608,7 +608,11 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       await editionsTable.getByRole('row').filter({hasText: normalEmail}).getByRole('button', {name: 'Merge into…', exact: true}).click();
       const mergeDialog = page.getByRole('dialog', {name: 'Merge editions'});
       await expect(mergeDialog).toBeVisible();
-      await mergeDialog.getByLabel('Surviving edition').selectOption(editionId);
+      // The survivor is chosen from a searchable list, not a select: type,
+      // then pick the row that names the edition.
+      const survivorPicker = mergeDialog.locator('.picker').filter({has: page.getByLabel('Surviving edition')});
+      await survivorPicker.getByLabel('Surviving edition').fill(isbn);
+      await survivorPicker.getByRole('button', {name: new RegExp(editionId)}).click();
       await mergeDialog.getByRole('button', {name: 'Preview without applying'}).click();
       await expect(mergeDialog.getByRole('heading', {name: 'Exact preview'})).toBeVisible();
       await expect(mergeDialog.getByText(`"isbn": "${isbn}"`)).toBeVisible();
@@ -630,6 +634,22 @@ test.describe.serial('shared catalog through Auth, Firestore, and Functions emul
       // The language trickled down at add time: the chosen work's default,
       // through the edition that inherits it, onto the reader's book.
       expect(mergedBook.get('language')).toBe('en');
+
+      // Merging this work into another offers every other live work, never
+      // this one: it is the source, and a chip already names it.
+      await page.getByRole('button', {name: 'Merge into another work…', exact: true}).click();
+      const mergeWorks = page.getByRole('dialog', {name: 'Merge works'});
+      await expect(mergeWorks.getByRole('button', {name: 'Remove The Left Hand of Darkness'})).toBeVisible();
+      await expect(mergeWorks.getByRole('button', {name: new RegExp(workId)})).toHaveCount(0);
+      const targetPicker = mergeWorks.locator('.picker').filter({has: page.getByLabel('Canonical target work')});
+      await expect(targetPicker.getByRole('button', {name: /Matilda/})).toHaveCount(1);
+      await targetPicker.getByLabel('Canonical target work').fill('matil');
+      await targetPicker.getByRole('button', {name: /Matilda/}).click();
+      const chosenTarget = mergeWorks.getByRole('group', {name: 'Canonical target work'});
+      await expect(chosenTarget).toContainText('Matilda');
+      await expect(chosenTarget.getByRole('button', {name: 'Change'})).toBeVisible();
+      await mergeWorks.getByRole('button', {name: 'Cancel'}).click();
+      await expect(mergeWorks).toBeHidden();
 
       // Every operation that starts from this work opens as its own dialog;
       // the per-edition buttons appear once per edition, so the first is used.

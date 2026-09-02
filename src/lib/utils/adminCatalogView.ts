@@ -633,3 +633,62 @@ export function paginate<T>(rows: readonly T[], page: number, size = CONSOLE_PAG
   const from = slice.length === 0 ? 0 : (current - 1) * size + 1;
   return { rows: slice, page: current, pages, total, from, to: slice.length === 0 ? 0 : from + slice.length - 1 };
 }
+
+// ---- Picker options. The operation dialog chooses records through a
+// searchable list (RecordPicker) rather than a select: each row says enough
+// to tell two records apart, and the search covers what an operator knows
+// about a record (title, names, id, ISBN).
+
+export interface PickerOption {
+  id: string;
+  title: string;
+  detail: string;
+  meta: string;
+  // Lowercased text the picker's search box matches against.
+  search: string;
+}
+
+export function workPickerOptions(
+  works: readonly AdminCatalogWorkRow[],
+  names: ReadonlyMap<string, string>,
+): PickerOption[] {
+  return works.map((work) => {
+    const authors = catalogAuthorNames(names, work.authorIds);
+    return {
+      id: work.workId,
+      title: work.canonicalTitle,
+      detail: `${authors} · ${work.workId}`,
+      meta: `${work.linkedBookCount} readers · ${work.editionCount} editions · created ${isoDay(work.createdAt)}` +
+        (work.status === 'hidden' ? ' · hidden' : ''),
+      search: [work.canonicalTitle, ...work.alternateTitles, authors, work.workId].join(' ').toLowerCase(),
+    };
+  });
+}
+
+export function authorPickerOptions(authors: readonly AdminCatalogAuthorRow[]): PickerOption[] {
+  return authors.map((author) => ({
+    id: author.authorId,
+    title: author.canonicalName,
+    detail: `${author.sortName} · ${author.kind} · ${author.authorId}`,
+    meta: `${author.workCount} ${author.workCount === 1 ? 'work' : 'works'}` +
+      (author.alternateNames.length > 0 ? ` · also ${author.alternateNames.join(', ')}` : ''),
+    search: [author.canonicalName, author.sortName, ...author.alternateNames, author.authorId].join(' ').toLowerCase(),
+  }));
+}
+
+export function editionPickerOptions(
+  editions: readonly AdminCatalogEditionRow[],
+  workTitles: ReadonlyMap<string, string>,
+): PickerOption[] {
+  return editions.map((edition) => {
+    const workTitle = workTitles.get(edition.workId) ?? edition.workId;
+    return {
+      id: edition.editionId,
+      title: edition.title,
+      detail: [edition.isbn13 ?? 'no ISBN', edition.publisher, edition.publishedDate].filter(Boolean).join(' · ') +
+        ` · ${edition.editionId}`,
+      meta: workTitle + (edition.language !== '' ? ` · ${edition.language}` : ''),
+      search: [edition.title, edition.isbn13 ?? '', edition.publisher, workTitle, edition.editionId].join(' ').toLowerCase(),
+    };
+  });
+}

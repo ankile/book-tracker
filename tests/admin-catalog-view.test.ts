@@ -23,6 +23,9 @@ import {
   paginate,
   parseConsoleQuery,
   activeOnly,
+  authorPickerOptions,
+  editionPickerOptions,
+  workPickerOptions,
   reviewLabel,
   reviewStatus,
   duplicateFindingsFor,
@@ -345,4 +348,22 @@ test('an edition merge names the work, its sources and one survivor that is not 
   });
   assert.throws(() => buildOperation(mergeEditionsDraft('work-a', ['edition-b', 'edition-c'], 'edition-b')), /cannot also be a source/);
   assert.throws(() => buildOperation(mergeEditionsDraft('work-a', [], 'edition-a')), /at least one source edition ID/);
+});
+
+test('picker options say enough to tell records apart and search what an operator knows', () => {
+  const names = new Map([['le-guin', 'Ursula K. Le Guin']]);
+  const [option] = workPickerOptions([work({linkedBookCount: 4, editionCount: 2, status: 'hidden'})], names);
+  assert.equal(option.title, 'The Left Hand of Darkness');
+  assert.equal(option.detail, 'Ursula K. Le Guin · work-a');
+  assert.equal(option.meta, '4 readers · 2 editions · created 1970-01-01 · hidden');
+  assert.ok(option.search.includes('left hand') && option.search.includes('le guin') && option.search.includes('work-a'));
+  const [person] = authorPickerOptions([author({workCount: 1})]);
+  assert.equal(person.detail, 'Le Guin · person · le-guin');
+  assert.equal(person.meta, '1 work · also Ursula Le Guin');
+  assert.ok(person.search.includes('ursula le guin'));
+  const [row] = editionPickerOptions([edition()], new Map([['work-a', 'The Left Hand of Darkness']]));
+  assert.equal(row.detail, '9780441478125 · Ace · 1987 · edition-a');
+  assert.equal(row.meta, 'The Left Hand of Darkness · en');
+  assert.ok(row.search.includes('9780441478125') && row.search.includes('the left hand of darkness'));
+  assert.equal(editionPickerOptions([edition({isbn13: null, publisher: '', language: ''})], new Map())[0].detail, 'no ISBN · 1987 · edition-a');
 });

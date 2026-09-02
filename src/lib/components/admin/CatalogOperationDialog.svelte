@@ -12,14 +12,20 @@
     CatalogScan,
   } from '$lib/interfaces/catalog.ts';
   import { COMMON_LANGUAGES } from '../../../../shared/language.ts';
-  import { catalogAuthorIdFor, classifyAdminCatalogFailure } from '$lib/utils/adminCatalog.ts';
+  import RecordPicker from './RecordPicker.svelte';
+  import { catalogAuthorIdFor, classifyAdminCatalogFailure, parseAdminStringList } from '$lib/utils/adminCatalog.ts';
   import {
+    authorNamesById,
+    authorPickerOptions,
     buildOperation,
+    editionPickerOptions,
     newestFirst,
     operationTitle,
     sortAuthors,
+    workPickerOptions,
     type OperationDraft,
   } from '$lib/utils/adminCatalogView.ts';
+  import type { AdminCatalogEditionRow } from '$lib/interfaces/catalog.ts';
 
   // One dialog per console page. The page opens it by assigning a prefilled
   // draft (src/lib/utils/adminCatalogView.ts) and the dialog closes itself
@@ -93,6 +99,21 @@
   const repointTargets = $derived(editions.filter((edition) => edition.status === 'active'));
   const workTitles = $derived(new Map((scan?.works ?? []).map((work) => [work.workId, work.canonicalTitle])));
   const workTitle = (workId: string): string => workTitles.get(workId) ?? workId;
+  const names = $derived(authorNamesById(scan ?? {authors: []}));
+  const workOptions = $derived(workPickerOptions(targetWorks, names));
+  const authorOptions = $derived(authorPickerOptions(activeAuthors));
+  const editionOptionsFor = (rows: readonly AdminCatalogEditionRow[]) => editionPickerOptions(rows, workTitles);
+  const workEditions = (workId: string): AdminCatalogEditionRow[] =>
+    editions.filter((edition) => edition.workId === workId && edition.status === 'active');
+  const editionLabel = (id: string): string => {
+    const edition = editions.find((row) => row.editionId === id);
+    return edition === undefined ? id : `${edition.title}${edition.isbn13 ? ` · ${edition.isbn13}` : ''}`;
+  };
+  // The id lists in a draft are newline-joined text (what the wire format
+  // parses); the chips and pickers edit them as lists.
+  const listOf = (text: string): string[] => parseAdminStringList(text);
+  const withId = (text: string, id: string): string => [...new Set([...listOf(text), id])].join('\n');
+  const without = (text: string, id: string): string => listOf(text).filter((entry) => entry !== id).join('\n');
   // Only active editions can be stood on or merged into; a merge's sources
   // are not offered as its survivor.
   const targetEditions = $derived.by(() => {
@@ -304,6 +325,17 @@
   }
 </script>
 
+{#snippet chosenList(label: string, ids: readonly string[], labelOf: (id: string) => string, remove: (id: string) => void)}
+  <div class="chosen-label">{label}</div>
+  <div class="chosen">
+    {#each ids as id (id)}
+      <span>{labelOf(id)}<button type="button" aria-label={`Remove ${labelOf(id)}`} onclick={() => remove(id)}>×</button></span>
+    {:else}
+      <span class="none">None chosen yet.</span>
+    {/each}
+  </div>
+{/snippet}
+
 <dialog
   bind:this={dialog}
   class="operation"
@@ -323,23 +355,17 @@
         </div>
       {:else if draft.type === 'mergeAuthors'}
         <div class="form-grid">
-          <label>Source author <small>Becomes an alias of the target.</small>
-            <select bind:value={draft.sourceAuthorId}>
-              <option value="">Choose the author to absorb</option>
-              {#each activeAuthors as author (author.authorId)}<option value={author.authorId}>{author.canonicalName} ({author.authorId})</option>{/each}
-            </select>
-          </label>
-          <label>Canonical target author
-            <select bind:value={draft.targetAuthorId}>
-              <option value="">Choose the surviving author</option>
-              {#each activeAuthors as author (author.authorId)}<option value={author.authorId}>{author.canonicalName} ({author.authorId})</option>{/each}
-            </select>
-          </label>
+          <RecordPicker label="Source author" hint="Becomes an alias of the target." options={authorOptions} bind:value={draft.sourceAuthorId} exclude={[draft.targetAuthorId]} />
+          <RecordPicker label="Canonical target author" hint="Keeps its record and takes the names it lacks." options={authorOptions} bind:value={draft.targetAuthorId} exclude={[draft.sourceAuthorId]} />
         </div>
       {:else if draft.type === 'createWork' || draft.type === 'editWork'}
+        {@const current = draft}
         <div class="form-grid">
           <label class="wide">Canonical title<input bind:value={draft.canonicalTitle} /></label>
-          <label>Catalog author IDs, one per line<textarea bind:value={draft.authorIds}></textarea></label>
+          <div class="wide">
+            {@render chosenList('Catalog authors', listOf(current.authorIds), (id) => names.get(id) ?? id, (id) => (current.authorIds = without(current.authorIds, id)))}
+            <RecordPicker add label="Add a catalog author" options={authorOptions} exclude={listOf(current.authorIds)} onpick={(id) => (current.authorIds = withId(current.authorIds, id))} />
+          </div>
           <label>Alternate titles, one per line<textarea bind:value={draft.alternateTitles}></textarea></label>
           <label>Status<select bind:value={draft.status}><option value="active">Active</option><option value="hidden">Hidden (soft delete: kept, not searchable)</option></select></label>
           <label>Fiction<select bind:value={draft.fiction}><option value="unknown">Unknown</option><option value="fiction">Fiction</option><option value="nonfiction">Nonfiction</option></select></label>
@@ -354,49 +380,32 @@
       {:else if draft.type === 'linkBooks'}
         <div class="form-grid">
           <label class="wide">Personal books, uid/bookId per line<textarea bind:value={draft.bookTargets}></textarea></label>
-          <label>Target work <small>Leave blank to unlink.</small>
-            <select bind:value={draft.targetWorkId}>
-              <option value="">— unlink —</option>
-              {#each targetWorks as work (work.workId)}<option value={work.workId}>{work.canonicalTitle} ({work.workId})</option>{/each}
-            </select>
-          </label>
-          <label>Target edition <small>Blank mints one edition per book from the book's own fields.</small>
-            <select bind:value={draft.targetEditionId} disabled={draft.targetWorkId === ''}>
-              <option value="">— mint from each book —</option>
-              {#each targetEditions as edition (edition.editionId)}<option value={edition.editionId}>{edition.title} · {edition.isbn13 ?? 'no ISBN'} ({edition.editionId})</option>{/each}
-            </select>
-          </label>
+          <RecordPicker label="Target work" blankMeans="Blank unlinks the books." options={workOptions} bind:value={draft.targetWorkId} />
+          <RecordPicker label="Target edition" blankMeans={draft.targetWorkId === '' ? 'Choose the work first.' : 'Blank mints one edition per book from the book\'s own fields.'} options={editionOptionsFor(targetEditions)} bind:value={draft.targetEditionId} />
         </div>
       {:else if draft.type === 'mergeWorks'}
+        {@const current = draft}
         <div class="form-grid">
-          <label>Source work IDs, one per line <small>They become aliases of the target, which keeps its own values and takes the titles, subjects, cover, fiction flag and language it lacks.</small><textarea bind:value={draft.sourceWorkIds}></textarea></label>
-          <label>Canonical target work
-            <select bind:value={draft.targetWorkId}>
-              <option value="">Choose the surviving work</option>
-              {#each targetWorks as work (work.workId)}<option value={work.workId}>{work.canonicalTitle} ({work.workId})</option>{/each}
-            </select>
-          </label>
+          <div class="wide">
+            {@render chosenList('Source works', listOf(current.sourceWorkIds), workTitle, (id) => (current.sourceWorkIds = without(current.sourceWorkIds, id)))}
+            <RecordPicker add label="Add a source work" hint="Each becomes an alias of the target." options={workOptions} exclude={[...listOf(current.sourceWorkIds), current.targetWorkId]} onpick={(id) => (current.sourceWorkIds = withId(current.sourceWorkIds, id))} />
+          </div>
+          <RecordPicker label="Canonical target work" hint="Keeps its own values and takes the titles, subjects, cover, fiction flag and language it lacks." options={workOptions} bind:value={draft.targetWorkId} exclude={listOf(draft.sourceWorkIds)} />
         </div>
       {:else if draft.type === 'mergeEditions'}
+        {@const current = draft}
         <div class="form-grid">
           <label>Work ID<input bind:value={draft.workId} autocomplete="off" readonly /></label>
-          <label>Source edition IDs, one per line <small>They become aliases of the survivor. The survivor keeps its own values and takes what it lacks from them (ISBN, external IDs, publisher, date, cover, language, translators, format, pages); every reader's book on the merged edition inherits what it left blank.</small><textarea bind:value={draft.sourceEditionIds}></textarea></label>
-          <label>Surviving edition
-            <select bind:value={draft.targetEditionId}>
-              <option value="">Choose the surviving edition</option>
-              {#each targetEditions as edition (edition.editionId)}<option value={edition.editionId}>{edition.title}{edition.isbn13 ? ` · ${edition.isbn13}` : ''}{edition.publisher ? ` · ${edition.publisher}` : ''} ({edition.editionId})</option>{/each}
-            </select>
-          </label>
+          <div class="wide">
+            {@render chosenList('Source editions', listOf(current.sourceEditionIds), editionLabel, (id) => (current.sourceEditionIds = without(current.sourceEditionIds, id)))}
+            <RecordPicker add label="Add a source edition" hint="Each becomes an alias of the survivor." options={editionOptionsFor(workEditions(current.workId))} exclude={[...listOf(current.sourceEditionIds), current.targetEditionId]} onpick={(id) => (current.sourceEditionIds = withId(current.sourceEditionIds, id))} />
+          </div>
+          <RecordPicker label="Surviving edition" hint="Keeps its own values and takes what it lacks from the sources (ISBN, external IDs, publisher, date, cover, language, translators, format, pages); every reader's book on the merged edition inherits what it left blank." options={editionOptionsFor(targetEditions)} bind:value={draft.targetEditionId} />
         </div>
       {:else if draft.type === 'upsertEdition'}
         <div class="form-grid">
           <label class="wide">Edition title<input bind:value={draft.title} /></label>
-          <label>Work
-            <select bind:value={draft.workId}>
-              <option value="">Choose the work</option>
-              {#each targetWorks as work (work.workId)}<option value={work.workId}>{work.canonicalTitle} ({work.workId})</option>{/each}
-            </select>
-          </label>
+          <RecordPicker label="Work" options={workOptions} bind:value={draft.workId} />
           <label>Edition ID<input bind:value={draft.editionId} autocomplete="off" /></label>
           <div class="field-row">
             <label>ISBN<input bind:value={draft.isbn} inputmode="numeric" /></label>
@@ -414,12 +423,7 @@
       {:else}
         <div class="form-grid">
           <label>ISBN<input bind:value={draft.isbn} inputmode="numeric" /></label>
-          <label>New edition
-            <select bind:value={draft.editionId}>
-              <option value="">Choose the edition</option>
-              {#each repointTargets as edition (edition.editionId)}<option value={edition.editionId}>{edition.title} · {edition.isbn13 ?? 'no ISBN'} · {workTitle(edition.workId)} ({edition.editionId})</option>{/each}
-            </select>
-          </label>
+          <RecordPicker label="New edition" hint="The edition the ISBN moves to; the edition holding it now loses it." options={editionOptionsFor(repointTargets)} bind:value={draft.editionId} />
         </div>
       {/if}
 
@@ -540,6 +544,44 @@
 
   .wide {
     grid-column: 1 / -1;
+  }
+
+  .chosen-label {
+    color: #3f4d4a;
+    font-size: 0.86rem;
+    font-weight: 650;
+  }
+
+  .chosen {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0.3rem 0 0.6rem;
+  }
+
+  .chosen span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.65rem;
+    font-size: 0.86rem;
+    background: #eef2f1;
+    border-radius: 999px;
+  }
+
+  .chosen .none {
+    padding: 0;
+    color: #6b7673;
+    background: none;
+  }
+
+  .form-grid .chosen button {
+    min-height: auto;
+    padding: 0 0.25rem;
+    font-size: 1.05rem;
+    line-height: 1;
+    background: none;
+    border: 0;
   }
 
   .field-row {
