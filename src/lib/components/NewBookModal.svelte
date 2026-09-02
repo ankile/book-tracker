@@ -10,19 +10,10 @@
   import { normalizeIsbn } from "../utils/isbn.ts";
   import {
     EMPTY_METADATA,
-    parseOpenLibraryBook,
     selectLookupMetadata,
   } from "../utils/bookMetadata.ts";
-  import { parseGoogleVolume } from "../utils/googleBooks.ts";
   import { effectiveLanguage, languageLabel } from "../../../shared/language.ts";
-  import {
-    nbSearchUrl,
-    nbModsUrl,
-    parseNbItem,
-    extractModsGenres,
-    extractModsLanguage,
-    extractModsCoverUrl,
-  } from "../utils/nasjonalbiblioteket.ts";
+  import { lookupIsbnSources } from "../utils/isbnLookup.ts";
   import { catalogAddEdition, catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
@@ -505,9 +496,9 @@
       // detailed subjects and bibliographic fields. Google Books supplies
       // the preferred cover and fiction classification. Nasjonalbiblioteket
       // fills gaps, especially for Norwegian editions.
-      const openLibrary = await fetchOpenLibrary(normalized);
-      const google = await fetchGoogleBooks(normalized);
-      const nb = await fetchNasjonalbiblioteket(normalized);
+      const {openLibrary, google, nb} = await lookupIsbnSources(normalized, {
+        google: async (isbn13) => (await lookupIsbn({isbn: isbn13})).data,
+      });
 
       if (openLibrary === null && google === null && nb === null) {
         lookupError = "No book found for this ISBN";
@@ -543,88 +534,6 @@
     }
   }
 
-  async function fetchOpenLibrary(isbn13: string): Promise<BookLookupResult | null> {
-    const response = await fetch(
-      `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn13}&format=json&jscmd=data`
-    );
-
-    if (!response.ok) {
-      throw new Error("Network error");
-    }
-
-    const data = requireRecord(await response.json(), 'Open Library response');
-    const record = data[`ISBN:${isbn13}`];
-    return record === undefined ? null : parseOpenLibraryBook(record);
-  }
-
-  // Nasjonalbiblioteket is called straight from the browser (open, no key,
-  // and it reflects CORS origins). Genres — the fiction/non-fiction signal
-  // for Norwegian books — live in the separate MODS record. That record can
-  // also contain an explicit public cover supplied by the Norwegian catalog.
-  async function fetchNasjonalbiblioteket(isbn13: string): Promise<BookLookupResult | null> {
-    try {
-      const response = await fetch(nbSearchUrl(isbn13));
-      if (!response.ok) throw new Error(`Nasjonalbiblioteket ${response.status}`);
-      const body = requireRecord(await response.json(), 'Nasjonalbiblioteket response');
-      const embedded = optionalRecord(body._embedded);
-      const items = embedded?.items;
-      const item = Array.isArray(items) ? items[0] : undefined;
-      if (item === undefined) return null;
-
-      const itemData = requireRecord(item, 'Nasjonalbiblioteket item');
-      if (typeof itemData.id !== 'string') throw new Error('Nasjonalbiblioteket item id must be a string.');
-      const mods = await fetch(nbModsUrl(itemData.id));
-      if (!mods.ok) throw new Error(`Nasjonalbiblioteket MODS ${mods.status}`);
-      const modsXml = await mods.text();
-      const parsed = parseNbItem(
-        item,
-        extractModsGenres(modsXml),
-        extractModsCoverUrl(modsXml),
-        extractModsLanguage(modsXml),
-      );
-      return {
-        title: parsed.title,
-        authorNames: parsed.authorNames,
-        pageCount: parsed.pageCount,
-        coverUrl: parsed.coverUrl,
-        publisher: parsed.publisher,
-        publishedDate: parsed.publishedDate,
-        subjects: parsed.subjects,
-        fiction: parsed.fiction,
-        language: parsed.language,
-      };
-    } catch (error) {
-      console.error("Nasjonalbiblioteket lookup failed", error);
-      return null;
-    }
-  }
-
-  // Google Books runs through a callable (it proxies a metered API key).
-  // A failure here must not discard the Open Library result the user is
-  // waiting on, so it degrades to "no second source" rather than throwing.
-  async function fetchGoogleBooks(isbn13: string): Promise<BookLookupResult | null> {
-    try {
-      const { data } = await lookupIsbn({ isbn: isbn13 });
-      return data.volume === null ? null : parseGoogleVolume(data.volume);
-    } catch (error) {
-      console.error("Google Books lookup failed", error);
-      return null;
-    }
-  }
-
-  type Data = Record<string, unknown>;
-
-  function requireRecord(value: unknown, context: string): Data {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new TypeError(`${context} must be an object.`);
-    }
-    return value as Data;
-  }
-
-  function optionalRecord(value: unknown): Data | undefined {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-    return value as Data;
-  }
 </script>
 
 <style>

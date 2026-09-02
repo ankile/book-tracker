@@ -1230,9 +1230,10 @@ test("a work's language carries into its books unless an edition overrides or a 
     },
   };
   const editionPreview = await deployed.admin.catalogpreview.run({operation: editionOperation}, recentAdmin());
+  // The edit also fills what the book left blank, here the work's fiction flag.
   assert.deepEqual(
     editionPreview.changes.filter(({kind}) => kind === "book").map(({after}) => after),
-    [{language: "sv"}],
+    [{fiction: true, language: "sv"}],
   );
   await deployed.admin.catalogapply.run({
     operationId: editionPreview.operationId, operation: editionOperation, expected: editionPreview.expected,
@@ -1426,4 +1427,90 @@ test("merging works gives the survivor the cover, fiction flag, language and sub
   assert.equal(full?.after?.fiction, false);
   assert.equal(full?.after?.language, "en");
   assert.deepEqual(full?.after?.subjects, ["Own", "Theirs"]);
+});
+
+test("an edition edit adds, changes or drops its ISBN with the index row, and fills its readers' blanks", async (t) => {
+  const store = installCatalogStore(t);
+  const now = Timestamp.fromMillis(1000);
+  store.write(store.ref("works/sult"), activeWork("Sult", {language: "no", coverUrl: "https://covers.test/work.jpg"}));
+  store.write(store.ref("editions/bare"), edition("sult", {isbn13: null, publisher: "", createdAt: now, updatedAt: now}));
+  store.write(store.ref("editions/other"), edition("sult", {isbn13: "9780441478125", createdAt: now, updatedAt: now}));
+  store.write(store.ref("isbnIndex/9780441478125"), {workId: "sult", editionId: "other"});
+  store.write(store.ref("users/magnus"), {uid: "magnus"});
+  store.write(store.ref("users/magnus/books/blank"), {
+    owner: store.ref("users/magnus"), title: "Sult", pageCount: 198, updatedAt: now, isbn: "",
+    coverUrl: "", publisher: "", publishedDate: "", fiction: null, subjects: [],
+    workId: "sult", editionId: "bare", matchMethod: "migration", linkedAt: now,
+  });
+  store.write(store.ref("users/magnus/books/own"), {
+    owner: store.ref("users/magnus"), title: "Sult", pageCount: 198, updatedAt: now, isbn: "9780000000000",
+    coverUrl: "https://covers.test/mine.jpg", publisher: "Own Press", publishedDate: "", fiction: null, subjects: [],
+    workId: "sult", editionId: "bare", matchMethod: "migration", linkedAt: now,
+  });
+  const input = (isbn13: string | null, overrides: Row = {}): Row => ({
+    isbn13, title: "Sult", publisher: "Gyldendal", publishedDate: "2009", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: 198,
+    coverUrl: "https://covers.test/gyldendal.jpg", externalIds: {}, ...overrides,
+  });
+  const edit = (isbn13: string | null, overrides: Row = {}) => ({
+    type: "upsertEdition", editionId: "bare", workId: "sult", edition: input(isbn13, overrides),
+  });
+
+  // Adding an ISBN creates its index row and the books inherit what they lacked.
+  const added = await deployed.admin.catalogpreview.run({operation: edit("9788205394810")}, recentAdmin());
+  assert.deepEqual(
+    added.changes.filter(({kind}) => kind === "isbn").map(({action, after}) => [action, after]),
+    [["create", {workId: "sult", editionId: "bare"}]],
+  );
+  assert.deepEqual(
+    added.changes.filter(({kind}) => kind === "book").map(({after}) => after),
+    [
+      {isbn: "9788205394810", coverUrl: "https://covers.test/gyldendal.jpg", publisher: "Gyldendal", publishedDate: "2009", fiction: true, language: "no"},
+      {publishedDate: "2009", fiction: true, language: "no"},
+    ],
+  );
+  await deployed.admin.catalogapply.run({
+    operationId: added.operationId, operation: edit("9788205394810"), expected: added.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("editions/bare")?.isbn13, "9788205394810");
+  assert.deepEqual(store.rows.get("isbnIndex/9788205394810"), {workId: "sult", editionId: "bare"});
+  assert.equal(store.rows.get("users/magnus/books/blank")?.isbn, "9788205394810");
+  assert.equal(store.rows.get("users/magnus/books/blank")?.coverUrl, "https://covers.test/gyldendal.jpg");
+  assert.equal(store.rows.get("users/magnus/books/own")?.publisher, "Own Press");
+  assert.equal(store.rows.get("users/magnus/books/own")?.isbn, "9780000000000");
+  assert.equal(store.rows.get("users/magnus/books/own")?.publishedDate, "2009");
+
+  // The same edit again plans nothing for the books.
+  const same = await deployed.admin.catalogpreview.run({operation: edit("9788205394810")}, recentAdmin());
+  assert.equal(same.changes.some(({kind}) => kind === "book"), false);
+  assert.equal(same.changes.some(({kind}) => kind === "isbn"), false);
+
+  // Changing it drops the old row and creates the new one.
+  const changed = await deployed.admin.catalogpreview.run({operation: edit("9788203368332")}, recentAdmin());
+  assert.deepEqual(
+    changed.changes.filter(({kind}) => kind === "isbn").map(({action, after}) => [action, after]),
+    [["delete", null], ["create", {workId: "sult", editionId: "bare"}]],
+  );
+  await deployed.admin.catalogapply.run({
+    operationId: changed.operationId, operation: edit("9788203368332"), expected: changed.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.has("isbnIndex/9788205394810"), false);
+  assert.deepEqual(store.rows.get("isbnIndex/9788203368332"), {workId: "sult", editionId: "bare"});
+
+  // An ISBN another edition holds is refused: that is repointIsbn's job.
+  await assert.rejects(
+    deployed.admin.catalogpreview.run({operation: edit("9780441478125")}, recentAdmin()),
+    (error) => hasCode(error, "failed-precondition") && detail(error, "reason") === "identifier-conflict",
+  );
+
+  // Dropping it deletes the row and leaves the edition without one.
+  const dropped = await deployed.admin.catalogpreview.run({operation: edit(null)}, recentAdmin());
+  assert.deepEqual(
+    dropped.changes.filter(({kind}) => kind === "isbn").map(({action}) => action), ["delete"],
+  );
+  await deployed.admin.catalogapply.run({
+    operationId: dropped.operationId, operation: edit(null), expected: dropped.expected,
+  }, recentAdmin());
+  assert.equal(store.rows.get("editions/bare")?.isbn13, null);
+  assert.equal(store.rows.has("isbnIndex/9788203368332"), false);
 });

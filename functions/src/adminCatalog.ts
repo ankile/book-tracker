@@ -1602,18 +1602,32 @@ async function planOperation(
         reader, db.collection("editions"), MAX_EDITIONS, 1, "editions",
       );
     }
-    if (old !== undefined && old.isbn13 !== operation.edition.isbn13) {
-      failedPrecondition("Use repointIsbn to change an edition ISBN.", "identifier-conflict");
-    }
-    if (old === undefined && operation.edition.isbn13 !== null) {
-      const isbn = await one(reader, db.collection("isbnIndex").doc(operation.edition.isbn13));
-      catalog.push(versionOf("isbn", isbn));
-      if (isbn.exists) failedPrecondition("ISBN is already assigned.", "identifier-conflict");
-      await ensureCollectionCapacity(
-        reader, db.collection("isbnIndex"), MAX_ISBN_INDEXES, 1, "ISBN indexes",
-      );
-      const row = {workId: operation.workId, editionId: operation.editionId};
-      changes.push(change("isbn", isbn.ref, "create", null, row, {type: "create", data: row}));
+    // An edit may give the edition an ISBN, change it or drop it; the index
+    // row follows. An ISBN another edition holds is refused here: taking it
+    // over is repointIsbn's job, which also clears the other edition.
+    const previousIsbn = old?.isbn13 ?? null;
+    if (previousIsbn !== operation.edition.isbn13) {
+      if (previousIsbn !== null) {
+        const priorRef = db.collection("isbnIndex").doc(previousIsbn);
+        const prior = await one(reader, priorRef);
+        catalog.push(versionOf("isbn", prior));
+        if (!prior.exists || prior.get("editionId") !== operation.editionId) {
+          failedPrecondition("Edition ISBN index is missing or owned elsewhere.", "catalog-invariant");
+        }
+        changes.push(change("isbn", priorRef, "delete", prior.data() ?? null, null, {type: "delete"}));
+      }
+      if (operation.edition.isbn13 !== null) {
+        const isbn = await one(reader, db.collection("isbnIndex").doc(operation.edition.isbn13));
+        catalog.push(versionOf("isbn", isbn));
+        if (isbn.exists) {
+          failedPrecondition("ISBN is already assigned to another edition; repoint it instead.", "identifier-conflict");
+        }
+        await ensureCollectionCapacity(
+          reader, db.collection("isbnIndex"), MAX_ISBN_INDEXES, 1, "ISBN indexes",
+        );
+        const row = {workId: operation.workId, editionId: operation.editionId};
+        changes.push(change("isbn", isbn.ref, "create", null, row, {type: "create", data: row}));
+      }
     }
     const next = {
       ...editionInputData(operation.workId, operation.edition, now, old),
@@ -1642,20 +1656,28 @@ async function planOperation(
       "external ID indexes",
     );
     changes.push(...external.changes);
-    if (old !== undefined && old.workId === operation.workId && old.language !== next.language) {
-      // An override that changes carries into the books on this edition.
-      const carried = await carriedLanguageChanges(
-        reader,
-        db,
-        db.collectionGroup("books").where("editionId", "==", operation.editionId),
-        () => [
-          effectiveLanguage(old.language, work.work.language),
-          effectiveLanguage(next.language, work.work.language),
-        ],
+    if (old !== undefined && old.workId === operation.workId) {
+      // The books on the edition inherit from the edited record what their
+      // readers left blank (an ISBN or cover the edit added, say), and a
+      // changed override carries into them; a reader's own values stay.
+      const languageBefore = effectiveLanguage(old.language, work.work.language);
+      const languageAfter = effectiveLanguage(next.language, work.work.language);
+      const linked = await liveLinkedBooks(
+        reader, db, db.collectionGroup("books").where("editionId", "==", operation.editionId),
       );
-      changes.push(...carried.changes);
-      catalog.push(...carried.catalog);
-      books = carried.versions;
+      const touched: AdminCatalogExpected["books"] = [];
+      for (const {snapshot: book, uid, bookId} of linked) {
+        const inherited = inheritedBookMetadata(book, next, work.work);
+        const carried = carriedLanguage(book, languageBefore, languageAfter);
+        const data = {...inherited.after, ...carried.after};
+        if (Object.keys(data).length === 0) continue;
+        touched.push(bookVersion(book, {uid, bookId}));
+        changes.push(change(
+          "book", book.ref, "update",
+          {...inherited.before, ...carried.before}, data, {type: "set", data},
+        ));
+      }
+      books = touched;
     }
     if (old !== undefined && old.workId !== operation.workId) {
       const linked = await many(reader, db.collectionGroup("books")

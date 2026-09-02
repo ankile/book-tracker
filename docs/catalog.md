@@ -216,7 +216,13 @@ it). Changes go through two callables: a preview that plans one operation,
 and an apply that re-plans it inside a transaction and refuses if the state
 moved under the preview. The operations are `upsertAuthor`, `mergeAuthors`,
 `createWork`, `linkBooks`, `mergeWorks`, `editWork`, `upsertEdition` and
-`repointIsbn`. A new author's id is derived from its canonical name the way
+`repointIsbn`. An edition edit may add, change or drop the edition's ISBN and
+its index row follows; an ISBN another edition holds is refused there and
+is `repointIsbn`'s job, which also clears the other edition. The edition
+form can look its ISBN up (the add-book form's three sources) to fill the
+fields the operator left blank, and every edition edit gives the books
+standing on the edition what their readers left blank — ISBN, cover,
+publisher, date — and carries a changed language override into them. A new author's id is derived from its canonical name the way
 `catalog.ensureauthors` derives it, so a reader adding the same name later
 lands on the console's document. Every apply is idempotent by operation id
 and writes an `adminAudit` record.

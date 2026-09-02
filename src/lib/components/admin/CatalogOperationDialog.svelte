@@ -1,7 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { FunctionsError } from 'firebase/functions';
   import { reauthenticateWithPassword } from '$lib/firebase/auth.ts';
-  import { adminCatalogApply, adminCatalogPreview } from '$lib/firebase/functions.ts';
+  import { adminCatalogApply, adminCatalogPreview, lookupIsbn } from '$lib/firebase/functions.ts';
+  import { normalizeIsbn } from '$lib/utils/isbn.ts';
+  import { lookupIsbnSources, primaryLookup } from '$lib/utils/isbnLookup.ts';
+  import { selectLookupMetadata } from '$lib/utils/bookMetadata.ts';
   import type {
     AdminCatalogOperation,
     AdminCatalogPreviewResponse,
@@ -35,6 +39,7 @@
   let preview = $state<PreviewState | null>(null);
   let previewFingerprint = $state<string | null>(null);
   let pending = $state(false);
+  let lookingUp = $state(false);
   let errorMessage = $state('');
   let statusMessage = $state('');
 
@@ -138,13 +143,69 @@
       statusMessage = `Preview ready: ${response.touchedDocuments} documents would be touched.`;
     } catch (error) {
       console.error('Admin catalog preview failed', error);
-      errorMessage = 'Preview failed. Nothing was changed; review the operation and try again.';
+      errorMessage = failureMessage(
+        error, 'Preview failed. Nothing was changed; review the operation and try again.',
+      );
     } finally {
       pending = false;
     }
   }
 
-  function failureMessage(error: unknown): string {
+  // The edition form's ISBN lookup: the same three sources the add-book
+  // form asks, filling only the fields the operator left blank.
+  async function lookUpEditionIsbn(): Promise<void> {
+    const current = draft;
+    if (current?.type !== 'upsertEdition') return;
+    const isbn13 = normalizeIsbn(current.isbn);
+    if (isbn13 === null) {
+      errorMessage = 'Not a valid ISBN-10 or ISBN-13 (check digit mismatch?).';
+      return;
+    }
+    current.isbn = isbn13;
+    lookingUp = true;
+    errorMessage = '';
+    statusMessage = '';
+    try {
+      const sources = await lookupIsbnSources(isbn13, {
+        google: async (isbn) => (await lookupIsbn({isbn})).data,
+      });
+      const primary = primaryLookup(sources);
+      if (primary === null) {
+        errorMessage = 'No book found for this ISBN.';
+        return;
+      }
+      const metadata = selectLookupMetadata(sources.openLibrary, sources.google, sources.nb);
+      const filled: string[] = [];
+      const fill = (field: 'title' | 'publisher' | 'publishedDate' | 'coverUrl' | 'language' | 'pageCount', value: string, label: string): void => {
+        if (current[field].trim() !== '' || value === '') return;
+        current[field] = value;
+        filled.push(label);
+      };
+      fill('title', primary.title, 'title');
+      fill('publisher', metadata.publisher, 'publisher');
+      fill('publishedDate', metadata.publishedDate, 'date');
+      fill('coverUrl', metadata.coverUrl, 'cover');
+      fill('language', metadata.language, 'language');
+      const pages = primary.pageCount ?? sources.google?.pageCount ?? sources.nb?.pageCount;
+      fill('pageCount', pages === undefined ? '' : String(pages), 'pages');
+      statusMessage = filled.length === 0 ?
+        'The ISBN answered, but every field already had a value.' :
+        `Filled ${filled.join(', ')} from the ISBN; what you had typed was kept.`;
+    } catch (error) {
+      console.error('ISBN lookup failed', error);
+      errorMessage = 'Failed to look up the ISBN. Try again.';
+    } finally {
+      lookingUp = false;
+    }
+  }
+
+  // The server's own reason rides along where it has one, so "identity
+  // invariant" names the invariant.
+  function failureMessage(
+    error: unknown,
+    fallback = 'The catalog operation failed. Nothing was applied.',
+  ): string {
+    const reason = error instanceof FunctionsError && error.message !== '' ? ` (${error.message})` : '';
     const failure = classifyAdminCatalogFailure(error);
     if (failure.kind === 'stale-preview') {
       preview = null;
@@ -158,12 +219,12 @@
       return `The ${failure.collection} catalog capacity (${failure.maximum}) has been reached. Edit, merge, or unlink existing records before creating another.`;
     }
     if (failure.kind === 'catalog-invariant') {
-      return 'The operation would violate a catalog identity invariant. Nothing was applied.';
+      return `The operation would violate a catalog identity invariant${reason}. Nothing was applied.`;
     }
     if (failure.kind === 'identifier-conflict') {
-      return 'An ISBN or external identifier is already assigned elsewhere. Nothing was applied.';
+      return `An ISBN or external identifier is already assigned elsewhere${reason}. Nothing was applied.`;
     }
-    return 'The catalog operation failed. Nothing was applied.';
+    return `${fallback}${reason}`;
   }
 
   async function applyPreview(confirmFirst = true): Promise<void> {
@@ -332,7 +393,10 @@
             </select>
           </label>
           <label>Edition ID<input bind:value={draft.editionId} autocomplete="off" /></label>
-          <label>ISBN<input bind:value={draft.isbn} inputmode="numeric" /></label>
+          <div class="field-row">
+            <label>ISBN<input bind:value={draft.isbn} inputmode="numeric" /></label>
+            <button type="button" disabled={lookingUp || pending} onclick={() => void lookUpEditionIsbn()}>{lookingUp ? 'Looking up…' : 'Look up'}</button>
+          </div>
           <label>Suggested pages<input bind:value={draft.pageCount} inputmode="numeric" /></label>
           <label>Publisher<input bind:value={draft.publisher} /></label>
           <label>Published date<input bind:value={draft.publishedDate} /></label>
@@ -471,6 +535,21 @@
 
   .wide {
     grid-column: 1 / -1;
+  }
+
+  .field-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+  }
+
+  .field-row label {
+    flex: 1 1 auto;
+  }
+
+  .field-row button {
+    min-height: 42px;
+    white-space: nowrap;
   }
 
   .preview {
