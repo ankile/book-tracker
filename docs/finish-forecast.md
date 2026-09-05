@@ -108,6 +108,11 @@ A production build does not enable emulator connections just because
 database review. No hosted preview or production deployment is part of this
 workflow.
 
+Restart the Vite dev server after running production builds or artifact
+checks in the same checkout. Those commands regenerate SvelteKit's server
+configuration with the production CSP, which excludes the emulator ports.
+Hard-refresh an already-open browser tab to replace cached response headers.
+
 ## Method references
 
 - [Time-series cross-validation](https://otexts.com/fpp3/tscv.html)
