@@ -14,6 +14,7 @@ import type {
   ReadingUpdateView,
 } from '../interfaces/reading.ts';
 import { dayKeyOf, shiftedDay } from './stats.ts';
+import { finishForecast, forecastDate, forecastReadings } from './finishForecast.ts';
 
 export const SPEED_MIN_SESSION_MINUTES = 5;
 export const SPEED_MAX_PAGES_PER_HOUR = 150;
@@ -432,39 +433,23 @@ export function completionRate(
 
 export function projectedFinishes(
   allBooks: readonly ProjectionBookView[],
-  timelines: ReadonlyMap<string, BookTimeline>,
+  _timelines: ReadonlyMap<string, BookTimeline>,
   sessions: readonly BookUpdateView[],
   now: Date,
 ): FinishProjection[] {
-  const windowStart = new Date(now.getTime() - 30 * MS_PER_DAY);
-  const recentMinutes = sessions
-    .filter(isReading)
-    .filter((session) => session.createdAt.toDate().getTime() >= windowStart.getTime())
-    .reduce((sum, session) => sum + session.timeRead, 0);
-  const minutesPerDay = recentMinutes / 30;
+  const readings = forecastReadings(sessions);
 
   const projections = allBooks
     .filter((book) => !book.finished)
     .map((book): FinishProjection => {
-      const timeline = timelines.get(book.id);
       const remainingPages = Math.max(0, book.pageCount - book.currentPage);
-      const active = timeline !== undefined
-        && (now.getTime() - timeline.lastAt.getTime()) / MS_PER_DAY <= 60;
-      const pagesRead = book.pagesRead;
-      const timeRead = book.timeRead;
-      const pagesPerMinute = timeRead > 0 ? pagesRead / timeRead : 0;
-      const projectable = active && minutesPerDay > 0 && pagesPerMinute > 0;
+      const forecast = finishForecast(book, allBooks, readings, now.getTime());
       return {
         title: book.title,
         remainingPages,
         percentComplete:
           book.pageCount > 0 ? Math.round((book.currentPage / book.pageCount) * 100) : 0,
-        projectedDate: projectable
-          ? new Date(
-              now.getTime()
-                + (remainingPages / (pagesPerMinute * minutesPerDay)) * MS_PER_DAY,
-            )
-          : null,
+        projectedDate: forecast.days === null ? null : forecastDate(now, forecast.days),
       };
     });
 

@@ -54,6 +54,8 @@ editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
   integration.
 - Shows yearly statistics, reading streaks, a daily activity heatmap, and
   per-book reading speed.
+- Opens a calendar finish forecast from **Est left**, using recent reading
+  and a historical date range. See [forecasting and local review](docs/finish-forecast.md).
 - Resolves authors through one shared catalog and lets authorized operators
   curate author identities, aliases, classifications, and merges.
 - Suggests existing shared works and editions while keeping each reader's

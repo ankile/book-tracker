@@ -46,7 +46,12 @@
     };
   });
 
-  const close = () => onclose();
+  const close = () => {
+    // Close while connected so the browser restores focus before the
+    // parent removes the component.
+    dialogElement?.close();
+    onclose();
+  };
 
   function handleSubmit(event: SubmitEvent) {
     event.preventDefault();

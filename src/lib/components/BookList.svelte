@@ -7,6 +7,7 @@
   import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
   import NewBookModal from "$lib/components/NewBookModal.svelte";
   import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
+  import FinishForecastModal from "$lib/components/FinishForecastModal.svelte";
   import { Database } from "../firebase/db.ts";
   import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
@@ -49,6 +50,7 @@
   });
   let books = $derived(booksProp ?? fetchedBooks);
   let sessionsBookId = $state<string | null>(null);
+  let forecastBookId = $state<string | null>(null);
   let sessionsBook = $derived(
     sessionsBookId === null
       ? null
@@ -742,17 +744,26 @@
             </div>
 
             <div class="col">
-              <div class="text-right">
-                <span class="label">{finished ? 'Finished' : 'Est left'}</span>
-                <br />
-                <span class="page-number">
-                  {#if finished}
+              {#if !finished}
+                <button type="button" class="action-button text-right clickable"
+                  aria-label={`View estimated finish for ${book.title}`}
+                  onclick={() => (forecastBookId = book.id)}>
+                  <span class="label">Est left</span><br />
+                  <span class="page-number">
+                    {#if hasEstimate(book)}
+                      {formatTime(Math.round((book.pageCount - book.currentPage) * (book.timeRead / book.pagesRead)))}
+                    {:else}NA{/if}
+                  </span>
+                </button>
+              {:else}
+                <div class="text-right">
+                  <span class="label">Finished</span>
+                  <br />
+                  <span class="page-number">
                     {finishedDateOf(book).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                  {:else if hasEstimate(book)}
-                    {formatTime(Math.round((book.pageCount - book.currentPage) * (book.timeRead / book.pagesRead)))}
-                  {:else}NA{/if}
-                </span>
-              </div>
+                  </span>
+                </div>
+              {/if}
             </div>
             <div class="col">
               <div class="text-right">
@@ -875,3 +886,7 @@
     </div>
   {/each}
 </div>
+
+{#if forecastBookId !== null && !finished}
+  <FinishForecastModal bookId={forecastBookId} {userId} onclose={() => (forecastBookId = null)} />
+{/if}

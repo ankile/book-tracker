@@ -190,13 +190,14 @@ test("projectedFinishes projects active books and nulls dormant ones", () => {
     { id: "b", finished: false, title: "Beta", currentPage: 25, pageCount: 100, pagesRead: 25, timeRead: 30 },
     { id: "dormant", finished: false, title: "Dormant", currentPage: 10, pageCount: 100, pagesRead: 10, timeRead: 60 },
   ];
-  const dormantSessions = [...sessions, reading("dormant", "2025-06-01T12:00:00", 10, 60)];
+  const dormantSessions = [reading("b", "2026-03-10T12:00:00", 10, 15), reading("b", "2026-03-18T12:00:00", 15, 15), reading("dormant", "2025-06-01T12:00:00", 10, 60)];
   const projections = projectedFinishes(books, buildBookTimelines(dormantSessions), dormantSessions, now);
   assert.equal(projections[0].title, "Beta");
-  // 30 recent minutes / 30 days = 1 min/day at 25/30 pages/min → 90 days.
+  // 90 active minutes left; geometric mean of 3 book minutes/day and
+  // 30/14 overall minutes/day, including days without reading.
   assert.ok(projections[0].projectedDate);
   assert.ok(
-    Math.abs(projections[0].projectedDate.getTime() - (now.getTime() + 90 * 24 * 60 * 60 * 1000)) < 1000
+    Math.abs(projections[0].projectedDate.getTime() - (now.getTime() + 90 / Math.sqrt(3 * 30 / 14) * 24 * 60 * 60 * 1000)) < 1000
   );
   assert.equal(projections[1].projectedDate, null);
 });
