@@ -7,7 +7,7 @@
   import UpdateCurrentModal from "$lib/components/UpdateCurrentModal.svelte";
   import NewBookModal from "$lib/components/NewBookModal.svelte";
   import ReadingSessionsModal from "$lib/components/ReadingSessionsModal.svelte";
-  import FinishForecastModal from "$lib/components/FinishForecastModal.svelte";
+  import ModalCard from "$lib/components/ModalCard.svelte";
   import { Database } from "../firebase/db.ts";
   import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
@@ -51,6 +51,13 @@
   let books = $derived(booksProp ?? fetchedBooks);
   let sessionsBookId = $state<string | null>(null);
   let forecastBookId = $state<string | null>(null);
+  let forecastTrigger: HTMLButtonElement | null = null;
+  const closeForecast = () => {
+    forecastBookId = null;
+    // The loading dialog is replaced after the lazy import. Restore the
+    // original trigger rather than the now-removed loading dialog's focus.
+    forecastTrigger?.focus();
+  };
   let sessionsBook = $derived(
     sessionsBookId === null
       ? null
@@ -747,7 +754,7 @@
               {#if !finished}
                 <button type="button" class="action-button text-right clickable"
                   aria-label={`View estimated finish for ${book.title}`}
-                  onclick={() => (forecastBookId = book.id)}>
+                  onclick={(event) => { forecastTrigger = event.currentTarget; forecastBookId = book.id; }}>
                   <span class="label">Est left</span><br />
                   <span class="page-number">
                     {#if hasEstimate(book)}
@@ -888,5 +895,15 @@
 </div>
 
 {#if forecastBookId !== null && !finished}
-  <FinishForecastModal bookId={forecastBookId} {userId} onclose={() => (forecastBookId = null)} />
+  {#await import('./FinishForecastModal.svelte')}
+    <ModalCard open header="Estimated finish" onclose={closeForecast}>
+      <p role="status">Loading finish forecast…</p>
+    </ModalCard>
+  {:then { default: FinishForecastModal }}
+    <FinishForecastModal bookId={forecastBookId} {userId} onclose={closeForecast} />
+  {:catch}
+    <ModalCard open header="Estimated finish" onclose={closeForecast}>
+      <p role="alert">The forecast view couldn't load. Close and reopen it to try again.</p>
+    </ModalCard>
+  {/await}
 {/if}

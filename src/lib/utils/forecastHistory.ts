@@ -29,6 +29,11 @@ export interface ForecastHistoryInput {
     minutes: number; pages: number; toPage?: number }[];
 }
 
+export interface ForecastReplayObservation extends ForecastObservation {
+  baselineDays: number;
+  activeBooks: number;
+}
+
 export function forecastHistoryInput(
   books: readonly ForecastHistoryBook[], updates: readonly ForecastHistoryUpdate[], now: number,
 ): ForecastHistoryInput {
@@ -42,7 +47,7 @@ export function forecastHistoryInput(
   };
 }
 
-export function forecastHistoryFromInput(input: ForecastHistoryInput): ForecastObservation[] {
+export function forecastHistoryFromInput(input: ForecastHistoryInput): ForecastReplayObservation[] {
   const stamp = (at: number): TimestampLike => ({ toDate: () => new Date(at) });
   return buildForecastHistory(
     input.books.map((book) => ({ ...book, finishedAt: book.finishedAt === null ? null : stamp(book.finishedAt) })),
@@ -57,7 +62,7 @@ export function buildForecastHistory(
   books: readonly ForecastHistoryBook[],
   updates: readonly (BookUpdateView | ForecastHistoryUpdate)[],
   now: number,
-): ForecastObservation[] {
+): ForecastReplayObservation[] {
   const rows = updates.map((row) => ({
     bookId: row.book.id, at: row.createdAt.toDate().getTime(),
     editedAt: 'updatedAt' in row && row.updatedAt ? row.updatedAt.toDate().getTime() : row.createdAt.toDate().getTime(),
@@ -74,7 +79,7 @@ export function buildForecastHistory(
   });
   const origins = new Set<number>(rows.filter((row) => row.type === 'reading' && row.at < now).map((row) => row.at));
   for (let at = Math.ceil(rows[0].at / (7 * DAY)) * 7 * DAY; at < now; at += 7 * DAY) origins.add(at);
-  const result: ForecastObservation[] = [];
+  const result: ForecastReplayObservation[] = [];
   for (const at of [...origins].sort((a, b) => a - b)) {
     const visible = histories.map((history) => {
       const past = history.own.filter((row) => row.at <= at && row.editedAt <= at + 1000);
@@ -91,8 +96,17 @@ export function buildForecastHistory(
       if (!isSession && at % (7 * DAY) !== 0) continue;
       const features = forecastFeatures(book, visible.map((item) => item.book), pastReadings, at);
       if (!features || features.readingDays < 2 || features.idleDays > 365) continue;
+      // Reproduce the old dashboard formula from the same visible prefix,
+      // including its unfiltered speed and correction-aware activity gate.
+      const own = past.filter((row) => row.type === 'reading');
+      const pages = own.reduce((sum, row) => sum + row.pages, 0);
+      const minutes = own.reduce((sum, row) => sum + row.minutes, 0);
+      const recentMinutes = pastReadings.filter((row) => at - row.at <= 30 * DAY).reduce((sum, row) => sum + row.minutes, 0);
+      const baselineDays = at - past.at(-1)!.at <= 60 * DAY && pages > 0 && minutes > 0 && recentMinutes > 0
+        ? (book.pageCount - book.currentPage) * minutes / pages / (recentMinutes / 30) : Infinity;
       result.push({ bookId: book.id, at, finishedAt: history.finishedAt,
-        predictedDays: selectedForecastDays(features), idleDays: features.idleDays });
+        predictedDays: selectedForecastDays(features), idleDays: features.idleDays,
+        baselineDays, activeBooks: features.activeBooks });
     }
   }
   return result;

@@ -48,6 +48,25 @@ Neither the forecast nor its calibration writes to Firestore. There is no
 new database field, migration, function, external API, or production job.
 Cached books and sessions can be used offline.
 
+The detail dialog exposes the filtered speed, remaining pages and minutes,
+the geometric-mean calculation, and both rates' denominators. Its rolling
+14-day activity bars reconcile with the recent budget; daily totals and
+session facts are available below the chart. A five-window comparison shows
+book-only and blended scenarios, and sliders calculate a specified daily
+budget plus a break before resuming. These scenarios never save data or
+change the selected forecast.
+
+The uncertainty panel shows the point and bounds separately, the raw
+historical error factors, the widening factor, and the calibration sample
+and pause group. It labels the range as empirical uncertainty without
+claiming a current-book probability. The worker also replays the original
+30-day baseline and scores the frozen 2025-onward evaluation period with
+the research runner's per-book capped-error metric. The dialog shows
+subgroups, date availability within one year, uncapped completed-book
+errors, interval coverage and finite-upper frequency, and the largest
+completed-book misses. These account-specific results are recomputed from
+saved history; no private research result is embedded in the app bundle.
+
 ## Reproduce the experiment
 
 The research runner reads a local snapshot and has no database client. It

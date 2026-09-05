@@ -7,6 +7,7 @@ import {
 } from '../src/lib/utils/finishForecast.ts';
 import { buildForecastHistory } from '../src/lib/utils/forecastHistory.ts';
 import { projectedFinishes } from '../src/lib/utils/sessions.ts';
+import { readingEvidence, forecastBacktest } from '../src/lib/utils/forecastDiagnostics.ts';
 
 import { conditionalResumeDays } from '../forecast-candidates.ts';
 
@@ -94,4 +95,55 @@ test('dashboard and modal use the same forecast date', () => {
   const books = [{ ...book, title: 'A', pagesRead: 40, timeRead: 60 }];
   const projection = projectedFinishes(books, new Map(), updates, new Date(now))[0];
   assert.equal(projection.projectedDate!.getTime(), Math.trunc(now + finishForecast(book, books, readings, now).days! * DAY));
+});
+
+test('reading evidence reconciles rolling daily bars, speed filters, and competing books', () => {
+  const sessions = [...readings,
+    { bookId: 'a', at: now - DAY, minutes: 2, pages: 1 },
+    { bookId: 'a', at: now - DAY / 2, minutes: 10, pages: 30 },
+    { bookId: 'b', at: now - 3 * DAY, minutes: 45, pages: 20 },
+    { bookId: 'b', at: now + DAY, minutes: 1000, pages: 1000 },
+    { bookId: 'b', at: now - 14 * DAY, minutes: 40, pages: 20 }];
+  const facts = readingEvidence(book, sessions, now);
+  const features = forecastFeatures(book, [book], sessions, now)!;
+  assert.equal(facts.sessions, 4);
+  assert.equal(facts.speedSessions, 2);
+  assert.equal(features.remainingMinutes, features.remainingPages * facts.speedMinutes / facts.speedPages);
+  assert.equal(facts.days.reduce((sum, row) => sum + row.book + row.other, 0), features.rates[14].user * 14);
+  assert.equal(facts.competing.find((row) => row.bookId === 'b')!.minutes14, 45);
+  assert.equal(facts.competing.find((row) => row.bookId === 'b')!.minutes30, 85);
+});
+
+test('backtest weights books equally and waits for unfinished outcomes to be scorable', () => {
+  const row = { bookId: 'a', at: now - 100 * DAY, finishedAt: now - 90 * DAY,
+    predictedDays: 8, baselineDays: 5, idleDays: 0, activeBooks: 2 };
+  const history = [row, { ...row, at: row.at + DAY, predictedDays: 7, baselineDays: 4 },
+    { ...row, bookId: 'b', predictedDays: Infinity, baselineDays: 30, finishedAt: null, idleDays: 20 },
+    { ...row, bookId: 'c', at: now - DAY, finishedAt: null },
+    { ...row, bookId: 'future', at: now + DAY },
+    { ...row, bookId: 'validation', at: Date.UTC(2024, 0, 1), finishedAt: Date.UTC(2024, 0, 10) }];
+  const result = forecastBacktest(history, now);
+  assert.equal(result.overall!.books, 2);
+  assert.equal(result.overall!.checkpoints, 3);
+  assert.equal(result.overall!.selected, 1); // (mean(2, 2) + 0) / 2
+  assert.equal(result.overall!.baseline, 32.5); // (mean(5, 5) + 60) / 2
+  assert.equal(result.overall!.dateRate, .5);
+  assert.equal(result.pending, 1);
+  assert.equal(result.worst.length, 1);
+  assert.equal(result.uncappedError, 2);
+  assert.equal(result.coverage, null);
+  const laterFinish = history.map((item) => item.bookId === 'c' ? { ...item, finishedAt: now + 20 * DAY } : item);
+  assert.deepEqual(forecastBacktest(laterFinish, now), result);
+});
+
+test('calibration exposes completed and censored evidence without changing its factors', () => {
+  const observations = Array.from({ length: 12 }, (_, i) => ({ bookId: `${i}`, at: now - 20 * DAY,
+    predictedDays: 10, finishedAt: i < 10 ? now - 10 * DAY : null, idleDays: 0 }));
+  const result = calibrateForecast(observations, now, 0)!;
+  assert.equal(result.books, 12);
+  assert.equal(result.checkpoints, 12);
+  assert.equal(result.completedCheckpoints, 10);
+  assert.equal(result.completedBooks, 10);
+  assert.equal(result.lowerFactor, 1);
+  assert.equal(result.upperFactor, Infinity);
 });

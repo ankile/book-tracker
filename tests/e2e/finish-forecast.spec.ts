@@ -56,6 +56,15 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   const dialog = page.getByRole('dialog', { name: 'Estimated finish', exact: true });
   await expect(dialog.getByTestId('finish-date')).toBeVisible();
   await expect(dialog.getByText("There isn't enough history yet to estimate a date range.")).toBeVisible();
+  await expect(dialog.getByTestId('forecast-calculation')).toContainText('240 minutes');
+  await expect(dialog.getByTestId('pace-comparison').locator('tbody tr')).toHaveCount(5);
+  const pointBeforeScenario = await dialog.getByTestId('finish-date').textContent();
+  await expect(dialog.getByTestId('scenario-date')).toContainText('8 days');
+  await dialog.getByRole('button', { name: '60 min/day', exact: true }).click();
+  await expect(dialog.getByTestId('scenario-date')).toContainText('4 days');
+  await dialog.getByRole('slider', { name: 'Days before resuming this book' }).fill('7');
+  await expect(dialog.getByTestId('scenario-date')).toContainText('11 days');
+  await expect(dialog.getByTestId('finish-date')).toHaveText(pointBeforeScenario!);
   const oldDate = await dialog.getByTestId('finish-date').textContent();
   const active = owner.collection('books').doc('active');
   const batch = db.batch();
@@ -64,15 +73,42 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   batch.update(active, { currentPage: 180, pagesRead: 180, timeRead: 150, updatedAt: Timestamp.now() });
   await batch.commit();
   await expect(dialog.getByTestId('finish-date')).not.toHaveText(oldDate!);
+  const historyBatch = db.batch();
+  for (let i = 0; i < 12; i += 1) {
+    const historical = owner.collection('books').doc(`history-${i}`);
+    const start = now - (200 - i * 6) * day;
+    historyBatch.set(historical, { ...(await active.get()).data(), title: `Historical book ${i}`,
+      currentPage: 200, pagesRead: 200, timeRead: 240, finished: true, finishedAt: Timestamp.fromMillis(start + 4 * day) });
+    for (const [j, pages] of [20, 20, 160].entries()) {
+      const at = Timestamp.fromMillis(start + j * 2 * day);
+      historyBatch.set(historical.collection('updates').doc(`session-${j}`), { owner, book: historical, type: 'reading',
+        fromPage: j * 20, toPage: j === 2 ? 200 : (j + 1) * 20, pagesRead: pages,
+        timeRead: j === 2 ? 180 : 30, createdAt: at, updatedAt: at });
+    }
+  }
+  await historyBatch.commit();
+  await expect(dialog.getByTestId('uncertainty-range')).toBeVisible();
+  await expect(dialog.getByText('Other books / forecast checkpoints')).toBeVisible();
+  await expect(dialog.getByText('Average error, capped at 90 days', { exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toBeFocused();
   await page.setViewportSize({ width: 390, height: 844 });
+  await trigger.click();
+  await expect(dialog.getByTestId('uncertainty-range')).toBeVisible();
+  await dialog.getByText('Daily totals and session facts', { exact: true }).click();
+  expect(await dialog.locator('form').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole('button', { name: 'Close', exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'snapshots/forecast-review/detail-mobile-test.png' });
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect(trigger).toBeFocused();
   await page.getByRole('button', { name: 'View estimated finish for Paused forecast book', exact: true }).click();
   await expect(dialog.getByText('No reliable finish date yet')).toBeVisible();
   const card = dialog.locator('form');
   const box = await card.boundingBox();
   expect(box!.width).toBeLessThanOrEqual(390);
+  expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'View estimated finish for New forecast book', exact: true }).click();
   await expect(dialog.getByText('A little more reading first')).toBeVisible();

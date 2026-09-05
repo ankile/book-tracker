@@ -11,6 +11,7 @@
     primaryText?: string;
     secondaryText?: string;
     hideSecondary?: boolean;
+    wide?: boolean;
     onclose: () => void;
     children: Snippet;
   }
@@ -23,6 +24,7 @@
     primaryText = "Do it!",
     secondaryText = "Close",
     hideSecondary = false,
+    wide = false,
     onclose,
     children
   }: Props = $props();
@@ -120,6 +122,35 @@
     padding: 2em 0;
   }
 
+  .card.wide {
+    max-width: 1080px;
+    padding: 0;
+    text-align: left;
+  }
+
+  .wide .modal-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+    background: white;
+    border-bottom: 1px solid #e1e5e5;
+  }
+
+  .wide .header { margin: 0; font-size: 1rem; }
+  .wide .content { padding: 1.5rem; }
+  .wide .buttons { padding: 0 1.5rem 1.5rem; }
+  .top-close { border: 1px solid #ccd4d4; border-radius: 5px; background: white; padding: .35rem .75rem; }
+  .top-close:focus-visible { outline: 3px solid #1b7179; outline-offset: 2px; }
+
+  @media (max-width: 600px) {
+    .wide .modal-heading, .wide .content { padding: 1rem; }
+  }
+
   .divider {
     display: none;
     height: 1px;
@@ -141,9 +172,12 @@
     onclick={handleBackdropClick}
     oncancel={handleCancel}
     class="background">
-    <form class="card hover" onsubmit={handleSubmit}>
+    <form class="card hover" class:wide onsubmit={handleSubmit}>
       {#if header}
-        <h4 class="header">{header}</h4>
+        <div class="modal-heading">
+          <h4 class="header">{header}</h4>
+          {#if wide}<button type="button" class="top-close" onclick={close}>Close</button>{/if}
+        </div>
         <div class="divider"></div>
       {/if}
       <div class="content">

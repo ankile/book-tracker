@@ -108,6 +108,11 @@ export interface ForecastCalibration {
   lowerFactor: number;
   upperFactor: number;
   books: number;
+  checkpoints: number;
+  completedCheckpoints: number;
+  completedBooks: number;
+  firstAt: number;
+  lastAt: number;
 }
 
 // Equal total weight per book prevents a long, frequently logged book from
@@ -147,7 +152,10 @@ export function calibrateForecast(
     risk -= removed;
     i = j;
   }
-  return { lowerFactor, upperFactor, books: counts.size };
+  const completed = usable.filter((row) => row.finishedAt !== null && row.finishedAt <= now);
+  return { lowerFactor, upperFactor, books: counts.size, checkpoints: usable.length,
+    completedCheckpoints: completed.length, completedBooks: new Set(completed.map((row) => row.bookId)).size,
+    firstAt: Math.min(...usable.map((row) => row.at)), lastAt: Math.max(...usable.map((row) => row.at)) };
 }
 
 export interface FinishForecast {
@@ -157,6 +165,7 @@ export interface FinishForecast {
   upperDays: number | null;
   features: ForecastFeatures | null;
   calibrationBooks: number;
+  calibration: ForecastCalibration | null;
 }
 
 export function finishForecast(
@@ -164,7 +173,7 @@ export function finishForecast(
   now: number, observations: readonly ForecastObservation[] = [],
 ): FinishForecast {
   const features = forecastFeatures(book, books, readings, now);
-  const empty = { days: null, lowerDays: null, upperDays: null, features, calibrationBooks: 0 };
+  const empty = { days: null, lowerDays: null, upperDays: null, features, calibrationBooks: 0, calibration: null };
   if (!features || features.readingDays < 2) return { ...empty, status: 'insufficient' };
   const days = selectedForecastDays(features);
   if (!Number.isFinite(days)) return { ...empty, status: 'inactive' };
@@ -175,7 +184,7 @@ export function finishForecast(
   return { status: 'estimated', days,
     lowerDays: lower !== null && Number.isFinite(lower) ? lower : null,
     upperDays: upper !== null && upper <= FORECAST_HORIZON_DAYS ? upper : null,
-    features, calibrationBooks: calibration?.books ?? 0 };
+    features, calibrationBooks: calibration?.books ?? 0, calibration };
 }
 
 export function forecastDate(now: Date, days: number): Date {
