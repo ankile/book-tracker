@@ -223,6 +223,7 @@ Root package commands:
 | `npm run check:service-worker` | Type-check the service worker |
 | `npm run check:watch` | Watch-mode Svelte checks |
 | `npm run test:unit` | Application and migration unit tests |
+| `npm run test:forecast-daily` | Offline daily forecast replay, censoring and temporal-validation tests; see the [experiment protocol](docs/forecast-daily-protocol.md) |
 | `npm run test:rules` | Firestore Rules and integration tests against local emulators |
 | `npm run test:catalog-emulator` | Restricted catalog preview/apply workflow against local emulators |
 | `npm run test:functions` | Functions lint, production build, strict test type-check, and tests |
