@@ -20,6 +20,30 @@ export const SPEED_MAX_PAGES_PER_HOUR = 150;
 export const BOOK_SPEED_MIN_MINUTES = 60;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+// A book with no reading activity for more than this many days has left
+// the deck for the dusty shelf: the dashboard's two lists, the finish
+// projection's active window and the reading list's divider share it.
+export const DUSTY_SHELF_DAYS = 60;
+
+export function daysSince(last: TimestampLike, now: Date): number {
+  return Math.floor((now.getTime() - last.toDate().getTime()) / MS_PER_DAY);
+}
+
+// The reading list has no session timelines, so it judges dust by the
+// book's own lastReadAt (or createdAt for a book never read).
+export function isDusty(book: { lastReadAt: TimestampLike | null; createdAt: TimestampLike }, now: Date): boolean {
+  return daysSince(book.lastReadAt ?? book.createdAt, now) > DUSTY_SHELF_DAYS;
+}
+
+// The id of the book the divider goes above: the first dusty one in a list
+// ordered by last read, and only when something active sits above it.
+export function dustyDividerId<T extends { id: string; lastReadAt: TimestampLike | null; createdAt: TimestampLike }>(
+  books: readonly T[],
+  now: Date,
+): string | null {
+  const index = books.findIndex((book) => isDusty(book, now));
+  return index > 0 ? books[index].id : null;
+}
 
 export interface FinishedBookView {
   id: string;
@@ -453,7 +477,7 @@ export function projectedFinishes(
       const timeline = timelines.get(book.id);
       const remainingPages = Math.max(0, book.pageCount - book.currentPage);
       const active = timeline !== undefined
-        && (now.getTime() - timeline.lastAt.getTime()) / MS_PER_DAY <= 60;
+        && (now.getTime() - timeline.lastAt.getTime()) / MS_PER_DAY <= DUSTY_SHELF_DAYS;
       const pagesRead = book.pagesRead;
       const timeRead = book.timeRead;
       const pagesPerMinute = timeRead > 0 ? pagesRead / timeRead : 0;

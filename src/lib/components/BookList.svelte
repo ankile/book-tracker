@@ -12,6 +12,7 @@
   import { formatTime } from "../utils/format.ts";
   import { finishedDateOf } from "../utils/finished.ts";
   import { minutesLeft, paceFor, paceNote } from "../utils/paceEstimate.ts";
+  import { DUSTY_SHELF_DAYS, dustyDividerId } from "../utils/sessions.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { catalogWorkHref } from "../utils/catalogClient.ts";
   import { FirebaseError } from "firebase/app";
@@ -49,6 +50,9 @@
     return unsubscribe;
   });
   let books = $derived(booksProp ?? fetchedBooks);
+  // The list is ordered by last read, so the dusty books sit together at
+  // the bottom; a faint rule marks where the dashboard's split falls.
+  let dividerBefore = $derived(finished ? null : dustyDividerId(books, new Date()));
   // The whole library, finished books included: a book without sessions
   // borrows a pace from the reader's other books (utils/paceEstimate.ts).
   let library = $state<Book[]>([]);
@@ -335,6 +339,23 @@
     height: 10px;
   }
 
+  .shelf-divider {
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    margin: 3em 3em 0;
+    color: #9aa5a8;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .shelf-divider::before,
+  .shelf-divider::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid #dfe5e6;
+  }
+
   .label {
     font-size: 0.9em;
     color: #666;
@@ -573,6 +594,10 @@
       padding: 1em;
     }
 
+    .shelf-divider {
+      margin: 1.5em 0.75em 0;
+    }
+
     .book-identity {
       gap: 0.75em;
     }
@@ -682,6 +707,11 @@
   {/if}
   {#each books as book (book.id)}
     {@const pace = paceFor(book, library)}
+    {#if book.id === dividerBefore}
+      <div class="shelf-divider" role="separator" aria-label="Dusty shelf: no reading in over {DUSTY_SHELF_DAYS} days">
+        <span>Dusty shelf · no reading in over {DUSTY_SHELF_DAYS} days</span>
+      </div>
+    {/if}
     {@const progress = (book.currentPage / book.pageCount) * 100}
     {@const resolvedAuthors = repairableBookAuthors(book, authorMap)}
     {@const workHref = catalogWorkHref(book)}

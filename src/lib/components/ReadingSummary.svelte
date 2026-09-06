@@ -21,8 +21,8 @@
     {
       label: 'Est. reading left',
       value: stats.unknownBooks === stats.count ? 'Not enough data' : formatReadingTime(stats.minutesLeft) + (stats.unknownBooks ? ' +' : ''),
-      hint: stats.borrowedBooks > 0 && stats.unknownBooks < stats.count
-        ? `${stats.borrowedBooks} ${stats.borrowedBooks === 1 ? 'book' : 'books'} estimated from your pace elsewhere`
+      tooltip: stats.borrowedBooks > 0 && stats.unknownBooks < stats.count
+        ? `${stats.borrowedBooks} ${stats.borrowedBooks === 1 ? 'book has' : 'books have'} no sessions yet and ${stats.borrowedBooks === 1 ? 'is' : 'are'} estimated from your pace on other books`
         : undefined,
     },
   ]}

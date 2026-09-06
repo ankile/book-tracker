@@ -4,6 +4,7 @@
   import {
     projectedFinishes,
     dustyShelf,
+    DUSTY_SHELF_DAYS,
     daysToFinishSummary,
     completionRate,
   } from '$lib/utils/sessions.ts';
@@ -28,7 +29,7 @@
   });
   const projections = $derived(projectedFinishes(books, timelines, sessions, now));
   const active = $derived(projections.filter((p) => p.projectedDate !== null).slice(0, 8));
-  const dusty = $derived(dustyShelf(books, timelines, now).filter((b) => b.daysSince > 60).slice(0, 5));
+  const dusty = $derived(dustyShelf(books, timelines, now).filter((b) => b.daysSince > DUSTY_SHELF_DAYS).slice(0, 5));
   const finishSummary = $derived(daysToFinishSummary(books, timelines));
   const rate = $derived(completionRate(books, timelines));
 

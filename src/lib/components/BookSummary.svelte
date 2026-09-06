@@ -4,7 +4,8 @@
   let { label, testId, stats, completion, note, children }: {
     label: string;
     testId?: string;
-    stats: { label: string; value: string; hint?: string }[];
+    // hint sits under the value; tooltip is a hover-only "?" beside it.
+    stats: { label: string; value: string; hint?: string; tooltip?: string }[];
     completion?: number;
     note?: string;
     children?: Snippet;
@@ -16,7 +17,10 @@
     {#each stats as stat}
       <div class="stat">
         <dt>{stat.label}</dt>
-        <dd>{stat.value}{#if stat.hint}<span class="hint">{stat.hint}</span>{/if}</dd>
+        <dd>
+          {stat.value}{#if stat.tooltip}<span class="help" title={stat.tooltip} role="img" aria-label={stat.tooltip}>?</span>{/if}
+          {#if stat.hint}<span class="hint">{stat.hint}</span>{/if}
+        </dd>
       </div>
     {/each}
   </dl>
@@ -35,6 +39,7 @@
   dd { font-size: 1.5rem; color: #253237; font-weight: 700; font-variant-numeric: tabular-nums; margin: .35rem 0 0; }
   .hint, p { font-size: .75rem; color: #53636a; font-weight: 400; }
   .hint { display: block; margin-top: .3rem; }
+  .help { display: inline-flex; align-items: center; justify-content: center; width: 1rem; height: 1rem; margin-left: .4rem; vertical-align: .35em; border: 1px solid #b8c4c6; border-radius: 50%; color: #53636a; font-size: .65rem; font-weight: 600; cursor: help; }
   progress { display: block; width: 100%; height: 6px; margin-top: 1.25rem; border: 0; border-radius: 3px; overflow: hidden; background: #e9eeee; accent-color: #1b7179; }
   progress::-webkit-progress-bar { background: #e9eeee; }
   progress::-webkit-progress-value { background: #1b7179; }

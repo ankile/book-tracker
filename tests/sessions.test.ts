@@ -18,6 +18,8 @@ import {
   computeSuperlatives,
   daysToFinishSummary,
   dustyShelf,
+  dustyDividerId,
+  isDusty,
   completionRate,
   projectedFinishes,
   authorLeaderboard,
@@ -180,6 +182,22 @@ test("dustyShelf ranks unfinished books by staleness", () => {
   assert.equal(shelf[1].daysSince, 12);
   assert.equal(shelf[2].title, "Delta"); // createdAt fallback, 5 days
   assert.equal(shelf[2].daysSince, 5);
+});
+
+test("the reading-list divider sits above the first dusty book, and only below something active", () => {
+  const now = new Date("2026-06-01T12:00:00");
+  const active = { id: "a", lastReadAt: ts("2026-05-20T12:00:00"), createdAt: ts("2026-01-01T00:00:00") };
+  const edge = { id: "e", lastReadAt: ts("2026-04-02T12:00:00"), createdAt: ts("2026-01-01T00:00:00") }; // 60 days: still on deck
+  const dusty = { id: "d", lastReadAt: ts("2026-04-01T11:00:00"), createdAt: ts("2026-01-01T00:00:00") }; // 61 days
+  const unread = { id: "u", lastReadAt: null, createdAt: ts("2026-01-01T00:00:00") }; // never read, judged by createdAt
+  assert.equal(isDusty(edge, now), false);
+  assert.equal(isDusty(dusty, now), true);
+  assert.equal(isDusty(unread, now), true);
+  assert.equal(dustyDividerId([active, edge, dusty, unread], now), "d");
+  assert.equal(dustyDividerId([active, edge], now), null);
+  // Everything dusty: nothing to divide from.
+  assert.equal(dustyDividerId([dusty, unread], now), null);
+  assert.equal(dustyDividerId([], now), null);
 });
 
 test("completionRate counts only books that were ever started", () => {
