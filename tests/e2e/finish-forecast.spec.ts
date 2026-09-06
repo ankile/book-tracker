@@ -52,7 +52,6 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   const trigger = page.getByRole('button', { name: 'View estimated finish for Active forecast book', exact: true });
   await expect(trigger).toBeVisible();
-  await expect(page.getByTestId('reading-summary')).toContainText('4 books');
   await trigger.focus();
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'Estimated finish', exact: true });

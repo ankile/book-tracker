@@ -117,7 +117,7 @@ node forecast-app-audit.ts <snapshot.json> <account-email> snapshots/forecast-da
 
 The original 19-model runner checks that the app still matches its frozen
 selection, so its `final` command intentionally rejects the promoted app.
-Use commit `d00a266` to reproduce the original research unchanged, and the
+Use commit `3201d78` to reproduce the original research unchanged, and the
 promotion audit above to verify the shipped predictor against saved results.
 
 ## Reproduce the experiment

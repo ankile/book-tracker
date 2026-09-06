@@ -56,7 +56,6 @@ distribution or a calibrated 80% probability guarantee.
 | App predictor, speed and calibration | [`finishForecast.ts`](../src/lib/utils/finishForecast.ts) |
 | Browser daily replay and scoring | [`forecastHistory.ts`](../src/lib/utils/forecastHistory.ts), [`forecastDiagnostics.ts`](../src/lib/utils/forecastDiagnostics.ts), [`forecast.worker.ts`](../src/lib/utils/forecast.worker.ts) |
 | Dialog and distribution | [`FinishForecastModal.svelte`](../src/lib/components/FinishForecastModal.svelte), [`ForecastDistribution.svelte`](../src/lib/components/ForecastDistribution.svelte), [`forecastDistribution.ts`](../src/lib/utils/forecastDistribution.ts) |
-| Currently Reading totals | [`ReadingSummary.svelte`](../src/lib/components/ReadingSummary.svelte), [`readingSummary.ts`](../src/lib/utils/readingSummary.ts) |
 | Offline daily experiment | [`forecast-daily-data.ts`](../forecast-daily-data.ts) → [`forecast-daily-models.ts`](../forecast-daily-models.ts) → [`forecast-daily-score.ts`](../forecast-daily-score.ts); orchestrated by [`forecast-daily.ts`](../forecast-daily.ts) |
 | Joint simulations | [`forecast-joint-context.ts`](../forecast-joint-context.ts) → [`forecast-joint-model.ts`](../forecast-joint-model.ts); search/selection in [`forecast-joint.ts`](../forecast-joint.ts) |
 | App/research parity | [`forecast-app-audit.ts`](../forecast-app-audit.ts), [`finish-forecast.test.ts`](../tests/finish-forecast.test.ts) |
@@ -75,7 +74,7 @@ distribution or a calibrated 80% probability guarantee.
    `python -m forecast_plot snapshots/forecast-joint/search.json` after installing
    matplotlib in your Python environment.
 4. Before promotion, run `forecast-app-audit.ts` against the saved daily ledger,
-   unit/type checks and emulator UI checks. Commit `d00a266` preserves the
+   unit/type checks and emulator UI checks. Commit `3201d78` preserves the
    original research before promotion. Frozen historical runners may reject
    later app/code hashes intentionally; do not rewrite their old results.
 
