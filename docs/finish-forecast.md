@@ -140,6 +140,12 @@ compares 51 fixed candidates using fixed follow-up cohorts. It includes
 commands for the private report and prediction viewer. The app predictor
 has not been replaced by those research candidates.
 
+The [joint simulation experiment](forecast-joint-protocol.md) adds a shared
+daily reading budget, competing books, completion and time redistribution,
+pauses and returns, and optional synthetic new-book arrivals. It records
+development hill climbing, frozen validation selection, empirical CRPS,
+matched interval comparisons, and all daily sampled completion times.
+
 - [Time-series cross-validation](https://otexts.com/fpp3/tscv.html)
 - [Distributional forecasts and prediction intervals](https://otexts.com/fpp3/prediction-intervals.html)
 - [NIST Kaplan-Meier estimation](https://itl.nist.gov/div898/software/dataplot/refman1/auxillar/kaplan.htm)
