@@ -98,6 +98,20 @@ test('book decoder validates correlated catalog links and provenance', () => {
   );
 });
 
+test('book decoder reads lastReadAt as null when absent or null and as a timestamp otherwise', () => {
+  assert.equal(decodeBook('absent', bookData(), 'users/owner/books/absent').lastReadAt, null);
+  assert.equal(decodeBook('null', { ...bookData(), lastReadAt: null }, 'users/owner/books/null').lastReadAt, null);
+  const stamp = Timestamp.fromMillis(1_700_000_050_000);
+  assert.equal(
+    decodeBook('read', { ...bookData(), lastReadAt: stamp }, 'users/owner/books/read').lastReadAt?.toMillis(),
+    stamp.toMillis(),
+  );
+  assert.throws(
+    () => decodeBook('junk', { ...bookData(), lastReadAt: '2024-01-01' }, 'users/owner/books/junk'),
+    /lastReadAt/,
+  );
+});
+
 test('book decoder reads finishedAt as null when absent or null and as a timestamp otherwise', () => {
   assert.equal(decodeBook('absent', bookData(), 'users/owner/books/absent').finishedAt, null);
   assert.equal(decodeBook('null', { ...bookData(), finishedAt: null }, 'users/owner/books/null').finishedAt, null);

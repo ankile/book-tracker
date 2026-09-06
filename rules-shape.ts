@@ -18,7 +18,7 @@ export const BOOK_FIELDS = [
   'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
   'workId', 'editionId', 'matchMethod', 'linkedAt',
   'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
-  'publisher', 'subjects', 'title', 'updatedAt', 'language',
+  'publisher', 'subjects', 'title', 'updatedAt', 'language', 'lastReadAt',
 ] as const;
 
 export const PROFILE_FIELDS = [
@@ -92,6 +92,10 @@ export function bookShapeViolations(book: Record<string, unknown>, ownerPath: st
     if (!isTimestamp(book.finishedAt)) v.push('finishedAt.missing');
   } else if ('finishedAt' in book && book.finishedAt !== null) {
     v.push('finishedAt.unfinished');
+  }
+  // lastReadAt is null/absent (never read) or a timestamp (validBookLastReadAt).
+  if ('lastReadAt' in book && book.lastReadAt !== null && !isTimestamp(book.lastReadAt)) {
+    v.push('lastReadAt.not-timestamp');
   }
   if ('authorIds' in book) {
     // validBookShape caps the stored list at 50, not at the six a fresh

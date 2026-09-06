@@ -726,6 +726,7 @@ const bookShapeRejections = (
     legacyAuthorsMany: { authors: Array.from({ length: 50 }, () => ({ name: 'x'.repeat(20_000) })) },
     updatedAtString: { updatedAt: 'x'.repeat(500_000) },
     updatedAtMap: { updatedAt: { blob: junk } },
+    lastReadAtString: { lastReadAt: 'yesterday' },
     pagesReadString: { pagesRead: junk },
     timeReadList: { timeRead: [junk] },
     unknownFieldSmall: { rating: 5 },
@@ -1616,6 +1617,88 @@ test('finishedAt is a timestamp exactly when the book is finished', async () => 
   }));
 });
 
+// lastReadAt (validBookLastReadAt, bookLastReadAtUnchanged): reading and
+// editing are separate kinds of change. A new book has not been read, a
+// progress batch stamps the moment of its row, and a metadata edit must
+// leave the stored stamp exactly as it is — that edit path is what put a
+// book edited on 2026-08-29 above one read on 2026-08-26.
+test('lastReadAt is null on create, moves only in a progress batch, and is pinned across metadata edits', async () => {
+  const uid = 'last-read-owner';
+  const stamp = Timestamp.fromMillis(1_750_000_000_000);
+  await environment.withSecurityRulesDisabled(async (context: RulesTestContext) => {
+    const adminDb = context.firestore();
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'read'), fullBook(adminDb, uid, { lastReadAt: stamp }));
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'legacy'), fullBook(adminDb, uid));
+    await setDoc(doc(adminDb, 'users', uid, 'books', 'progress'), readingBook({
+      currentPage: 10, currentPageUpdateId: null, pagesRead: 10, timeRead: 30, lastReadAt: stamp,
+    }));
+  });
+  const db = environment.authenticatedContext(uid).firestore();
+  const books = collection(db, 'users', uid, 'books');
+  await assertSucceeds(setDoc(doc(books, 'new-null'), creatableBook({ lastReadAt: null })));
+  await assertSucceeds(setDoc(doc(books, 'new-absent'), creatableBook()));
+  await assertFails(setDoc(doc(books, 'new-stamped'), creatableBook({ lastReadAt: Timestamp.now() })));
+  await assertFails(setDoc(doc(books, 'new-junk'), creatableBook({ lastReadAt: 'yesterday' })));
+
+  // A metadata edit keeps the stored stamp: omitted, or restated exactly.
+  await assertSucceeds(updateDoc(doc(books, 'read'), { title: 'Edited', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(doc(books, 'read'), { title: 'Edited again', lastReadAt: stamp, updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(doc(books, 'read'), { title: 'Bumped', lastReadAt: Timestamp.now(), updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(doc(books, 'read'), { title: 'Cleared', lastReadAt: null, updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(doc(books, 'read'), { title: 'Dropped', lastReadAt: deleteField(), updatedAt: Timestamp.now() }));
+  // A book from before the field existed is unread until a progress batch
+  // says otherwise; an edit may state that null but not invent a stamp.
+  await assertSucceeds(updateDoc(doc(books, 'legacy'), { title: 'Still unread', updatedAt: Timestamp.now() }));
+  await assertSucceeds(updateDoc(doc(books, 'legacy'), { title: 'Explicitly unread', lastReadAt: null, updatedAt: Timestamp.now() }));
+  await assertFails(updateDoc(doc(books, 'legacy'), { title: 'Backdated by an edit', lastReadAt: stamp, updatedAt: Timestamp.now() }));
+
+  // A reading batch moves the stamp to its row's instant; a junk stamp
+  // fails the batch, and so does a stamp riding on a delete of nothing.
+  const progressRef = doc(books, 'progress');
+  const now = Timestamp.now();
+  const readingRef = doc(progressRef, 'updates', 'reading');
+  const reading = writeBatch(db);
+  reading.set(readingRef, readingEntry(db, uid, 'progress', { createdAt: now, updatedAt: now }));
+  reading.update(progressRef, {
+    currentPage: 20,
+    currentPageUpdateId: readingRef.id,
+    finished: false,
+    pagesRead: increment(10),
+    timeRead: increment(30),
+    lastReadAt: now,
+    updatedAt: now,
+  });
+  await assertSucceeds(reading.commit());
+  assert.equal((await getDoc(progressRef)).get('lastReadAt')?.toMillis(), now.toMillis());
+  const junkRef = doc(progressRef, 'updates', 'junk');
+  const junk = writeBatch(db);
+  junk.set(junkRef, readingEntry(db, uid, 'progress', { fromPage: 20, toPage: 30 }));
+  junk.update(progressRef, {
+    currentPage: 30,
+    currentPageUpdateId: junkRef.id,
+    finished: false,
+    pagesRead: increment(10),
+    timeRead: increment(30),
+    lastReadAt: 'now',
+    updatedAt: Timestamp.now(),
+  });
+  await assertFails(junk.commit());
+  // Deleting the session that carried the stamp hands it back.
+  const remove = writeBatch(db);
+  remove.delete(readingRef);
+  remove.update(progressRef, {
+    currentPage: 10,
+    currentPageUpdateId: null,
+    finished: false,
+    pagesRead: increment(-10),
+    timeRead: increment(-30),
+    lastReadAt: stamp,
+    updatedAt: Timestamp.now(),
+  });
+  await assertSucceeds(remove.commit());
+  assert.equal((await getDoc(progressRef)).get('lastReadAt')?.toMillis(), stamp.toMillis());
+});
+
 test('a page-count clamp establishes progress provenance on a legacy book', async () => {
   const uid = 'page-count-clamp-legacy';
   const bookId = 'book';
@@ -2024,6 +2107,7 @@ test('session deletion cannot drive aggregate totals negative', async () => {
     previous: { fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30 },
     book: { currentPage: 20, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
 });
 
@@ -2084,6 +2168,7 @@ test('session update and delete enter the local cache while Firestore is offline
     previous: { fromPage: 10, toPage: 25, pagesRead: 15, timeRead: 45 },
     book: { currentPage: 25, currentPageUpdateId: 'session', pageCount: 100, finished: false },
     previousProgressUpdate: {id: 'prior', toPage: 10},
+    lastReadAtPatch: {},
   });
   const [deletedSession, deletedBook] = await Promise.all([
     getDocFromCache(sessionRef),
@@ -2130,6 +2215,7 @@ test('deleting progress owners hands off to surviving reading and correction row
       previous: {fromPage: 10, toPage: 20, pagesRead: 10, timeRead: 30},
       book: { currentPage: 20, currentPageUpdateId: 'latest', pageCount: 100, finished: false },
       previousProgressUpdate: {id: 'prior', toPage: 10},
+      lastReadAtPatch: {},
     }));
     const saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
     assert.equal(saved?.currentPage, 10);
@@ -2146,6 +2232,7 @@ test('deleting progress owners hands off to surviving reading and correction row
     previous: {fromPage: 0, toPage: 10, pagesRead: 10, timeRead: 30},
     book: { currentPage: 10, currentPageUpdateId: 'prior', pageCount: 100, finished: false },
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
   const emptied = (await getDoc(doc(db, 'users', uid, 'books', 'reading-prior'))).data();
   assert.equal(emptied?.currentPage, 0);
@@ -2193,6 +2280,7 @@ test('session deletion rejects missing, wrong-page, and cross-book progress pred
       // The local candidate claims the right endpoint; rules verify the
       // actual same-book row exists and agrees.
       previousProgressUpdate: {id: 'predecessor', toPage: 10},
+      lastReadAtPatch: {},
     }));
     assert.equal(
       (await getDoc(doc(db, 'users', uid, 'books', bookId))).data()?.currentPageUpdateId,
@@ -2365,6 +2453,7 @@ test('same-endpoint later correction prevents an older session from owning progr
     previous: { fromPage: 10, toPage: 18, pagesRead: 8, timeRead: 25 },
     book: { currentPage: 20, currentPageUpdateId: 'correction', pageCount: 100, finished: false },
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
   saved = (await getDoc(doc(db, 'users', uid, 'books', bookId))).data();
   assert.equal(saved?.currentPage, 20);
@@ -2404,6 +2493,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     previous,
     book: sourceBook,
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
 
   await assertSucceeds(queueReadingSessionDelete({
@@ -2414,6 +2504,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     previous,
     book: sourceBook,
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
   await assertFails(queueReadingSessionUpdate({
     firestore: readingSessionWriteStore(db),
@@ -2432,6 +2523,7 @@ test('session edit/delete races reject in either order and a delete cannot repea
     previous,
     book: sourceBook,
     previousProgressUpdate: null,
+    lastReadAtPatch: {},
   }));
 
   const deletedBook = (await getDoc(doc(db, 'users', uid, 'books', 'delete-first'))).data();

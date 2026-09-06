@@ -60,6 +60,10 @@ interface BookBase extends BookMetadata, CatalogLink {
   finished: boolean;
   // The moment the book was marked finished; null while unfinished.
   finishedAt: Timestamp | null;
+  // The moment of the newest reading activity (utils/lastRead.ts); null
+  // for a book never read. Orders the reading list; metadata edits move
+  // updatedAt, never this.
+  lastReadAt: Timestamp | null;
   isbn: string;
   owner: DocumentReference;
   createdAt: Timestamp;

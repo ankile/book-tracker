@@ -35,7 +35,8 @@ export interface DustyBookView extends FinishedBookView {
   title: string;
   currentPage: number;
   pageCount: number;
-  updatedAt: TimestampLike;
+  lastReadAt: TimestampLike | null;
+  createdAt: TimestampLike;
 }
 
 export interface ProjectionBookView extends FinishedBookView {
@@ -409,7 +410,10 @@ export function dustyShelf(
   return allBooks
     .filter((book) => !book.finished)
     .map((book) => {
-      const lastActivityAt = timelines.get(book.id)?.lastAt ?? book.updatedAt.toDate();
+      // A book with no session history is idle since it was last read or,
+      // never having been read, since it was added; updatedAt is a
+      // metadata-edit stamp and not a source.
+      const lastActivityAt = timelines.get(book.id)?.lastAt ?? (book.lastReadAt ?? book.createdAt).toDate();
       return {
         title: book.title,
         lastActivityAt,

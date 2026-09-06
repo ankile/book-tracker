@@ -184,6 +184,7 @@ current deployment instructions.
 | `migrate-toggl-tokens.ts` | Move legacy integration credentials | Completed historical rollout. Reuse requires a separate credential-rotation review. |
 | `migrate-cross-user-works.ts` | Move author identity into the shared catalog and add Work/Edition links | Completed historical rollout (2026-09-01: apply matched the reviewed dry run, second apply 0, audit clean apart from one reviewed-group author the planner did not mint — repaired separately). Idempotent; a rerun links only books that gained unlinked author references since. |
 | `migrate-finished-at.ts` | Stamp `finishedAt` on books finished before the field existed, from their progress history | Completed historical rollout (2026-09-01: 198 stamped, second apply 0, audit clean). Idempotent; a rerun stamps only a finished book that somehow lost its stamp. |
+| `migrate-last-read-at.ts` | Stamp `lastReadAt` on books written before the field existed, from their reading history (an explicit null for a book never read) | See [lastReadAt rollout](#lastreadat-rollout). Idempotent; a rerun stamps only a book that somehow lost the field. |
 | `migrate-book-editions.ts` | Put every linked personal book on an edition of its work, minting one per reader per book identity from the book's own fields | Completed historical rollout (2026-09-02: dry-run and emulator rehearsal on the day's snapshot matched the apply — 46 editions created, 47 books linked, nothing for review — second apply 0, audit back at its known baselines). Idempotent; a rerun joins what it minted and plans nothing for a book that carries an edition. See [Book editions backfill](#book-editions-backfill). |
 | `migrate-catalog-creators.ts` | Stamp `createdBy` on every work, edition and catalog author that has none, from the earliest personal book standing on it | Completed historical rollout (2026-09-02: dry-run matched the apply — 541 creators stamped: 203 works, 174 editions, 164 authors, nothing for review — second apply 0, audit back at its 11 known baselines). Idempotent; a record that carries a creator is left alone. See [Catalog creators backfill](#catalog-creators-backfill). |
 | `migrate-work-languages.ts` | Stamp a default `language` on every work that has none, inferred from its editions' overrides or ISBN registration groups, and the carried copy on every personal book that has none | Completed historical rollout (2026-09-02: dry-run matched the apply — 203 works stamped, 174 from ISBN registration groups (156 en, 17 no, 1 de) and 29 without an ISBN left unknown for review in the console; 222 books stamped — second apply 0, audit back at its 11 known baselines). Idempotent; a work that carries the field and a book that carries a language are left alone. See [Work languages backfill](#work-languages-backfill). |
@@ -449,6 +450,55 @@ npm run pages:deploy && npm run pages:purge
 
 The migration writes one field per finished book and nothing else. Nothing
 is deleted; `updatedAt`, `createdAt`, and the update rows are untouched.
+Undoing it is deleting the one field, and `db-restore.ts` from the step-1
+snapshot restores the exact prior documents.
+
+## lastReadAt rollout
+
+Books carry an explicit `lastReadAt` (the moment of the newest reading
+activity: a timed session or a forward page update; null for a book never
+read). Reading and editing are separate kinds of change (owner decision
+2026-09-05): before the field existed the reading list ordered by
+`updatedAt`, which moves on every metadata edit, so a book edited in the
+console on 2026-08-29 sat above one read on 2026-08-26. The client now
+stamps `lastReadAt` in the batch that writes a reading row and hands it
+back to the previous row when that row is deleted; the Rules pin it across
+metadata edits; `migrate-last-read-at.ts` backfills every older book from
+its own rows (`src/lib/utils/lastRead.ts` is the one rule the client, the
+backfill and `db-audit.ts` share; never `updatedAt`).
+
+The Rules admit the field before any client writes it and an old client
+never sends it (an absent field equals an absent field), so the order is
+Rules, then the backfill, then the client. `db-audit.ts` reports
+`book.missing.lastReadAt` for every book until the backfill runs and
+`book.lastReadAt-disagrees` for a stamp that does not match the rows.
+
+```bash
+# 0. from the reviewed revision, full validation
+nvm use && npm ci && npm --prefix functions ci && npm run validate
+
+# 1. baseline (read-only) + snapshot: the rollback is this snapshot and PITR
+node db-audit.ts --prod            # book.missing.lastReadAt = every book
+node db-snapshot.ts --prod
+
+# 2. Rules only (nothing in Functions changes)
+firebase deploy --only firestore:rules
+
+# 3. backfill: dry run, then apply twice — the second apply must write 0
+#    books. Every REVIEW line is a book a metadata edit had moved.
+node migrate-last-read-at.ts --prod
+node migrate-last-read-at.ts --prod --apply
+node migrate-last-read-at.ts --prod --apply
+
+# 4. audit: zero lastReadAt findings
+node db-audit.ts --prod
+
+# 5. ship the client and purge the edge cache
+npm run pages:deploy && npm run pages:purge
+```
+
+The migration writes one field per book and nothing else. Nothing is
+deleted; `updatedAt`, `createdAt`, and the update rows are untouched.
 Undoing it is deleting the one field, and `db-restore.ts` from the step-1
 snapshot restores the exact prior documents.
 

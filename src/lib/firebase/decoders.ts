@@ -327,6 +327,11 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
     finishedAt: data.finishedAt === undefined || data.finishedAt === null
       ? null
       : timestamp(data.finishedAt, `${path}.finishedAt`),
+    // Absent on documents written before the field existed; null is the
+    // stored value for a book never read.
+    lastReadAt: data.lastReadAt === undefined || data.lastReadAt === null
+      ? null
+      : timestamp(data.lastReadAt, `${path}.lastReadAt`),
     isbn: string(data.isbn ?? '', `${path}.isbn`),
     owner: reference(data.owner, `${path}.owner`),
     createdAt: timestamp(data.createdAt, `${path}.createdAt`),

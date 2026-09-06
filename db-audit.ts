@@ -13,6 +13,7 @@ import { parseFlags, connect, openDatabase } from './migrate-lib.ts';
 import { isFinished } from './src/lib/utils/finished.ts';
 import { auditTimerClaimState } from './timer-claim-migration.ts';
 import { auditReadingProgressSource } from './reading-progress-source-migration.ts';
+import { lastReadAtOf } from './src/lib/utils/lastRead.ts';
 import { Timestamp } from 'firebase-admin/firestore';
 import {
   deterministicExternalIndexId,
@@ -845,6 +846,28 @@ for (const user of users) {
       updates.docs.map((update) => ({id: update.id, data: update.data()})),
     )) {
       found(finding.cls, p, finding.detail);
+    }
+    // lastReadAt is the newest reading row's createdAt (utils/lastRead.ts):
+    // the client stamps it in the batch that writes the row and hands it
+    // back on delete, and migrate-last-read-at.ts backfilled every older
+    // book. An absent field is pre-migration drift; a present one that
+    // disagrees with the rows is a write path that forgot the stamp.
+    if (b.lastReadAt === undefined) {
+      found('book.missing.lastReadAt', p);
+    } else if (b.lastReadAt !== null && !(b.lastReadAt instanceof Timestamp)) {
+      found('book.bad-lastReadAt', p, String(b.lastReadAt));
+    } else {
+      const expected = lastReadAtOf(updates.docs.map((update) => ({
+        id: update.id,
+        type: update.get('type'),
+        pagesRead: update.get('pagesRead'),
+        createdAt: update.get('createdAt') as Timestamp,
+      })));
+      const stored: Timestamp | null = b.lastReadAt;
+      if ((expected === null) !== (stored === null) ||
+          (expected !== null && stored !== null && !expected.isEqual(stored))) {
+        found('book.lastReadAt-disagrees', p, `${stored?.toDate().toISOString() ?? 'null'} != ${expected?.toDate().toISOString() ?? 'null'}`);
+      }
     }
     for (const update of updates.docs) {
       const u = update.data();

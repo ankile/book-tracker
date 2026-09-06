@@ -8,6 +8,7 @@
   import { formatTime } from "$lib/utils/format.ts";
   import { acceptReportedWrite } from "$lib/utils/offlineWrite.ts";
   import { precedingProgressUpdate } from "$lib/utils/readingSessionMutation.ts";
+  import { lastReadAtAfterDelete } from "$lib/utils/lastRead.ts";
   import {
     readingSessionMutationConfirmed,
     readingSessionVersion,
@@ -138,6 +139,7 @@
           previousProgressUpdate: book.currentPageUpdateId === session.id
             ? precedingProgressUpdate(updates, session)
             : null,
+          lastReadAtPatch: lastReadAtAfterDelete(updates, session.id, book.lastReadAt),
         }),
         () => {
           operationId = ++nextSessionOperationId;

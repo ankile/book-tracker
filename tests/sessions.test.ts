@@ -165,14 +165,21 @@ test("daysToFinishSummary needs two sessions and reports medians", () => {
 test("dustyShelf ranks unfinished books by staleness", () => {
   const now = new Date("2026-06-01T12:00:00");
   const books = [
-    { id: "b", finished: false, title: "Beta", currentPage: 50, pageCount: 200, updatedAt: ts("2026-03-10T08:00:00") },
-    { id: "c", finished: false, title: "Gamma", currentPage: 0, pageCount: 300, updatedAt: ts("2026-05-20T12:00:00") },
+    // updatedAt is deliberately newest on every book: a metadata edit moved
+    // it, and it must not count as activity.
+    { id: "b", finished: false, title: "Beta", currentPage: 50, pageCount: 200, lastReadAt: ts("2026-03-10T08:00:00"), createdAt: ts("2026-03-01T08:00:00"), updatedAt: ts("2026-05-31T12:00:00") },
+    // No session history: idle since it was last read.
+    { id: "c", finished: false, title: "Gamma", currentPage: 30, pageCount: 300, lastReadAt: ts("2026-05-20T12:00:00"), createdAt: ts("2026-05-01T12:00:00"), updatedAt: ts("2026-05-31T12:00:00") },
+    // Never read: idle since it was added.
+    { id: "d", finished: false, title: "Delta", currentPage: 0, pageCount: 100, lastReadAt: null, createdAt: ts("2026-05-27T12:00:00"), updatedAt: ts("2026-05-31T12:00:00") },
   ];
   const shelf = dustyShelf(books, buildBookTimelines(sessions), now);
   assert.equal(shelf[0].title, "Beta"); // idle since March
   assert.equal(shelf[0].percentComplete, 25);
-  assert.equal(shelf[1].title, "Gamma"); // updatedAt fallback, 12 days
+  assert.equal(shelf[1].title, "Gamma"); // lastReadAt fallback, 12 days
   assert.equal(shelf[1].daysSince, 12);
+  assert.equal(shelf[2].title, "Delta"); // createdAt fallback, 5 days
+  assert.equal(shelf[2].daysSince, 5);
 });
 
 test("completionRate counts only books that were ever started", () => {

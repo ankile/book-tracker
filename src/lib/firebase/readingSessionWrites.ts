@@ -40,6 +40,9 @@ interface ReadingSessionWriteBase {
 
 interface ReadingSessionDeleteWrite extends ReadingSessionWriteBase {
   previousProgressUpdate: Pick<ReadingProgressUpdate, 'id' | 'toPage'> | null;
+  // From lastReadAtAfterDelete (utils/lastRead.ts): the stamp hands back
+  // to the newest remaining reading row when the deleted one carried it.
+  lastReadAtPatch: { lastReadAt: Timestamp | null } | Record<string, never>;
 }
 
 interface ReadingSessionUpdateWrite extends ReadingSessionWriteBase {
@@ -84,6 +87,7 @@ export function queueReadingSessionDelete({
   previous,
   book,
   previousProgressUpdate,
+  lastReadAtPatch,
 }: ReadingSessionDeleteWrite): Promise<void> {
   const sessionRef = firestore.document('users', userId, 'books', bookId, 'updates', sessionId);
   const bookRef = firestore.document('users', userId, 'books', bookId);
@@ -100,6 +104,7 @@ export function queueReadingSessionDelete({
     pagesRead: increment(mutation.deltaPages),
     timeRead: increment(mutation.deltaTime),
     ...(mutation.progress ?? {}),
+    ...lastReadAtPatch,
     updatedAt: Timestamp.now(),
   });
   return batch.commit();

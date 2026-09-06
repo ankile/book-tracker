@@ -23,6 +23,7 @@ service cloud.firestore {
                     && validInitialBookTimer()
                     && validBookPageState(request.resource.data)
                     && request.resource.data.get('currentPageUpdateId', null) == null
+                    && request.resource.data.get('lastReadAt', null) == null
                     && validBookShape()
                     && validBookAuthors()
                     && validBookCatalogLink();
@@ -33,10 +34,11 @@ service cloud.firestore {
                     && validBookProgressSourceTransition(userId, bookId)
                     && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                            'activeTimer', 'currentPage', 'currentPageUpdateId',
-                           'pagesRead', 'timeRead', 'finished', 'finishedAt', 'updatedAt'
+                           'pagesRead', 'timeRead', 'finished', 'finishedAt', 'lastReadAt', 'updatedAt'
                          ])
                          && validBookProgressFields())
                         || (validBookShape()
+                            && bookLastReadAtUnchanged()
                             && validBookAuthorsTransition()
                             && validBookCatalogLinkTransition()));
       // A local timer has no remote side effect. The UI explicitly warns
@@ -174,7 +176,23 @@ service cloud.firestore {
       return book.get('updatedAt', request.time) is timestamp
              && book.get('pagesRead', 0) is number
              && book.get('timeRead', 0) is number
-             && validBookFinishedAt(book);
+             && validBookFinishedAt(book)
+             && validBookLastReadAt(book);
+    }
+
+    // lastReadAt is the moment of the book's newest reading activity and
+    // what the reading list orders by (utils/lastRead.ts). Reading and
+    // editing are separate kinds of change: only a progress batch may move
+    // it, a metadata edit must leave it exactly as stored, and a new book
+    // has not been read. Null or absent means never read.
+    function validBookLastReadAt(book) {
+      return book.get('lastReadAt', null) == null
+             || book.lastReadAt is timestamp;
+    }
+
+    function bookLastReadAtUnchanged() {
+      return request.resource.data.get('lastReadAt', null)
+             == resource.data.get('lastReadAt', null);
     }
 
     // finishedAt is the moment the book was marked finished, and the only
@@ -204,13 +222,14 @@ service cloud.firestore {
       return book.keys().hasOnly([
                'activeTimer', 'authorIds', 'coverUrl', 'createdAt',
                'currentPage', 'currentPageUpdateId', 'fiction', 'finished', 'finishedAt', 'isbn',
-               'language', 'workId', 'editionId', 'matchMethod', 'linkedAt',
+               'language', 'lastReadAt', 'workId', 'editionId', 'matchMethod', 'linkedAt',
                'owner', 'pageCount', 'pagesRead', 'timeRead', 'publishedDate',
                'publisher', 'subjects', 'title', 'updatedAt'
              ])
              // Absent on the oldest documents; typed when present.
              && book.get('updatedAt', request.time) is timestamp
              && validBookFinishedAt(book)
+             && validBookLastReadAt(book)
              // The shape cap stays at the pre-catalog 50 so a legacy book
              // the migration left with 7–50 per-user ids (REVIEW
              // too-many-personal-authors) can still have its title, page
@@ -489,8 +508,9 @@ service cloud.firestore {
       let timeRead = after.get('timeRead', 0);
       return after.diff(before).affectedKeys().hasOnly([
                'pagesRead', 'timeRead', 'currentPage', 'currentPageUpdateId',
-               'finished', 'finishedAt', 'updatedAt'
+               'finished', 'finishedAt', 'lastReadAt', 'updatedAt'
              ])
+             && validBookLastReadAt(after)
              && pagesRead is int
              && pagesRead >= 0
              && timeRead is int

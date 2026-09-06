@@ -34,6 +34,7 @@ import { issueReportPayload, type IssueInput } from '../utils/issueReport.ts';
 import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { finishedAtPatch, isFinished } from '../utils/finished.ts';
+import { isReadingActivity, readOrderMillis } from '../utils/lastRead.ts';
 import {
   isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
@@ -362,6 +363,8 @@ interface DeleteReadingSessionInput {
   session: ReadingSession;
   bookProgress: Pick<Book, 'currentPage' | 'currentPageUpdateId' | 'pageCount' | 'finished'>;
   previousProgressUpdate: Pick<BookUpdate, 'id' | 'toPage'> | null;
+  // lastReadAtAfterDelete(...) computed by the modal from the loaded rows.
+  lastReadAtPatch: { lastReadAt: Timestamp | null } | Record<string, never>;
   title: string;
 }
 
@@ -497,13 +500,11 @@ class Database {
     const key = `${userId}:${finished}`;
     if (!booksStores.has(key)) {
       booksStores.set(key, derived(this.getAllBooks(userId), (books) => (
+        // Newest reading activity first (utils/lastRead.ts); never
+        // updatedAt, which moves on every metadata edit.
         (books ?? [])
           .filter((book) => book.finished === finished)
-          .toSorted((a, b) => {
-            const aTime = a.updatedAt?.toMillis?.() ?? 0;
-            const bTime = b.updatedAt?.toMillis?.() ?? 0;
-            return bTime - aTime;
-          })
+          .toSorted((a, b) => readOrderMillis(b) - readOrderMillis(a))
       )));
     }
     const store = booksStores.get(key);
@@ -800,6 +801,13 @@ class Database {
     const batch = writeBatch(db);
     const bookRef = doc(db, 'users', userId, 'books', id);
     const updateRef = doc(collection(db, 'users', userId, 'books', id, 'updates'));
+    const now = Timestamp.now();
+    const row = {
+      type: 'update' as const,
+      fromPage: previousPage,
+      toPage: currentPage,
+      pagesRead: currentPage - previousPage,
+    };
 
     // Add the update document. Client timestamps, not serverTimestamp():
     // offline writes sync hours later and would otherwise be stamped with
@@ -807,15 +815,14 @@ class Database {
     batch.set(updateRef, {
       owner: doc(db, 'users', userId),
       book: bookRef,
-      type: 'update',
-      fromPage: previousPage,
-      toPage: currentPage,
-      pagesRead: currentPage - previousPage,
-      updatedAt: Timestamp.now(),
-      createdAt: Timestamp.now(),
+      ...row,
+      updatedAt: now,
+      createdAt: now,
     });
 
-    // Update book with new currentPage and updatedAt
+    // Update book with new currentPage and updatedAt. A forward page
+    // update is reading and stamps lastReadAt with the row's own instant;
+    // a backward correction is not (utils/lastRead.ts).
     batch.update(bookRef, {
       currentPage,
       currentPageUpdateId: updateRef.id,
@@ -823,9 +830,10 @@ class Database {
       ...finishedAtPatch(
         isFinished(previousPage, pageCount),
         isFinished(currentPage, pageCount),
-        Timestamp.now(),
+        now,
       ),
-      updatedAt: Timestamp.now(),
+      ...(isReadingActivity(row) ? { lastReadAt: now } : {}),
+      updatedAt: now,
     });
 
     await batch.commit();
@@ -838,6 +846,7 @@ class Database {
     const sessionRef = doc(collection(db, 'users', userId, 'books', id, 'updates'));
 
     const pagesRead = currentPage - previousPage;
+    const now = Timestamp.now();
 
     // Add the reading session document. Client timestamps so sessions
     // logged offline keep the day they actually happened (see addPageUpdate).
@@ -849,11 +858,12 @@ class Database {
       fromPage: previousPage,
       toPage: currentPage,
       pagesRead,
-      updatedAt: Timestamp.now(),
-      createdAt: Timestamp.now(),
+      updatedAt: now,
+      createdAt: now,
     });
 
-    // Update book with incremented aggregates
+    // Update book with incremented aggregates. A session is reading by
+    // definition: lastReadAt takes the row's own instant.
     batch.update(bookRef, {
       currentPage,
       currentPageUpdateId: sessionRef.id,
@@ -861,11 +871,12 @@ class Database {
       ...finishedAtPatch(
         isFinished(previousPage, pageCount),
         isFinished(currentPage, pageCount),
-        Timestamp.now(),
+        now,
       ),
       pagesRead: increment(pagesRead),
       timeRead: increment(timeRead),
-      updatedAt: Timestamp.now(),
+      lastReadAt: now,
+      updatedAt: now,
     });
 
     await batch.commit();
@@ -888,6 +899,7 @@ class Database {
       currentPageUpdateId: null,
       finished: isFinished(currentPage, pageCount),
       finishedAt: isFinished(currentPage, pageCount) ? Timestamp.now() : null,
+      lastReadAt: null,
       owner: ownerRef,
       pageCount,
       pagesRead: 0,
@@ -1213,6 +1225,7 @@ class Database {
     session,
     bookProgress,
     previousProgressUpdate,
+    lastReadAtPatch,
   }: DeleteReadingSessionInput): Promise<void> {
     return queueReadingSessionDelete({
       firestore: readingSessionWriteStore,
@@ -1222,6 +1235,7 @@ class Database {
       previous: session,
       book: bookProgress,
       previousProgressUpdate,
+      lastReadAtPatch,
     });
   }
 
