@@ -75,7 +75,7 @@ distribution or a calibrated 80% probability guarantee.
    `python -m forecast_plot snapshots/forecast-joint/search.json` after installing
    matplotlib in your Python environment.
 4. Before promotion, run `forecast-app-audit.ts` against the saved daily ledger,
-   unit/type checks and emulator UI checks. Commit `d89b359` preserves the
+   unit/type checks and emulator UI checks. Commit `d00a266` preserves the
    original research before promotion. Frozen historical runners may reject
    later app/code hashes intentionally; do not rewrite their old results.
 
