@@ -11,6 +11,7 @@
   import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
   import { finishedDateOf } from "../utils/finished.ts";
+  import { minutesLeft, paceFor, paceNote } from "../utils/paceEstimate.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { catalogWorkHref } from "../utils/catalogClient.ts";
   import { FirebaseError } from "firebase/app";
@@ -48,6 +49,13 @@
     return unsubscribe;
   });
   let books = $derived(booksProp ?? fetchedBooks);
+  // The whole library, finished books included: a book without sessions
+  // borrows a pace from the reader's other books (utils/paceEstimate.ts).
+  let library = $state<Book[]>([]);
+  $effect(() => {
+    const libraryStore = Database.getAllBooks(userId);
+    return libraryStore.subscribe((data) => (library = data ?? []));
+  });
   let sessionsBookId = $state<string | null>(null);
   let sessionsBook = $derived(
     sessionsBookId === null
@@ -337,6 +345,11 @@
   .title,
   .page-number {
     font-size: 1.5em;
+  }
+  /* A pace borrowed from other books reads as the rough guess it is. */
+  .pace.approximate {
+    color: #8a9599;
+    cursor: help;
   }
 
   .author {
@@ -665,9 +678,10 @@
   {#if header}
     <div class="list-summary">{@render header()}</div>
   {:else if !finished && books.length > 0}
-    <div class="list-summary"><ReadingSummary {books} /></div>
+    <div class="list-summary"><ReadingSummary {books} {library} /></div>
   {/if}
   {#each books as book (book.id)}
+    {@const pace = paceFor(book, library)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
     {@const resolvedAuthors = repairableBookAuthors(book, authorMap)}
     {@const workHref = catalogWorkHref(book)}
@@ -748,9 +762,11 @@
                 <span class="page-number">
                   {#if finished}
                     {finishedDateOf(book).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                  {:else if hasEstimate(book)}
-                    {formatTime(Math.round((book.pageCount - book.currentPage) * (book.timeRead / book.pagesRead)))}
-                  {:else}NA{/if}
+                  {:else if pace === null}NA{:else}
+                    <span class="pace" class:approximate={pace.source !== 'own'} title={paceNote(pace, book) ?? undefined}>
+                      {pace.source === 'own' ? '' : '~'}{formatTime(minutesLeft(book, pace))}
+                    </span>
+                  {/if}
                 </span>
               </div>
             </div>
@@ -759,9 +775,11 @@
                 <span class="label">Min/Page</span>
                 <br />
                 <span class="page-number">
-                  {#if hasEstimate(book)}
-                    {Math.round((book.timeRead / book.pagesRead) * 100) / 100}
-                  {:else}NA{/if}
+                  {#if pace === null}NA{:else}
+                    <span class="pace" class:approximate={pace.source !== 'own'} title={paceNote(pace, book) ?? undefined}>
+                      {pace.source === 'own' ? '' : '~'}{Math.round(pace.minutesPerPage * 100) / 100}
+                    </span>
+                  {/if}
                 </span>
               </div>
             </div>
