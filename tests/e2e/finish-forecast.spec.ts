@@ -26,6 +26,7 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
     createdAt: Timestamp.now(), updatedAt: Timestamp.now() });
   for (const [id, title, ages] of [
     ['active', 'Active forecast book', [10, 2]],
+    ['firstday', 'First-day forecast book', [2]],
     ['paused', 'Paused forecast book', [100, 90]],
     ['new', 'New forecast book', []],
   ] as const) {
@@ -55,6 +56,8 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'Estimated finish', exact: true });
   await expect(dialog.getByTestId('finish-date')).toBeVisible();
+  await expect(dialog.getByTestId('selected-model')).toContainText('Current model');
+  await expect(dialog.getByTestId('model-comparison')).toContainText('Multi-window pace');
   await expect(dialog.getByText("There isn't enough history yet to estimate a date range.")).toBeVisible();
   await expect(dialog.getByTestId('forecast-calculation')).toContainText('240 minutes');
   await expect(dialog.getByTestId('pace-comparison').locator('tbody tr')).toHaveCount(5);
@@ -103,6 +106,10 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toBeFocused();
+  await page.getByRole('button', { name: 'View estimated finish for First-day forecast book', exact: true }).click();
+  await expect(dialog.getByTestId('finish-date')).toBeVisible();
+  await expect(dialog.getByText('Early estimate.', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'View estimated finish for Paused forecast book', exact: true }).click();
   await expect(dialog.getByText('No reliable finish date yet')).toBeVisible();
   const card = dialog.locator('form');

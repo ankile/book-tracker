@@ -36,6 +36,7 @@ export interface ForecastFeatures {
   rates: Record<number, { user: number; book: number; share: number; activeShare: number }>;
   activeBooks: number;
   resumeRate: number;
+  speedSource?: 'book' | 'library' | 'default';
 }
 
 export const FORECAST_WINDOWS = [7, 14, 30, 60, 90] as const;
@@ -47,6 +48,7 @@ export function forecastFeatures(
   books: readonly ForecastBook[],
   readings: readonly ForecastReading[],
   now: number,
+  allowSpeedPrior = false,
 ): ForecastFeatures | null {
   const past = readings.filter((row) => row.at <= now && row.minutes > 0 && row.pages >= 0);
   const own = past.filter((row) => row.bookId === book.id).sort((a, b) => a.at - b.at);
@@ -54,7 +56,11 @@ export function forecastFeatures(
   const speedRows = own.filter((row) => row.minutes >= 5 && row.pages / row.minutes <= 2.5);
   const speedPages = speedRows.reduce((sum, row) => sum + row.pages, 0);
   const speedMinutes = speedRows.reduce((sum, row) => sum + row.minutes, 0);
-  if (speedPages <= 0 || speedMinutes <= 0) return null;
+  if ((speedPages <= 0 || speedMinutes <= 0) && !allowSpeedPrior) return null;
+  const librarySpeed = past.filter((row) => row.minutes >= 5 && row.pages / row.minutes <= 2.5);
+  const libraryPages = librarySpeed.reduce((sum, row) => sum + row.pages, 0);
+  const minutesPerPage = speedPages > 0 ? speedMinutes / speedPages
+    : libraryPages > 0 ? librarySpeed.reduce((sum, row) => sum + row.minutes, 0) / libraryPages : 2;
   const remainingPages = Math.max(0, book.pageCount - book.currentPage);
   const first = own[0].at;
   const ageDays = Math.max(1, (now - first) / FORECAST_DAY_MS);
@@ -79,21 +85,32 @@ export function forecastFeatures(
   return {
     bookId: book.id,
     remainingPages,
-    remainingMinutes: remainingPages * speedMinutes / speedPages,
+    remainingMinutes: remainingPages * minutesPerPage,
+    speedSource: speedPages > 0 ? 'book' : libraryPages > 0 ? 'library' : 'default',
     idleDays, ageDays, rates, activeBooks,
     readingDays: new Set(own.map((row) => Math.floor((now - row.at) / FORECAST_DAY_MS))).size,
     resumeRate: resumeMinutes / Math.max(1, Math.min(14, (lastAt - first) / FORECAST_DAY_MS)),
   };
 }
 
-// Selected on the 2024 validation period before opening the 2025+ holdout.
-export const SELECTED_FORECAST = { name: 'blend-14', kind: 'blend', window: 14 } as const;
-export const FORECAST_RANGE_SCALE = 3;
+// Promoted after daily replay. The later evaluation period has been reused;
+// this is a practical model choice, not a claim of untouched holdout accuracy.
+export const SELECTED_FORECAST = { name: 'blend-14-ungated', kind: 'blend', window: 14 } as const;
+// Minimum capped 80% interval score on mature 2024 daily origins.
+export const FORECAST_RANGE_SCALE = 2;
 
 export function selectedForecastDays(features: ForecastFeatures): number {
   const rate = features.rates[SELECTED_FORECAST.window];
   const daily = Math.sqrt(rate.book * rate.user);
   return daily > 0 ? features.remainingMinutes / daily : Infinity;
+}
+
+export function multiWindowForecastDays(features: ForecastFeatures): number {
+  const estimates = [7, 14, 30, 60].map((window) => {
+    const rate = features.rates[window];
+    return features.remainingMinutes / Math.sqrt(rate.book * rate.user);
+  }).sort((a, b) => a - b);
+  return (estimates[1] + estimates[2]) / 2;
 }
 
 export interface ForecastObservation {
@@ -172,9 +189,9 @@ export function finishForecast(
   book: ForecastBook, books: readonly ForecastBook[], readings: readonly ForecastReading[],
   now: number, observations: readonly ForecastObservation[] = [],
 ): FinishForecast {
-  const features = forecastFeatures(book, books, readings, now);
+  const features = forecastFeatures(book, books, readings, now, true);
   const empty = { days: null, lowerDays: null, upperDays: null, features, calibrationBooks: 0, calibration: null };
-  if (!features || features.readingDays < 2) return { ...empty, status: 'insufficient' };
+  if (!features) return { ...empty, status: 'insufficient' };
   const days = selectedForecastDays(features);
   if (!Number.isFinite(days)) return { ...empty, status: 'inactive' };
   if (days > FORECAST_HORIZON_DAYS) return { ...empty, status: 'beyond-horizon' };

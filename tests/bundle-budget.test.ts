@@ -82,9 +82,12 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // on-demand dialog adds reading evidence, pace/scenario comparisons and
   // historical accuracy. Replay and scoring run in a separate worker.
   // The complete build measures about 365 KiB; the remainder is headroom.
+  // Total raised 368 -> 369 KiB for daily forecast replay, first-day speed
+  // priors, model comparison and capped interval diagnostics. After removing
+  // repeated UI copy, the complete build measures 368.0 KiB.
   assert.ok(
-    totalBytes <= 368 * 1024,
-    `Expected at most 368 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 369 * 1024,
+    `Expected at most 369 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

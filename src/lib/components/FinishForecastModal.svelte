@@ -1,7 +1,7 @@
 <script lang="ts">
   import ModalCard from './ModalCard.svelte';
   import { Database } from '../firebase/db.ts';
-  import { finishForecast, forecastDate, forecastReadings, FORECAST_WINDOWS, FORECAST_RANGE_SCALE } from '../utils/finishForecast.ts';
+  import { finishForecast, forecastDate, forecastReadings, selectedForecastDays, multiWindowForecastDays, SELECTED_FORECAST, FORECAST_WINDOWS, FORECAST_RANGE_SCALE } from '../utils/finishForecast.ts';
   import { forecastHistoryInput } from '../utils/forecastHistory.ts';
   import { readingEvidence, type ForecastWorkerResult } from '../utils/forecastDiagnostics.ts';
   import type { Book } from '../interfaces/book.ts';
@@ -43,6 +43,8 @@
   const calibration = $derived(forecast?.calibration);
   const backtest = $derived(evidence?.backtest);
   const effectivePace = $derived(features ? Math.sqrt(features.rates[14].book * features.rates[14].user) : 0);
+  const multiWindowDays = $derived(features ? multiWindowForecastDays(features) : Infinity);
+  const jumpTo = (id: string) => document.getElementById(id)?.scrollIntoView({ block: 'start' });
   const chartMax = $derived(facts ? Math.max(1, ...facts.days.map((day) => day.book + day.other)) : 1);
   const rawLower = $derived(forecast?.days != null && calibration ? Math.max(1, forecast.days) * calibration.lowerFactor : null);
   const rawUpper = $derived(forecast?.days != null && calibration ? Math.max(1, forecast.days) * calibration.upperFactor : null);
@@ -83,7 +85,7 @@
             <p class="lead">The recent pace puts completion beyond the one-year forecast limit.</p>
           {:else}
             <h2>A little more reading first</h2>
-            <p class="lead">Log timed progress on at least two reading days to estimate a finish date.</p>
+            <p class="lead">Log a timed reading session to start estimating a finish date.</p>
           {/if}
         </div>
         <div class="progress-fact">
@@ -92,6 +94,19 @@
           <progress max={book.pageCount} value={book.currentPage} aria-label="Book progress"></progress>
         </div>
       </header>
+
+      <div class="model-note" data-testid="selected-model">
+        <span class="tag">Current model · 14-day blended pace</span>
+      </div>
+      {#if features && (features.readingDays < 2 || features.speedSource !== 'book')}
+        <p class="callout"><strong>Early estimate.</strong> {features.readingDays < 2 ? 'This book has only one recorded reading day. A single session can move the date substantially.' : ''}
+          {features.speedSource === 'library' ? 'Reading speed comes from your other recorded reading because this book has too little qualifying page progress.' : features.speedSource === 'default' ? 'Until there is qualifying page progress, reading speed assumes 2 minutes per page.' : ''}</p>
+      {/if}
+      <nav class="forecast-nav" aria-label="Forecast sections">
+        {#each [['uncertainty-heading', 'Date range'], ['calculation-heading', 'Calculation'], ['pace-heading', 'Compare estimates'], ['scenario-heading', 'What if?'], ['backtest-heading', 'Accuracy']] as [id, label]}
+          {#if features || id === 'uncertainty-heading' || id === 'backtest-heading'}<button type="button" onclick={() => jumpTo(id)}>{label}</button>{/if}
+        {/each}
+      </nav>
 
       <dl class="headline-facts">
         <div><dt>Pages remaining</dt><dd>{book.pageCount - book.currentPage}</dd><small>From your current page</small></div>
@@ -117,7 +132,7 @@
             <div class="point"><span>Point estimate</span><strong>{date(forecast.days!)}</strong><small>{num(forecast.days!)} days away</small></div>
             <div><span>Later end</span><strong>{forecast.upperDays !== null ? date(forecast.upperDays) : 'No upper date within a year'}</strong><small>{forecast.upperDays !== null ? `${num(forecast.upperDays)} days away` : 'Long pauses leave the tail unresolved'}</small></div>
           </div>
-          <p>This span applies the errors from forecasts of your other books to this estimate, then widens it to allow for larger misses. {forecast.upperDays !== null ? 'Finishing later is still possible, especially after a pause or a switch to another book.' : 'Your history does not establish an upper date within the forecast limit.'} <strong>It is not a guaranteed window or an 80% chance of finishing within it.</strong></p>
+          <p>This span applies your other books' historical errors, widened to allow for larger misses. Pausing or switching books can move the date. <strong>This is an empirical range, not a calibrated 80% probability.</strong></p>
           <div class="two-columns range-detail">
             <div>
               <h4>Where the bounds come from</h4>
@@ -151,7 +166,7 @@
             <div><span>Calendar time left</span><strong>{num(features.remainingMinutes)} ÷ {num(effectivePace)}</strong><small>= {effectivePace > 0 ? `${num(features.remainingMinutes / effectivePace)} days` : 'no finite date'}</small></div>
           </div>
           <p class="small">The budget is the geometric mean of this book's {num(features.rates[14].book)} min/day and your overall {num(features.rates[14].user)} min/day. This book's rate uses {num(Math.min(14, features.ageDays))} elapsed days since its first session (up to 14); your overall rate uses the full 14 days. Days without reading count in both rates.</p>
-          <p class="small">Reading speed uses {facts.speedSessions} of {facts.sessions} sessions: {num(facts.speedPages)} pages in {duration(facts.speedMinutes)}. Sessions shorter than 5 minutes or faster than 150 pages/hour are excluded from speed, but still count toward the daily budget. Page corrections change remaining progress without adding reading time.</p>
+          <p class="small">{features.speedSource === 'book' ? `Reading speed uses ${facts.speedSessions} of ${facts.sessions} sessions: ${num(facts.speedPages)} pages in ${duration(facts.speedMinutes)}.` : features.speedSource === 'library' ? 'Reading speed uses qualifying sessions across your library until this book has enough page progress.' : 'Reading speed uses an initial assumption of 2 minutes per page until qualifying progress is available.'} Sessions shorter than 5 minutes or faster than 150 pages/hour are excluded from speed, but still count toward the daily budget. Page corrections change remaining progress without adding reading time.</p>
           {#if listMinutes !== null && Math.abs(listMinutes - features.remainingMinutes) >= 1}
             <p class="callout">The Currently reading list shows {duration(listMinutes)} left using aggregate speed. This forecast uses {duration(features.remainingMinutes)} after the session filters above.</p>
           {/if}
@@ -188,7 +203,11 @@
 
       {#if features}
         <section aria-labelledby="pace-heading">
-          <h3 id="pace-heading">Alternative pace estimates</h3>
+          <h3 id="pace-heading">Compare the leading estimates</h3>
+          <div class="model-comparison" data-testid="model-comparison">
+            <div class="chosen-model"><span class="tag">Used for your forecast</span><h4>Recent 14-day pace</h4><strong>{prediction(selectedForecastDays(features))}</strong><p>Responds to your current routine. Starts estimating on the first reading day.</p></div>
+            <div><span class="tag">Comparison</span><h4>Multi-window pace</h4><strong>{prediction(multiWindowDays)}</strong><p>Median of estimates from 7, 14, 30 and 60 days. Balances your recent pace with longer reading patterns.</p></div>
+          </div>
           <p class="muted">Same remaining reading time, different views of your habits. These are conditional estimates, not lower and upper uncertainty bounds.</p>
           <div class="table-scroll"><table data-testid="pace-comparison"><caption>All rates are minutes per calendar day</caption><thead><tr><th>Lookback</th><th>This book</th><th>All books</th><th>This book's share</th><th>At this book's pace</th><th>At blended pace</th></tr></thead><tbody>
             {#each FORECAST_WINDOWS as window}
@@ -196,7 +215,7 @@
               <tr class:selected={window === 14}><th scope="row">{window} days{window === 14 ? ' · selected' : ''}</th><td>{num(rate.book)}</td><td>{num(rate.user)}</td><td>{num(rate.share * 100, 0)}%</td><td>{prediction(features.remainingMinutes / rate.book)}</td><td>{prediction(features.remainingMinutes / Math.sqrt(rate.book * rate.user))}</td></tr>
             {/each}
           </tbody></table></div>
-          <p class="small">For a book started inside a lookback window, its daily rate uses only the elapsed time since starting (at least one day). Its share is the fraction of all minutes in the full window, so it may differ from the ratio of the two displayed daily rates.</p>
+          <p class="small">New books use elapsed days since starting, with a one-day minimum. Share uses total minutes in the full window, so it can differ from the ratio of daily rates.</p>
         </section>
 
         <section class="scenario" aria-labelledby="scenario-heading">
@@ -218,7 +237,7 @@
           <h3 id="parallel-heading">Where your reading time went</h3>
           <p class="muted">{recentUnfinished} unfinished books read in the last 30 days. Finished books still count toward your recent overall reading budget.</p>
           <div class="table-scroll"><table><caption>Books read in the last 30 days</caption><thead><tr><th>Book</th><th>Status</th><th>Last 14 days</th><th>Last 30 days</th><th>Last read</th></tr></thead><tbody>{#each facts.competing as row}<tr class:selected={row.bookId === bookId}><th scope="row">{title(row.bookId)}{row.bookId === bookId ? ' · this book' : ''}</th><td>{books.find((candidate) => candidate.id === row.bookId)?.finished ? 'Finished' : 'Unfinished'}</td><td>{duration(row.minutes14)}</td><td>{duration(row.minutes30)}</td><td>{dateAt(row.lastAt)}</td></tr>{/each}</tbody></table></div>
-          <p class="small">The model blends the book's observed pace with your overall budget. It does not allocate a fixed future schedule across your books, so their individual forecasts are not a joint reading plan.</p>
+          <p class="small">Each book has an individual pace forecast; these dates do not allocate a shared future reading schedule.</p>
         </section>
       {/if}
 
@@ -230,30 +249,39 @@
         {:else if !backtest}
           <p role="status">Calculating historical accuracy…</p>
         {:else if !backtest.overall}
-          <p>There are no scorable forecasts in this evaluation period yet. Completed books or at least 90 days of follow-up are needed.</p>
+          <p>There are no scorable forecasts in this evaluation period yet. Each forecast needs at least 90 days of follow-up.</p>
         {:else}
-          <p>Replayed from your saved sessions using only the progress and reading available at each forecast date. Each book has equal weight. In the original experiment, the 14-day blend was selected from 19 candidates using 2024 validation, before examining the 2025 onward evaluation period.</p>
+          <p>One forecast per open book every day at 00:00 UTC, using only the progress and reading available then. Each book has equal weight. Pauses, first-day estimates and currently unfinished books stay in the comparison.</p>
+          <div class="table-scroll"><table data-testid="model-leaderboard"><caption>Leading models and earlier versions, on the same daily forecasts</caption><thead><tr><th>Model</th><th>All history</th><th>Since Jan 2025</th></tr></thead><tbody>
+            {#each [{ name: 'Recent 14-day pace · current', key: 'selected' }, { name: 'Multi-window pace', key: 'multiWindow' }, { name: 'Earlier 14-day model · required two days', key: 'previous' }, { name: 'Original 30-day overall pace', key: 'baseline' }] as model}
+              <tr class:selected={model.key === 'selected'}><th scope="row">{model.name}</th><td>{backtest.fullHistory ? `${num(backtest.fullHistory[model.key as 'selected' | 'multiWindow' | 'previous' | 'baseline'], 2)} days` : 'Not enough data'}</td><td>{num(backtest.overall[model.key as 'selected' | 'multiWindow' | 'previous' | 'baseline'], 2)} days</td></tr>
+            {/each}
+          </tbody></table></div>
+          <p class="small">{backtest.fullHistory ? `${backtest.fullHistory.books} books and ${num(backtest.fullHistory.checkpoints, 0)} daily forecasts across all history` : 'Full-history results unavailable'}; {backtest.overall.books} books and {num(backtest.overall.checkpoints, 0)} daily forecasts since Jan 2025. Only forecasts with 90 days of follow-up are included in either column.</p>
+          <p class="small">Chosen for recent-history performance; multi-window pace led over all history. Results are recomputed for your library. Repeated model comparisons used these periods, so this is not an untouched test. Model: {SELECTED_FORECAST.name}.</p>
           <dl class="headline-facts backtest-facts">
             <div><dt>Average error, capped at 90 days</dt><dd>{num(backtest.overall.selected)} days</dd><small>Selected 14-day blend</small></div>
-            <div><dt>Previous model's error</dt><dd>{num(backtest.overall.baseline)} days</dd><small>30-day overall reading pace</small></div>
+            <div><dt>Earlier model's error</dt><dd>{num(backtest.overall.previous)} days</dd><small>14-day pace with two-day requirement</small></div>
             <div><dt>Evaluation sample</dt><dd>{backtest.overall.books} books</dd><small>{num(backtest.overall.checkpoints, 0)} forecast checkpoints</small></div>
             <div><dt>Forecasts within one year</dt><dd>{num(backtest.overall.dateRate * 100, 0)}%</dd><small>Book-weighted; dates withheld otherwise</small></div>
           </dl>
-          <div class="table-scroll"><table><caption>Mean absolute error in remaining days, capped at 90</caption><thead><tr><th>Reading pattern</th><th>Selected model</th><th>Previous model</th><th>Books / checkpoints</th></tr></thead><tbody>
+          <div class="table-scroll"><table><caption>Mean absolute error in remaining days, capped at 90</caption><thead><tr><th>Reading pattern</th><th>Current model</th><th>Earlier 14-day model</th><th>Books / forecasts</th></tr></thead><tbody>
             {#each [{ name: 'All forecasts', score: backtest.overall }, { name: 'Read within 7 days', score: backtest.active }, { name: 'Idle for more than 7 days', score: backtest.quiet }, { name: 'Multiple active books', score: backtest.parallel }] as row}
-              {#if row.score}<tr><th scope="row">{row.name}</th><td>{num(row.score.selected)} days</td><td>{num(row.score.baseline)} days</td><td>{row.score.books} / {row.score.checkpoints}</td></tr>{/if}
+              {#if row.score}<tr><th scope="row">{row.name}</th><td>{num(row.score.selected)} days</td><td>{num(row.score.previous)} days</td><td>{row.score.books} / {row.score.checkpoints}</td></tr>{/if}
             {/each}
           </tbody></table></div>
           <p class="small">The score caps both predicted and actual remaining time at 90 days, then averages absolute errors within each book and across books. Long-unfinished books count once they have 90 days of follow-up. {backtest.pending} newer checkpoints are not yet scorable. This is not a ±{num(backtest.overall.selected)}-day confidence interval for this book.</p>
-          {#if backtest.uncappedError !== null}<p class="small">Without the 90-day cap, the book-weighted average error was <strong>{num(backtest.uncappedError)} days</strong> across {backtest.completedCheckpoints} forecasts of {backtest.completedBooks} completed books where the model gave a date within one year. This excludes unfinished outcomes and withheld dates.</p>{/if}
+          {#if backtest.cappedCoverage !== null && backtest.intervalScore !== null && backtest.intervalWidth !== null}
+            <div class="callout"><strong>Range coverage on the 90-day horizon: {num(backtest.cappedCoverage * 100)}%.</strong> {num(backtest.cappedIntervalCheckpoints, 0)} calibrated daily forecasts; mean width {num(backtest.intervalWidth)} days; interval score {num(backtest.intervalScore)} days. Lower scores reward narrow ranges and penalize misses. Unfinished outcomes and bounds beyond 90 days count at 90, without implying completion.</div>
+          {/if}
+          {#if backtest.uncappedError !== null}<p class="small">Uncapped mean book error: <strong>{num(backtest.uncappedError)} days</strong> across {backtest.completedCheckpoints} forecasts of {backtest.completedBooks} completed books. Only issued dates within one year count; unfinished outcomes are excluded.</p>{/if}
           {#if backtest.coverage !== null && backtest.finiteUpperRate !== null}
-            <div class="callout"><strong>How often did the widened range cover the outcome? {num(backtest.coverage * 100, 1)}%.</strong> That is book-weighted coverage across {backtest.intervalCheckpoints} forecasts of {backtest.intervalBooks} books with known completion dates. Only {num(backtest.finiteUpperRate * 100, 1)}% of all evaluable ranges had a finite upper date within one year; open-ended ranges make coverage easier to achieve. This retrospective rate is not a probability for your current book.</div>
+            <p class="small">Uncapped coverage among completed books: {num(backtest.coverage * 100)}%, across {backtest.intervalCheckpoints} forecasts of {backtest.intervalBooks} books. {num(backtest.finiteUpperRate * 100)}% of evaluable ranges have a finite upper date within one year. Open-ended ranges make coverage easier.</p>
           {/if}
           {#if backtest.worst.length > 0}
             <details><summary>Largest misses and evaluation limitations</summary>
               <div class="table-scroll"><table><caption>Largest absolute miss per book, among completed books with a forecast within one year</caption><thead><tr><th>Book / forecast made</th><th>Predicted remaining</th><th>Actual remaining</th><th>Miss</th></tr></thead><tbody>{#each backtest.worst as row}<tr><th scope="row">{title(row.bookId)}<small>{dateAt(row.at)}</small></th><td>{num(row.predictedDays)} days</td><td>{num(row.actualDays)} days</td><td>{num(row.error)} days</td></tr>{/each}</tbody></table></div>
-              <p class="small">Checkpoints include session ends and weekly checks during gaps. Historical ranges use only earlier observations and exclude the book being predicted. The sample is small, and books read at the same time share circumstances; a lower average error does not establish that the model is reliably better.</p>
-              <p class="small">Page counts are assumed unchanged. Deleted sessions and earlier versions of edited records cannot be reconstructed. Completed books without progress corroborating their finish date are excluded. Recently unfinished outcomes remain unknown. No model here can know a future decision to put a book on hold.</p>
+              <p class="small">Range widening minimizes interval score on mature 2024 forecasts. Books read together share circumstances. Page counts are assumed fixed; deleted sessions and earlier edits are unavailable. Completion labels need corroborating progress. Future decisions to pause remain unknown.</p>
             </details>
           {/if}
         {/if}
@@ -273,6 +301,15 @@
   .overview { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; }
   .eyebrow { font-size: 1rem; font-weight: 600; color: #176c74; margin: 0; }
   .lead { color: #53636a; margin-bottom: 0; }
+  .model-note { margin-top: 1rem; }
+  .forecast-nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+  .forecast-nav button { border: 1px solid #b3caca; border-radius: 5px; background: white; color: #176c74; padding: .5rem .75rem; font-size: .8rem; }
+  h3 { scroll-margin-top: 5rem; }
+  .model-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+  .model-comparison > div { padding: 1rem; border: 1px solid #cbd8d9; border-radius: 6px; }
+  .model-comparison .chosen-model { border-color: #1b7179; background: #f0f7f6; }
+  .model-comparison h4 { margin: .75rem 0 .4rem; }
+  .model-comparison p { font-size: .8rem; color: #53636a; margin-bottom: 0; }
   .progress-fact { display: grid; min-width: 170px; gap: .2rem; font-size: .8rem; color: #53636a; }
   .progress-fact strong { font-size: 1.5rem; color: #253237; }
   progress { width: 100%; height: 6px; accent-color: #1b7179; }
@@ -334,7 +371,7 @@
   .updated { color: #53636a; font-size: .75rem; margin: 1.5rem 0 0; }
   @media (max-width: 760px) {
     .headline-facts { grid-template-columns: 1fr 1fr; gap: .6rem; }
-    .two-columns, .scenario-controls { grid-template-columns: 1fr; gap: 1rem; }
+    .two-columns, .scenario-controls, .model-comparison { grid-template-columns: 1fr; gap: 1rem; }
     .progress-fact { min-width: 120px; }
     .calculation { grid-template-columns: 1fr; gap: .5rem; }
   }

@@ -52,15 +52,16 @@ function score(rows: ForecastReplayObservation[], now: number) {
   return { books: new Set(rows.map((row) => row.bookId)).size, checkpoints: rows.length,
     selected: mean(bookMeans(rows, (row) => error(row, row.predictedDays))),
     baseline: mean(bookMeans(rows, (row) => error(row, row.baselineDays))),
+    previous: mean(bookMeans(rows, (row) => error(row, row.previousDays ?? Infinity))),
+    multiWindow: mean(bookMeans(rows, (row) => error(row, row.multiWindowDays ?? Infinity))),
     dateRate: mean(bookMeans(rows, (row) => Number(row.predictedDays <= FORECAST_HORIZON_DAYS))) };
 }
 
-// This is a fresh replay of the account's stored history, not a new model
-// selection. Keep the frozen 2025+ evaluation period and the research metric.
-export function forecastBacktest(history: readonly ForecastReplayObservation[], now: number) {
+// Fixed follow-up includes all open books, whether or not they later finish.
+export function forecastBacktest(history: readonly ForecastReplayObservation[], now: number, rangeScale = FORECAST_RANGE_SCALE) {
   const evaluation = history.filter((row) => row.at >= FORECAST_HOLDOUT_START && row.at < now);
-  const scorable = evaluation.filter((row) => remaining(row, now) < 90 || now - row.at >= 90 * DAY);
-  const completed = evaluation.filter((row) => Number.isFinite(remaining(row, now))
+  const scorable = evaluation.filter((row) => now - row.at >= 90 * DAY);
+  const completed = scorable.filter((row) => Number.isFinite(remaining(row, now))
     && Number.isFinite(row.predictedDays) && row.predictedDays <= FORECAST_HORIZON_DAYS);
   const errors = completed.map((row) => ({ ...row, actualDays: remaining(row, now),
     error: Math.abs(row.predictedDays - remaining(row, now)) })).sort((a, b) => b.error - a.error);
@@ -69,14 +70,19 @@ export function forecastBacktest(history: readonly ForecastReplayObservation[], 
   const intervals = scorable.filter((row) => row.predictedDays > 0 && row.predictedDays <= FORECAST_HORIZON_DAYS).flatMap((row) => {
     const calibration = calibrateForecast(history.filter((other) => other.bookId !== row.bookId), row.at, row.idleDays);
     if (calibration === null) return [];
-    const lower = Math.min(row.predictedDays, Math.max(1, row.predictedDays) * calibration.lowerFactor / FORECAST_RANGE_SCALE);
-    const rawUpper = Math.max(row.predictedDays, Math.max(1, row.predictedDays) * calibration.upperFactor * FORECAST_RANGE_SCALE);
+    const lower = Math.min(row.predictedDays, Math.max(1, row.predictedDays) * calibration.lowerFactor / rangeScale);
+    const rawUpper = Math.max(row.predictedDays, Math.max(1, row.predictedDays) * calibration.upperFactor * rangeScale);
     const upper = rawUpper <= FORECAST_HORIZON_DAYS ? rawUpper : Infinity;
     const actual = remaining(row, now);
-    return [{ bookId: row.bookId, actual, upper, covered: Number(actual >= lower && actual <= upper) }];
+    const cappedLower = Math.min(90, lower), cappedUpper = Math.min(90, rawUpper), cappedActual = Math.min(90, actual);
+    return [{ bookId: row.bookId, actual, upper, covered: Number(actual >= lower && actual <= upper),
+      cappedCovered: Number(cappedActual >= cappedLower && cappedActual <= cappedUpper),
+      width: cappedUpper - cappedLower,
+      intervalScore: cappedUpper - cappedLower + 10 * Math.max(0, cappedLower - cappedActual, cappedActual - cappedUpper) }];
   });
   const knownIntervals = intervals.filter((row) => Number.isFinite(row.actual));
   return {
+    fullHistory: score(history.filter((row) => now - row.at >= 90 * DAY), now),
     overall: score(scorable, now), active: score(scorable.filter((row) => row.idleDays <= 7), now),
     quiet: score(scorable.filter((row) => row.idleDays > 7), now),
     parallel: score(scorable.filter((row) => row.activeBooks > 1), now),
@@ -86,6 +92,10 @@ export function forecastBacktest(history: readonly ForecastReplayObservation[], 
     intervalCheckpoints: knownIntervals.length, intervalBooks: new Set(knownIntervals.map((row) => row.bookId)).size,
     coverage: knownIntervals.length === 0 ? null : mean(bookMeans(knownIntervals, (row) => row.covered)),
     finiteUpperRate: intervals.length === 0 ? null : mean(intervals.map((row) => Number(Number.isFinite(row.upper)))),
+    cappedCoverage: intervals.length === 0 ? null : mean(bookMeans(intervals, (row) => row.cappedCovered)),
+    intervalScore: intervals.length === 0 ? null : mean(bookMeans(intervals, (row) => row.intervalScore)),
+    intervalWidth: intervals.length === 0 ? null : mean(bookMeans(intervals, (row) => row.width)),
+    cappedIntervalCheckpoints: intervals.length,
     worst,
   };
 }

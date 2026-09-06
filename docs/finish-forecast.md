@@ -20,15 +20,18 @@ progress but are not reading time. Only sessions at or before the forecast
 instant are used. This is a marginal forecast for a book, not a simultaneous
 schedule that assigns every future minute to one of the current books.
 
-At least two occupied 24-hour reading buckets are required. The buckets end
-at the forecast instant. Without recent reading, the model withholds a date
+The current model is `blend-14-ungated`. It can estimate from the first
+timed reading day, labeled as an early estimate. If this book has no usable
+speed, it uses qualifying reading across the library, or 2 minutes per page
+until qualifying progress exists. The page states which source is used.
+Without recent reading, the model withholds a date
 and can show the separate scenario of resuming the book's previous pace.
 Predictions beyond one year are displayed without a precise date. Forecast
 instants use elapsed days; dates are displayed in the browser's local zone.
 
 ## Uncertainty
 
-Historical session and weekly checkpoints are replayed using prefix progress
+Historical daily checkpoints at 00:00 UTC are replayed using prefix progress
 and speed. This includes quiet periods and unfinished books. Recorded rows
 edited after a cutoff are omitted from that cutoff. Completed books require
 a progress row reaching their page count near the recorded completion date.
@@ -38,7 +41,10 @@ distribution. Unfinished books contribute censored lower bounds. A weighted
 Kaplan-Meier estimate gives the 10th and 90th percentiles, with equal total
 weight per book and separate groups for more than seven days of inactivity.
 The current book never calibrates its own interval. The range is widened by
-a factor of three, selected in validation, and includes the point estimate.
+a factor of two and includes the point estimate. This factor minimized the
+book-weighted nominal 80% interval score among 1, 1.5, 2 and 3 on mature 2024
+daily origins, with outcomes censored at January 2025. Bounds and outcomes
+are capped at 90 for this scoring, not for the displayed date range.
 At least 12 other books are required. If the upper bound cannot be estimated
 within one year, the dialog says so. It does not promise an 80% probability.
 
@@ -60,19 +66,47 @@ The uncertainty panel shows the point and bounds separately, the raw
 historical error factors, the widening factor, and the calibration sample
 and pause group. It labels the range as empirical uncertainty without
 claiming a current-book probability. The worker also replays the original
-30-day baseline and scores the frozen 2025-onward evaluation period with
-the research runner's per-book capped-error metric. The dialog shows
+30-day baseline, earlier gated 14-day model and `median-windows` comparison.
+It scores all history and the 2025-onward evaluation period with
+the research runner's per-book capped-error metric. Every included origin
+must have 90 days of follow-up, even if the book finished sooner. The dialog shows
 subgroups, date availability within one year, uncapped completed-book
 errors, interval coverage and finite-upper frequency, and the largest
 completed-book misses. These account-specific results are recomputed from
 saved history; no private research result is embedded in the app bundle.
+Section shortcuts lead to the date range, calculation, model comparison,
+scenarios and accuracy. First-day and borrowed-speed estimates are identified.
+
+## Promotion after daily experiments
+
+The ungated 14-day blend is the default because it had the lowest recent
+mean book error among the leading candidates. The multi-window model was
+slightly better over the full history and remains visible as a comparison.
+The joint simulator did not beat these formulas on later point forecasts;
+it remains research-only. These periods have been inspected repeatedly.
+This choice is not proof of a universally best model or pristine holdout
+performance. Uncertainty factors are recalculated from the new model's
+daily predictions; old model residuals are not mixed into its calibration.
+
+The read-only promotion audit checks all 9,298 saved daily cases and four
+models, 37,192 comparisons, against the browser's replay, then records range
+validation, full-history and recent scores. It requires only local files:
+
+```bash
+node forecast-app-audit.ts <snapshot.json> <account-email> snapshots/forecast-daily/predictions.jsonl snapshots/forecast-review/promotion-audit.json
+```
+
+The original 19-model runner checks that the app still matches its frozen
+selection, so its `final` command intentionally rejects the promoted app.
+Use commit `d89b359` to reproduce the original research unchanged, and the
+promotion audit above to verify the shipped predictor against saved results.
 
 ## Reproduce the experiment
 
 The research runner reads a local snapshot and has no database client. It
 compares 19 candidates: the existing projection, per-book windows, lifetime
 pace, shared-budget allocation, blended rates, simulation, and conditional
-pause-resumption estimates. It uses the same selected predictor as the app.
+pause-resumption estimates. It records the app's original predictor.
 
 ```bash
 node forecast-research.ts <snapshot.json> <account-email> explore snapshots/forecast-research
@@ -138,7 +172,8 @@ The subsequent [daily backtesting protocol](forecast-daily-protocol.md)
 replays every open book every day, retains cold starts and long holds, and
 compares 51 fixed candidates using fixed follow-up cohorts. It includes
 commands for the private report and prediction viewer. The app predictor
-has not been replaced by those research candidates.
+now uses its ungated 14-day candidate, with the multi-window candidate
+available as a comparison.
 
 The [joint simulation experiment](forecast-joint-protocol.md) adds a shared
 daily reading budget, competing books, completion and time redistribution,

@@ -1,7 +1,7 @@
 import type { BookUpdateView } from '../interfaces/reading.ts';
 import type { TimestampLike } from '../interfaces/common.ts';
 import {
-  FORECAST_DAY_MS as DAY, selectedForecastDays, forecastFeatures,
+  FORECAST_DAY_MS as DAY, selectedForecastDays, multiWindowForecastDays, forecastFeatures,
   type ForecastBook, type ForecastObservation, type ForecastReading,
 } from './finishForecast.ts';
 
@@ -32,6 +32,8 @@ export interface ForecastHistoryInput {
 export interface ForecastReplayObservation extends ForecastObservation {
   baselineDays: number;
   activeBooks: number;
+  previousDays?: number;
+  multiWindowDays?: number;
 }
 
 export function forecastHistoryInput(
@@ -77,25 +79,24 @@ export function buildForecastHistory(
     return { book, own, finishedAt, reliable: finishedAt === null
       || (finishRow !== undefined && Math.abs(finishRow.at - finishedAt) < DAY) };
   });
-  const origins = new Set<number>(rows.filter((row) => row.type === 'reading' && row.at < now).map((row) => row.at));
-  for (let at = Math.ceil(rows[0].at / (7 * DAY)) * 7 * DAY; at < now; at += 7 * DAY) origins.add(at);
+  const origins: number[] = [];
+  for (let at = Math.ceil(rows[0].at / DAY) * DAY; at <= now; at += DAY) origins.push(at);
   const result: ForecastReplayObservation[] = [];
-  for (const at of [...origins].sort((a, b) => a - b)) {
+  for (const at of origins) {
     const visible = histories.map((history) => {
-      const past = history.own.filter((row) => row.at <= at && row.editedAt <= at + 1000);
+      const past = history.own.filter((row) => row.at <= at && row.editedAt <= at);
       const last = past.at(-1);
       return { history, past, book: { ...history.book, currentPage: last?.to ?? 0,
-        finished: last?.to === history.book.pageCount } };
+        finished: (last?.to ?? 0) >= history.book.pageCount } };
     }).filter((item) => item.past.length > 0);
-    const pastReadings: ForecastReading[] = rows.filter((row) => row.type === 'reading' && row.at <= at && row.editedAt <= at + 1000);
+    const pastReadings: ForecastReading[] = rows.filter((row) => row.type === 'reading' && row.at <= at && row.editedAt <= at);
+    const activeBooks = visible.filter((item) => !item.book.finished && pastReadings.some((row) =>
+      row.bookId === item.book.id && row.minutes > 0 && row.pages >= 0 && at - row.at < 30 * DAY)).length;
     for (const item of visible) {
       const { history, book, past } = item;
-      if (!history.reliable || book.finished || (history.finishedAt !== null && history.finishedAt <= at)) continue;
+      if (!history.reliable || book.finished) continue;
       if (past.some((row) => row.to === undefined)) continue;
-      const isSession = past.at(-1)!.at === at && past.at(-1)!.type === 'reading';
-      if (!isSession && at % (7 * DAY) !== 0) continue;
-      const features = forecastFeatures(book, visible.map((item) => item.book), pastReadings, at);
-      if (!features || features.readingDays < 2 || features.idleDays > 365) continue;
+      const features = forecastFeatures(book, visible.map((item) => item.book), pastReadings, at, true);
       // Reproduce the old dashboard formula from the same visible prefix,
       // including its unfiltered speed and correction-aware activity gate.
       const own = past.filter((row) => row.type === 'reading');
@@ -105,8 +106,12 @@ export function buildForecastHistory(
       const baselineDays = at - past.at(-1)!.at <= 60 * DAY && pages > 0 && minutes > 0 && recentMinutes > 0
         ? (book.pageCount - book.currentPage) * minutes / pages / (recentMinutes / 30) : Infinity;
       result.push({ bookId: book.id, at, finishedAt: history.finishedAt,
-        predictedDays: selectedForecastDays(features), idleDays: features.idleDays,
-        baselineDays, activeBooks: features.activeBooks });
+        predictedDays: features ? selectedForecastDays(features) : Infinity,
+        previousDays: features && features.readingDays >= 2 && features.speedSource === 'book'
+          ? selectedForecastDays(features) : Infinity,
+        multiWindowDays: features ? multiWindowForecastDays(features) : Infinity,
+        idleDays: features?.idleDays ?? (at - past.at(-1)!.at) / DAY,
+        baselineDays, activeBooks });
     }
   }
   return result;

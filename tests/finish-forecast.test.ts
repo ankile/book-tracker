@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   FORECAST_DAY_MS as DAY, selectedForecastDays, calibrateForecast,
-  finishForecast, forecastFeatures, forecastReadings,
+  finishForecast, forecastFeatures, forecastReadings, multiWindowForecastDays,
   type ForecastBook, type ForecastReading,
 } from '../src/lib/utils/finishForecast.ts';
 import { buildForecastHistory } from '../src/lib/utils/forecastHistory.ts';
@@ -46,10 +46,18 @@ test('zero-reading days slow the forecast and a long pause does not invent a ret
   assert.ok(paused.features!.resumeRate > 0);
 });
 
-test('new books, single-day history and zero progress have no invented date', () => {
+test('unstarted books need a session; first-day forecasts use explicit speed priors', () => {
   assert.equal(finishForecast(book, [book], [], now).status, 'insufficient');
-  assert.equal(finishForecast(book, [book], readings.slice(0, 1), now).status, 'insufficient');
-  assert.equal(finishForecast(book, [book], readings.map((r) => ({ ...r, pages: 0 })), now).status, 'insufficient');
+  const first = finishForecast(book, [book], readings.slice(0, 1), now);
+  assert.equal(first.status, 'estimated');
+  assert.equal(first.features!.speedSource, 'book');
+  const noPages = readings.map((r) => ({ ...r, pages: 0 }));
+  const defaultSpeed = finishForecast(book, [book], noPages, now);
+  assert.equal(defaultSpeed.features!.speedSource, 'default');
+  assert.equal(defaultSpeed.features!.remainingMinutes, 320);
+  const librarySpeed = finishForecast(book, [book], [...noPages, { bookId: 'b', at: now - DAY, minutes: 30, pages: 20 }], now);
+  assert.equal(librarySpeed.features!.speedSource, 'library');
+  assert.equal(librarySpeed.features!.remainingMinutes, 720); // 90 total minutes / 20 pages, including zero-page sessions
   assert.equal(finishForecast({ ...book, finished: true }, [book], readings, now).days, null);
 });
 
@@ -83,10 +91,44 @@ test('history replay uses prefix progress and never the completed book totals', 
     timeRead: i === 2 ? 60 : 20, toPage: i === 2 ? 100 : (i + 1) * 20 }));
   const finished = { ...book, currentPage: 100, pageCount: 100, finished: true, finishedAt: stamp(start + 4 * DAY) };
   const history = buildForecastHistory([finished], updates, start + 5 * DAY);
-  assert.ok(history.some((row) => row.at === start + 2 * DAY && row.predictedDays > 0));
+  assert.ok(history.some((row) => row.at === start + 2.5 * DAY && row.predictedDays > 0));
   const before = buildForecastHistory([{ ...finished, finished: false, currentPage: 40, finishedAt: null }], updates.slice(0, 2), start + 3 * DAY);
-  assert.equal(history.find((row) => row.at === start + 2 * DAY)!.predictedDays,
-    before.find((row) => row.at === start + 2 * DAY)!.predictedDays);
+  assert.equal(history.find((row) => row.at === start + 2.5 * DAY)!.predictedDays,
+    before.find((row) => row.at === start + 2.5 * DAY)!.predictedDays);
+});
+
+test('multi-window estimate includes a quiet seven-day window without dropping its other evidence', () => {
+  const features = forecastFeatures(book, [book], readings, now + 6 * DAY)!;
+  assert.equal(features.rates[7].book, 0);
+  assert.equal(selectedForecastDays(features), 112);
+  assert.ok(Number.isFinite(multiWindowForecastDays(features)));
+  assert.equal(multiWindowForecastDays(features), (112 + 240 / Math.sqrt(3.75)) / 2);
+  const paused = forecastFeatures(book, [book], readings, now + 15 * DAY)!;
+  assert.equal(multiWindowForecastDays(paused), Infinity);
+});
+
+test('daily replay keeps first-day and long-idle books and ignores edits not yet visible', () => {
+  const start = Date.UTC(2023, 0, 1, 12);
+  const updates = [{ book: { id: 'a' }, createdAt: stamp(start), updatedAt: stamp(start),
+    type: 'reading' as const, pagesRead: 20, timeRead: 30, toPage: 20 }];
+  const history = buildForecastHistory([{ ...book, finishedAt: null }], updates, start + 400 * DAY);
+  assert.equal(history.length, 400);
+  assert.ok(Number.isFinite(history[0].predictedDays));
+  assert.equal(history[0].previousDays, Infinity);
+  assert.equal(history.at(-1)!.predictedDays, Infinity);
+  const edited = buildForecastHistory([{ ...book, finishedAt: null }],
+    updates.map((row) => ({ ...row, updatedAt: stamp(start + 2 * DAY) })), start + 3 * DAY);
+  assert.equal(edited.length, 1);
+  assert.equal(edited[0].at, start + 2.5 * DAY);
+});
+
+test('fixed follow-up never cherry-picks recently completed books into the main score', () => {
+  const fresh = { bookId: 'fast', at: now - 10 * DAY, finishedAt: now - DAY,
+    predictedDays: 8, baselineDays: 5, idleDays: 0, activeBooks: 1 };
+  const result = forecastBacktest([fresh, { ...fresh, bookId: 'ongoing', finishedAt: null }], now);
+  assert.equal(result.overall, null);
+  assert.equal(result.pending, 2);
+  assert.equal(result.uncappedError, null);
 });
 
 test('dashboard and modal use the same forecast date', () => {
