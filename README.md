@@ -5,6 +5,7 @@ books, reading progress, reading sessions, and reading statistics. It supports
 offline work and optional public profiles.
 
 New to the codebase? Start with the [architecture and site map](docs/architecture/README.md).
+For reading predictions, start with the [forecasting overview and research handoff](docs/forecasting.md).
 
 Any change to the architecture, routes, access model, data flows, or external
 integrations must update the relevant map source and regenerate its image
@@ -54,6 +55,8 @@ editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
   integration.
 - Shows yearly statistics, reading streaks, a daily activity heatmap, and
   per-book reading speed.
+- Opens a calendar finish forecast from **Est left**, using recent reading
+  and a historical date range. See [forecasting and local review](docs/finish-forecast.md).
 - Resolves authors through one shared catalog and lets authorized operators
   curate author identities, aliases, classifications, and merges.
 - Suggests existing shared works and editions while keeping each reader's
@@ -221,6 +224,8 @@ Root package commands:
 | `npm run check:service-worker` | Type-check the service worker |
 | `npm run check:watch` | Watch-mode Svelte checks |
 | `npm run test:unit` | Application and migration unit tests |
+| `npm run test:forecast-daily` | Offline daily forecast replay, censoring and temporal-validation tests; see the [experiment protocol](docs/forecast-daily-protocol.md) |
+| `npm run test:forecast-joint` | Shared reading-budget simulations, temporal isolation and probability scoring tests; see the [joint simulation protocol](docs/forecast-joint-protocol.md) |
 | `npm run test:rules` | Firestore Rules and integration tests against local emulators |
 | `npm run test:catalog-emulator` | Restricted catalog preview/apply workflow against local emulators |
 | `npm run test:functions` | Functions lint, production build, strict test type-check, and tests |

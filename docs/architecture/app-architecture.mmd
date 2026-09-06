@@ -18,6 +18,7 @@ flowchart TB
   delivery["<b>Managed web delivery</b><br/>Static application assets<br/>and published profile responses"]:::delivery
   browser["<b>Browser or installed app</b><br/>User interface and client state"]:::client
   local["<b>Local persistence</b><br/>Cached app shell and offline work"]:::client
+  forecast["<b>Local forecast worker</b><br/>Reading-history replay<br/>and finish-date uncertainty"]:::client
 
   identity["<b>Managed identity</b><br/>Sign-in and authenticated sessions"]:::security
   permissions["<b>Data access controls</b><br/>Owner scope and write validation"]:::security
@@ -37,6 +38,8 @@ flowchart TB
   delivery -->|"application"| browser
   delivery -->|"published profile request"| publicrenderer
   browser -->|"cache and queued work"| local
+  browser -->|"cached owner history"| forecast
+  forecast -->|"historical forecast evidence"| browser
 
   browser -->|"sign in"| identity
   browser -->|"owner reads and writes"| permissions

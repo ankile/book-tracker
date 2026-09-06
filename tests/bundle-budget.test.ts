@@ -78,9 +78,19 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // (codes, labels, ISBN groups), the work default and edition override in
   // the console and the add-book flow, and the carried copy on books add
   // 1.7 KiB compressed; the build measures 349.7 KiB, the rest is headroom.
+  // Total raised 356 -> 368 KiB for the detailed finish forecast: the
+  // on-demand dialog adds reading evidence, pace/scenario comparisons and
+  // historical accuracy. Replay and scoring run in a separate worker.
+  // The complete build measures about 365 KiB; the remainder is headroom.
+  // Total raised 368 -> 369 KiB for daily forecast replay, first-day speed
+  // priors, model comparison and capped interval diagnostics. After removing
+  // repeated UI copy, the complete build measures 368.0 KiB.
+  // Total raised 369 -> 372 KiB for the uncertainty histogram, accessible
+  // distribution table and Currently Reading summary. The build is 371.0 KiB;
+  // no charting library is included.
   assert.ok(
-    totalBytes <= 356 * 1024,
-    `Expected at most 356 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 372 * 1024,
+    `Expected at most 372 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,
