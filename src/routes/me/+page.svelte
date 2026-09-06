@@ -1,5 +1,6 @@
 <script lang="ts">
   import { user, signOut } from '$lib/firebase/auth.ts';
+  import { ADMIN_UID } from '$lib/admin-uid.ts';
   import { page } from '$app/state';
   import ReadingHeatmap from '$lib/components/ReadingHeatmap.svelte';
   import SuperlativesRow from '$lib/components/SuperlativesRow.svelte';
@@ -592,14 +593,20 @@
     flex-wrap: wrap;
     margin-bottom: 2rem;
 
-    button {
+    button,
+    a {
+      display: inline-block;
+      box-sizing: border-box;
       min-width: 200px;
       border: none;
       background: white;
       padding: 1rem 2rem;
       font-size: 1rem;
       font-weight: 600;
+      line-height: normal;
       color: #333;
+      text-align: center;
+      text-decoration: none;
       box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
       border-radius: 5px;
       cursor: pointer;
@@ -1110,7 +1117,8 @@
       }
     }
 
-    .actions button {
+    .actions button,
+    .actions a {
       width: 100%;
     }
 
@@ -1173,6 +1181,9 @@
 
     <div class="actions">
       <button onclick={handleSignOut}>Sign Out</button>
+      {#if $user.uid === ADMIN_UID}
+        <a href="/admin">Admin console</a>
+      {/if}
     </div>
 
     <details class="settings">
