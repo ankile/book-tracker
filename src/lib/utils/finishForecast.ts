@@ -130,13 +130,15 @@ export interface ForecastCalibration {
   completedBooks: number;
   firstAt: number;
   lastAt: number;
+  distribution?: { ratio: number; mass: number }[];
+  unresolvedMass: number;
 }
 
 // Equal total weight per book prevents a long, frequently logged book from
 // dominating the uncertainty estimate. Unfinished books contribute censored
 // lower bounds. See docs/finish-forecast.md for the coverage limitations.
 export function calibrateForecast(
-  observations: readonly ForecastObservation[], now: number, idleDays: number,
+  observations: readonly ForecastObservation[], now: number, idleDays: number, includeDistribution = false,
 ): ForecastCalibration | null {
   const usable = observations.filter((row) => row.at < now && Number.isFinite(row.predictedDays) && row.predictedDays > 0
     && (row.idleDays > 7) === (idleDays > 7));
@@ -153,6 +155,7 @@ export function calibrateForecast(
   let survival = 1;
   let lowerFactor = Infinity;
   let upperFactor = Infinity;
+  const distribution: { ratio: number; mass: number }[] = [];
   for (let i = 0; i < values.length;) {
     const ratio = values[i].ratio;
     let j = i;
@@ -163,6 +166,8 @@ export function calibrateForecast(
       if (values[j].event) events += values[j].weight;
       j += 1;
     }
+    const mass = survival * events / risk;
+    if (includeDistribution && events > 0) distribution.push({ ratio, mass });
     survival *= Math.max(0, 1 - events / risk);
     if (survival <= .9 && lowerFactor === Infinity) lowerFactor = ratio;
     if (survival <= .1 && upperFactor === Infinity) upperFactor = ratio;
@@ -171,6 +176,7 @@ export function calibrateForecast(
   }
   const completed = usable.filter((row) => row.finishedAt !== null && row.finishedAt <= now);
   return { lowerFactor, upperFactor, books: counts.size, checkpoints: usable.length,
+    ...(includeDistribution ? { distribution } : {}), unresolvedMass: survival,
     completedCheckpoints: completed.length, completedBooks: new Set(completed.map((row) => row.bookId)).size,
     firstAt: Math.min(...usable.map((row) => row.at)), lastAt: Math.max(...usable.map((row) => row.at)) };
 }
@@ -195,7 +201,7 @@ export function finishForecast(
   const days = selectedForecastDays(features);
   if (!Number.isFinite(days)) return { ...empty, status: 'inactive' };
   if (days > FORECAST_HORIZON_DAYS) return { ...empty, status: 'beyond-horizon' };
-  const calibration = calibrateForecast(observations.filter((row) => row.bookId !== book.id), now, features.idleDays);
+  const calibration = calibrateForecast(observations.filter((row) => row.bookId !== book.id), now, features.idleDays, true);
   const lower = calibration === null ? null : Math.min(days, Math.max(0, Math.max(1, days) * calibration.lowerFactor / FORECAST_RANGE_SCALE));
   const upper = calibration === null ? null : Math.max(days, Math.max(1, days) * calibration.upperFactor * FORECAST_RANGE_SCALE);
   return { status: 'estimated', days,

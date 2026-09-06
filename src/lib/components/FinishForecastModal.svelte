@@ -1,5 +1,6 @@
 <script lang="ts">
   import ModalCard from './ModalCard.svelte';
+  import ForecastDistribution from './ForecastDistribution.svelte';
   import { Database } from '../firebase/db.ts';
   import { finishForecast, forecastDate, forecastReadings, selectedForecastDays, multiWindowForecastDays, SELECTED_FORECAST, FORECAST_WINDOWS, FORECAST_RANGE_SCALE } from '../utils/finishForecast.ts';
   import { forecastHistoryInput } from '../utils/forecastHistory.ts';
@@ -133,6 +134,7 @@
             <div><span>Later end</span><strong>{forecast.upperDays !== null ? date(forecast.upperDays) : 'No upper date within a year'}</strong><small>{forecast.upperDays !== null ? `${num(forecast.upperDays)} days away` : 'Long pauses leave the tail unresolved'}</small></div>
           </div>
           <p>This span applies your other books' historical errors, widened to allow for larger misses. Pausing or switching books can move the date. <strong>This is an empirical range, not a calibrated 80% probability.</strong></p>
+          <ForecastDistribution {calibration} days={forecast.days!} />
           <div class="two-columns range-detail">
             <div>
               <h4>Where the bounds come from</h4>

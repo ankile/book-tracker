@@ -2,7 +2,8 @@
 
 This experiment reads the existing September 2026 snapshot and daily replay.
 It never connects to a database. Keep private outputs under `snapshots/`.
-The app predictor is unchanged.
+The joint simulator remains research-only. See [the forecasting overview](forecasting.md)
+for the current app predictor and [model inventory](forecast-models.md) for all families.
 
 ## Model and search, recorded before scores
 

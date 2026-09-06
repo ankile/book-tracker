@@ -8,6 +8,8 @@ import {
 import { buildForecastHistory } from '../src/lib/utils/forecastHistory.ts';
 import { projectedFinishes } from '../src/lib/utils/sessions.ts';
 import { readingEvidence, forecastBacktest } from '../src/lib/utils/forecastDiagnostics.ts';
+import { forecastHistogram } from '../src/lib/utils/forecastDistribution.ts';
+import { readingSummary } from '../src/lib/utils/readingSummary.ts';
 
 import { conditionalResumeDays } from '../forecast-candidates.ts';
 
@@ -188,4 +190,46 @@ test('calibration exposes completed and censored evidence without changing its f
   assert.equal(result.completedBooks, 10);
   assert.equal(result.lowerFactor, 1);
   assert.equal(result.upperFactor, Infinity);
+});
+
+test('histogram preserves Kaplan-Meier event mass, censored tail and original quantiles', () => {
+  const observations = Array.from({ length: 12 }, (_, i) => ({ bookId: `${i}`, at: now - 100 * DAY,
+    predictedDays: 10, finishedAt: i < 9 ? now - (90 - i * 10) * DAY : null, idleDays: 0 }));
+  const basic = calibrateForecast(observations, now, 0)!;
+  const full = calibrateForecast(observations, now, 0, true)!;
+  assert.equal(full.lowerFactor, basic.lowerFactor);
+  assert.equal(full.upperFactor, basic.upperFactor);
+  assert.equal(full.distribution!.length, 9);
+  assert.ok(Math.abs(full.unresolvedMass - .25) < 1e-12);
+  const histogram = forecastHistogram(full, 20);
+  assert.equal(histogram.maxDays, 180);
+  assert.ok(Math.abs(histogram.bins.reduce((sum, bin) => sum + bin.mass, 0) + full.unresolvedMass - 1) < 1e-12);
+  assert.ok(histogram.bins.at(-1)!.mass > 0, 'Largest observation belongs in the last bin');
+  const duplicate = calibrateForecast([...observations, observations[0]], now, 0, true)!;
+  assert.deepEqual(duplicate.distribution, full.distribution, 'Repeating a book does not increase its total weight');
+});
+
+test('fully censored calibration cannot invent finite completion mass', () => {
+  const observations = Array.from({ length: 12 }, (_, i) => ({ bookId: `${i}`, at: now - DAY,
+    predictedDays: 10, finishedAt: null, idleDays: 0 }));
+  const full = calibrateForecast(observations, now, 0, true)!;
+  assert.deepEqual(full.distribution, []);
+  assert.equal(full.unresolvedMass, 1);
+  assert.equal(full.upperFactor, Infinity);
+});
+
+test('reading summary weights pages, includes holds and identifies unknown remaining time', () => {
+  const summary = readingSummary([
+    { currentPage: 50, pageCount: 100, pagesRead: 50, timeRead: 100 },
+    { currentPage: 100, pageCount: 900, pagesRead: 100, timeRead: 150 },
+    { currentPage: 0, pageCount: 100, pagesRead: 0, timeRead: 0 },
+  ]);
+  assert.equal(summary.count, 3);
+  assert.equal(summary.completion, 150 / 1100 * 100);
+  assert.equal(summary.pagesLeft, 950);
+  assert.equal(summary.minutesRead, 250);
+  assert.equal(summary.minutesLeft, 1300);
+  assert.equal(summary.unknownBooks, 1);
+  assert.equal(readingSummary([]).completion, 0);
+  assert.equal(readingSummary([{ currentPage: 100, pageCount: 100, pagesRead: 0, timeRead: 0 }]).unknownBooks, 0);
 });

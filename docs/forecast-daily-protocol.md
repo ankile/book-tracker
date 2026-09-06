@@ -1,5 +1,8 @@
 # Daily completion-forecast experiment
 
+This records the research protocol. For the current app and later promotion,
+see [the forecasting overview](forecasting.md) and [model inventory](forecast-models.md).
+
 ## Protocol recorded before the daily leaderboard
 
 Use the existing local snapshot only. Run one forecast at 00:00 UTC on every
@@ -112,6 +115,6 @@ sensitivities, and a full replay at noon UTC. `report.html` is self-contained
 and can be opened locally to inspect each book and prediction. Its links to
 the Markdown report, CSV and JSON work when those files stay together.
 
-These files are research tools. They do not replace the app's predictor or
-change its calibration. No emulator or production access is needed to rerun
-the experiment.
+These commands are research tools and do not modify the app. The subsequent
+promotion of an ungated candidate is documented in the overview above.
+No emulator or production access is needed to rerun the experiment.

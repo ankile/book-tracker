@@ -5,6 +5,7 @@ books, reading progress, reading sessions, and reading statistics. It supports
 offline work and optional public profiles.
 
 New to the codebase? Start with the [architecture and site map](docs/architecture/README.md).
+For reading predictions, start with the [forecasting overview and research handoff](docs/forecasting.md).
 
 Any change to the architecture, routes, access model, data flows, or external
 integrations must update the relevant map source and regenerate its image

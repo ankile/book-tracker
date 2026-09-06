@@ -1,5 +1,8 @@
 # Finish-date forecasts
 
+For the concise model, evaluation and code map, read [Forecasting: start here](forecasting.md).
+The complete tested candidate inventory is in [Forecast models](forecast-models.md).
+
 On Currently Reading, click **Est left** to open the finish forecast. The
 existing number still shows active reading time. The dialog adds a calendar
 date, historical range, and recent activity context. The dashboard's On deck
@@ -47,6 +50,22 @@ daily origins, with outcomes censored at January 2025. Bounds and outcomes
 are capped at 90 for this scoring, not for the displayed date range.
 At least 12 other books are required. If the upper bound cannot be estimated
 within one year, the dialog says so. It does not promise an 80% probability.
+
+The histogram exposes the same Kaplan–Meier event masses that define these
+quantiles, mapped to remaining days before widening. Equal-width bins in
+`log(1 + days)` retain the full finite tail; bar heights are mass per bin,
+not density per linear day. Remaining survival mass is shown separately as
+unresolved, never assigned a made-up finite completion time. A table exposes
+all bins. Without any completed outcomes, the chart reports that no finite
+distribution is available. Histogram generation does not change the estimate
+or calibration factors.
+
+Currently Reading also summarizes the displayed books: count, page-weighted
+completion, pages remaining, time read and estimated active reading left.
+The latter sums the existing per-book Est left formula before rounding.
+Books on hold stay included; books without recorded speed are counted as
+unknown and the total is explicitly partial. This is not a simultaneous
+calendar completion forecast for the entire queue.
 
 Historical replay runs in a Web Worker when the dialog opens and when its
 data changes. Closing the dialog terminates the worker and subscriptions.

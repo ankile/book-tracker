@@ -52,6 +52,8 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   const trigger = page.getByRole('button', { name: 'View estimated finish for Active forecast book', exact: true });
   await expect(trigger).toBeVisible();
+  await expect(page.getByTestId('reading-summary')).toContainText('4 books');
+  await expect(page.getByTestId('reading-summary')).toContainText('1 book needs more history');
   await trigger.focus();
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'Estimated finish', exact: true });
@@ -91,6 +93,8 @@ test('finish forecasts open from Est left, handle pauses, and update from local 
   }
   await historyBatch.commit();
   await expect(dialog.getByTestId('uncertainty-range')).toBeVisible();
+  await expect(dialog.getByTestId('forecast-distribution')).toBeVisible();
+  await expect(dialog.getByTestId('forecast-distribution').getByRole('img')).toHaveAttribute('aria-label', /Historical error distribution/);
   await expect(dialog.getByText('Other books / forecast checkpoints')).toBeVisible();
   await expect(dialog.getByText('Average error, capped at 90 days', { exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
