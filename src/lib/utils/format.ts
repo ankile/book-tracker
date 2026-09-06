@@ -1,3 +1,8 @@
+export function formatReadingTime(minutes: number): string {
+  const rounded = Math.round(minutes);
+  return `${Math.floor(rounded / 60).toLocaleString('en-US')}h ${rounded % 60}m`;
+}
+
 export function formatTime(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(
     minutes % 60

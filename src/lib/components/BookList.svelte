@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+  import ReadingSummary from './ReadingSummary.svelte';
   import Icon from "svelte-awesome";
   import { plus, edit, play, stop } from "svelte-awesome/icons";
   import AddReadingModal from "$lib/components/AddReadingModal.svelte";
@@ -18,8 +20,8 @@
   import type { NewQueueOperation } from "../firebase/decoders.ts";
 
   let {
-    finished, userId, books: booksProp = null,
-  }: { finished: boolean; userId: string; books?: Book[] | null } = $props();
+    finished, userId, books: booksProp = null, header,
+  }: { finished: boolean; userId: string; books?: Book[] | null; header?: Snippet } = $props();
 
   let screenWidth = $state(0);
 
@@ -311,6 +313,8 @@
 </script>
 
 <style lang="scss">
+  .list-summary { margin: 1.5em 3em 0; }
+
   .book-row {
     margin: 3em;
     padding: 2em;
@@ -539,6 +543,7 @@
   }
 
   @media only screen and (max-width: 770px) {
+    .list-summary { margin: 1.5em .75em 0; }
     .author,
     .title,
     .page-number {
@@ -657,6 +662,11 @@
 {/snippet}
 
 <div class="container">
+  {#if header}
+    <div class="list-summary">{@render header()}</div>
+  {:else if !finished && books.length > 0}
+    <div class="list-summary"><ReadingSummary {books} /></div>
+  {/if}
   {#each books as book (book.id)}
     {@const progress = (book.currentPage / book.pageCount) * 100}
     {@const resolvedAuthors = repairableBookAuthors(book, authorMap)}

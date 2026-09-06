@@ -1,8 +1,9 @@
 <script lang="ts">
   import { user } from '$lib/firebase/auth.ts';
   import BookList from '$lib/components/BookList.svelte';
+  import BookSummary from '$lib/components/BookSummary.svelte';
   import { Database } from '$lib/firebase/db.ts';
-  import { formatTime } from '$lib/utils/format.ts';
+  import { formatReadingTime } from '$lib/utils/format.ts';
   import { finishedDateOf } from '$lib/utils/finished.ts';
   import { repairableBookAuthors, joinAuthors } from '$lib/utils/authors.ts';
   import type { Author } from '$lib/interfaces/author.ts';
@@ -86,41 +87,6 @@
 </script>
 
 <style>
-  .controls {
-    max-width: 1200px;
-    margin: 0 auto 2rem;
-    padding: 1.5rem 2rem;
-    background: white;
-    border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  }
-
-  .stats {
-    display: flex;
-    gap: 2rem;
-    margin-bottom: 1.5rem;
-    flex-wrap: wrap;
-  }
-
-  .stat {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .stat-label {
-    font-size: 0.85rem;
-    color: #666;
-    text-transform: uppercase;
-    font-weight: 600;
-    margin-bottom: 0.25rem;
-  }
-
-  .stat-value {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: #333;
-  }
-
   .filters {
     display: flex;
     gap: 1.5rem;
@@ -136,7 +102,7 @@
 
   .filter-label {
     font-size: 0.85rem;
-    color: #666;
+    color: #53636a;
     font-weight: 600;
   }
 
@@ -153,7 +119,8 @@
   }
 
   input[type="text"] {
-    min-width: 200px;
+    width: 100%;
+    min-width: 0;
   }
 
   select:hover, input[type="text"]:hover {
@@ -162,60 +129,63 @@
 
   select:focus, input[type="text"]:focus {
     outline: none;
-    border-color: #007bff;
-    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.1);
+    border-color: #1b7179;
+    box-shadow: 0 0 0 2px rgba(27, 113, 121, 0.15);
+  }
+  @media (max-width: 770px) {
+    .filters { align-items: stretch; gap: 1rem; }
+    .filter-group { flex: 1 1 140px; min-width: 0; }
+    .filter-group:first-child { flex-basis: 100%; }
+    .filter-group:nth-child(2) { flex: 2 1 170px; }
+    .filter-group:nth-child(3) { flex: 1 1 110px; }
+    select { width: 100%; }
   }
 </style>
 
 {#if $user}
-  <div class="controls">
-    <div class="stats">
-      <div class="stat">
-        <span class="stat-label">Books Finished</span>
-        <span class="stat-value">{stats.count}</span>
-      </div>
-      <div class="stat">
-        <span class="stat-label">Total Pages</span>
-        <span class="stat-value">{stats.totalPages.toLocaleString()}</span>
-      </div>
-      <div class="stat">
-        <span class="stat-label">Total Time</span>
-        <span class="stat-value">{formatTime(stats.totalTime)}</span>
-      </div>
-    </div>
+  <BookList finished={true} userId={$user.uid} books={sortedBooks}>
+    {#snippet header()}
+      <BookSummary
+        label="Finished books summary"
+        testId="finished-summary"
+        stats={[
+          { label: 'Books finished', value: stats.count + (stats.count === 1 ? ' book' : ' books') },
+          { label: 'Total pages', value: stats.totalPages.toLocaleString() },
+          { label: 'Time read', value: formatReadingTime(stats.totalTime) },
+        ]}
+      >
+        <div class="filters">
+          <div class="filter-group">
+            <label class="filter-label" for="search-input">Search</label>
+            <input
+              id="search-input"
+              type="text"
+              placeholder="Title or author..."
+              bind:value={searchTerm}
+            />
+          </div>
 
-    <div class="filters">
-      <div class="filter-group">
-        <label class="filter-label" for="search-input">Search</label>
-        <input
-          id="search-input"
-          type="text"
-          placeholder="Title or author..."
-          bind:value={searchTerm}
-        />
-      </div>
+          <div class="filter-group">
+            <label class="filter-label" for="sort-select">Sort by</label>
+            <select id="sort-select" bind:value={sortBy}>
+              <option value="finishedAt">Recently Finished</option>
+              <option value="title">Title (A-Z)</option>
+              <option value="pageCount">Length (Pages)</option>
+              <option value="timeRead">Time Spent</option>
+            </select>
+          </div>
 
-      <div class="filter-group">
-        <label class="filter-label" for="sort-select">Sort by</label>
-        <select id="sort-select" bind:value={sortBy}>
-          <option value="finishedAt">Recently Finished</option>
-          <option value="title">Title (A-Z)</option>
-          <option value="pageCount">Length (Pages)</option>
-          <option value="timeRead">Time Spent</option>
-        </select>
-      </div>
-
-      <div class="filter-group">
-        <label class="filter-label" for="year-select">Year</label>
-        <select id="year-select" bind:value={filterYear}>
-          <option value="all">All Years</option>
-          {#each availableYears as year}
-            <option value={year.toString()}>{year}</option>
-          {/each}
-        </select>
-      </div>
-    </div>
-  </div>
-
-  <BookList finished={true} userId={$user.uid} books={sortedBooks} />
+          <div class="filter-group">
+            <label class="filter-label" for="year-select">Year</label>
+            <select id="year-select" bind:value={filterYear}>
+              <option value="all">All Years</option>
+              {#each availableYears as year}
+                <option value={year.toString()}>{year}</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+      </BookSummary>
+    {/snippet}
+  </BookList>
 {/if}
