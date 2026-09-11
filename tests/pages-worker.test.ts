@@ -166,7 +166,7 @@ test('HEAD reaches the renderer as HEAD; other methods are refused without an or
   const post = await run('/profiles/lars', {method: 'POST', body: 'x'});
   assert.equal(post.status, 405);
   assert.equal(post.headers.get('Allow'), 'GET, HEAD');
-  assertPolicy(post, PROFILE_CACHE_CONTROL);
+  assertPolicy(post, 'no-store');
   assert.equal(originCalls.length, 1);
   assert.equal(assetCalls.length, 0);
 });
@@ -205,7 +205,7 @@ test('an unreachable renderer fails closed with a 503, never the shell', async (
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('Retry-After'), '30');
   assert.match(await response.text(), /unavailable/);
-  assertPolicy(response, PROFILE_CACHE_CONTROL);
+  assertPolicy(response, 'no-store');
   assert.equal(assetCalls.length, 0);
 });
 
@@ -241,7 +241,7 @@ test('Firebase email-action links on our domain hop to the Hosting domain with t
 test('rendered responses are edge-cached for the old CDN lifetimes and errors never are', () => {
   assert.deepEqual(RENDERED_EDGE_CACHE, {
     cacheEverything: true,
-    cacheTtlByStatus: {'200-299': 300, '404': 60, '500-599': 0},
+    cacheTtlByStatus: {'200-299': 300, '400-403': -1, '404': 60, '405-499': -1, '500-599': -1},
   });
 });
 
@@ -259,4 +259,28 @@ test('the header policy is the retired firebase.json Hosting policy, pinned lite
   assert.equal(PROFILE_CACHE_CONTROL, 'public, max-age=60, s-maxage=300');
   assert.equal(SITEMAP_CACHE_CONTROL, 'public, max-age=300, s-maxage=300');
   assert.equal(ORIGIN, 'https://publicweb-juiumzbyrq-ew.a.run.app');
+});
+
+test('rendered failures are never given a positive cache lifetime', async () => {
+  for (const status of [400, 403, 405, 429, 500, 503, 504]) {
+    originHandler = () => new Response('unavailable', {status, headers: {'Cache-Control': 'no-store', 'Retry-After': '10'}});
+    const response = await run('/profiles/ada');
+    assertPolicy(response, 'no-store');
+    assert.equal(response.headers.get('Retry-After'), '10');
+  }
+  assert.equal(RENDERED_EDGE_CACHE.cacheTtlByStatus['500-599'], -1);
+});
+
+test('worker-generated renderer failures and method errors are not cacheable', async () => {
+  originHandler = async () => {throw new Error('unreachable');};
+  assertPolicy(await run('/profiles/ada'), 'no-store');
+  assertPolicy(await run('/profiles/ada', {method: 'POST'}), 'no-store');
+});
+
+test('a failed HEAD proxy returns headers without an error body', async () => {
+  originHandler = async () => {throw new Error('unreachable');};
+  const response = await run('/profiles/ada', {method: 'HEAD'});
+  assert.equal(response.status, 503);
+  assertPolicy(response, 'no-store');
+  assert.equal(await response.text(), '');
 });

@@ -52,8 +52,8 @@
     workSearchText,
   } from '$lib/utils/adminCatalogView.ts';
 
-  // The scan is derived from live Firestore listeners the app prefetch opens
-  // once the operator is signed in ($lib/firebase/adminCatalog.ts): every
+  // The scan is derived from live Firestore listeners the admin layout owns
+  // while the operator visits the console ($lib/firebase/adminCatalog.ts): every
   // console page renders whatever is current and updates as documents
   // change. Nothing here fetches; an applied operation shows up when its
   // writes land, the same way anyone else's would.

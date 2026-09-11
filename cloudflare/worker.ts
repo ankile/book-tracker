@@ -77,9 +77,11 @@ function withPolicy(response: Response, pathname: string): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(BASE_HEADERS)) headers.set(name, value);
   const cacheControl = cacheControlFor(pathname);
+  const renderedFailure = isRenderedPath(pathname) && response.status >= 400 && response.status !== 404;
   headers.set(
     'Cache-Control',
-    cacheControl === IMMUTABLE_CACHE_CONTROL && servedTheShell(response) ? BASE_HEADERS['Cache-Control'] : cacheControl,
+    renderedFailure ? 'no-store' :
+      cacheControl === IMMUTABLE_CACHE_CONTROL && servedTheShell(response) ? BASE_HEADERS['Cache-Control'] : cacheControl,
   );
   return new Response(response.body, {
     status: response.status,
@@ -105,7 +107,7 @@ function textResponse(status: number, body: string, extra: Record<string, string
 // minutes to show publicly, as before.
 export const RENDERED_EDGE_CACHE = {
   cacheEverything: true,
-  cacheTtlByStatus: {'200-299': 300, '404': 60, '500-599': 0},
+  cacheTtlByStatus: {'200-299': 300, '400-403': -1, '404': 60, '405-499': -1, '500-599': -1},
 } as const;
 
 interface EdgeCachedRequestInit extends RequestInit {
@@ -137,7 +139,7 @@ async function renderedResponse(request: Request, url: URL): Promise<Response> {
   try {
     return await fetch(upstream, init);
   } catch {
-    return textResponse(503, 'Profile renderer unavailable.\n', {'Retry-After': '30'});
+    return textResponse(503, request.method === 'HEAD' ? '' : 'Profile renderer unavailable.\n', {'Retry-After': '30'});
   }
 }
 

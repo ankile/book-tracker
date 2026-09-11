@@ -19,11 +19,13 @@
   // login screen when signed out and Reading when signed in.
   const publicRoute = $derived(page.route.id?.startsWith('/profiles') ?? false);
 
-  // Let the requested page paint first, then load the other private routes'
-  // code and data. The timeout prevents a busy tab from postponing the work
-  // forever. The subscriptions stay alive until sign-out or a public route.
+  // Auth may publish a refreshed user object without changing accounts.
+  // Only an actual uid change should restart shared subscriptions.
+  const userId = $derived($user?.uid);
+
+  // Paint the requested page before loading route code and shared app data.
+  // History and catalog listeners are owned by their consuming pages.
   $effect(() => {
-    const userId = $user?.uid;
     if (!userId || publicRoute) return;
 
     let cancelled = false;

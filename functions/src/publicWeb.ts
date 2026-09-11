@@ -22,6 +22,7 @@ import {
   renderSitemap,
 } from "./publicProfileRenderer";
 import {PUBLICWEB_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
+import {publicProfileReader} from "./publicProfileRepository";
 
 const USERNAME_PATTERN = /^[a-z0-9-]{3,30}$/;
 const PROFILE_ROUTE = /^\/profiles\/([^/]+)$/;
@@ -116,8 +117,8 @@ interface StoredDocument {
 }
 
 export interface PublicWebRepository {
-  getProfile(_username: string): Promise<unknown | null>;
-  getDiscovery(_username: string): Promise<unknown | null>;
+  getProfile(_username: string, _signal?: AbortSignal): Promise<unknown | null>;
+  getDiscovery(_username: string, _signal?: AbortSignal): Promise<unknown | null>;
   listDiscoveries(_limit: number): Promise<StoredDocument[]>;
 }
 
@@ -267,12 +268,28 @@ export interface TtlCacheOptions<T> {
   // per request.
   pinnedDegradedTtlMs?: number;
   now?: () => number;
+  loadTimeoutMs?: (_key: string) => number | undefined;
+  failureCooldownMs?: number;
+  maxInflight?: number;
+  observe?: (_event: {outcome: string; loadId?: number; durationMs?: number}) => void;
+}
+
+class PublicWebUnavailable extends Error {
+  constructor() {
+    super("Public profile dependency unavailable");
+  }
+}
+
+function retryableReadError(error: unknown): boolean {
+  return error instanceof PublicWebUnavailable ||
+    (typeof error === "object" && error !== null && "code" in error &&
+      [4, 8, 13, 14].includes(error.code as number));
 }
 
 export const MISS_BUDGET_EXHAUSTED = Symbol("publicweb miss budget exhausted");
 
 export interface TtlCache<T> {
-  get(_key: string, _load: () => Promise<T>): Promise<T> | typeof MISS_BUDGET_EXHAUSTED;
+  get(_key: string, _load: (_signal: AbortSignal) => Promise<T>): Promise<T> | typeof MISS_BUDGET_EXHAUSTED;
 }
 
 interface CacheEntry<T> {
@@ -284,8 +301,9 @@ interface CacheEntry<T> {
 // Per-instance memo. An entry is fresh for ttlMs; a hit refreshes recency
 // and the least recently used key of the same pool is evicted past that
 // pool's cap. Concurrent callers for one key share the in-flight promise,
-// and a load only enters a pool once it resolves, so pending and rejected
-// loads never occupy or evict a slot. Loads are metered: once
+// and a load only enters a response pool once it resolves. Failed loads
+// have a separate bounded cooldown pool; unfinished work retains its
+// in-flight slot even after the response deadline. Loads are metered: once
 // maxMissesPerWindow uncached loads have started in the current window the
 // cache stops loading and reports MISS_BUDGET_EXHAUSTED, which is the
 // ceiling on what a flood of distinct keys can cost this instance — unless
@@ -305,7 +323,16 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
   const retained = new Map<string, CacheEntry<T>>();
   const pinned = new Map<string, CacheEntry<T>>();
   const transient = new Map<string, CacheEntry<T>>();
-  const inflight = new Map<string, Promise<T>>();
+  const inflight = new Map<string, {promise: Promise<T>; loadId: number}>();
+  const failures = new Map<string, number>();
+  let nextLoadId = 0;
+  const observe = (event: Parameters<NonNullable<TtlCacheOptions<T>["observe"]>>[0]): void => {
+    try {
+      options.observe?.(event);
+    } catch {
+      // Diagnostics must not interrupt settlement or leave an in-flight slot occupied.
+    }
+  };
   let windowStart = now();
   let misses = 0;
 
@@ -327,18 +354,43 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
     get(key, load) {
       const at = now();
       const held = pinned.get(key);
-      if (held !== undefined && held.loadedAt + pinnedFreshMs(held) > at) return Promise.resolve(held.value);
+      if (held !== undefined && held.loadedAt + pinnedFreshMs(held) > at) {
+        observe({outcome: "fresh"});
+        return Promise.resolve(held.value);
+      }
       const kept = retained.get(key);
-      if (kept !== undefined && kept.loadedAt + options.ttlMs > at) return touch(retained, key, kept);
+      if (kept !== undefined && kept.loadedAt + options.ttlMs > at) {
+        observe({outcome: "fresh"});
+        return touch(retained, key, kept);
+      }
       const passing = transient.get(key);
-      if (passing !== undefined && passing.loadedAt + options.ttlMs > at) return touch(transient, key, passing);
+      if (passing !== undefined && passing.loadedAt + options.ttlMs > at) {
+        observe({outcome: "transient"});
+        return touch(transient, key, passing);
+      }
       const pending = inflight.get(key);
-      if (pending !== undefined) return pending;
+      if (pending !== undefined) {
+        observe({outcome: "shared", loadId: pending.loadId});
+        return pending.promise;
+      }
+      const retryAt = failures.get(key);
+      if (retryAt !== undefined) {
+        if (at < retryAt) {
+          observe({outcome: "cooldown"});
+          return Promise.reject(new PublicWebUnavailable());
+        }
+        failures.delete(key);
+      }
+      if (inflight.size >= (options.maxInflight ?? Infinity)) {
+        observe({outcome: "capacity"});
+        return MISS_BUDGET_EXHAUSTED;
+      }
       if (at - windowStart >= options.windowMs) {
         windowStart = at;
         misses = 0;
       }
       if (misses >= options.maxMissesPerWindow) {
+        observe({outcome: "miss-budget"});
         if (held !== undefined && held.loadedAt + pinnedFreshMs(held) + staleAllowanceMs > at) {
           return Promise.resolve(held.value);
         }
@@ -346,7 +398,46 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
         return MISS_BUDGET_EXHAUSTED;
       }
       misses += 1;
-      const value = load().then((loaded) => {
+      const loadId = ++nextLoadId;
+      const controller = new AbortController();
+      const cooldown = (): void => {
+        if (options.failureCooldownMs === undefined) return;
+        failures.delete(key);
+        failures.set(key, now() + options.failureCooldownMs);
+        for (const oldest of failures.keys()) {
+          if (failures.size <= options.maxTransientEntries) break;
+          failures.delete(oldest);
+        }
+      };
+      let expired = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let resolve!: (_loaded: T) => void;
+      let reject!: (_error: unknown) => void;
+      const value = new Promise<T>((res, rej) => {resolve = res; reject = rej;});
+      inflight.set(key, {promise: value, loadId});
+      const timeoutMs = options.loadTimeoutMs?.(key);
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          expired = true;
+          controller.abort();
+          cooldown();
+          observe({outcome: "deadline", loadId, durationMs: now() - at});
+          reject(new PublicWebUnavailable());
+        }, timeoutMs);
+      }
+      observe({outcome: "load", loadId});
+      // The response deadline does not release ownership of the actual work.
+      // Late results are discarded; new keys are bounded by maxInflight.
+      const finish = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        inflight.delete(key);
+        if (expired) observe({outcome: "late-settlement", loadId, durationMs: now() - at});
+      };
+      Promise.resolve().then(() => {
+        controller.signal.throwIfAborted();
+        return load(controller.signal);
+      }).then((loaded) => {
+        if (expired) return loaded;
         const entry = {loadedAt: at, value: loaded};
         if (retain(loaded)) {
           transient.delete(key);
@@ -361,23 +452,27 @@ export function createTtlCache<T>(options: TtlCacheOptions<T>): TtlCache<T> {
           retained.delete(key);
           insert(transient, options.maxTransientEntries, key, entry);
         }
+        observe({outcome: "loaded", loadId, durationMs: now() - at});
         return loaded;
-      }).finally(() => inflight.delete(key));
-      inflight.set(key, value);
+      }).then((loaded) => {
+        finish();
+        if (!expired) resolve(loaded);
+      }, (error: unknown) => {
+        finish();
+        if (!expired) {
+          if (retryableReadError(error)) cooldown();
+          observe({outcome: retryableReadError(error) ? "unavailable" : "error", loadId,
+            durationMs: now() - at});
+          reject(error);
+        }
+      });
       return value;
     },
   };
 }
 
 export const firestoreRepository: PublicWebRepository = {
-  async getProfile(username) {
-    const snapshot = await getFirestore().collection("profiles").doc(username).get();
-    return snapshot.exists ? snapshot.data() ?? null : null;
-  },
-  async getDiscovery(username) {
-    const snapshot = await getFirestore().collection("profileDiscovery").doc(username).get();
-    return snapshot.exists ? snapshot.data() ?? null : null;
-  },
+  ...publicProfileReader,
   async listDiscoveries(limit) {
     const snapshot = await getFirestore().collection("profileDiscovery")
       .orderBy("createdAt").limit(limit).get();
@@ -593,8 +688,10 @@ async function profileResponse(
   repository: PublicWebRepository,
   shell: string,
   username: string,
+  signal?: AbortSignal,
 ): Promise<PublicWebResponse> {
-  const storedProfile = await repository.getProfile(username);
+  const storedProfile = await repository.getProfile(username, signal);
+  signal?.throwIfAborted();
   const profile = storedProfile === null || !profileIsPublic(storedProfile)
     ? null
     : decodeStoredProfile(username, storedProfile);
@@ -606,7 +703,8 @@ async function profileResponse(
     };
   }
 
-  const storedDiscovery = await repository.getDiscovery(username);
+  const storedDiscovery = await repository.getDiscovery(username, signal);
+  signal?.throwIfAborted();
   const searchable = storedDiscovery === null
     ? false
     : decodeMarkerUid(username, storedDiscovery) === profile.uid;
@@ -625,8 +723,10 @@ async function profileJsonResponse(
   request: PublicWebRequest,
   repository: PublicWebRepository,
   username: string | null,
+  signal?: AbortSignal,
 ): Promise<PublicWebResponse> {
-  const storedProfile = username === null ? null : await repository.getProfile(username);
+  const storedProfile = username === null ? null : await repository.getProfile(username, signal);
+  signal?.throwIfAborted();
   const profile = username === null || storedProfile === null || !profileIsPublic(storedProfile)
     ? null
     : decodeStoredProfile(username, storedProfile);
@@ -677,6 +777,7 @@ export async function resolvePublicWebRequest(
   request: PublicWebRequest,
   repository: PublicWebRepository,
   shell: string,
+  signal?: AbortSignal,
 ): Promise<PublicWebResponse> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return {
@@ -706,7 +807,7 @@ export async function resolvePublicWebRequest(
   const jsonMatch = PROFILE_JSON_ROUTE.exec(request.path);
   if (jsonMatch !== null) {
     const username = USERNAME_PATTERN.test(jsonMatch[1]) ? jsonMatch[1] : null;
-    return profileJsonResponse(request, repository, username);
+    return profileJsonResponse(request, repository, username, signal);
   }
 
   const match = PROFILE_ROUTE.exec(request.path);
@@ -717,14 +818,14 @@ export async function resolvePublicWebRequest(
       body: request.method === "HEAD" ? "" : renderNotFoundDocument(shell),
     };
   }
-  return profileResponse(request, repository, shell, match[1]);
+  return profileResponse(request, repository, shell, match[1], signal);
 }
 
 // Finished responses are what get cached: decode, render, and serialise
 // once per path per TTL. HEAD shares GET's entry and drops the body; 405s
-// cost no reads and bypass the cache; a rejected resolve (a Firestore
-// failure — malformed data is a 404, never a throw) propagates and is not
-// memoised; 404s are memoised in the transient pool, so a repeated unknown
+// cost no reads and bypass the cache. Retryable dependency failures become
+// uncached 503s with a cooldown; unexpected failures propagate. Malformed
+// stored data is a memoised 404 in the transient pool, so a repeated unknown
 // path is free but a flood of them cannot evict profiles.
 export async function cachedPublicWebResponse(
   request: PublicWebRequest,
@@ -737,7 +838,7 @@ export async function cachedPublicWebResponse(
   }
   const cached = cache.get(
     request.path,
-    () => resolvePublicWebRequest({method: "GET", path: request.path}, repository, shell).then(withGzip),
+    (signal) => resolvePublicWebRequest({method: "GET", path: request.path}, repository, shell, signal).then(withGzip),
   );
   if (cached === MISS_BUDGET_EXHAUSTED) {
     return {
@@ -747,10 +848,17 @@ export async function cachedPublicWebResponse(
         "Retry-After": "60",
         "Content-Type": "text/plain; charset=utf-8",
       },
-      body: "Temporarily unavailable.\n",
+      body: request.method === "HEAD" ? "" : "Temporarily unavailable.\n",
     };
   }
-  const response = await cached;
+  const response = await cached.catch((error: unknown): PublicWebResponse => {
+    if (!retryableReadError(error)) throw error;
+    return {
+      status: 503,
+      headers: {"Cache-Control": "no-store", "Retry-After": "10", "Content-Type": "text/plain; charset=utf-8"},
+      body: "Temporarily unavailable.\n",
+    };
+  });
   return request.method === "HEAD" ? {...response, body: ""} : response;
 }
 
@@ -772,6 +880,10 @@ export const RESPONSE_CACHE_OPTIONS: TtlCacheOptions<PublicWebResponse> = {
   pin: (path) => path === "/sitemap.xml",
   pinnedTtlMs: SITEMAP_MEMO_TTL_MS,
   pinnedDegradedTtlMs: SITEMAP_PARTIAL_MEMO_TTL_MS,
+  loadTimeoutMs: (path) => path === "/sitemap.xml" ? undefined : 8_000,
+  failureCooldownMs: 10_000,
+  maxInflight: 16,
+  observe: (event) => logger.info("publicweb.cache", event),
 };
 
 const responseCache = createTtlCache<PublicWebResponse>(RESPONSE_CACHE_OPTIONS);

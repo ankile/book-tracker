@@ -1057,3 +1057,111 @@ test("a tombstoned profile is a 404 and leaves the sitemap without a skip", asyn
   assert.doesNotMatch(sitemap.body, /gone-reader/);
   assert.deepEqual(warnings, []);
 });
+
+test("stalled refresh expires without releasing its underlying slot or publishing late data", async (t) => {
+  t.mock.timers.enable({apis: ["setTimeout"]});
+  let now = 0;
+  let release!: (value: number) => void;
+  const limits = {loadTimeoutMs: () => 100, failureCooldownMs: 50, maxInflight: 1};
+  const cache = createTtlCache<number>({ttlMs: 10, staleTtlMs: 500, maxEntries: 2,
+    maxTransientEntries: 2, maxMissesPerWindow: 20, windowMs: 1000, now: () => now, ...limits});
+  const pending = cache.get("profile", () => new Promise<number>((resolve) => {release = resolve;}));
+  assert.notEqual(pending, MISS_BUDGET_EXHAUSTED);
+  let outcome = "pending";
+  void Promise.resolve(pending).then(() => {outcome = "success";}, () => {outcome = "expired";});
+  await new Promise(setImmediate);
+  now = 101;
+  t.mock.timers.tick(101);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(outcome, "expired");
+  assert.equal(cache.get("other", async () => 2), MISS_BUDGET_EXHAUSTED);
+  now = 200;
+  let extra = 0;
+  await assert.rejects(Promise.resolve(cache.get("profile", async () => {extra++; return 2;})));
+  assert.equal(extra, 0);
+  release(1);
+  await new Promise(setImmediate);
+  assert.equal(await cache.get("profile", async () => 3), 3, "late result must not become fresh");
+});
+
+test("retryable read failure cools down then a single new refresh recovers", async () => {
+  let now = 0;
+  let reads = 0;
+  const limits = {loadTimeoutMs: () => 100, failureCooldownMs: 50, maxInflight: 2};
+  const cache = createTtlCache<number>({ttlMs: 10, staleTtlMs: 100, maxEntries: 2,
+    maxTransientEntries: 2, maxMissesPerWindow: 20, windowMs: 1000, now: () => now, ...limits});
+  const fail = async (): Promise<number> => {reads++; throw Object.assign(new Error("offline"), {code: 14});};
+  await assert.rejects(Promise.resolve(cache.get("profile", fail)));
+  await assert.rejects(Promise.resolve(cache.get("profile", fail)));
+  assert.equal(reads, 1);
+  now = 51;
+  assert.equal(await cache.get("profile", async () => {reads++; return 7;}), 7);
+  assert.equal(reads, 2);
+});
+
+test("retryable profile failures become uncached 503s with an empty HEAD body", async () => {
+  const repo = repository();
+  repo.getProfile = async () => {throw Object.assign(new Error("unavailable"), {code: 14});};
+  const cache = createTtlCache<PublicWebResponse>(RESPONSE_CACHE_OPTIONS);
+  const response = await cachedPublicWebResponse({method: "HEAD", path: "/profiles/ada"}, repo, shell, cache);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers["Cache-Control"], "no-store");
+  assert.equal(response.body, "");
+});
+
+test("diagnostic observer failures cannot strand cache loads, deadlines or capacity", async (t) => {
+  t.mock.timers.enable({apis: ["setTimeout"]});
+  let reads = 0;
+  const cache = createTtlCache<number>({ttlMs: 60_000, staleTtlMs: 120_000, maxEntries: 2, maxTransientEntries: 2,
+    maxMissesPerWindow: 20, windowMs: 1000, maxInflight: 1, loadTimeoutMs: () => 100,
+    observe: () => {throw new Error("diagnostic sink unavailable");}});
+  assert.equal(await cache.get("normal", async () => {reads++; return 1;}), 1);
+  assert.equal(await cache.get("normal", async () => {reads++; return 2;}), 1);
+  assert.equal(reads, 1);
+  let release!: (value: number) => void;
+  const pending = cache.get("stall", () => new Promise<number>(resolve => {release = resolve;}));
+  const rejected = assert.rejects(Promise.resolve(pending));
+  await new Promise(setImmediate);
+  t.mock.timers.tick(101);
+  await rejected;
+  release(3);
+  await new Promise(setImmediate);
+  assert.equal(await cache.get("recovery", async () => 4), 4);
+});
+
+test("expired profile lookup cannot start discovery when initialization returns late", async (t) => {
+  t.mock.timers.enable({apis: ["setTimeout"]});
+  let release!: (value: unknown) => void;
+  let discoveries = 0;
+  const repo = repository();
+  repo.getProfile = () => new Promise((resolve) => {release = resolve;});
+  repo.getDiscovery = async () => {discoveries++; return marker;};
+  const cache = createTtlCache<PublicWebResponse>({...RESPONSE_CACHE_OPTIONS, observe: undefined, loadTimeoutMs: () => 20});
+  const pending = cachedPublicWebResponse({method: "GET", path: "/profiles/ada"}, repo, shell, cache);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(21);
+  assert.equal((await pending).status, 503);
+  release(storedProfile());
+  await new Promise(setImmediate);
+  assert.equal(discoveries, 0);
+});
+
+test("failure cooldown records are bounded and do not swallow programming errors", async () => {
+  let attempts = 0;
+  const cache = createTtlCache<number>({ttlMs: 10, staleTtlMs: 100, maxEntries: 1,
+    maxTransientEntries: 2, maxMissesPerWindow: 10, windowMs: 1000, failureCooldownMs: 1000});
+  const fail = async (): Promise<number> => {attempts++; throw Object.assign(new Error("unavailable"), {code: 14});};
+  for (const key of ["one", "two", "three", "one"]) await assert.rejects(Promise.resolve(cache.get(key, fail)));
+  assert.equal(attempts, 4, "oldest failed key is evicted");
+  const bug = new Error("programming error");
+  await assert.rejects(Promise.resolve(cache.get("bug", async () => {throw bug;})), (error) => error === bug);
+  assert.equal(await cache.get("bug", async () => 5), 5);
+});
+
+test("capacity rejection sends an empty uncached HEAD response", async () => {
+  const cache = createTtlCache<PublicWebResponse>({...RESPONSE_CACHE_OPTIONS, observe: undefined, maxInflight: 0});
+  const response = await cachedPublicWebResponse({method: "HEAD", path: "/profiles/ada"}, repository(), shell, cache);
+  assert.equal(response.status, 503);
+  assert.equal(response.body, "");
+  assert.equal(response.headers["Cache-Control"], "no-store");
+});

@@ -1,3 +1,4 @@
+import { diagnosticSnapshot } from './diagnosticSnapshot.ts';
 import {
   clearIndexedDbPersistence,
   collection,
@@ -6,7 +7,6 @@ import {
   terminate,
   query,
   where,
-  onSnapshot,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -166,7 +166,7 @@ const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
 const catalogAuthorsStore: Readable<Author[] | undefined> = cachedReadable<Author[] | undefined>(
   undefined,
-  (set) => onSnapshot(query(collection(db, 'catalogAuthors')), (snapshot) => {
+  (set) => diagnosticSnapshot('authors', query(collection(db, 'catalogAuthors')), (snapshot) => {
     const authors = snapshot.docs.map((authorDoc) => decodeStored(
       () => decodeCatalogAuthor(authorDoc.id, authorDoc.data(), authorDoc.ref.path),
     ));
@@ -485,7 +485,7 @@ class Database {
   // the createUserDocument auth trigger).
   static getUser(userId: string): Readable<UserDocument | null | undefined> {
     return cachedStore(userStores, userId, undefined, (set) => (
-      onSnapshot(doc(db, 'users', userId), (snapshot) => {
+      diagnosticSnapshot('user', doc(db, 'users', userId), (snapshot) => {
         set(snapshot.exists()
           ? decodeStored(
             () => decodeUser(snapshot.data(), snapshot.ref.path),
@@ -525,7 +525,7 @@ class Database {
     return cachedStore(allBooksStores, userId, undefined, (set) => {
       const q = query(collection(db, 'users', userId, 'books'));
 
-      return onSnapshot(q, (snapshot) => {
+      return diagnosticSnapshot('books', q, (snapshot) => {
         const books = snapshot.docs.map((bookDoc) => decodeStored(
           () => decodeBook(bookDoc.id, bookDoc.data(), bookDoc.ref.path),
         ));
@@ -555,7 +555,7 @@ class Database {
     return cachedStore(profileStores, userId, undefined, (set) => {
       const q = query(collection(db, 'profiles'), where('uid', '==', userId));
 
-      const stop = onSnapshot(q, (snapshot) => {
+      const stop = diagnosticSnapshot('profile', q, (snapshot) => {
         const profileDoc = snapshot.docs[0];
         if (!snapshot.metadata.fromCache) {
           ownProfileUsernames.set(userId, new Set(snapshot.docs.map((d) => d.id)));
@@ -631,7 +631,7 @@ class Database {
 
   static getProfileDiscovery(username: string): Readable<ProfileDiscovery | null | undefined> {
     return cachedStore(profileDiscoveryStores, username, undefined, (set) => (
-      onSnapshot(doc(db, 'profileDiscovery', username), (snapshot) => {
+      diagnosticSnapshot('discovery', doc(db, 'profileDiscovery', username), (snapshot) => {
         // createdAt is a serverTimestamp(); the optimistic local snapshot
         // would otherwise carry null until the server acknowledges.
         set(snapshot.exists()
@@ -651,7 +651,7 @@ class Database {
   // day boundaries in UTC until a time zone is stored.
   static getBookSharingSettings(userId: string): Readable<BookSharingSettings | null | undefined> {
     return cachedStore(bookSharingStores, userId, undefined, (set) => (
-      onSnapshot(doc(db, 'users', userId, 'settings', 'bookSharing'), (snapshot) => {
+      diagnosticSnapshot('sharing', doc(db, 'users', userId, 'settings', 'bookSharing'), (snapshot) => {
         set(snapshot.exists()
           ? decodeStored(() => decodeBookSharingSettings(
             snapshot.data({ serverTimestamps: 'estimate' }),
@@ -1245,7 +1245,7 @@ class Database {
         collection(db, 'users', userId, 'books', bookId, 'updates')
       );
 
-      return onSnapshot(q, (snapshot) => {
+      return diagnosticSnapshot('book-updates', q, (snapshot) => {
         const updates = snapshot.docs.map((updateDoc) =>
           decodeStored(
             () => decodeBookUpdate(
@@ -1282,7 +1282,7 @@ class Database {
         where('type', 'in', ['reading', 'update'])
       );
 
-      return onSnapshot(q, (snapshot) => {
+      return diagnosticSnapshot('history', q, (snapshot) => {
         const sessions = snapshot.docs.map((sessionDoc) => decodeStored(
           () => decodeBookUpdate(sessionDoc.id, sessionDoc.data(), sessionDoc.ref.path),
         ));

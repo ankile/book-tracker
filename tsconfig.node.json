@@ -15,6 +15,7 @@
   "include": [
     "*.ts",
     "docs/architecture/*.ts",
+    "diagnostics/*.ts",
     "tests/**/*.ts"
   ],
   "exclude": [

@@ -56,12 +56,16 @@
     await signOut();
   }
 
+  // Refreshed auth objects for the same account must not restart page-owned
+  // queries, especially the full reading history.
+  const userId = $derived($user?.uid);
+
   // Get all books for statistics; undefined until the first snapshot (the
   // profile sync below must not run against the pre-snapshot empty list).
   let allBooks = $state<Book[] | undefined>(undefined);
   $effect(() => {
-    if ($user) {
-      const booksStore = Database.getAllBooks($user.uid);
+    if (userId) {
+      const booksStore = Database.getAllBooks(userId);
       const unsubscribe = booksStore.subscribe((books) => {
         allBooks = books;
       });
@@ -72,7 +76,7 @@
   // Author docs, for analytics identity and the management-card count.
   let authorList = $state<Author[] | undefined>(undefined);
   $effect(() => {
-    if ($user) {
+    if (userId) {
       const authorsStore = Database.getAuthors();
       const unsubscribe = authorsStore.subscribe((data) => (authorList = data));
       return unsubscribe;
@@ -103,8 +107,8 @@
   // as allBooks, and for the same reason).
   let allSessions = $state<BookUpdate[] | undefined>(undefined);
   $effect(() => {
-    if ($user) {
-      const sessionsStore = Database.getAllReadingSessions($user.uid);
+    if (userId) {
+      const sessionsStore = Database.getAllReadingSessions(userId);
       const unsubscribe = sessionsStore.subscribe((sessions) => {
         allSessions = sessions;
       });
@@ -163,8 +167,8 @@
   // User document (for the Toggl connection status)
   let userDoc = $state<UserDocument | null | undefined>(undefined);
   $effect(() => {
-    if ($user) {
-      const userStore = Database.getUser($user.uid);
+    if (userId) {
+      const userStore = Database.getUser(userId);
       const unsubscribe = userStore.subscribe((data) => {
         userDoc = data;
       });
@@ -209,8 +213,8 @@
   // Public profile: undefined → loading, null → none enabled.
   let myProfile = $state<Profile | null | undefined>(undefined);
   $effect(() => {
-    if ($user) {
-      const profileStore = Database.getMyProfile($user.uid);
+    if (userId) {
+      const profileStore = Database.getMyProfile(userId);
       const unsubscribe = profileStore.subscribe((data) => (myProfile = data));
       return unsubscribe;
     }

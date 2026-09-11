@@ -154,6 +154,19 @@ test('a live book and author listener survives reloading the original tab', asyn
     await expect(first.getByText(`${updatedAuthor}:`, { exact: true })).toBeVisible();
     await expect(first.getByText(/Couldn't load .+ \(permission-denied\)\./)).toHaveCount(0);
     expect(permissionErrors).toEqual([]);
+
+    // A queued personal edit is visible from the persistent cache before
+    // reconnect and then reaches the server without reopening the app.
+    const offlineTitle = 'Offline edited ' + suffix;
+    await context.setOffline(true);
+    await first.getByRole('button', {name: 'Edit ' + updatedTitle, exact: true}).click();
+    await first.getByLabel('Book title', {exact: true}).fill(offlineTitle);
+    await first.getByRole('button', {name: 'Update book', exact: true}).click();
+    await expect(first.getByText(offlineTitle, {exact: true})).toBeVisible();
+    expect((await bookRef.get()).get('title')).toBe(updatedTitle);
+    await context.setOffline(false);
+    await expect.poll(async () => (await bookRef.get()).get('title')).toBe(offlineTitle);
+    await expect(second.getByText(offlineTitle, {exact: true})).toBeVisible();
   } finally {
     await context.close();
     await db.recursiveDelete(userRef);

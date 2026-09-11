@@ -1,4 +1,5 @@
 import { preloadCode } from '$app/navigation';
+import { ADMIN_UID } from '$lib/admin-uid.ts';
 import type { Unsubscriber } from 'svelte/store';
 import { adminCatalogScan } from '$lib/firebase/adminCatalog.ts';
 import { adminOverview, type AdminOverview } from '$lib/firebase/functions.ts';
@@ -46,11 +47,24 @@ function cache<T>(load: () => Promise<T>): {
 
 export const overviewCache = cache<AdminOverview>(async () => (await adminOverview({})).data);
 
-// Called from the app prefetch once the signed-in account is the operator
-// and the app's own stores have delivered: warms both routes' code and
-// opens the catalog listeners, which then stay open for the session so the
-// console is current whenever it is opened. Returns the listener release.
-export function startAdminPrefetch(): Unsubscriber {
+// A scalar owner stays unchanged across catalog navigation and user-object
+// refreshes. Account-only pages and denied routes do not own the catalog.
+export function adminCatalogOwner(
+  userId: string | undefined,
+  routeId: string | null,
+): string | undefined {
+  return userId === ADMIN_UID && (
+    routeId === '/admin' ||
+    routeId === '/admin/works/[workId]' ||
+    routeId === '/admin/authors/[authorId]'
+  ) ? userId : undefined;
+}
+
+// The admin layout owns this subscription, keeping catalog listeners shared
+// across its child pages and releasing them when the operator leaves admin.
+// Route code can preload without starting the accounts callable.
+export function startAdminPrefetch(userId: string | undefined): Unsubscriber {
+  if (userId !== ADMIN_UID) return () => {};
   void Promise.all(ADMIN_ROUTES.map((route) => preloadCode(route)));
   return adminCatalogScan.subscribe(() => {});
 }
