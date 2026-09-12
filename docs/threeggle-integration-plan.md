@@ -2,6 +2,8 @@
 
 Draft for review, September 12, 2026. No implementation or deployment is included in this pass.
 
+Review threads: [Book Tracker PR #53](https://github.com/ankile/book-tracker/pull/53) and [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).
+
 The initial review used Book Tracker at `1464be9`. This integration branch starts from published `master` at `252231d`, leaving the unmerged profile-read fix separate. The Threeggle branch starts from published `main` at `fe7e710`. Its timer API is unchanged from the initial review. API behavior below was verified in source, not against an authenticated production deployment.
 
 ## Recommendation
@@ -66,7 +68,7 @@ For the first release, timer creation and stopping are the integration scope. Hi
 
 ## Required Threeggle API extension
 
-Add a versioned integration contract at `/api/time-tracking/v1`, while retaining `/api/timer` for existing CLI, shortcut, MCP, and Todoist clients. The names below are proposed, not existing API actions. The detailed producer contract and Threeggle file-level work breakdown live in the [companion Threeggle plan](https://github.com/ankile/threeggle/blob/feat/book-tracker-integration/docs/book-tracker-integration-plan.md).
+Add a versioned integration contract at `/api/time-tracking/v1`, while retaining `/api/timer` for existing CLI, shortcut, MCP, and Todoist clients. The names below are proposed, not existing API actions. The detailed producer contract and Threeggle file-level work breakdown live in the companion plan in [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).
 
 | Operation | Request | Required result and behavior |
 |---|---|---|
@@ -178,7 +180,7 @@ Use Threeggle's Convex tests for atomicity and contract behavior. Use Book Track
 | Book Tracker | `feat/threeggle-integration` from `master` | Account setting, adapter, shared lifecycle, queues, compatibility, and end-to-end release checklist. |
 | Threeggle | `feat/book-tracker-integration` from `main` | Versioned API, targeted operations, receipts, authentication integration, and API contract tests. |
 
-Both branches use dedicated worktrees. Open linked draft PRs with these plans first, then add implementation commits after plan review. The PR descriptions must say when they contain planning only; a plan PR is not evidence that the feature is implemented or tested. Keep both PRs open through implementation and mark them ready after the shared acceptance checks pass. No merge or deployment is part of this planning pass.
+Both branches use dedicated worktrees and linked draft PRs. The agreed next step is review of both plans by Claude 5.1 Fable. Reconcile that feedback into the plans, then wait for the user's explicit implementation instruction before adding application code in either repository. The PR descriptions must say when they contain planning only; a plan PR is not evidence that the feature is implemented or tested. Keep both PRs open through implementation and mark them ready after the shared acceptance checks pass. No merge or deployment is part of this planning pass.
 
 Threeggle [PR #1](https://github.com/ankile/threeggle/pull/1) is still open. It introduces timer/reconstruction token kinds, the `connectionToken` helper, and a versioned reconstruction route. This integration must not grant reconstruction tokens timer access. Prefer landing and reviewing that shared authentication work first if #1 is approved; otherwise carry the minimal compatible token-kind helper in the integration PR and resolve the overlap explicitly when either branch lands. The integration does not need reconstruction UI or proposal features. Re-test both token kinds and legacy tokens after reconciliation.
 
@@ -221,3 +223,19 @@ The deployments are ordered within one release, not simultaneous. Threeggle's ol
 - Preserve offline intervals with conflicts for review, rather than altering overlapping history.
 - Extend Threeggle first, then add full online/offline support in Book Tracker.
 - Keep reading-session saving and later corrections separate from remote timer synchronization in the first release.
+
+## Review brief for Claude 5.1 Fable
+
+Review both linked draft PRs as one proposed integration. They contain plans only. Read the existing timer, queue, rules, and Threeggle transaction code before recommending changes. Treat the persistent single-provider account setting as confirmed.
+
+Focus the review on these questions:
+
+1. Is extracting shared orchestration and adding a new queue justified, or can the same correctness be achieved with a smaller compatibility change?
+2. Do the API receipts, targeted stops, and version checks cover lost responses, concurrent activity switches, external edits/deletions, and retries of rejected operations?
+3. Is offline work durable when Firestore rejects a stale connection revision? Specify the local outbox and acknowledgement boundary, since a Firestore cache alone does not guarantee retention after a rejected write.
+4. Can configuration changes, disconnect, account deletion, and old cached clients race with timer claims or queue creation? Identify any remaining route that can write to the wrong provider/account or leave a permanent lock.
+5. Does the proposed overlap check use complete, bounded history reads and remain correct under concurrent writes? Should overlap review block export in the first release, as proposed?
+6. Does the token-kind integration preserve the access separation introduced by Threeggle PR #1 in either merge order?
+7. Are the producer/consumer fixtures and two-backend tests enough to catch real contract mismatches, and is the deployment/rollback order safe for active timers?
+
+Return findings by severity with concrete failure sequences, affected plan sections/source files, and the smallest recommended plan change. Distinguish blocking correctness gaps from optional improvements. Do not implement, merge, or deploy as part of this review.
