@@ -130,6 +130,10 @@ Configuration changes and starts must coordinate through the same server transac
 
 Offline devices may submit writes using a stale selection. Rules must reject a mismatched connection revision without deleting the local interval; the UI must retain and explain rejected pending work. Test this explicitly before rollout. Old clients cannot express the new provider shape, so switching to Threeggle also requires a refresh/update path for cached clients.
 
+New offline timer intents need a small IndexedDB outbox owned by Book Tracker, separate from Firestore's cache. Persist the account ID, timer/operation IDs, pinned configuration, original start, and recorded stop before submitting the correlated Firestore batch. Start and stop records must survive reload and include enough data to reconstruct the interval without a book snapshot. If the local durability write fails, report it before presenting the action as saved. Firestore may remove a rejected optimistic write from its cache, so a rules rejection cannot be the acknowledgement that deletes this outbox record.
+
+Remove an outbox record only after confirming the matching server claim/queue transition or an explicit user resolution. After an uncertain acknowledgement, read the server record and compare its operation identity before retrying. Replay only the same intent, never a new request ID or the newly selected provider. A rejected revision becomes a visible recovery item with the original interval, not an automatic write to the new connection. Reads and UI overlays must be scoped to the signed-in account; clear that account's local records on account deletion and define their handling in the existing sign-out/cache-reset workflow. Add browser tests for reload after rejection and lost acknowledgement, plus two-tab replay of the same outbox record.
+
 ### Credentials, diagnostics, and resource use
 
 Reuse authenticated callables, verified-account connection setup, App Check, owner checks, account-deletion checks, bounded queue creation, and backend-only credentials. Configure the Threeggle service URL on the server; do not offer an arbitrary URL field. Use deterministic local provider responses during emulator tests so rehearsals cannot send real credentials or change a live timeline.
@@ -193,7 +197,7 @@ The Book Tracker profile-read fix changes `db.ts`, the Me page, and subscription
 | Provider contracts and compatibility | `src/lib/interfaces/book.ts`, `src/lib/utils/timerClaim.ts`, both decoder modules; new shared provider/timer types compatible with the repository's shared-module build. |
 | Backend split | Extract lifecycle orchestration and provider adapter contracts from `functions/src/toggl.ts`; add a Threeggle HTTP adapter and generic callable/queue entry points; retain Toggl wrappers. |
 | Settings and timer UI | `src/routes/me/+page.svelte`, `src/lib/components/BookList.svelte`, `src/lib/firebase/functions.ts`; persist one account choice. |
-| Local persistence and recovery | `src/lib/firebase/db.ts`, provider-neutral queue helpers, durable pending-operation recovery for rules-rejected offline writes. |
+| Local persistence and recovery | `src/lib/firebase/db.ts`, provider-neutral queue helpers, a new IndexedDB timer outbox module, and durable pending-operation recovery for rules-rejected offline writes. |
 | Rules and maintenance | `firestore.rules`, `firestore.indexes.json`, `functions/src/index.ts`, `db-audit.ts`, telemetry decoders/reporting, admin diagnostics. |
 | Tests and documentation | Extend timer/rules/runtime tests, add provider contract and browser flows, document configuration, and regenerate relevant architecture maps in the implementation commit. |
 
@@ -232,7 +236,7 @@ Focus the review on these questions:
 
 1. Is extracting shared orchestration and adding a new queue justified, or can the same correctness be achieved with a smaller compatibility change?
 2. Do the API receipts, targeted stops, and version checks cover lost responses, concurrent activity switches, external edits/deletions, and retries of rejected operations?
-3. Is offline work durable when Firestore rejects a stale connection revision? Specify the local outbox and acknowledgement boundary, since a Firestore cache alone does not guarantee retention after a rejected write.
+3. Is offline work durable when Firestore rejects a stale connection revision? Review the proposed local outbox, reload behavior, account scoping, and acknowledgement boundary, since a Firestore cache alone does not guarantee retention after a rejected write.
 4. Can configuration changes, disconnect, account deletion, and old cached clients race with timer claims or queue creation? Identify any remaining route that can write to the wrong provider/account or leave a permanent lock.
 5. Does the proposed overlap check use complete, bounded history reads and remain correct under concurrent writes? Should overlap review block export in the first release, as proposed?
 6. Does the token-kind integration preserve the access separation introduced by Threeggle PR #1 in either merge order?
