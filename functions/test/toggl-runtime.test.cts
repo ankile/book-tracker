@@ -1359,15 +1359,21 @@ test("a stale start claim becomes terminal without another POST", async (t) => {
   assert.equal(activeTimer(store.book).state, "outcome-unknown");
 });
 
-test("an explicit start rejection clears its claim", async (t) => {
+test("an explicit start rejection clears its claim and reports Toggl's reason", async (t) => {
   const store = installBookStore(t, {title: "The Book", activeTimer: null});
   t.mock.method(global, "fetch", async () =>
-    new Response("rejected", {status: 400}),
+    new Response("Payment Required\n", {status: 402}),
   );
 
+  // A typed error reaches the client as its message; a plain Error would
+  // arrive as a bare INTERNAL with the status and body lost.
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    /start failed with status 400/,
+    (error) => hasError(
+      error,
+      "failed-precondition",
+      /^Toggl start failed with status 402: Payment Required$/,
+    ),
   );
 
   assert.equal(store.book.activeTimer, null);
@@ -1383,13 +1389,17 @@ test("a start 5xx becomes outcome-unknown", async (t) => {
 
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
-    /start failed with status 503/,
+    (error) => hasError(
+      error,
+      "unavailable",
+      /^Toggl start failed with status 503: gateway failed after forwarding$/,
+    ),
   );
 
   const failedTimer = activeTimer(store.book);
   assert.equal(failedTimer.state, "outcome-unknown");
   assert.ok(failedTimer.error);
-  assert.match(failedTimer.error, /status 503/);
+  assert.match(failedTimer.error, /status 503: gateway failed after forwarding/);
   await assert.rejects(
     deployed.toggl.start.run({bookId: "book"}, authContext),
     (error) => hasError(error, "failed-precondition"),
@@ -1460,6 +1470,28 @@ test("stop decodes activeTimer without requiring a title", async (t) => {
   );
   assert.equal(fetchCalls, 1);
   assert.equal(store.book.activeTimer, null);
+});
+
+test("a stop refusal keeps the timer and reports Toggl's reason", async (t) => {
+  const store = installBookStore(t, {
+    activeTimer: {
+      entryId: 12,
+      start: "2026-08-24T12:00:00Z",
+    },
+  });
+  t.mock.method(global, "fetch", async () =>
+    new Response("Payment Required", {status: 402}),
+  );
+
+  await assert.rejects(
+    deployed.toggl.stop.run({bookId: "book"}, authContext),
+    (error) => hasError(
+      error,
+      "failed-precondition",
+      /^Toggl stop failed with status 402: Payment Required$/,
+    ),
+  );
+  assert.equal(activeTimer(store.book).entryId, 12);
 });
 
 test("a 404 does not claim the timer was cleared after its identity changed", async (t) => {

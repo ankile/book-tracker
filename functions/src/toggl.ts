@@ -74,6 +74,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// A non-OK Toggl reply becomes a typed callable error so the client shows
+// the status and Toggl's own reason instead of a bare INTERNAL. A 5xx is
+// Toggl being unavailable; anything else is Toggl refusing this request
+// (billing, validation, permissions), which retrying alone will not fix.
+async function togglRefusal(
+  action: "start" | "stop",
+  resp: Response,
+): Promise<functions.https.HttpsError> {
+  const body = (await resp.text()).trim().slice(0, 300);
+  return new functions.https.HttpsError(
+    resp.status >= 500 ? "unavailable" : "failed-precondition",
+    `Toggl ${action} failed with status ${resp.status}` +
+      (body ? `: ${body}` : "."),
+  );
+}
+
 function queueExpiry(now: Timestamp): Timestamp {
   return Timestamp.fromMillis(now.toMillis() + TOGGL_QUEUE_RETENTION_MS);
 }
@@ -544,15 +560,15 @@ exports.start = functions
       throw error;
     }
     if (!resp.ok) {
-      const error = `Toggl start failed with status ${resp.status}.`;
+      const error = await togglRefusal("start", resp);
       await transitionStartClaim(bookRef, claimRef, operationId, resp.status >= 500 ? {
         state: "outcome-unknown",
         operationId,
         start: requestedStart,
         claimedAt,
-        error,
+        error: error.message,
       } : null);
-      throw new Error(error);
+      throw error;
     }
 
     let entry: {id: number; start: string};
@@ -693,10 +709,7 @@ exports.stop = functions
       const entryData: unknown = await entryResp.json();
       seconds = decodeStoppedTogglDuration(entryData);
     } else {
-      throw new Error(
-        `Toggl stop failed with status ${stopResp.status}: ` +
-          `${await stopResp.text()}`,
-      );
+      throw await togglRefusal("stop", stopResp);
     }
 
     const cleared = await clearMatchedTimer(bookRef, claimRef, activeTimer);
