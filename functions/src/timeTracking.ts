@@ -26,12 +26,14 @@ import { decodeConnection, decodeTimerIntent } from "./shared/timeTracking";
 import { isOperationId, wireRecord } from "./shared/time-tracking-api";
 import { getFirestore } from "firebase-admin/firestore";
 
-const callable = functions.region("europe-west1").runWith({
-  serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
-  maxInstances: CALLABLE_MAX_INSTANCES,
-  enforceAppCheck: true,
-  timeoutSeconds: 120,
-});
+const callable = functions
+  .region("europe-west1")
+  .runWith({
+    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+    maxInstances: CALLABLE_MAX_INSTANCES,
+    enforceAppCheck: true,
+    timeoutSeconds: 120,
+  });
 function input(value: unknown): Record<string, unknown> {
   if (!wireRecord(value))
     throw new functions.https.HttpsError(
