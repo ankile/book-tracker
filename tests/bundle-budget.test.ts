@@ -78,9 +78,13 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // (codes, labels, ISBN groups), the work default and edition override in
   // the console and the add-book flow, and the carried copy on books add
   // 1.7 KiB compressed; the build measures 349.7 KiB, the rest is headroom.
+  // Total raised 356 -> 370 KiB for direct time tracking: the shared wire
+  // validators, revision-aware timer reader, IndexedDB recovery, and provider
+  // settings/review UI bring the measured build to 368.1 KiB compressed.
+  // The largest-chunk limit stays at 170 KiB; recovery is dynamically loaded.
   assert.ok(
-    totalBytes <= 356 * 1024,
-    `Expected at most 356 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 370 * 1024,
+    `Expected at most 370 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,
