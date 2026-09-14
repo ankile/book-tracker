@@ -7,6 +7,148 @@ service cloud.firestore {
       // state to tell orphaned data from a live reader's book.
       allow list: if isOperator();
     }
+    match /configuration/timeTracking {
+      allow read: if request.auth != null;
+    }
+    match /users/{userId}/timeTrackingResults/{operationId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+    }
+    match /users/{userId}/timerOperations/{operationId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && verifiedAccount()
+                    && v2Acknowledgement(request.resource.data, operationId)
+                    && v2OperationTransition(userId, request.resource.data.intent);
+    }
+    match /users/{userId}/timeTrackingQueue/{operationId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && verifiedAccount()
+                    && v2RowsAvailable(userId)
+                    && v2InitialQueue(request.resource.data, operationId)
+                    && request.resource.data.intent.connection.provider != 'none'
+                    && getAfter(/databases/$(database)/documents/users/$(userId)/timerOperations/$(operationId)).data.intent == request.resource.data.intent
+                    && !exists(/databases/$(database)/documents/users/$(userId)/timerOperations/$(operationId));
+    }
+    function v2RowsAvailable(userId) {
+      let path = /databases/$(database)/documents/users/$(userId)/functionQuotas/timeTrackingQueueRows;
+      return !exists(path) || get(path).data.windowStartedAt <= request.time - duration.value(3600,'s') || get(path).data.count < 60;
+    }
+    function v2Id(id) {
+      return id is string && id.matches('[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}');
+    }
+    function v2Intent(intent, operationId) {
+      return intent is map
+             && intent.keys().hasAll(['version','operationId','timerId','bookId','connection','action','start','end','description','remote'])
+             && intent.keys().hasOnly(['version','operationId','timerId','bookId','connection','action','start','end','description','remote'])
+             && intent.version == 2 && intent.operationId == operationId
+             && v2Id(operationId) && v2Id(intent.timerId)
+             && intent.bookId is string && intent.bookId.matches('[^/]{1,500}')
+             && intent.connection is map && intent.connection.provider in ['none','toggl','threeggle']
+             && intent.connection.revision is string
+             && intent.description is string && intent.description.size() > 0 && intent.description.size() <= 2000
+             && validTimerStart(intent.start)
+             && ((intent.action == 'start' && intent.end == null && intent.remote == null)
+                 || (intent.action in ['stop','clear'] && (intent.action == 'clear' || (validTimerStart(intent.end)))));
+    }
+    function v2Acknowledgement(ack, operationId) {
+      return ack.keys().hasAll(['version','operationId','timerId','bookId','action','acceptedAt','intent'])
+             && ack.keys().hasOnly(['version','operationId','timerId','bookId','action','acceptedAt','intent'])
+             && ack.version == 2 && ack.operationId == operationId
+             && ack.timerId == ack.intent.timerId && ack.bookId == ack.intent.bookId
+             && ack.action == ack.intent.action && ack.acceptedAt is int
+             && v2Intent(ack.intent, operationId);
+    }
+    function v2InitialQueue(row, operationId) {
+      return row.keys().hasAll(['version','intent','status','createdAt','attempts','claimedAt','retryAt','prepared','errorCode','successorId','resolution','rowCounted'])
+             && row.keys().hasOnly(['version','intent','status','createdAt','attempts','claimedAt','retryAt','prepared','errorCode','successorId','resolution','rowCounted'])
+             && row.version == 2 && row.status == 'pending' && row.attempts == 0
+             && row.createdAt is int && row.claimedAt == null && row.retryAt == null
+             && row.rowCounted == false && row.prepared == null && row.errorCode == null && row.successorId == null && row.resolution == null
+             && row.intent.action == 'stop' && v2Intent(row.intent,operationId);
+    }
+    function v2Selected(userId, connection) {
+      let user = get(/databases/$(database)/documents/users/$(userId)).data;
+      return user.get('deletedAt', null) == null
+             && (user.get('timeTracking', null) == connection
+                 || (!user.keys().hasAny(['timeTracking']) && connection.revision == 'legacy'
+                     && ((connection.provider == 'none' && !user.keys().hasAny(['toggl']))
+                         || (connection.provider == 'toggl' && connection.accountId == 'legacy'
+                             && connection.workspaceId == user.toggl.workspaceId && connection.projectId == user.toggl.projectId))));
+    }
+    function v2StartsEnabled(connection) {
+      let controls = get(/databases/$(database)/documents/configuration/timeTracking).data;
+      return controls.timerWriteVersion == 2
+             && (connection.provider != 'threeggle' || controls.threeggleEnabled == true);
+    }
+    function v2LocalTimer(timer, intent) {
+      return timer == {'version':2,'timerId':intent.timerId,'operationId':intent.operationId,
+                      'connection':intent.connection,'state':'local','start':intent.start,
+                      'claimedAt':timer.claimedAt,'remote':null,'queueId':null,'errorCode':null}
+             && timer.claimedAt is int;
+    }
+    function v2ActiveClaim(claim, bookId, timer) {
+      return claim == {'version':2,'state':'active','bookId':bookId,'timer':timer};
+    }
+    function v2ClearedClaim(claim, intent) {
+      return claim == {'version':2,'state':'idle','cleared':{'bookId':intent.bookId,'timerId':intent.timerId,'operationId':intent.operationId}};
+    }
+    function v2StartTransition(intent, before, after, beforeClaim, afterClaim) {
+      return intent.action == 'start' && before == null && beforeClaim.state == 'idle'
+             && v2StartsEnabled(intent.connection) && v2LocalTimer(after,intent)
+             && v2ActiveClaim(afterClaim,intent.bookId,after);
+    }
+    function v2StopTransition(userId, intent, before, after, beforeClaim, afterClaim) {
+      return intent.action in ['stop','clear'] && before is map && before.version == 2
+             && before.timerId == intent.timerId && before.start == intent.start
+             && before.connection == intent.connection && before.remote == intent.remote
+             && v2ActiveClaim(beforeClaim,intent.bookId,before)
+             && ((before.state == 'local' && after == null && v2ClearedClaim(afterClaim,intent))
+                 || (intent.action == 'stop' && before.state == 'remote' && before.remote != null
+                     && after.diff(before).affectedKeys().hasOnly(['state','operationId','queueId','errorCode'])
+                     && after.state == 'stopping' && after.operationId == intent.operationId
+                     && after.queueId == intent.operationId && after.errorCode == null
+                     && v2ActiveClaim(afterClaim,intent.bookId,after)))
+             && (intent.action == 'clear' || intent.connection.provider == 'none'
+                 || v2QueuedIntent(userId,intent));
+    }
+    function v2QueuedIntent(userId, intent) {
+      let row = getAfter(/databases/$(database)/documents/users/$(userId)/timeTrackingQueue/$(intent.operationId)).data;
+      return row.intent == intent
+             && !exists(/databases/$(database)/documents/users/$(userId)/timeTrackingQueue/$(intent.operationId));
+    }
+    function v2OperationTransition(userId, intent) {
+      let bookPath = /databases/$(database)/documents/users/$(userId)/books/$(intent.bookId);
+      let claimPath = /databases/$(database)/documents/users/$(userId)/timerLifecycle/current;
+      let before = get(bookPath).data.get('activeTimer', null);
+      let after = getAfter(bookPath).data.get('activeTimer', null);
+      let beforeClaim = get(claimPath).data;
+      let afterClaim = getAfter(claimPath).data;
+      return v2Selected(userId,intent.connection)
+             && intent.description == get(bookPath).data.title
+             && (v2StartTransition(intent,before,after,beforeClaim,afterClaim)
+                 || v2StopTransition(userId,intent,before,after,beforeClaim,afterClaim));
+    }
+    function v2BookTransition(userId, bookId, afterClaim) {
+      let operationId = afterClaim.state == 'active' ? afterClaim.timer.operationId : afterClaim.cleared.operationId;
+      let ackPath = /databases/$(database)/documents/users/$(userId)/timerOperations/$(operationId);
+      let ack = getAfter(ackPath).data;
+      // A previously absent acknowledgement must be created in this batch.
+      // Its create rule validates the full book/claim/queue transition once.
+      return !exists(ackPath) && ack.bookId == bookId && ack.operationId == operationId;
+    }
+    function v2ClaimTransition(userId) {
+      let after = request.resource.data;
+      let bookId = after.state == 'active' ? after.bookId : after.cleared.bookId;
+      return after.version == 2 && v2BookTransition(userId,bookId,after);
+    }
+    function legacyStartAllowed(userId) {
+      // Old local starts cannot pin an explicitly configured revision.
+      // Readers remain compatible, while those stale writers must refresh.
+      let path = /databases/$(database)/documents/users/$(userId);
+      return !exists(path) || !get(path).data.keys().hasAny(['timeTracking']);
+    }
+
     // Own-user private data, but a signed-up stranger's too: every field a
     // client may write is allowlisted and byte-capped (SEC-039), so one
     // document is a few KB rather than the 1 MiB Firestore allows —
@@ -161,7 +303,7 @@ service cloud.firestore {
                   && lifecycleId == 'current';
       allow update: if request.auth != null && userId == request.auth.uid
                     && lifecycleId == 'current'
-                    && validClientTimerClaimTransition(userId);
+                    && (request.resource.data.get("version", 1) == 2 ? v2ClaimTransition(userId) : validClientTimerClaimTransition(userId));
     }
 
     // The fields a progress or timer update may touch without the full
@@ -633,15 +775,13 @@ service cloud.firestore {
       let claimPath = /databases/$(database)/documents/users/$(userId)/timerLifecycle/current;
       let beforeClaim = get(claimPath).data;
       let afterClaim = getAfter(claimPath).data;
-      return (before == null
+      return afterClaim.get("version", 1) == 2 ? v2BookTransition(userId, bookId, afterClaim) : (before == null
                  && validLocalTimer(after)
                  && validIdleTimerClaim(beforeClaim)
                  && localClaimMatchesTimer(afterClaim, bookId, after))
              || (after == null
-                 && ((validLocalTimer(before)
-                      && localClaimMatchesTimer(beforeClaim, bookId, before))
-                     || (validUnknownTimer(before)
-                         && unknownClaimMatchesTimer(beforeClaim, bookId, before)))
+                 && (localClaimMatchesTimer(beforeClaim, bookId, before)
+                     || unknownClaimMatchesTimer(beforeClaim, bookId, before))
                  && validClearedTimerClaim(afterClaim, beforeClaim))
              || (validRemoteTimer(before)
                  && validStoppingTimer(after)
@@ -840,6 +980,7 @@ service cloud.firestore {
       let before = resource.data;
       let after = request.resource.data;
       return (validIdleTimerClaim(before)
+              && legacyStartAllowed(userId)
               && validLocalTimerClaim(after)
               && validLocalBookStart(userId, after))
              || (validLocalTimerClaim(before)
@@ -950,6 +1091,7 @@ service cloud.firestore {
                          .hasOnly(['status', 'retryRequestedAt'])
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasAll(['retryRequestedAt'])
+                    && !resource.data.keys().hasAny(["legacyResolution"])
                     && togglRetryMarkerOpen()
                     && request.resource.data.status == 'pending'
                     && validRetryTogglQueueItem()
@@ -1114,6 +1256,7 @@ service cloud.firestore {
       let path = /databases/$(database)/documents/users/$(userId);
       let toggl = get(path).data.get('toggl', null);
       return exists(path)
+             && get(path).data.get("timeTracking", {"provider":"toggl"}).provider == "toggl"
              && toggl is map
              && toggl.keys().hasAll(['workspaceId', 'projectId', 'connectedAt'])
              && toggl.keys().hasOnly(['workspaceId', 'projectId', 'connectedAt'])

@@ -1484,6 +1484,7 @@ export function decodeCreatedTogglEntryId(
 }
 
 interface QueueCommon {
+  legacyResolution?: {acknowledgedAt: Timestamp; reason: "remote_outcome_checked"};
   bookId?: string;
   timerClaimVersion?: 1;
   bookTitle: string;
@@ -1547,7 +1548,7 @@ export function decodeTogglQueueDocument(
       "bookId",
       "timerClaimVersion",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
-      "deferredUntil", "deferrals",
+      "deferredUntil", "deferrals", "legacyResolution",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
     "Toggl queue item",
@@ -1562,7 +1563,15 @@ export function decodeTogglQueueDocument(
   if (decoded.timerClaimVersion !== undefined && decoded.timerClaimVersion !== 1) {
     fail("Queue timer claim version must be 1 when present.");
   }
+  let legacyResolution: {acknowledgedAt: Timestamp; reason: "remote_outcome_checked"} | undefined;
+  if (decoded.legacyResolution !== undefined) {
+    const resolution = record(decoded.legacyResolution, "legacy resolution", fail);
+    exactKeys(resolution, ["acknowledgedAt", "reason"], "legacy resolution", fail);
+    if (resolution.reason !== "remote_outcome_checked") fail("Invalid legacy resolution reason.");
+    legacyResolution = {acknowledgedAt: firestoreTimestamp(resolution.acknowledgedAt, "resolution time", fail), reason: "remote_outcome_checked"};
+  }
   const common = {
+    ...(legacyResolution === undefined ? {} : {legacyResolution}),
     ...(bookId === undefined ? {} : {bookId}),
     ...(decoded.timerClaimVersion === undefined ? {} : {timerClaimVersion: 1 as const}),
     bookTitle: string(decoded.bookTitle, "queue book title", fail, 500),

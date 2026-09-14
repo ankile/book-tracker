@@ -1,4 +1,4 @@
-import type { ActiveTimer, TogglActiveTimer } from '../interfaces/book.ts';
+import type { LegacyActiveTimer, TogglActiveTimer } from '../interfaces/book.ts';
 import type { Timestamp } from 'firebase/firestore';
 
 export type ActiveTimerClaim =
@@ -10,7 +10,7 @@ export type ActiveTimerClaim =
 
 export type IdleTimerClaim = { version: 1; state: 'idle'; cleared: ActiveTimerClaim | null };
 
-export function activeTimerClaim(bookId: string, timer: ActiveTimer): ActiveTimerClaim {
+export function activeTimerClaim(bookId: string, timer: LegacyActiveTimer): ActiveTimerClaim {
   if (!('state' in timer)) {
     if (timer.entryId !== undefined) {
       return { version: 1, state: 'remote', bookId, entryId: timer.entryId, start: timer.start };
@@ -28,7 +28,7 @@ export function idleTimerClaim(cleared: ActiveTimerClaim | null): IdleTimerClaim
 export function stoppingTimer(
   timer: TogglActiveTimer,
   queueId: string,
-): ActiveTimer & { state: 'stopping' } {
+): LegacyActiveTimer & { state: 'stopping' } {
   return {
     state: 'stopping',
     entryId: timer.entryId,

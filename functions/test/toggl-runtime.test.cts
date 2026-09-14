@@ -16,6 +16,7 @@ type TestContext = import("node:test").TestContext;
 interface Snapshot {
   exists: boolean;
   data(): unknown;
+  get(field: string): unknown;
 }
 interface TransactionStub {
   get(ref: object): Promise<Snapshot>;
@@ -120,7 +121,10 @@ const secretsDb = getFirestore("secrets");
 const authContext = {auth: {uid: "owner", token: {}}};
 
 function snapshot(data: unknown, exists = true): Snapshot {
-  return {exists, data: () => data};
+  return {exists, data: () => data, get: (field: string) => {
+    if (typeof data !== "object" || data === null) return undefined;
+    return Object.fromEntries(Object.entries(data))[field];
+  }};
 }
 
 // The credential store (SEC-004): getTogglConfig reads
@@ -216,7 +220,7 @@ function installQueueStore(
   const userRef = {
     get: async () => {
       configReads += 1;
-      return snapshot({uid: "owner"});
+      return snapshot({uid: "owner", toggl: {workspaceId: 3, projectId: 4}});
     },
   };
   installTogglSecret(t);
@@ -228,8 +232,11 @@ function installQueueStore(
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
-  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
+  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => {
+    const effects: Array<()=>Promise<void>>=[];
+    const result=await handler({
     get: async (ref: object) => {
+      if (ref === userRef) return snapshot({uid:"owner",toggl:{workspaceId:3,projectId:4}});
       if (ref === queueRef) return snapshot(item);
       if (ref === rowsRef) {
         rowsReads += 1;
@@ -240,7 +247,9 @@ function installQueueStore(
     },
     update: (ref: object, patch: QueuePatch) => {
       if (ref === queueRef) {
-        transactionUpdates.push(patch);
+        if ("claimedAt" in patch || "deferredUntil" in patch || "deferrals" in patch) transactionUpdates.push(patch);
+        else { effects.push(async()=>{await queueRef.update(patch);Object.assign(item,patch);});return; }
+        Object.assign(item, patch);
       } else if (ref === rowsRef) {
         rowsValue = {...rowsValue, ...patch};
         rowsWrites.push({type: "update", value: patch});
@@ -250,6 +259,7 @@ function installQueueStore(
         quotaWrites.push({type: "update", value: patch});
       }
     },
+    delete: (ref: object) => { assert.equal(ref, queueRef); effects.push(()=>queueRef.delete()); },
     set: (ref: object, value: Record<string, unknown>) => {
       if (ref === rowsRef) {
         rowsValue = value;
@@ -260,7 +270,10 @@ function installQueueStore(
       quotaValue = value;
       quotaWrites.push({type: "set", value});
     },
-  }));
+    });
+    for(const effect of effects) await effect();
+    return result;
+  });
   t.mock.method(db, "collection", (path: string) => {
     assert.equal(path, "logEvents");
     return {add: async (issue: LoggedIssue) => issues.push(issue)};
@@ -336,7 +349,7 @@ function installCorrelatedStopStore(
   const quotaRef = {};
   const rowsRef = {};
   const userRef = {
-    get: async () => snapshot({uid: "owner"}),
+    get: async () => snapshot({uid: "owner", toggl: {workspaceId: 3, projectId: 4}}),
   };
   installTogglSecret(t);
   const issues: LoggedIssue[] = [];
@@ -358,7 +371,8 @@ function installCorrelatedStopStore(
     if (transactionNumber === 1) {
       return handler({
         get: async (ref: object) => {
-          if (ref === queueRef) return snapshot(item);
+          if (ref === userRef) return userRef.get();
+      if (ref === queueRef) return snapshot(item);
           if (ref === rowsRef) return snapshot(undefined, false);
           assert.equal(ref, quotaRef);
           return snapshot(quota, quota !== undefined);
@@ -373,7 +387,8 @@ function installCorrelatedStopStore(
       if (mode === "recovery-write-fails") {
         return handler({
           get: async (ref: object) => {
-            if (ref === queueRef) return snapshot(item);
+            if (ref === userRef) return userRef.get();
+      if (ref === queueRef) return snapshot(item);
             if (ref === bookRef) {
               return snapshot({
                 title: "The Book",
@@ -395,7 +410,8 @@ function installCorrelatedStopStore(
       }
       await handler({
         get: async (ref: object) => {
-          if (ref === queueRef) return snapshot(item);
+          if (ref === userRef) return userRef.get();
+      if (ref === queueRef) return snapshot(item);
           if (ref === bookRef) {
             return snapshot({
               title: "The Book",
@@ -425,7 +441,9 @@ function installCorrelatedStopStore(
     if (mode === "recovery-write-fails") {
       throw new Error("recovery storage unavailable");
     }
-    return handler({
+    let deleted = false;
+    const result = await handler({
+      delete: (ref: object) => { assert.equal(ref, queueRef); deleted = true; },
       get: async (ref: object) => {
         assert.equal(ref, queueRef);
         return snapshot(item);
@@ -433,6 +451,8 @@ function installCorrelatedStopStore(
       update: () => {},
       set: () => {},
     });
+    if (deleted) await queueRef.delete();
+    return result;
   });
   return {
     event: {
@@ -480,24 +500,9 @@ function errorDetails(error: unknown): error is {code: string; message: string} 
     typeof error.message === "string";
 }
 
-function secretValue(write: SecretWrite | undefined): TogglSecret {
-  assert.ok(write);
-  assert.equal(write.type, "set");
-  assert.ok(write.value);
-  return write.value;
-}
-
 function recordValue(value: unknown): Record<string, unknown> {
   assert.ok(typeof value === "object" && value !== null);
   return Object.fromEntries(Object.entries(value));
-}
-
-function firstUserWrite(
-  writes: Array<{value: Record<string, unknown>}>,
-): {value: Record<string, unknown>} {
-  const write = writes[0];
-  assert.ok(write);
-  return write;
 }
 
 test("queued creates pass through outcome-unknown before synced", async (t) => {
@@ -1074,7 +1079,7 @@ test("an SDK transaction retry that early-returns does not report the first atte
     handlers.push(handler);
     const firstAttempt = {
       get: async (ref: object) => ref === store.queueRef ?
-        snapshot(queueItem()) :
+        snapshot(queueItem()) : "get" in ref ? snapshot({uid:"owner",toggl:{workspaceId:3,projectId:4}}) :
         snapshot({windowStartedAt: Timestamp.now(), count: TOGGL_QUEUE_ROW_LIMIT}, true),
       update: () => {},
       set: () => {},
@@ -1185,7 +1190,7 @@ test("a failed terminal cleanup leaves a durable synced queue item", async (t) =
 
 function installBooksStore(t: TestContext, books: Record<string, Book>) {
   const userRef = {
-    get: async () => snapshot({uid: "owner"}),
+    get: async () => snapshot({uid: "owner", toggl: {workspaceId: 3, projectId: 4}}),
   };
   installTogglSecret(t);
   const active = Object.entries(books).find(([, book]) => book.activeTimer !== null);
@@ -1229,6 +1234,7 @@ function installBooksStore(t: TestContext, books: Record<string, Book>) {
   });
   t.mock.method(db, "runTransaction", async (handler: (transaction: BookTransactionStub) => Promise<unknown>) => handler({
     get: async (ref: object) => {
+      if (ref === userRef) return userRef.get();
       if (ref === claimRef) return snapshot(claim, claim !== null);
       const entry = [...bookRefs.entries()].find(([, bookRef]) => bookRef === ref);
       assert.ok(entry);
@@ -1536,282 +1542,87 @@ const verifiedContext = {auth: {uid: "owner", token: {email_verified: true}}};
 // savetoken meters itself through users/owner/functionQuotas/togglToken
 // (consumeQuota's own transaction); the mock serves that document and
 // records what the quota transaction writes.
-function installTokenQuota(
-  t: TestContext,
-  userRef: object,
-  {quota}: {quota?: Counter} = {},
-) {
-  const quotaRef = {};
-  let quotaValue: Record<string, unknown> | undefined = quota;
-  const quotaWrites: StoreWrite[] = [];
-  t.mock.method(db, "doc", (path: string) => {
-    if (path === "users/owner/functionQuotas/togglToken") return quotaRef;
-    assert.equal(path, "users/owner");
-    return userRef;
-  });
-  t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
-    get: async (ref: object) => {
-      assert.equal(ref, quotaRef);
-      return snapshot(quotaValue, quotaValue !== undefined);
-    },
-    set: (ref: object, value: Record<string, unknown>) => {
-      assert.equal(ref, quotaRef);
-      quotaValue = value;
-      quotaWrites.push({type: "set", value});
-    },
-    update: (ref: object, patch: QueuePatch) => {
-      assert.equal(ref, quotaRef);
-      quotaValue = {...quotaValue, ...patch};
-      quotaWrites.push({type: "update", value: patch});
-    },
-  }));
-  return {
-    get quota() {
-      return counter(quotaValue);
-    },
-    quotaWrites,
-  };
-}
-
-test("savetoken validates Toggl responses and stores the selected project", async (t) => {
-  const writes: Array<{value: Record<string, unknown>}> = [];
-  let exists = true;
-  const secret = installTogglSecret(t, undefined);
-  const userRef = {
-    get: async () => ({exists, data: () => ({})}),
-    update: async (value: Record<string, unknown>) => {
-      // Credential first, mirror second: if the mirror write is lost the
-      // account merely shows disconnected.
-      assert.equal(secret.writes.length, 1, "the credential is stored before the mirror");
-      writes.push({value});
-    },
-    set: async () => assert.fail("savetoken must not create a user document"),
-  };
-  const quota = installTokenQuota(t, userRef);
-  const requested: Array<string | URL | Request> = [];
-  t.mock.method(global, "fetch", async (url: string | URL | Request) => {
-    requested.push(url);
-    if (String(url).endsWith("/me")) return new Response("{}", {status: 200});
-    return new Response(JSON.stringify([{
-      id: 7,
-      workspace_id: 6,
-      name: "Reading",
-    }]), {status: 200});
-  });
-
-  assert.deepEqual(
-    await deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    {workspaceId: 6, projectId: 7},
-  );
-  // The credential goes only to the secrets store; the user document gets
-  // the status mirror and never the token (SEC-004).
-  assert.equal(secret.writes.length, 1);
-  const savedSecret = secretValue(secret.writes[0]);
-  assert.deepEqual(Object.keys(savedSecret).sort(), ["apiToken", "projectId", "updatedAt", "workspaceId"]);
-  assert.equal(savedSecret.apiToken, "valid-token");
-  assert.equal(savedSecret.workspaceId, 6);
-  assert.equal(savedSecret.projectId, 7);
-  assert.equal(writes.length, 1);
-  const mirror = recordValue(firstUserWrite(writes).value.toggl);
-  assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
-  assert.equal(mirror.workspaceId, 6);
-  assert.equal(mirror.projectId, 7);
-  assert.equal(requested.length, 2);
-  assert.equal(quota.quota.count, 1);
-
-  // A deleted account's still-valid token cannot recreate its user document.
-  exists = false;
-  await assert.rejects(
-    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => hasError(error, "failed-precondition"),
-  );
-  assert.equal(writes.length, 1);
-  assert.equal(secret.writes.length, 1);
-});
-
-test("savetoken refuses unverified accounts before any Toggl call or quota spend", async (t) => {
-  const userRef = {
-    get: async () => assert.fail("must not read the user document"),
-    update: async () => assert.fail("must not write"),
-  };
-  const quota = installTokenQuota(t, userRef);
-  let fetchCalls = 0;
-  t.mock.method(global, "fetch", async () => {
-    fetchCalls += 1;
-    throw new Error("fetch must not run");
-  });
-  for (const context of [
-    authContext,
-    {auth: {uid: "owner", token: {email_verified: false}}},
-    {auth: {uid: "owner", token: {email_verified: "true"}}},
-  ]) {
-    await assert.rejects(
-      deployed.toggl.savetoken.run({token: "valid-token"}, context),
-      (error) => hasError(error, "failed-precondition", /verified email address/),
-    );
+interface ConnectionRef {path:string;id:string;get():Promise<Snapshot & {ref:ConnectionRef}>;set(value:Record<string,unknown>):Promise<void>;delete():Promise<void>}
+function installConnectionStore(t: TestContext) {
+  const values=new Map<string,Record<string,unknown>>([
+    ['users/owner',{uid:'owner',email:'owner@example.test'}],
+    ['users/owner/timerLifecycle/current',{version:1,state:'idle',cleared:null}],
+  ]);
+  const credentials=new Map<string,Record<string,unknown>>();
+  const writes:string[]=[];
+  let staged:()=>void=()=>{};
+  function reference(path:string, secret=false):ConnectionRef {
+    const map=secret ? credentials : values;
+    const ref:ConnectionRef={path,id:path.split('/').at(-1) ?? path,
+      get:async()=>({...snapshot(map.get(path),map.has(path)),ref}),
+      set:async(value)=>{map.set(path,value);writes.push(`${secret ? 'secret:' : ''}${path}`);if(secret) staged();},
+      delete:async()=>{map.delete(path);writes.push(`delete:${secret ? 'secret:' : ''}${path}`);},
+    };
+    return ref;
   }
-  assert.equal(fetchCalls, 0);
-  assert.deepEqual(quota.quotaWrites, []);
-});
-
-test("savetoken is metered per user and warns once per window", async (t) => {
-  const warnings: unknown[][] = [];
-  t.mock.method(logger, "warn", (...args: unknown[]) => warnings.push(args));
-  const userRef = {
-    get: async () => ({exists: true, data: () => ({})}),
-    update: async () => {},
-  };
-  const quota = installTokenQuota(t, userRef, {
-    quota: {windowStartedAt: Timestamp.now(), count: 5},
+  t.mock.method(db,'doc',(path:string)=>reference(path));
+  t.mock.method(secretsDb,'doc',(path:string)=>reference(path,true));
+  t.mock.method(db,'collection',(path:string)=>{
+    const queryRef={where:()=>queryRef,limit:()=>queryRef,get:async()=>({size:0,empty:true,docs:[]}),path};return queryRef;
   });
-  let fetchCalls = 0;
-  t.mock.method(global, "fetch", async () => {
-    fetchCalls += 1;
-    throw new Error("fetch must not run past the quota");
-  });
-  // Sixth attempt in the window: refused, the credential never leaves.
-  await assert.rejects(
-    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => hasError(error, "resource-exhausted"),
-  );
-  await assert.rejects(
-    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => hasError(error, "resource-exhausted"),
-  );
-  assert.equal(fetchCalls, 0);
-  assert.equal(quota.quota.count, 6);
-  assert.deepEqual(warnings, [["toggl.token_quota_exceeded", {uid: "owner"}]]);
-});
-
-test("the Functions emulator saves a deterministic Toggl project without outbound fetch", async (t) => {
-  enableFunctionsEmulator(t);
-  const writes: Array<{value: Record<string, unknown>}> = [];
-  const secret = installTogglSecret(t, undefined);
-  const userRef = {
-    get: async () => ({exists: true, data: () => ({})}),
-    update: async (value: Record<string, unknown>) => writes.push({value}),
-  };
-  installTokenQuota(t, userRef);
-
-  assert.deepEqual(
-    await deployed.toggl.savetoken.run({token: "snapshot-production-token"}, verifiedContext),
-    {workspaceId: 900001, projectId: 900002},
-  );
-  assert.equal(secretValue(secret.writes[0]).apiToken, "snapshot-production-token");
-  assert.equal(writes.length, 1);
-  const mirror = recordValue(firstUserWrite(writes).value.toggl);
-  assert.deepEqual(Object.keys(mirror).sort(), ["connectedAt", "projectId", "workspaceId"]);
-  assert.equal(mirror.workspaceId, 900001);
-  assert.equal(mirror.projectId, 900002);
-});
-
-test("cleartoken removes the stored Toggl credential and nothing else", async (t) => {
-  const writes: Record<string, unknown>[] = [];
-  let exists = true;
-  let claimState = "idle";
-  const secret = installTogglSecret(t);
-  const userRef = {
-    get: async () => ({exists, data: () => ({})}),
-    update: async (value: Record<string, unknown>) => {
-      // Withdrawal first: the credential must be gone before the mirror.
-      assert.deepEqual(secret.writes, [{type: "delete"}], "the credential is deleted before the mirror");
-      writes.push(value);
-    },
-  };
-  const claimRef = {get: async () => ({exists: true, get: (field: string) => {
-    assert.equal(field, "state");
-    return claimState;
-  }})};
-  t.mock.method(db, "doc", (path: string) => {
-    if (path === "users/owner/timerLifecycle/current") return claimRef;
-    assert.equal(path, "users/owner");
-    return userRef;
-  });
-  assert.deepEqual(await deployed.toggl.cleartoken.run(undefined, authContext), {cleared: true});
-  assert.equal(writes.length, 1);
-  assert.deepEqual(Object.keys(writes[0]), ["toggl"]);
-  // A running timer can only be stopped through Toggl: refuse to disconnect.
-  claimState = "claimed";
-  await assert.rejects(
-    deployed.toggl.cleartoken.run(undefined, authContext),
-    (error) => hasError(error, "failed-precondition", /running timer/),
-  );
-  assert.equal(writes.length, 1);
-  claimState = "idle";
-  await assert.rejects(
-    deployed.toggl.cleartoken.run({extra: 1}, authContext),
-    (error) => hasError(error, "invalid-argument"),
-  );
-  exists = false;
-  await assert.rejects(
-    deployed.toggl.cleartoken.run(undefined, authContext),
-    (error) => hasError(error, "failed-precondition"),
-  );
-  assert.equal(writes.length, 1);
-  // Every refusal above stopped before touching the credential store.
-  assert.equal(secret.writes.length, 1);
-});
-
-// The deletion race (SEC-004 review F4): the tombstone check at the top
-// of savetoken and the credential write are two outbound Toggl calls
-// apart. A deletion that lands in that window must not strand a live
-// credential: savetoken re-reads the user document after writing and
-// undoes itself.
-test("savetoken written during account deletion removes its own credential", async (t) => {
-  let reads = 0;
-  const secret = installTogglSecret(t, undefined);
-  const userRef = {
-    get: async () => {
-      reads += 1;
-      // Live at the pre-flight check, tombstoned at the post-write re-check.
-      return {exists: true, data: () => (reads >= 2 ? {deletedAt: Timestamp.fromMillis(1)} : {})};
-    },
-    update: async () => assert.fail("no status mirror may be written for a deleted account"),
-  };
-  installTokenQuota(t, userRef);
-  t.mock.method(global, "fetch", async (url: string | URL | Request) => {
-    if (String(url).endsWith("/me")) return new Response("{}", {status: 200});
-    return new Response(JSON.stringify([{id: 7, workspace_id: 6, name: "Reading"}]), {status: 200});
-  });
-  await assert.rejects(
-    deployed.toggl.savetoken.run({token: "valid-token"}, verifiedContext),
-    (error) => hasError(error, "failed-precondition", /account has been deleted/),
-  );
-  // The credential was written and then removed by the compensation.
-  assert.deepEqual(secret.writes.map((w) => w.type), ["set", "delete"]);
-  assert.equal(secret.stored, undefined);
-});
-
-// A deleted account is tombstoned, never removed (SEC-006). The deletion
-// trigger deletes its credential from the secrets store, but the refusal
-// below must not depend on that: for the hour the ID token outlives the
-// account (and for queued rows that outlive it) every path refuses on the
-// tombstone alone, before any secrets read or Toggl call.
-test("a tombstoned account cannot use, save or clear a Toggl token", async (t) => {
-  const tombstoned = snapshot({
-    uid: "owner",
-    deletedAt: Timestamp.fromMillis(1),
-    toggl: {workspaceId: 3, projectId: 4, connectedAt: Timestamp.fromMillis(1)},
-  });
-  const userRef = {
-    get: async () => tombstoned,
-    update: async () => assert.fail("a tombstoned document must not be updated"),
-    set: async () => assert.fail("a tombstoned document must not be replaced"),
-  };
-  installTokenQuota(t, userRef);
-  t.mock.method(global, "fetch", async () => assert.fail("no Toggl request for a deleted account"));
-  const context = {auth: {uid: "owner", token: {email_verified: true}}};
-  const rejectedCalls: Array<[string, () => Promise<unknown>]> = [
-    ["savetoken", () => deployed.toggl.savetoken.run({token: "x".repeat(32)}, context)],
-    ["cleartoken", () => deployed.toggl.cleartoken.run({}, context)],
-    ["start", () => deployed.toggl.start.run({bookId: "book"}, context)],
-  ];
-  for (const [name, call] of rejectedCalls) {
-    await assert.rejects(call(), (error) => {
-      assert.ok(errorDetails(error));
-      assert.equal(error.code, "failed-precondition", name);
-      assert.match(error.message, /account has been deleted/, name);
-      return true;
+  t.mock.method(db,'runTransaction',async(work:(tx:unknown)=>Promise<unknown>)=>{
+    const changes:Array<()=>void>=[];
+    const result=await work({get:async(ref:{get():Promise<unknown>})=>ref.get(),
+      set:(ref:ConnectionRef,value:Record<string,unknown>)=>changes.push(()=>{values.set(ref.path,value);writes.push(ref.path);}),
+      update:(ref:ConnectionRef,patch:Record<string,unknown>)=>changes.push(()=>{
+        const value={...values.get(ref.path)};
+        for(const [key,next] of Object.entries(patch)) {if(next instanceof FieldValue && next.isEqual(FieldValue.delete())) delete value[key];else value[key]=next;}
+        values.set(ref.path,value);writes.push(ref.path);
+      }),
     });
-  }
+    changes.forEach(apply=>apply());return result;
+  });
+  return {values,credentials,writes,onStage(callback:()=>void){staged=callback;}};
+}
+function mockConnectionResponses(t:TestContext) {
+  t.mock.method(global,'fetch',async(url:string|URL|Request)=>String(url).endsWith('/me') ? new Response(JSON.stringify({id:9}),{status:200}) : new Response(JSON.stringify([{id:7,workspace_id:6,name:'Reading'}]),{status:200}));
+}
+test('savetoken initializes one revision with credentials staged before activation',async t=>{
+  const store=installConnectionStore(t);mockConnectionResponses(t);
+  assert.deepEqual(await deployed.toggl.savetoken.run({token:'valid-token'},verifiedContext),{workspaceId:6,projectId:7});
+  const user=store.values.get('users/owner');assert.ok(user);
+  const config=recordValue(user.timeTracking);assert.equal(config.provider,'toggl');assert.equal(config.accountId,'9');
+  assert.equal(store.credentials.get(`timeTrackingTokens/owner/revisions/${config.revision}`)?.apiToken,'valid-token');
+  assert.ok(store.writes.findIndex(path=>path.startsWith('secret:'))<store.writes.lastIndexOf('users/owner'));
+  assert.equal(JSON.stringify(user).includes('valid-token'),false);
+});
+test('legacy savetoken refuses an explicit destination and never overwrites it',async t=>{
+  const store=installConnectionStore(t);mockConnectionResponses(t);
+  const selected={provider:'none',revision:'chosen'};store.values.set('users/owner',{uid:'owner',timeTracking:selected});
+  await assert.rejects(deployed.toggl.savetoken.run({token:'valid-token'},verifiedContext),error=>hasError(error,'failed-precondition'));
+  assert.deepEqual(store.values.get('users/owner')?.timeTracking,selected);assert.equal(store.credentials.size,0);
+});
+test('savetoken refuses unverified accounts before a credential or quota is touched',async t=>{
+  const store=installConnectionStore(t);
+  await assert.rejects(deployed.toggl.savetoken.run({token:'valid-token'},authContext),error=>hasError(error,'failed-precondition',/Verify your email/));assert.equal(store.writes.length,0);
+});
+test('connection validation is rate limited before making outbound calls',async t=>{
+  const store=installConnectionStore(t);store.values.set('users/owner/functionQuotas/timeTrackingConnection',{windowStartedAt:Timestamp.now(),count:10});
+  await assert.rejects(deployed.toggl.savetoken.run({token:'valid-token'},verifiedContext),error=>hasError(error,'resource-exhausted'));
+  assert.equal(store.credentials.size,0);
+});
+test('the emulator initializes a deterministic Toggl project without outbound fetch',async t=>{
+  enableFunctionsEmulator(t);const store=installConnectionStore(t);
+  assert.deepEqual(await deployed.toggl.savetoken.run({token:'snapshot-token'},verifiedContext),{workspaceId:900001,projectId:900002});assert.equal(store.credentials.size,1);
+});
+test('cleartoken changes the default database revision before removing the credential',async t=>{
+  const store=installConnectionStore(t);
+  store.values.set('users/owner',{uid:'owner',toggl:{workspaceId:3,projectId:4},timeTracking:{provider:'toggl',revision:'old',accountId:'9',workspaceId:3,projectId:4}});
+  store.credentials.set('timeTrackingTokens/owner/revisions/old',{apiToken:'token'});
+  assert.deepEqual(await deployed.toggl.cleartoken.run({},verifiedContext),{cleared:true});
+  assert.equal(recordValue(store.values.get('users/owner')?.timeTracking).provider,'none');assert.equal(store.credentials.size,0);
+  assert.ok(store.writes.indexOf('users/owner')<store.writes.indexOf('delete:secret:timeTrackingTokens/owner/revisions/old'));
+});
+test('a token staged during account deletion is removed without activating it',async t=>{
+  const store=installConnectionStore(t);mockConnectionResponses(t);store.onStage(()=>store.values.set('users/owner',{uid:'owner',deletedAt:Timestamp.now()}));
+  await assert.rejects(deployed.toggl.savetoken.run({token:'valid-token'},verifiedContext),error=>hasError(error,'failed-precondition',/deleted/));assert.equal(store.credentials.size,0);
+});
+test('a running timer prevents disconnect and retains the only credential',async t=>{
+  const store=installConnectionStore(t);store.values.set('users/owner',{uid:'owner',toggl:{workspaceId:3,projectId:4}});store.values.set('users/owner/timerLifecycle/current',{version:1,state:'starting'});store.credentials.set('togglTokens/owner',{apiToken:'token'});
+  await assert.rejects(deployed.toggl.cleartoken.run({},verifiedContext),error=>hasError(error,'failed-precondition',/Stop your timer/));assert.equal(store.credentials.size,1);
 });

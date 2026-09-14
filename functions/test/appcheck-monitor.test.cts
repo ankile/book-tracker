@@ -58,7 +58,7 @@ test("every https.onCall handler starts with logAppCheckPresence", () => {
   let handlers = 0;
   for (const file of readdirSync(sourceDir).filter((f) => f.endsWith(".ts"))) {
     const source = readFileSync(join(sourceDir, file), "utf8");
-    const pattern = /\.https\.onCall\(async \([^)]*\)(?:: [^=]*)? => \{\s*(\w+)\((?:"([^"]+)"|(\w+)), context\);/g;
+    const pattern = /\.https\.onCall\(\s*async \([^)]*\)(?:: [^=]*)? => \{\s*(\w+)\((?:"([^"]+)"|(\w+)), context\);/g;
     const total = source.split(".https.onCall(").length - 1;
     let matched = 0;
     for (const match of source.matchAll(pattern)) {
@@ -73,9 +73,9 @@ test("every https.onCall handler starts with logAppCheckPresence", () => {
     assert.equal(matched, total, `${file}: ${total} onCall handlers, ${matched} open with logAppCheckPresence`);
     handlers += total;
   }
-  assert.equal(handlers, 13, "thirteen callable handler implementations carry the monitor line");
+  assert.equal(handlers, 23, "twenty-three callable handler implementations carry the monitor line");
   assert.equal(wrappedNames.length, 3, "all three admin callables pin their monitor names at the wrapper call site");
   const deployedNames = [...names, ...wrappedNames];
-  assert.equal(deployedNames.length, 15, "all fifteen deployed callables are named for monitoring");
+  assert.equal(deployedNames.length, 25, "all twenty-five deployed callables are named for monitoring");
   assert.equal(new Set(deployedNames).size, deployedNames.length, "each callable names its own function");
 });

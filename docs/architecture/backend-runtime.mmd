@@ -56,7 +56,7 @@ flowchart TB
     direction LR
     timerbrowser["<b>Signed-in reader</b><br/>Connects or uses a reading timer"]:::source
     timerapi["<b>Integration service</b><br/>Authorizes requests and protects credentials"]:::service
-    timerstate[("<b>Private timer state</b><br/>Connection status and reading activity")]:::data
+    timerstate[("<b>Private timer state</b><br/>Connection revisions · shared timer claim<br/>immutable acceptance records")]:::data
     timerprovider["<b>External time-tracking service</b><br/>Reading activity"]:::external
     timerbrowser --> timerapi --> timerstate
     timerapi --> timerprovider
@@ -65,9 +65,9 @@ flowchart TB
   subgraph offlinepath[Offline recovery]
     direction LR
     offlinebrowser["<b>Device goes offline</b><br/>Finishes a timer action"]:::source
-    localqueue["<b>Durable client queue</b><br/>Keeps bounded work until reconnect"]:::mediation
+    localqueue["<b>Durable client queue</b><br/>Preserves original intent until server acceptance"]:::mediation
     syncedwork[("<b>Validated deferred work</b><br/>Owner-scoped recovery state")]:::data
-    syncworker["<b>Synchronization worker</b><br/>Claims and processes work"]:::service
+    syncworker["<b>Synchronization worker</b><br/>Claims work · freezes requests<br/>retries or requests review"]:::service
     syncprovider["<b>External integration</b><br/>Receives the recovered activity"]:::external
     offlinebrowser --> localqueue -->|"reconnect"| syncedwork --> syncworker --> syncprovider
   end

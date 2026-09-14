@@ -1079,7 +1079,7 @@ class Database {
       // uses. Counted before the requeue transactions so a transaction
       // failure can't swallow the report.
       const queueDocs = new Map(items.docs.map((item) => [item.id, item]));
-      const decoded = decodeQueueSweepBatch(items.docs.map((item) => ({
+      const decoded = decodeQueueSweepBatch(items.docs.filter(item => item.get("legacyResolution") === undefined).map((item) => ({
         id: item.id,
         value: item.data(),
         path: item.ref.path,
@@ -1143,7 +1143,7 @@ class Database {
           await runTransaction(db, async (tx) => {
             attemptedItem = null;
             const snap = await tx.get(ref);
-            if (!snap.exists()) return;
+            if (!snap.exists() || snap.get("legacyResolution") !== undefined) return;
             const item = decodeLiveQueueSweepItem(snap.id, snap.data(), snap.ref.path);
             if (item === null) return;
             if (!isTogglSweepTransactionCandidate(item)) return;

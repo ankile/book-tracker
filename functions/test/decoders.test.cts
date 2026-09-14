@@ -699,16 +699,19 @@ test("a malformed pending queue item is terminal before fetch", async (t) => {
     status: "pending",
     createdAt: Timestamp.now(),
   };
+  const userRef = {};
   const ref = {};
   const rowsRef = {};
   let rows: Record<string, unknown> | undefined;
   t.mock.method(db, "doc", (path: string) => {
+    if (path === "users/owner") return userRef;
     if (path === "users/owner/functionQuotas/togglQueueRows") return rowsRef;
     assert.equal(path, "users/owner/functionQuotas/togglQueue");
     return quotaRef;
   });
   t.mock.method(db, "runTransaction", async (handler: (transaction: TransactionStub) => Promise<unknown>) => handler({
     get: async (target: object) => {
+      if (target === userRef) return {exists:true,data:()=>({uid:"owner",toggl:{workspaceId:3,projectId:4}}),get:()=>undefined};
       if (target === ref) return {exists: true, data: () => item};
       if (target === rowsRef) return {exists: rows !== undefined, data: () => rows};
       return {exists: true, data: () => quota};

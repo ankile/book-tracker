@@ -1,3 +1,4 @@
+import type {TimerV2} from '../../../shared/timeTracking.ts';
 import type { DocumentReference, Timestamp } from 'firebase/firestore';
 import type { LegacyEmbeddedAuthor } from './author.ts';
 import type { CatalogLink } from './catalog.ts';
@@ -39,12 +40,14 @@ export interface StoppingTogglTimer {
   queueId: string;
 }
 
-export type ActiveTimer =
+export type LegacyActiveTimer =
   | LocalActiveTimer
   | TogglActiveTimer
   | StartingTogglTimer
   | UnknownTogglTimerOutcome
   | StoppingTogglTimer;
+
+export type ActiveTimer = LegacyActiveTimer | TimerV2;
 
 interface BookBase extends BookMetadata, CatalogLink {
   id: string;

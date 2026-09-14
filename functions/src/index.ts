@@ -187,6 +187,7 @@ exports.deleteUserDocument = functions
     const cleanup = await Promise.allSettled([
       tombstoneProfiles(user.uid),
       deleteTogglCredential(user.uid),
+      getFirestore("secrets").recursiveDelete(getFirestore("secrets").doc(`timeTrackingTokens/${user.uid}`)),
     ]);
     const failures = cleanup.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -206,4 +207,5 @@ exports.booksapi = require("./booksapi");
 exports.catalog = require("./catalogEndpoints");
 exports.telemetry = require("./telemetry");
 exports.toggl = require("./toggl");
+exports.timetracking = require("./timeTracking");
 exports.publicweb = publicweb;

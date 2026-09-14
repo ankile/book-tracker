@@ -52,14 +52,12 @@ const {
   TOGGL_QUEUE_RETENTION_MS,
   TOGGL_QUEUE_ROW_LIMIT,
   TOGGL_QUEUE_WINDOW_MS,
-  TOGGL_TOKEN_LIMIT,
 } = functionsRequire('./lib/togglQueueLimits') as {
   TOGGL_QUEUE_LIMIT: number;
   TOGGL_QUEUE_MAX_DEFERRALS: number;
   TOGGL_QUEUE_RETENTION_MS: number;
   TOGGL_QUEUE_ROW_LIMIT: number;
   TOGGL_QUEUE_WINDOW_MS: number;
-  TOGGL_TOKEN_LIMIT: number;
 };
 
 type AdminTimestamp = import('firebase-admin/firestore').Timestamp;
@@ -83,65 +81,36 @@ after(async () => {
   await togglSecret(uid).delete();
 });
 
-test('savetoken admits a verified account five times an hour and refuses the sixth before Toggl is called', async (t) => {
-  const warnings = captureWarnings(t);
-  await userRef.set({uid, email: 'timer@example.com'}, {merge: true});
-  const quotaRef = userRef.collection('functionQuotas').doc('togglToken');
+test('legacy token setup stages a revision once and cannot override an explicit choice', async (t) => {
+  await userRef.set({uid,email:'timer@example.test'});
+  const quotaRef=userRef.collection('functionQuotas').doc('timeTrackingConnection');
   await quotaRef.delete();
-  let fetchCalls = 0;
-  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
-    fetchCalls += 1;
-    if (String(url).endsWith('/me')) return new Response('{}', {status: 200});
-    return new Response(JSON.stringify([{id: 7, workspace_id: 6, name: 'Reading'}]), {status: 200});
+  let fetchCalls=0;
+  t.mock.method(globalThis,'fetch',async (url: string | URL | Request)=>{
+    fetchCalls++;
+    return new Response(JSON.stringify(String(url).endsWith('/me') ? {id:42} : [{id:7,workspace_id:6,name:'Reading'}]),{status:200});
   });
-  const verified = {auth: {uid, token: {email_verified: true}}};
-  const unverified = {auth: {uid, token: {}}};
-
-  await assert.rejects(
-    deployed.toggl.savetoken.run({token: 'secret'}, unverified),
-    (error: unknown) => (error as {code: string}).code === 'failed-precondition',
-  );
-  assert.equal(fetchCalls, 0);
-  assert.equal((await quotaRef.get()).exists, false);
-
-  for (let attempt = 1; attempt <= TOGGL_TOKEN_LIMIT; attempt += 1) {
-    assert.deepEqual(
-      await deployed.toggl.savetoken.run({token: 'secret'}, verified),
-      {workspaceId: 6, projectId: 7},
-    );
-  }
-  assert.equal(fetchCalls, 2 * TOGGL_TOKEN_LIMIT);
-  // The user document carries only the status mirror; the credential is
-  // in the secrets database and nowhere in the user document (SEC-004).
-  const mirror = (await userRef.get()).data()?.toggl as Record<string, unknown>;
-  assert.deepEqual(Object.keys(mirror).sort(), ['connectedAt', 'projectId', 'workspaceId']);
-  assert.equal(mirror.workspaceId, 6);
-  assert.equal(mirror.projectId, 7);
-  assert.ok(!JSON.stringify((await userRef.get()).data()).includes('secret'));
-  const storedSecret = (await togglSecret(uid).get()).data() as Record<string, unknown>;
-  assert.deepEqual(Object.keys(storedSecret).sort(), ['apiToken', 'projectId', 'updatedAt', 'workspaceId']);
-  assert.equal(storedSecret.apiToken, 'secret');
-  assert.equal(storedSecret.workspaceId, 6);
-  assert.equal(storedSecret.projectId, 7);
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await assert.rejects(
-      deployed.toggl.savetoken.run({token: 'secret'}, verified),
-      (error: unknown) => (error as {code: string}).code === 'resource-exhausted',
-    );
-  }
-  assert.equal(fetchCalls, 2 * TOGGL_TOKEN_LIMIT);
-  assert.equal((await quotaRef.get()).data()?.count, TOGGL_TOKEN_LIMIT + 1);
-  assert.deepEqual(warnings, [['toggl.token_quota_exceeded', {uid}]]);
-
-  await quotaRef.set({
-    windowStartedAt: new Date(Date.now() - TOGGL_QUEUE_WINDOW_MS - 1000),
-    count: TOGGL_TOKEN_LIMIT + 1,
-  });
-  await deployed.toggl.savetoken.run({token: 'secret'}, verified);
-  assert.equal((await quotaRef.get()).data()?.count, 1);
-  await seedTogglSecret(uid);
-  await userRef.update({toggl: togglStatus()});
+  const verified={auth:{uid,token:{email_verified:true}}};
+  await assert.rejects(deployed.toggl.savetoken.run({token:'secret'},{auth:{uid,token:{}}}),{code:'failed-precondition'});
+  assert.equal(fetchCalls,0);
+  assert.deepEqual(await deployed.toggl.savetoken.run({token:'secret'},verified),{workspaceId:6,projectId:7});
+  const user=(await userRef.get()).data();
+  assert.ok(user);
+  assert.equal(user.timeTracking.provider,'toggl');
+  assert.equal(user.timeTracking.accountId,'42');
+  assert.equal(JSON.stringify(user).includes('secret'),false);
+  const staged=secretsDb.doc(`timeTrackingTokens/${uid}/revisions/${user.timeTracking.revision}`);
+  assert.equal((await staged.get()).get('apiToken'),'secret');
+  assert.equal((await togglSecret(uid).get()).exists,false);
+  await assert.rejects(deployed.toggl.savetoken.run({token:'replacement'},verified),{code:'failed-precondition'});
+  assert.equal((await staged.get()).get('apiToken'),'secret');
+  assert.equal((await secretsDb.collection(`timeTrackingTokens/${uid}/revisions`).get()).size,1);
+  await quotaRef.set({windowStartedAt:Timestamp.now(),count:10});
+  const before=fetchCalls;
+  await assert.rejects(deployed.toggl.savetoken.run({token:'replacement'},verified),{code:'resource-exhausted'});
+  assert.equal(fetchCalls,before);
+  await db.recursiveDelete(userRef);
+  await secretsDb.recursiveDelete(secretsDb.doc(`timeTrackingTokens/${uid}`));
 });
 
 test('Firestore serializes simultaneous starts on different books', async (t) => {
@@ -650,7 +619,8 @@ test('checked recovery clears capped failures but refuses live processing work',
   );
   assert.equal((await bookRef.get()).data()?.activeTimer, null);
   assert.equal((await lifecycleRef.get()).data()?.state, 'idle');
-  assert.equal((await queueRef.get()).exists, false);
+  assert.equal((await queueRef.get()).get('legacyResolution.reason'), 'remote_outcome_checked');
+  assert.equal((await queueRef.get()).get('expiresAt'), undefined);
 
   await seed('error', Timestamp.now(), 1);
   await userRef.update({deletedAt: Timestamp.now()});

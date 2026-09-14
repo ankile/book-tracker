@@ -17,7 +17,7 @@ flowchart TB
   people["<b>People and indexers</b><br/>Readers · profile visitors<br/>authorized operators · search services"]:::person
   delivery["<b>Managed web delivery</b><br/>Static application assets<br/>and published profile responses"]:::delivery
   browser["<b>Browser or installed app</b><br/>User interface and client state"]:::client
-  local["<b>Local persistence</b><br/>Cached app shell and offline work"]:::client
+  local["<b>Local persistence</b><br/>Cached app shell · account-scoped timer outbox"]:::client
 
   identity["<b>Managed identity</b><br/>Sign-in and authenticated sessions"]:::security
   permissions["<b>Data access controls</b><br/>Owner scope and write validation"]:::security
@@ -31,7 +31,7 @@ flowchart TB
   observability["<b>Operational telemetry</b><br/>Runtime health and issue reporting"]:::neutral
 
   catalogs["<b>Book information services</b><br/>Metadata and cover information"]:::external
-  timer["<b>Optional time-tracking service</b><br/>Reading activity synchronization"]:::external
+  timer["<b>Optional time-tracking service</b><br/>One selected app · reading activity synchronization"]:::external
 
   people -->|"HTTPS"| delivery
   delivery -->|"application"| browser

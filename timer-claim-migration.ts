@@ -1,3 +1,5 @@
+import {decodeTimerV2,decodeClaimV2} from './shared/timeTracking.ts';
+import {wireRecord} from './shared/time-tracking-api.ts';
 import { Timestamp } from 'firebase-admin/firestore';
 import { createHash } from 'node:crypto';
 
@@ -288,6 +290,19 @@ export function auditTimerClaimState(
   books: StoredBook[],
   lifecycle: { exists: boolean; data: unknown },
 ): TimerClaimAuditFinding[] {
+  if ((wireRecord(lifecycle.data) && lifecycle.data.version === 2) || books.some(book => wireRecord(book.data.activeTimer) && book.data.activeTimer.version === 2)) {
+    if (!lifecycle.exists) return [{cls:'timer-lifecycle.missing',detail:'v2 timer has no lifecycle'}];
+    try {
+      const claim=decodeClaimV2(lifecycle.data);
+      const active=books.filter(book=>book.data.activeTimer !== undefined && book.data.activeTimer !== null);
+      if (claim.state === 'idle' && active.length === 0) return [];
+      if (claim.state !== 'active' || active.length !== 1 || active[0].id !== claim.bookId || JSON.stringify(decodeTimerV2(active[0].data.activeTimer)) !== JSON.stringify(claim.timer)) return [{cls:'timer-lifecycle.mismatch',detail:'v2 timer does not match its lifecycle'}];
+      return [];
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      return [{cls:'timer-lifecycle.malformed',detail:'Invalid v2 timer or lifecycle shape'}];
+    }
+  }
   let plan: TimerClaimMigrationPlan;
   try {
     plan = planTimerClaim(books);

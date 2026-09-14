@@ -1,5 +1,7 @@
 # Threeggle integration plan
 
+Implementation is now included in this PR. See [implementation and validation](integration-implementation-status.md) and the [coordinated release runbook](time-tracking-release.md). Deployment checklist items remain pending approval.
+
 Draft for review, September 12, 2026. No implementation or deployment is included in this pass.
 
 Review threads: [Book Tracker PR #53](https://github.com/ankile/book-tracker/pull/53) and [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).

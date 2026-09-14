@@ -13,7 +13,7 @@
   import StatCard from '$lib/components/StatCard.svelte';
   import StatGrid from '$lib/components/StatGrid.svelte';
   import { Database, type BookSharingSettings } from '$lib/firebase/db.ts';
-  import { togglClearToken, togglSaveToken } from '$lib/firebase/functions.ts';
+  import TimeTrackingSettings from '$lib/components/TimeTrackingSettings.svelte';
   import { formatTime, formatDateRange, formatMonthYear } from '$lib/utils/format.ts';
   import { countIsbnProblems } from '$lib/utils/metadataHealth.ts';
   import {
@@ -175,33 +175,6 @@
       return unsubscribe;
     }
   });
-
-  let togglToken = $state('');
-  let savingToken = $state(false);
-
-  let clearingToken = $state(false);
-  async function clearTogglToken() {
-    clearingToken = true;
-    try {
-      await togglClearToken({});
-    } catch (error) {
-      alert(errorMessage(error));
-    } finally {
-      clearingToken = false;
-    }
-  }
-
-  async function saveTogglToken() {
-    savingToken = true;
-    try {
-      await togglSaveToken({ token: togglToken });
-      togglToken = '';
-    } catch (error) {
-      alert(errorMessage(error));
-    } finally {
-      savingToken = false;
-    }
-  }
 
   // Statistics (shared with the public-profile payload, see utils/stats.ts)
   const stats = $derived(computeStats(analyticsBooks));
@@ -662,14 +635,6 @@
       margin: 0 0 1rem 0;
     }
 
-    .toggl-status {
-      color: #666;
-      margin-bottom: 1rem;
-
-      &.connected {
-        color: #198754;
-      }
-    }
 
     form {
       display: flex;
@@ -1190,7 +1155,7 @@
       {/if}
     </div>
 
-    <details class="settings">
+    <details class="settings" open={typeof window !== "undefined" && window.location.hash === "#time-tracking"}>
       <summary>Settings</summary>
       <div class="settings-body">
         <div class="toggl-card share-card">
@@ -1383,42 +1348,7 @@
           {#if sharingError}<p class="error" role="alert">{sharingError}</p>{/if}
         </div>
 
-        <div class="toggl-card">
-          <h2>Toggl Track</h2>
-          {#if userDoc?.toggl}
-            <p class="toggl-status connected">
-              Connected. Timers log to your "Reading" project in Toggl, with the
-              book's title as the entry description. Your token is stored on the
-              server for that purpose.
-            </p>
-            <button type="button" disabled={clearingToken} onclick={clearTogglToken}>
-              {clearingToken ? 'Disconnecting…' : 'Disconnect Toggl'}
-            </button>
-            <p class="toggl-status">
-              Disconnecting deletes the stored copy; revoke the token in Toggl too. Stop any running timer first.
-            </p>
-          {:else}
-            <p class="toggl-status">
-              Paste your Toggl API token (found under Profile settings in
-              Toggl) to start reading timers from your book list. Requires a
-              Toggl project named "Reading".
-            </p>
-          {/if}
-          <form
-            onsubmit={(event) => {
-              event.preventDefault();
-              saveTogglToken();
-            }}>
-            <input
-              type="password"
-              class="form-control"
-              placeholder="Toggl API token"
-              bind:value={togglToken} />
-            <button type="submit" disabled={savingToken || !togglToken}>
-              {userDoc?.toggl ? 'Replace Token' : 'Connect'}
-            </button>
-          </form>
-        </div>
+        {#if userDoc && userId}<TimeTrackingSettings uid={userId} {userDoc} />{/if}
       </div>
     </details>
 
