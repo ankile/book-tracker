@@ -41,6 +41,24 @@
         { "fieldPath": "uid", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "timeTrackingQueue",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "resolution",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "successorId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

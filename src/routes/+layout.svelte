@@ -8,6 +8,7 @@
   import Login from '$lib/components/Login.svelte';
   import LaunchScreen from '$lib/components/LaunchScreen.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import { addError } from '$lib/stores/errors.ts';
   import type { Snippet } from 'svelte';
 
   let { children }: { children: Snippet } = $props();
@@ -22,6 +23,23 @@
   // Auth may publish a refreshed user object without changing accounts.
   // Only an actual uid change should restart shared subscriptions.
   const userId = $derived($user?.uid);
+  const emailVerified = $derived($user?.emailVerified ?? false);
+
+  // Recovery belongs to the signed-in app, including direct Settings loads.
+  $effect(() => {
+    if (!userId || !emailVerified || publicRoute) return;
+    let cancelled = false;
+    let stopRecovery: (() => void) | undefined;
+    void import('$lib/timer-recovery.ts').then(({ startTimerRecovery }) => {
+      if (!cancelled) stopRecovery = startTimerRecovery(userId);
+    }).catch(() => {
+      if (!cancelled) addError('Timer recovery could not load. Reload to retry.');
+    });
+    return () => {
+      cancelled = true;
+      stopRecovery?.();
+    };
+  });
 
   // Paint the requested page before loading route code and shared app data.
   // History and catalog listeners are owned by their consuming pages.

@@ -98,6 +98,14 @@ export async function confirmEmailVerified(): Promise<boolean> {
 }
 
 export async function signOut(): Promise<void> {
+  const uid=auth.currentUser?.uid;
+  if (uid) {
+    const {listOutbox,clearOutbox}=await import('./timerOutbox.ts');
+    if ((await listOutbox(uid)).length>0) {
+      if ((await listOutbox(uid)).length>0 && !confirm('Some timer operations are still saved on this device. Sign out and discard them? Save their intervals from Time tracking settings first. A remote timer may still be running.')) return;
+    }
+    await clearOutbox(uid);
+  }
   // A shared device must not keep this account's Firestore mirror —
   // books, sessions, the user document — readable in IndexedDB after
   // sign-out (SEC-004; sign-out used to leave the whole cache behind).

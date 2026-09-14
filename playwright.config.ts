@@ -15,6 +15,7 @@ const emulatorAppCheckToken = `${encode({ alg: 'none', typ: 'JWT' })}.${encode({
 
 export default defineConfig({
   testDir: './tests/e2e',
+  globalSetup: './tests/e2e/setup.ts',
   fullyParallel: false,
   workers: 1,
   retries: 0,

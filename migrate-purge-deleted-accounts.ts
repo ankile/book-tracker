@@ -91,6 +91,14 @@ if ((await tokenRef.get()).exists) {
   credentials = 1;
 }
 
+const integrationTokens = openDatabase('secrets').doc(`timeTrackingTokens/${uid}`);
+const revisions = await integrationTokens.collection('revisions').get();
+if (!revisions.empty) {
+  console.log(`${tag} secrets:${integrationTokens.path} (${revisions.size} credential revisions)`);
+  if (flags.apply) await openDatabase('secrets').recursiveDelete(integrationTokens);
+  credentials += revisions.size;
+}
+
 // The tree: counted by listing (so orphans under a missing root count
 // too), removed subcollection by subcollection with recursiveDelete, and
 // the root document deleted LAST. Root-last is what makes a re-run of an

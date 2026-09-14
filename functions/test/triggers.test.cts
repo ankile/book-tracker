@@ -57,6 +57,19 @@ interface FunctionsBundle {
   syncsharingaccountprojection: DeployedFunction;
   syncsharingsettingprojection: DeployedFunction;
   telemetry: {reportissue: DeployedFunction};
+  timetracking: {
+    sweep: DeployedFunction;
+    accept: DeployedFunction;
+    acknowledge: DeployedFunction;
+    acknowledgelegacy: DeployedFunction;
+    clear: DeployedFunction;
+    connect: DeployedFunction;
+    context: DeployedFunction;
+    inspect: DeployedFunction;
+    replace: DeployedFunction;
+    retry: DeployedFunction;
+    syncqueue: DeployedFunction;
+  };
   toggl: {
     clearstopping: DeployedFunction;
     cleartoken: DeployedFunction;
@@ -95,6 +108,7 @@ test("preserves the deployed function export names", () => {
     "syncsharingaccountprojection",
     "syncsharingsettingprojection",
     "telemetry",
+    "timetracking",
     "toggl",
   ]);
   assert.deepEqual(Object.keys(functions.admin).sort(), [
@@ -111,6 +125,7 @@ test("preserves the deployed function export names", () => {
     "workreaders",
   ]);
   assert.deepEqual(Object.keys(functions.telemetry), ["reportissue"]);
+  assert.deepEqual(Object.keys(functions.timetracking).sort(), ["accept","acknowledge","acknowledgelegacy","clear","connect","context","inspect","replace","retry","sweep","syncqueue"]);
   assert.deepEqual(Object.keys(functions.toggl).sort(), [
     "clearstopping",
     "cleartoken",
@@ -654,6 +669,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   const credentialDeletes: string[] = [];
   let credentialFailure = false;
   t.mock.method(secretsDb, "doc", (path: string) => {
+    if (path === "timeTrackingTokens/owner") return {path};
     assert.equal(path, "togglTokens/owner");
     return {delete: async () => {
       // Order pin (SEC-004 review F4): the tombstone must already be on
@@ -668,6 +684,10 @@ test("user deletion tombstones the user document and its profiles, deletes only 
       cleanupEvents.push("credential");
       if (credentialFailure) throw new Error("secrets database unavailable");
     }};
+  });
+  let integrationCredentialDeletes = 0;
+  t.mock.method(secretsDb, "recursiveDelete", async (ref: {path:string}) => {
+    assert.equal(ref.path,"timeTrackingTokens/owner");assert.ok(userValue?.deletedAt);integrationCredentialDeletes++;
   });
   interface ProfileDoc {
     id: string;
@@ -774,6 +794,7 @@ test("user deletion tombstones the user document and its profiles, deletes only 
   assert.deepEqual(sets[0][2], {merge: true});
   assert.deepEqual(userValue.toggl, {workspaceId: 3, projectId: 4});
   assert.equal(credentialDeletes.length, 1);
+  assert.equal(integrationCredentialDeletes, 1);
   // Profiles: 249 tombstoned (one already was); three batches; cursor
   // paging by document id.
   const profileSets = sets.slice(1);
@@ -951,6 +972,17 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "toggl.clearstopping": functions.toggl.clearstopping,
     "toggl.cleartoken": functions.toggl.cleartoken,
     "toggl.syncqueue": functions.toggl.syncqueue,
+    "timetracking.accept": functions.timetracking.accept,
+    "timetracking.acknowledge": functions.timetracking.acknowledge,
+    "timetracking.acknowledgelegacy": functions.timetracking.acknowledgelegacy,
+    "timetracking.clear": functions.timetracking.clear,
+    "timetracking.connect": functions.timetracking.connect,
+    "timetracking.context": functions.timetracking.context,
+    "timetracking.inspect": functions.timetracking.inspect,
+    "timetracking.replace": functions.timetracking.replace,
+    "timetracking.retry": functions.timetracking.retry,
+    "timetracking.sweep": functions.timetracking.sweep,
+    "timetracking.syncqueue": functions.timetracking.syncqueue,
   };
   for (const [name, deployedFunction] of Object.entries(authenticated)) {
     assert.equal(deployedFunction.__endpoint.serviceAccountEmail, functionsRuntime, name);
@@ -1006,6 +1038,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.syncsharingaccountprojection",
     "functions.syncsharingsettingprojection",
     "functions.toggl.syncqueue",
+    "functions.timetracking.syncqueue",
   ]);
   for (const [name, deployedFunction] of exported) {
     const ingress = deployedFunction.__endpoint.ingressSettings;
@@ -1040,6 +1073,17 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.createUserDocument": 10,
     "functions.deleteUserDocument": 10,
     "functions.toggl.syncqueue": 5,
+    "functions.timetracking.accept": 10,
+    "functions.timetracking.acknowledge": 10,
+    "functions.timetracking.acknowledgelegacy": 10,
+    "functions.timetracking.clear": 10,
+    "functions.timetracking.connect": 10,
+    "functions.timetracking.context": 10,
+    "functions.timetracking.inspect": 10,
+    "functions.timetracking.replace": 10,
+    "functions.timetracking.retry": 10,
+    "functions.timetracking.sweep": 10,
+    "functions.timetracking.syncqueue": 5,
     "functions.deletebookupdates": 5,
     "functions.syncbooksharingprojection": 5,
     "functions.syncsharingaccountprojection": 5,

@@ -1,5 +1,10 @@
 <script lang="ts">
+  import {effectiveConnection} from "../../../shared/timeTracking.ts";
+  import type {TimerControls} from "../../../shared/timeTracking.ts";
+  import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, watchTimerControls, waitForTimerStop} from "../firebase/timeTracking.ts";
+  import {timerContext} from "../firebase/functions.ts";
   import type { Snippet } from 'svelte';
+  import { onDestroy } from 'svelte';
   import ReadingSummary from './ReadingSummary.svelte';
   import Icon from "svelte-awesome";
   import { plus, edit, play, stop } from "svelte-awesome/icons";
@@ -37,6 +42,7 @@
   const closemodal = () => {
     currentBook = null;
     prefillMinutes = null;
+    estimatedTime = false;
   };
 
   // Use provided books prop if available, otherwise fetch from database.
@@ -95,6 +101,9 @@
   // With a Toggl token connected the timer runs through Toggl; otherwise a
   // local timer is written directly to Firestore (no entryId).
   let prefillMinutes = $state<number | null>(null);
+  let estimatedTime = $state(false);
+  const stopWait = new AbortController();
+  onDestroy(() => stopWait.abort());
   let busy = $state(false);
   let now = $state(Date.now());
   let online = $state(true);
@@ -117,8 +126,12 @@
     const unsubscribe = userStore.subscribe((data) => (userDoc = data));
     return unsubscribe;
   });
-  let userLoaded = $derived(userDoc !== undefined);
-  let hasToggl = $derived(!!userDoc?.toggl);
+  let userLoaded = $derived(userDoc !== undefined && userDoc !== null);
+  let connection = $derived(userDoc ? effectiveConnection(userDoc) : {provider: "none" as const, revision: "legacy"});
+  let hasToggl = $derived(connection.provider === "toggl");
+  let timerControls = $state<TimerControls>({threeggleEnabled:false,timerWriteVersion:1});
+  let controlsLoaded=$state(false);
+  $effect(() => watchTimerControls(value => {timerControls=value;controlsLoaded=true;},error => alert(error.message)));
 
   $effect(() => {
     // Database reports the failure before rethrowing; observe it here so the
@@ -159,14 +172,33 @@
 
   function startClaimIsStale(book: Book): boolean {
     const timer = book.activeTimer;
-    return timer !== null &&
+    return timer !== null && !isTimerV2(timer) &&
       'state' in timer &&
       timer.state === 'starting' &&
       timer.claimedAt.toMillis() < now - 5 * 60 * 1000;
   }
 
   async function startTimer(book: Book): Promise<void> {
-    if (timerPending) return;
+    if (timerPending || !controlsLoaded) return;
+    if (timerControls.timerWriteVersion === 2) {
+      if (connection.provider === "threeggle" && !timerControls.threeggleEnabled) { alert("New Threeggle timers are temporarily disabled. Existing timers can still be stopped."); return; }
+      busy = true;
+      try {
+        let expectedRunning: {key:string;version:string} | null = null;
+        if (connection.provider === "threeggle" && navigator.onLine) {
+          const context = inspectResult((await timerContext({includeProjects: false})).data).context;
+          if (context.current) {
+            const current=context.current;
+            if (!confirm(`Threeggle is tracking “${current.description}”. Stop that timer and start reading “${book.title}”?`)) return;
+            expectedRunning={key:current.key,version:current.version};
+          }
+        }
+        const intent=newTimerIntent(book.id,book.title,connection);
+        markTimerPending();
+        await submitTimerOperation(pendingOperation(userId,intent,connection.provider === "none" || !navigator.onLine ? "batch" : "accept",null,expectedRunning));
+      } catch (error) { alert(errorMessage(error)); } finally { busy=false; }
+      return;
+    }
     // Offline with Toggl connected: run a local timer; the stop path
     // enqueues the finished interval for server-side Toggl sync.
     if (!hasToggl || !navigator.onLine) {
@@ -246,6 +278,25 @@
   async function stopTimer(book: Book): Promise<void> {
     const timer = book.activeTimer;
     if (timer === null) throw new Error('Cannot stop a timer that is not running.');
+    if (isTimerV2(timer)) {
+      if (timer.state !== "local" && timer.state !== "remote") { window.location.assign("/me#time-tracking");return; }
+      if (timerPending) return;
+      const intent=stopTimerIntent(book.id,book.title,timer);
+      busy = true;
+      try {
+        markTimerPending();
+        const onlineStop = navigator.onLine;
+        const {delivery} = await submitTimerOperation(pendingOperation(userId,intent,onlineStop && timer.remote !== null ? "accept" : "batch",timer));
+        const interval = onlineStop && timer.connection.provider !== "none"
+          ? await waitForTimerStop(userId,intent.operationId,stopWait.signal,delivery) : null;
+        if (stopWait.signal.aborted) return;
+        estimatedTime = interval === null && timer.connection.provider !== "none";
+        const start = interval?.start ?? intent.start, end = interval?.end ?? intent.end ?? intent.start;
+        prefillMinutes=Math.max(1,Math.round((Date.parse(end)-Date.parse(start))/60000));
+        setModalBook(book,"addReading");
+      } catch (error) { alert(errorMessage(error)); } finally { busy = false; }
+      return;
+    }
     if ('state' in timer) throw new Error('Cannot stop a Toggl timer before its lifecycle transition is resolved.');
     if (timerPending) return;
     // No entryId means the timer is local, even if Toggl was connected later
@@ -290,7 +341,7 @@
 
   function clearUnknownTimer(book: Book): void {
     const timer = book.activeTimer;
-    if (timer === null || !('state' in timer) || timer.state !== 'outcome-unknown') {
+    if (timer === null || isTimerV2(timer) || !('state' in timer) || timer.state !== 'outcome-unknown') {
       throw new Error('Only an unknown Toggl timer outcome can be cleared here.');
     }
     const confirmed = confirm(
@@ -625,6 +676,7 @@
   <AddReadingModal
     book={currentBook}
     initialTime={prefillMinutes ?? undefined}
+    estimatedTime={estimatedTime}
     onaddReading={addReading}
     oncloseModal={closemodal} />
 {:else if currentBook && modal === 'updatePage'}
@@ -648,7 +700,13 @@
 {/if}
 
 {#snippet timerControl(book: Book, scale: number)}
-  {#if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
+  {#if isTimerV2(book.activeTimer)}
+    <button type="button" class="action-button timer-button" disabled={busy || timerPending || !userLoaded}
+      aria-label={book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? `Stop the reading timer for ${book.title}` : `Review time tracking for ${book.title}`}
+      onclick={() => stopTimer(book)}>
+      <span>{book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? formatElapsed(book.activeTimer.start) : book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
+    </button>
+  {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
     <button
       type="button"
       class="action-button timer-button"
@@ -691,7 +749,7 @@
     <button
       type="button"
       class="action-button timer-button"
-      disabled={busy || timerPending || anyTimerRunning || !userLoaded}
+      disabled={busy || timerPending || anyTimerRunning || !userLoaded || !controlsLoaded}
       aria-label={`Start a reading timer for ${book.title}`}
       onclick={() => startTimer(book)}>
       <Icon data={play} {scale} style="color: #198754;" />
@@ -869,7 +927,13 @@
             <Icon data={plus} scale={0.9} />
             <span>Log reading</span>
           </button>
-          {#if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
+          {#if isTimerV2(book.activeTimer)}
+    <button type="button" class="action-button timer-button" disabled={busy || timerPending || !userLoaded}
+      aria-label={book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? `Stop the reading timer for ${book.title}` : `Review time tracking for ${book.title}`}
+      onclick={() => stopTimer(book)}>
+      <span>{book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? formatElapsed(book.activeTimer.start) : book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
+    </button>
+  {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
             <button
               type="button"
               class="mobile-action-button start-button"
@@ -911,7 +975,7 @@
             <button
               type="button"
               class="mobile-action-button start-button"
-              disabled={busy || timerPending || anyTimerRunning || !userLoaded}
+              disabled={busy || timerPending || anyTimerRunning || !userLoaded || !controlsLoaded}
               aria-label={`Start a reading timer for ${book.title}`}
               onclick={() => startTimer(book)}>
               <Icon data={play} scale={0.9} />

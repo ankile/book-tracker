@@ -1475,6 +1475,14 @@ export function decodeStoppedTogglDuration(
   return duration;
 }
 
+export function decodeTogglTimerEntry(value: unknown): StartedTogglEntry & { duration: number } {
+  const entry = decodeStartedTogglEntry(value);
+  const decoded = record(value, "Toggl timer response", throwDecodeError);
+  const duration = finiteNumber(decoded.duration, "Toggl entry duration", throwDecodeError);
+  if (!Number.isSafeInteger(duration)) throwDecodeError("Invalid Toggl duration.");
+  return { ...entry, duration };
+}
+
 export function decodeCreatedTogglEntryId(
   value: unknown,
   fail: DecodeFailure = throwDecodeError,
@@ -1484,6 +1492,7 @@ export function decodeCreatedTogglEntryId(
 }
 
 interface QueueCommon {
+  legacyResolution?: {acknowledgedAt: Timestamp; reason: "remote_outcome_checked"};
   bookId?: string;
   timerClaimVersion?: 1;
   bookTitle: string;
@@ -1522,6 +1531,7 @@ export type TogglQueueDocument = TogglQueuePayload & QueueLifecycle & (
   | {status: "error"; claimedAt: Timestamp; error: string}
   | {status: "outcome-unknown"; claimedAt: Timestamp; error: string}
   | {status: "synced"; claimedAt: Timestamp; entryId: number}
+  | {status: "acknowledged"}
 );
 
 export function decodeTogglQueueDocument(
@@ -1536,7 +1546,7 @@ export function decodeTogglQueueDocument(
   const status = decoded.status;
   if (status !== "pending" && status !== "processing" &&
       status !== "error" && status !== "outcome-unknown" &&
-      status !== "synced") {
+      status !== "synced" && status !== "acknowledged") {
     fail("Toggl queue item has an invalid status.");
   }
   const entryIdAllowed = type === "stop" || status === "synced";
@@ -1547,7 +1557,7 @@ export function decodeTogglQueueDocument(
       "bookId",
       "timerClaimVersion",
       "attempts", "claimedAt", "expiresAt", "retryRequestedAt", "error",
-      "deferredUntil", "deferrals",
+      "deferredUntil", "deferrals", "legacyResolution",
       ...(entryIdAllowed ? ["entryId"] : []),
     ],
     "Toggl queue item",
@@ -1562,7 +1572,15 @@ export function decodeTogglQueueDocument(
   if (decoded.timerClaimVersion !== undefined && decoded.timerClaimVersion !== 1) {
     fail("Queue timer claim version must be 1 when present.");
   }
+  let legacyResolution: {acknowledgedAt: Timestamp; reason: "remote_outcome_checked"} | undefined;
+  if (decoded.legacyResolution !== undefined) {
+    const resolution = record(decoded.legacyResolution, "legacy resolution", fail);
+    exactKeys(resolution, ["acknowledgedAt", "reason"], "legacy resolution", fail);
+    if (resolution.reason !== "remote_outcome_checked") fail("Invalid legacy resolution reason.");
+    legacyResolution = {acknowledgedAt: firestoreTimestamp(resolution.acknowledgedAt, "resolution time", fail), reason: "remote_outcome_checked"};
+  }
   const common = {
+    ...(legacyResolution === undefined ? {} : {legacyResolution}),
     ...(bookId === undefined ? {} : {bookId}),
     ...(decoded.timerClaimVersion === undefined ? {} : {timerClaimVersion: 1 as const}),
     bookTitle: string(decoded.bookTitle, "queue book title", fail, 500),
@@ -1609,6 +1627,10 @@ export function decodeTogglQueueDocument(
     return decoded.error;
   })();
 
+  if (status === "acknowledged") {
+    if (!legacyResolution) fail("An acknowledged queue item needs its immutable resolution.");
+    return {...payload, status, createdAt, attempts, claimedAt, error, deferrals};
+  }
   if (status === "pending") {
     if (attempts === 0 && (decoded.attempts !== undefined ||
         claimedAt !== undefined || error !== undefined)) {

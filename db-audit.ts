@@ -1,3 +1,5 @@
+import {decodeTimerV2} from './shared/timeTracking.ts';
+import {wireRecord} from './shared/time-tracking-api.ts';
 // Read-only drift report over the whole database. Run before and after
 // every migration and diff the outputs: deterministic path-sorted lines,
 // one per finding, then per-class counts.
@@ -808,7 +810,12 @@ for (const user of users) {
     if (Number.isFinite(b.currentPage) && Number.isFinite(b.pageCount) && b.currentPage > b.pageCount) {
       found('book.page-overrun', p, `${b.currentPage}/${b.pageCount}`);
     }
-    if (b.activeTimer) found('book.active-timer', p, JSON.stringify(b.activeTimer));
+    if (b.activeTimer) {
+      if (wireRecord(b.activeTimer) && b.activeTimer.version === 2) {
+        const timer=decodeTimerV2(b.activeTimer);
+        found('book.active-timer',p,JSON.stringify({provider:timer.connection.provider,operationId:timer.operationId,state:timer.state,errorCode:timer.errorCode}));
+      } else found('book.active-timer',p,JSON.stringify(b.activeTimer));
+    }
 
     // Author references: every id resolves to an author doc, no dupes.
     if (b.authorIds !== undefined) {

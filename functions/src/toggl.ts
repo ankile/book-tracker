@@ -1,14 +1,17 @@
+import {activateConnection, assertCurrentConnection, assertLegacyDestination, timerCredential} from "./timeTrackingConnections";
+import type {Connection} from "./shared/timeTracking";
+import {effectiveConnection} from "./shared/timeTracking";
+import {requireVerifiedUid} from "./callerGuards";
+import {togglFetch} from "./togglTransport";
+import {claimForTimer, timerMatchesClaim, transitionStartClaim, clearMatchedTimer} from "./timerLifecycle";
 import * as functions from "firebase-functions/v1";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
 import {DocumentReference, FieldValue, Timestamp, getFirestore} from "firebase-admin/firestore";
-import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
-import {env} from "node:process";
-import {setTimeout as delay} from "node:timers/promises";
 import {logger} from "firebase-functions";
 import {CALLABLE_MAX_INSTANCES, EVENT_INGRESS, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
 import {logIssue} from "./logging";
-import {applyQuota, consumeQuota} from "./quota";
+import {applyQuota} from "./quota";
 import {assertLiveAccount} from "./callerGuards";
 import {
   TOGGL_QUEUE_LIMIT,
@@ -16,7 +19,6 @@ import {
   TOGGL_QUEUE_RETENTION_MS,
   TOGGL_QUEUE_ROW_LIMIT,
   TOGGL_QUEUE_WINDOW_MS,
-  TOGGL_TOKEN_LIMIT,
 } from "./togglQueueLimits";
 import {markCorrelatedStopFailure} from "./toggl-recovery";
 import {logAppCheckPresence} from "./appCheck";
@@ -35,8 +37,6 @@ import {
   decodeStartedTogglEntry,
   decodeStoppedTogglDuration,
   decodeTimerClaim,
-  decodeTogglConfig,
-  decodeTogglProjects,
   decodeTogglQueueDocument,
 } from "./decoders";
 
@@ -52,16 +52,6 @@ const db = getFirestore();
 // connectedAt} for the Me page and the togglQueue create gate — never the
 // token, which used to sit in the owner-readable user document and every
 // device's IndexedDB mirror.
-const secretsDb = getFirestore("secrets");
-const togglTokenRef = (uid: string) => secretsDb.doc(`togglTokens/${uid}`);
-
-const TOGGL_BASE = "https://api.track.toggl.com/api/v9";
-const PROJECT_NAME = "Reading";
-
-const EMULATOR_WORKSPACE_ID = 900001;
-const EMULATOR_PROJECT_ID = 900002;
-const EMULATOR_ENTRY_ID = 900003;
-const EMULATOR_STOP_DURATION_SECONDS = 60;
 
 const MAX_QUEUE_ATTEMPTS = 5;
 const START_CLAIM_STALE_MS = 5 * 60 * 1000;
@@ -131,94 +121,6 @@ interface QueueClaimToken {
   claimedAt: Timestamp;
 }
 
-function emulatorJson(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {"Content-Type": "application/json"},
-  });
-}
-
-// The Functions emulator is used with production snapshots, including the
-// owner's real Toggl token. Never let a rehearsal send that token or mutate
-// real Toggl data. These responses cover every Toggl endpoint this module
-// calls and still drive the real Firestore claim, timer and queue lifecycles.
-function emulatorTogglFetch(
-  method: string,
-  path: string,
-  body?: object,
-): Response {
-  if (method === "GET" && path === "/me") {
-    return emulatorJson({id: 1});
-  }
-  if (method === "GET" && path === "/me/projects") {
-    return emulatorJson([{
-      id: EMULATOR_PROJECT_ID,
-      workspace_id: EMULATOR_WORKSPACE_ID,
-      name: PROJECT_NAME,
-    }]);
-  }
-
-  const timeEntryPath =
-    /^\/workspaces\/\d+\/time_entries(?:\/(\d+)(?:\/stop)?)?$/;
-  const match = timeEntryPath.exec(path);
-  if (method === "POST" && match !== null && match[1] === undefined) {
-    if (body === undefined || !("start" in body) ||
-        typeof body.start !== "string") {
-      return emulatorJson({error: "start is required"}, 400);
-    }
-    return emulatorJson({id: EMULATOR_ENTRY_ID, start: body.start});
-  }
-  if (method === "PATCH" && match?.[1] !== undefined &&
-      path.endsWith("/stop")) {
-    return emulatorJson({duration: EMULATOR_STOP_DURATION_SECONDS});
-  }
-  if (method === "PUT" && match?.[1] !== undefined) {
-    return emulatorJson({id: Number(match[1])});
-  }
-
-  const existingEntry = /^\/me\/time_entries\/(\d+)$/.exec(path);
-  if (method === "GET" && existingEntry !== null) {
-    return emulatorJson({
-      id: Number(existingEntry[1]),
-      duration: EMULATOR_STOP_DURATION_SECONDS,
-    });
-  }
-  return emulatorJson({error: `No Toggl emulator route for ${method} ${path}`}, 501);
-}
-
-async function togglFetch(
-  token: string,
-  method: string,
-  path: string,
-  body?: object,
-): Promise<Response> {
-  if (env.FUNCTIONS_EMULATOR === "true") {
-    return emulatorTogglFetch(method, path, body);
-  }
-  const doFetch = () => fetch(TOGGL_BASE + path, {
-    method,
-    headers: {
-      "Authorization":
-        "Basic " + Buffer.from(`${token}:api_token`).toString("base64"),
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let resp = await doFetch();
-  if (resp.status === 429) {
-    // Toggl rate-limits with a leaky bucket per token; a reconnect burst
-    // of queue items (one function instance each) can trip it, and they
-    // all see the 429 at the same moment. Back off long enough for the
-    // bucket to drain and jitter so the retries don't collide again. A 429
-    // rejects before processing, so replaying even a POST cannot
-    // duplicate. Items that still fail go to 'error' and are requeued by
-    // the client's next-session sweep.
-    await delay(15000 + Math.random() * 15000);
-    resp = await doFetch();
-  }
-  return resp;
-}
-
 // Toggl stores timestamps at second precision and requires
 // start + duration == stop, so both the duration arithmetic and the
 // timestamps sent must be truncated to whole seconds the same way.
@@ -240,63 +142,14 @@ function requireUid(context: functions.https.CallableContext): string {
   return context.auth.uid;
 }
 
-async function getTogglConfig(uid: string): Promise<TogglConfig> {
+async function getTogglConfig(uid: string): Promise<TogglConfig & {connection: Connection}> {
   const userSnap = await db.doc(`users/${uid}`).get();
   assertLiveAccount(userSnap.exists, userSnap.data()?.deletedAt);
-  const tokenSnap = await togglTokenRef(uid).get();
-  const toggl = tokenSnap.data();
-  if (toggl === undefined) {
-    throw new functions.https.HttpsError(
-      "failed-precondition",
-      "Add your Toggl API token on the Me page first.",
-    );
-  }
-  return decodeTogglConfig(toggl, (message) => {
-    throw new functions.https.HttpsError(
-      "failed-precondition",
-      `Stored Toggl configuration is invalid: ${message}`,
-    );
-  });
-}
-
-function claimForTimer(bookId: string, timer: ActiveTimer): TimerClaim {
-  if (!("state" in timer)) {
-    if ("entryId" in timer) {
-      return {version: 1, state: "remote", bookId, entryId: timer.entryId, start: timer.start};
-    }
-    if (timer.operationId === undefined) {
-      throw new Error("Local timer is missing its operation id.");
-    }
-    return {version: 1, state: "local", bookId, operationId: timer.operationId, start: timer.start};
-  }
-  return {version: 1, ...timer, bookId};
-}
-
-function timerMatchesClaim(
-  bookId: string,
-  timer: ActiveTimer | null,
-  claim: TimerClaim,
-): boolean {
-  if (timer === null || claim.state === "idle" || claim.bookId !== bookId) return false;
-  const expected = claimForTimer(bookId, timer);
-  if (expected.state !== claim.state || expected.start !== claim.start) return false;
-  if (expected.state === "local") {
-    return claim.state === "local" && expected.operationId === claim.operationId;
-  }
-  if (expected.state === "remote") {
-    return claim.state === "remote" && expected.entryId === claim.entryId;
-  }
-  if (expected.state === "stopping") {
-    return claim.state === "stopping" && expected.entryId === claim.entryId &&
-      expected.queueId === claim.queueId;
-  }
-  if (expected.state === "starting") {
-    return claim.state === "starting" && expected.operationId === claim.operationId &&
-      expected.claimedAt.isEqual(claim.claimedAt);
-  }
-  return claim.state === "outcome-unknown" &&
-    expected.operationId === claim.operationId &&
-    expected.claimedAt.isEqual(claim.claimedAt) && expected.error === claim.error;
+  const connection = effectiveConnection(userSnap.data());
+  if (connection.provider !== "toggl") throw new functions.https.HttpsError("failed-precondition", "Toggl is not the selected app.");
+  const apiToken = await timerCredential(uid, connection);
+  if (apiToken === null) throw new functions.https.HttpsError("failed-precondition", "Repair your Toggl connection in settings.");
+  return {apiToken, workspaceId: connection.workspaceId, projectId: connection.projectId, connection};
 }
 
 exports.savetoken = functions
@@ -311,98 +164,10 @@ exports.savetoken = functions
     const uid = requireUid(context);
     const {token} = decodeSaveTokenRequest(data, invalidArgument);
 
-    // Two outbound Toggl calls with a caller-supplied credential: a
-    // validation oracle and a request amplifier from Google IPs unless
-    // metered (SEC-024). Verified accounts only — sign-up is open and
-    // unverified, and a stored token is a live credential for the user's
-    // whole Toggl account (SEC-033).
-    if (context.auth?.token.email_verified !== true) {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "Connecting Toggl needs a verified email address. The app cannot verify it yet — ask the administrator.",
-      );
-    }
-    // Read before any outbound call: the user document is created only by
-    // the sign-up trigger, and an identity whose account has been deleted
-    // keeps a valid ID token for up to an hour — it must neither recreate
-    // its document (and re-enable queue processing) nor spend Toggl calls.
-    const userRef = db.doc(`users/${uid}`);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "Your account is still being set up. Wait a few seconds and try again.",
-      );
-    }
-    assertLiveAccount(userSnap.exists, userSnap.data()?.deletedAt);
-    const decision = await consumeQuota(
-      db,
-      `users/${uid}/functionQuotas/togglToken`,
-      TOGGL_TOKEN_LIMIT,
-      TOGGL_QUEUE_WINDOW_MS,
-    );
-    if (!decision.granted) {
-      if (decision.firstRefusal) {
-        logger.warn("toggl.token_quota_exceeded", {uid});
-      }
-      throw new functions.https.HttpsError(
-        "resource-exhausted",
-        "Too many Toggl connection attempts. Try again later.",
-      );
-    }
-    const meResp = await togglFetch(token, "GET", "/me");
-    if (!meResp.ok) {
-      throw new functions.https.HttpsError(
-        "invalid-argument",
-        `Toggl rejected the API token (status ${meResp.status}).`,
-      );
-    }
-
-    const projectsResp = await togglFetch(token, "GET", "/me/projects");
-    if (!projectsResp.ok) {
-      throw new Error(
-        `Toggl project lookup failed with status ${projectsResp.status}`,
-      );
-    }
-    const projectsData: unknown = await projectsResp.json();
-    const projects = decodeTogglProjects(projectsData);
-    const project = projects.find((p) => p.name === PROJECT_NAME);
-    if (!project) {
-      throw new functions.https.HttpsError(
-        "not-found",
-        `No Toggl project named "${PROJECT_NAME}" found.`,
-      );
-    }
-
-    // The credential goes to the secrets database first, the status
-    // mirror second. If the second write is lost the account shows
-    // disconnected while a token is stored; the next savetoken overwrites
-    // both, and db-audit reports the drift (toggl-secret.status-missing).
-    await togglTokenRef(uid).set({
-      apiToken: token,
-      workspaceId: project.workspaceId,
-      projectId: project.id,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-    // The tombstone check at the top and this write are seconds apart
-    // (two outbound Toggl calls in between), and a cross-database
-    // transaction does not exist: re-check after writing and undo, so an
-    // account deleted mid-call cannot keep a live credential. The
-    // deletion trigger sets the tombstone before its own credential
-    // delete, so one of the two paths always removes this write.
-    const recheck = await userRef.get();
-    if (recheck.data()?.deletedAt !== undefined) await togglTokenRef(uid).delete();
-    assertLiveAccount(recheck.exists, recheck.data()?.deletedAt);
-    // update, never a merge-set (see the existence check above).
-    await userRef.update({
-      toggl: {
-        workspaceId: project.workspaceId,
-        projectId: project.id,
-        connectedAt: FieldValue.serverTimestamp(),
-      },
-    });
-
-    return {workspaceId: project.workspaceId, projectId: project.id};
+    requireVerifiedUid(context);
+    const connection = await activateConnection(uid, {provider: "toggl", token, expectedRevision: "legacy", legacyInitialize: true});
+    if (connection.provider !== "toggl") throw new Error("Expected a Toggl connection.");
+    return {workspaceId: connection.workspaceId, projectId: connection.projectId};
   });
 
 // The stored token is a live credential for the user's whole Toggl
@@ -420,29 +185,12 @@ exports.cleartoken = functions
     logAppCheckPresence("toggl.cleartoken", context);
     const uid = requireUid(context);
     decodeEmptyCallableRequest(data, invalidArgument);
-    const userRef = db.doc(`users/${uid}`);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-      throw new functions.https.HttpsError("failed-precondition", "Account is not set up.");
-    }
-    assertLiveAccount(userSnap.exists, userSnap.data()?.deletedAt);
-    // A running remote timer can only be stopped through Toggl; without the
-    // token the stop callable fails and every other timer stays blocked.
-    const claimSnap = await db.doc(`users/${uid}/timerLifecycle/current`).get();
-    if (claimSnap.exists && claimSnap.get("state") !== "idle") {
-      throw new functions.https.HttpsError(
-        "failed-precondition",
-        "Stop your running timer before disconnecting Toggl.",
-      );
-    }
-    // Withdrawing the credential is the part that must not be lost:
-    // secret first, then the status mirror. If the second write is lost
-    // the account still looks connected but every use refuses ("Add your
-    // Toggl API token"), and db-audit reports the drift
-    // (user.toggl-status-orphan). Deleting a missing document is a no-op,
-    // so a retry converges either way.
-    await togglTokenRef(uid).delete();
-    await userRef.update({toggl: FieldValue.delete()});
+    requireVerifiedUid(context);
+    const user = await db.doc(`users/${uid}`).get();
+    assertLiveAccount(user.exists, user.get("deletedAt"));
+    const connection = effectiveConnection(user.data());
+    if (connection.provider !== "toggl") throw new functions.https.HttpsError("failed-precondition", "Toggl is not the selected app.");
+    await activateConnection(uid, {provider: "none", expectedRevision: connection.revision});
     return {cleared: true};
   });
 
@@ -464,7 +212,9 @@ exports.start = functions
     const operationId = randomUUID();
     const requestedStart = new Date().toISOString();
     const claimedAt = Timestamp.now();
+    const connection = toggl.connection;
     const claim = await db.runTransaction<StartClaimResult>(async (tx) => {
+      await assertCurrentConnection(tx, uid, connection);
       const [bookSnap, claimSnap] = await Promise.all([
         tx.get(bookRef),
         tx.get(claimRef),
@@ -473,7 +223,7 @@ exports.start = functions
         throw new functions.https.HttpsError("not-found", "Book not found.");
       }
       const book = decodeBookForTimer(bookSnap.data());
-      const currentClaim = claimSnap.exists ? decodeTimerClaim(claimSnap.data()) : null;
+      const currentClaim = claimSnap.exists ? (claimSnap.get("version") === 2 && claimSnap.get("state") === "idle" ? {version: 1 as const, state: "idle" as const, cleared: null} : decodeTimerClaim(claimSnap.data())) : null;
       if (currentClaim?.state === "starting" &&
           currentClaim.claimedAt.toMillis() < Date.now() - START_CLAIM_STALE_MS) {
         const claimedBookRef = db.doc(`users/${uid}/books/${currentClaim.bookId}`);
@@ -597,33 +347,6 @@ exports.start = functions
 
     return {entryId: entry.id, start: entry.start};
   });
-
-async function transitionStartClaim(
-  bookRef: DocumentReference,
-  claimRef: DocumentReference,
-  operationId: string,
-  replacement: ActiveTimer | null,
-): Promise<boolean> {
-  return db.runTransaction(async (tx) => {
-    const [snap, claimSnap] = await Promise.all([
-      tx.get(bookRef),
-      tx.get(claimRef),
-    ]);
-    if (!snap.exists || !claimSnap.exists) return false;
-    const current = decodeActiveTimerFromBook(snap.data());
-    const claim = decodeTimerClaim(claimSnap.data());
-    if (!current || !("state" in current) ||
-        current.state !== "starting" || current.operationId !== operationId ||
-        claim.state !== "starting" || claim.operationId !== operationId ||
-        !timerMatchesClaim(bookRef.id, current, claim)) {
-      return false;
-    }
-    tx.update(bookRef, {activeTimer: replacement});
-    if (replacement === null) tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
-    else tx.set(claimRef, claimForTimer(bookRef.id, replacement));
-    return true;
-  });
-}
 
 exports.stop = functions
   .region("europe-west1")
@@ -797,34 +520,10 @@ exports.clearstopping = functions
       }
       tx.update(bookRef, {activeTimer: null});
       tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
-      tx.delete(queueRef);
+      tx.update(queueRef, {status: "acknowledged", legacyResolution: {acknowledgedAt: Timestamp.now(), reason: "remote_outcome_checked"}, expiresAt: FieldValue.delete()});
     });
     return {cleared: true};
   });
-
-async function clearMatchedTimer(
-  bookRef: DocumentReference,
-  claimRef: DocumentReference,
-  expectedTimer: ActiveTimer,
-): Promise<boolean> {
-  return db.runTransaction(async (tx) => {
-    const [bookSnap, claimSnap] = await Promise.all([
-      tx.get(bookRef),
-      tx.get(claimRef),
-    ]);
-    if (!bookSnap.exists || !claimSnap.exists) return false;
-    const timer = decodeActiveTimerFromBook(bookSnap.data());
-    const claim = decodeTimerClaim(claimSnap.data());
-    const expectedClaim = claimForTimer(bookRef.id, expectedTimer);
-    if (!timerMatchesClaim(bookRef.id, timer, expectedClaim) ||
-        claim.state === "idle" || !timerMatchesClaim(bookRef.id, timer, claim)) {
-      return false;
-    }
-    tx.update(bookRef, {activeTimer: null});
-    tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
-    return true;
-  });
-}
 
 // Performs one queued Toggl operation and returns the entry id it touched.
 // Queue docs are client-writable, so every field is validated before it
@@ -870,10 +569,14 @@ async function syncQueueItem(
     // accepts the request, the client must not replay it and create a second
     // entry. A verified non-2xx response moves back to retryable error; a
     // network failure or invalid 2xx response remains outcome-unknown.
-    await queueRef.update({
+    await db.runTransaction(async tx => {
+      const live = await tx.get(queueRef);
+      if (live.get("legacyResolution") !== undefined) throw new Error("Toggl operation has already been acknowledged.");
+      tx.update(queueRef, {
       status: "outcome-unknown",
       error: "Toggl create started but its remote outcome is not confirmed.",
       retryRequestedAt: FieldValue.delete(),
+      });
     });
     let postResp: Response;
     try {
@@ -1002,7 +705,8 @@ exports.syncqueue = onDocumentWritten(
       const snap = await tx.get(after.ref);
       if (!snap.exists) return null;
       const data = snap.data();
-      if (!data || data.status !== "pending") return null;
+      if (!data || data.status !== "pending" || data.legacyResolution !== undefined) return null;
+      await assertLegacyDestination(tx, event.params.uid);
       const now = Timestamp.now();
       const expiresAt = queueExpiry(now);
       // A row this trigger has never touched carries no lifecycle field: a
@@ -1208,11 +912,15 @@ exports.syncqueue = onDocumentWritten(
       // retried by flipping status back to 'pending') instead of leaving
       // the item claimed forever, then rethrow so the error is logged.
       const raw = errorMessage(error);
-      await after.ref.update({
+      await db.runTransaction(async tx => {
+        const live = await tx.get(after.ref);
+        if (live.get("legacyResolution") !== undefined) return;
+        tx.update(after.ref, {
         status: error instanceof OutcomeUnknownError ?
           "outcome-unknown" : "error",
         error: raw.slice(0, 1000),
         retryRequestedAt: FieldValue.delete(),
+        });
       });
       // Also record it durably where the admin overview looks: a sync that
       // exhausts its retries otherwise only surfaces if the user notices.
@@ -1256,6 +964,7 @@ exports.syncqueue = onDocumentWritten(
             tx.get(bookRef),
             tx.get(claimRef),
           ]);
+          if (queueSnap.get("legacyResolution") !== undefined) return;
           if (!queueSnap.exists || !bookSnap.exists || !claimSnap.exists) {
             throw new Error("Toggl stop queue lost its correlated timer state.");
           }
@@ -1305,7 +1014,10 @@ exports.syncqueue = onDocumentWritten(
             const value = live.data();
             if (live.exists && value?.status === "synced" &&
                 value.entryId === entryId) {
-              await after.ref.delete();
+              await db.runTransaction(async tx => {
+                const completion = await tx.get(after.ref);
+                if (completion.exists && completion.get("legacyResolution") === undefined && completion.get("status") === "synced") tx.delete(after.ref);
+              });
               return;
             }
           }
@@ -1322,12 +1034,19 @@ exports.syncqueue = onDocumentWritten(
         throw error;
       }
     } else {
-      await after.ref.update({
+      await db.runTransaction(async tx => {
+        const live = await tx.get(after.ref);
+        if (live.get("legacyResolution") !== undefined) return;
+        tx.update(after.ref, {
         status: "synced",
         entryId,
         error: FieldValue.delete(),
         retryRequestedAt: FieldValue.delete(),
+        });
       });
     }
-    await after.ref.delete();
+    await db.runTransaction(async tx => {
+                const completion = await tx.get(after.ref);
+                if (completion.exists && completion.get("legacyResolution") === undefined && completion.get("status") === "synced") tx.delete(after.ref);
+              });
   });

@@ -1,3 +1,5 @@
+import {decodeConnection, decodeTimerV2} from '../../../shared/timeTracking.ts';
+import type {Connection} from '../../../shared/timeTracking.ts';
 import {
   DocumentReference,
   Timestamp,
@@ -44,6 +46,7 @@ export class DataDecodeError extends Error {
 }
 
 export interface UserDocument {
+  timeTracking?: Connection;
   uid: string;
   email: string;
   // Status-only (SEC-004): the credential lives server-side in the
@@ -59,6 +62,7 @@ export interface UserDocument {
 export type QueueStatus = 'pending' | 'processing' | 'error';
 
 interface QueueBase {
+  legacyResolution?: {acknowledgedAt: Timestamp;reason:"remote_outcome_checked"};
   id: string;
   bookId?: string;
   timerClaimVersion?: 1;
@@ -256,6 +260,7 @@ function metadata(data: Data, context: string): BookMetadata {
 function activeTimer(value: unknown, context: string): ActiveTimer | null {
   if (value === undefined || value === null) return null;
   const data = record(value, context);
+  if (data.version === 2) return decodeTimerV2(data);
   if (data.state === 'stopping') {
     exactKeys(data, ['state', 'entryId', 'start', 'queueId'], context);
     const entryId = integer(data.entryId, `${context}.entryId`);
@@ -601,12 +606,14 @@ export function decodeUser(value: unknown, path: string): UserDocument {
   const togglValue = data.toggl;
   if (togglValue === undefined) {
     return {
-      uid: nonEmptyString(data.uid, `${path}.uid`),
+      ...(data.timeTracking === undefined ? {} : {timeTracking:decodeConnection(data.timeTracking)}),
+    uid: nonEmptyString(data.uid, `${path}.uid`),
       email: nonEmptyString(data.email, `${path}.email`),
     };
   }
   const toggl = record(togglValue, `${path}.toggl`);
   return {
+    ...(data.timeTracking === undefined ? {} : {timeTracking:decodeConnection(data.timeTracking)}),
     uid: nonEmptyString(data.uid, `${path}.uid`),
     email: nonEmptyString(data.email, `${path}.email`),
     toggl: {
@@ -668,7 +675,7 @@ export function decodeQueueSweepItem(
       'bookId',
       'timerClaimVersion',
       'attempts', 'claimedAt', 'expiresAt', 'retryRequestedAt', 'error',
-      'deferredUntil', 'deferrals',
+      'deferredUntil', 'deferrals', 'legacyResolution',
       ...(type === 'stop' ? ['entryId'] : []),
     ],
     path,
@@ -702,7 +709,15 @@ export function decodeQueueSweepItem(
   if (data.timerClaimVersion !== undefined && data.timerClaimVersion !== 1) {
     fail(`${path}.timerClaimVersion`, '1 or absent');
   }
+  let legacyResolution: QueueBase['legacyResolution'];
+  if (data.legacyResolution !== undefined) {
+    const resolution=record(data.legacyResolution,`${path}.legacyResolution`);
+    exactKeys(resolution,['acknowledgedAt','reason'],path);
+    if (resolution.reason !== 'remote_outcome_checked') fail(path,'a checked remote outcome');
+    legacyResolution={acknowledgedAt:timestamp(resolution.acknowledgedAt,path),reason:'remote_outcome_checked'};
+  }
   const shared: Omit<QueueBase, 'status'> = {
+    ...(legacyResolution === undefined ? {} : {legacyResolution}),
     id,
     ...(bookId === undefined ? {} : { bookId }),
     ...(data.timerClaimVersion === undefined ? {} : { timerClaimVersion: 1 as const }),

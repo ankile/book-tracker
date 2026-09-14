@@ -27,7 +27,7 @@ export async function markCorrelatedStopFailure(
     if (!snap.exists) return false;
     const value = snap.data();
     if (value === undefined) throw new Error("Existing Toggl queue has no data.");
-    if (value.status !== "processing" || value.attempts !== token.attempts ||
+    if (value.legacyResolution !== undefined || value.status !== "processing" || value.attempts !== token.attempts ||
         !(value.claimedAt instanceof Timestamp) ||
         !value.claimedAt.isEqual(token.claimedAt)) {
       return false;

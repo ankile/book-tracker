@@ -50,8 +50,8 @@ editable Mermaid and JavaScript sources, PNG copies, and rendering commands.
 
 - Adds, edits, and removes books from a personal library.
 - Tracks page progress, finished books, and reading sessions.
-- Starts and stops reading timers, including an optional time-tracking
-  integration.
+- Starts and stops reading timers with one persistent choice: local-only,
+  Toggl Track, or Threeggle. The new integration follows a reader-first rollout.
 - Shows yearly statistics, reading streaks, a daily activity heatmap, and
   per-book reading speed.
 - Resolves authors through one shared catalog and lets authorized operators
@@ -222,6 +222,7 @@ Root package commands:
 | `npm run check:watch` | Watch-mode Svelte checks |
 | `npm run test:unit` | Application and migration unit tests |
 | `npm run test:rules` | Firestore Rules and integration tests against local emulators |
+| `npm run test:time-tracking-local` | Opt-in real Firestore/isolated Threeggle contract test; requires the dedicated local endpoint and timer token described in [the release runbook](docs/time-tracking-release.md) |
 | `npm run test:catalog-emulator` | Restricted catalog preview/apply workflow against local emulators |
 | `npm run test:functions` | Functions lint, production build, strict test type-check, and tests |
 | `npm run test:pwa` | Service-worker and PWA behavior tests |

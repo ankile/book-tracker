@@ -7,11 +7,13 @@
   let {
     book,
     initialTime = undefined,
+    estimatedTime = false,
     onaddReading,
     oncloseModal
   }: {
     book: Book;
     initialTime?: number;
+    estimatedTime?: boolean;
     onaddReading: (data: { id: string; timeRead: number; currentPage: number; previousPage: number }) => void;
     oncloseModal: () => void;
   } = $props();
@@ -83,6 +85,9 @@
   primaryText="Add"
   primaryAction={addReading}
   header={book.title}>
+  {#if estimatedTime}
+    <p role="status">Estimated from this device. Remote confirmation is pending; check the duration before saving.</p>
+  {/if}
   <Input label="Minutes read" inputId="inputTime">
     <input
       id="inputTime"
