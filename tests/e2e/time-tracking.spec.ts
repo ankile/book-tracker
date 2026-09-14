@@ -249,8 +249,12 @@ test("a rejected offline revision keeps its interval through reload and explicit
       expect(dialog.type()).toBe("confirm");
       await dialog.accept();
     });
+    // Sign-out clears Firestore persistence and reloads. The transient
+    // signed-out render before that reload is not ready for a new login.
+    const signedOutReload = page.waitForEvent("load");
     await page.getByRole("button", { name: "Sign Out", exact: true }).click();
     await confirmSignOut;
+    await signedOutReload;
     await expect(
       page.getByRole("button", { name: "Log in", exact: true }),
     ).toBeVisible();
