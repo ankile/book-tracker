@@ -4,7 +4,7 @@ Draft for review, September 12, 2026. No implementation or deployment is include
 
 Review threads: [Book Tracker PR #53](https://github.com/ankile/book-tracker/pull/53) and [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).
 
-The initial review used Book Tracker at `1464be9`. This integration branch starts from published `master` at `252231d`, leaving the unmerged profile-read fix separate. The Threeggle branch starts from published `main` at `fe7e710`. Its timer API is unchanged from the initial review. API behavior below was verified in source, not against an authenticated production deployment.
+This integration branch is rebased onto Book Tracker `master` at `9255b8c`, which includes the profile-read fix and typed Toggl refusal handling. The Threeggle branch is rebased onto `main` at `54cd0e2`, which includes reconstruction PR #1, token-kind enforcement, and bidirectional project sync. API behavior below was verified in source, not against an authenticated production deployment.
 
 ## Recommendation
 
@@ -74,7 +74,7 @@ Add a versioned integration contract at `/api/time-tracking/v1`, while retaining
 |---|---|---|
 | Connection info | Authenticated read | Stable account identifier and supported API version/capabilities. Project listing can use the existing query. |
 | Start | `requestId`, description, project ID, start time, `expectedRunning: null` or `{key, version}` | Atomically start or switch only if current activity still matches. Return the created entry's key, version, start, and any displaced activity's end. |
-| Stop entry | `requestId`, `entryKey`, recorded end time | Address the specific owned entry. Use its current revision inside the mutation; a title/project edit does not block stopping it. If already stopped, return its actual interval without rewriting it. Never stop a different entry. |
+| Stop entry | `requestId`, `entryKey`, recorded end time | Address the specific owned entry. Use its current revision inside the mutation; retain valid title/project edits, with typed recovery for an unavailable retained project. If already stopped, return its actual interval without rewriting it. Never stop a different entry. |
 | Create interval | `requestId`, description, project ID, start and end | Insert one completed interval without changing the current timer. Reject overlapping history for review, preserving the proposed interval in Book Tracker. Perform the overlap check and insert in one transaction, including a running entry. |
 | Get entry | `entryKey` | Return the owned entry, including final times and version, or a typed missing result. Used to reconcile external edits or deletion. |
 | Get operation | `requestId` | Return the original committed operation result, including its entry identity, or a typed unknown result. |
@@ -85,7 +85,11 @@ The producer must evaluate deterministic domain preconditions before `applyForUs
 
 The operation receipt records what happened at execution time. A separate entry lookup reports subsequent edits or deletion. A recovered start must check the current state of its recorded entry before Book Tracker presents it as running.
 
-Use typed response envelopes and error codes for invalid input, revoked credentials, missing entries, stale start/switch expectations, time conflicts, and temporary failures. `interval_overlap` includes up to five conflicting entry snapshots and whether more exist; `running_changed` includes the current activity or null. Persist those details in the receipt and render them as the observation at the failed attempt, not as current history. The existing API catches mutation errors as HTTP 409; the new route needs to distinguish a conflict requiring review from a failure eligible for retry.
+Use typed response envelopes and error codes for invalid input, revoked credentials, missing entries, stale start/switch expectations, unavailable retained projects, interval limits, time conflicts, and temporary failures. `interval_overlap` includes up to five conflicting entry snapshots and whether more exist; `running_changed` includes the current activity or null. Persist those details in the receipt and render them as the observation at the failed attempt, not as current history. The existing API catches mutation errors as HTTP 409; the new route needs to distinguish a conflict requiring review from a failure eligible for retry.
+
+The current Threeggle tracker rejects a write retaining a deleted project, including a stop or the displaced half of a switch. The producer returns a durable `409 project_unavailable` with `details: {entry, reason}`; reasons are `project_deleted` or `project_missing`, and the snapshot is the owned affected entry. A retained owned archived project or null project remains valid, while new entries require an active project. A completed target returns `already_stopped` without project validation. Both repos must share fixtures for these distinctions; do not substitute a retryable 5xx or silently clear a project.
+
+Completed offline exports have a 31-day maximum, `2678400000` ms. The producer bounds overlap candidate discovery to 256 document reads plus one overflow sentinel, counting raw span rows, span-target fetches, same-month candidates, running entries, and the previous-entry lookup before filtering/deduplication. It requires a complete set before inserting; a truncated scan cannot prove no overlap. It returns durable `422 interval_too_long` with `details: {maxDurationMs: 2678400000}` or `422 overlap_check_limit` with `details: {maxReadDocuments: 256}`. The context response advertises `limits: {maxIntervalDurationMs: 2678400000, maxOverlapReadDocuments: 256}`. The consumer uses these for explanation/preflight, while the producer enforces them. See the companion plan for bounded indexed reads and span-write limits.
 
 Implement the new mutations through `applyForUser` to retain entry validation, revisions, history indexing, and optional Toggl propagation. Keep the existing timer route's behavior compatible. Add only the validation and failure handling required at the external API and asynchronous write boundaries; programming errors should remain visible.
 
@@ -165,6 +169,10 @@ Transport retry reuses the original request ID and frozen provider payload. For 
 
 A clock correction is likewise a reviewed new decision with original and corrected times retained. Abandonment marks the row resolved with an explicit reason; clearing a correlated remote stop also requires confirmation that the remote timer has been stopped/deleted and a transaction matching the claim. An `outcome-unknown` Toggl create cannot use the new-export action until its remote outcome is checked. Successful/synced rows never offer it. These actions prevent permanent locks without silently duplicating or rewriting history.
 
+For `project_unavailable`, keep a correlated stop and its account lock while displaying the affected entry and repair steps. The user can move the entry to an active project or clear its project in Threeggle. Merely pressing Stop there may hit the same validation. Keep lookup, targeted stop, and same-account credential repair available even when the connection's selected project has disappeared; project availability gates new entries, not these recovery calls. After the user repairs the entry, re-read it and offer a reviewed new attempt with a new ID, transferring the correlated stop claim atomically. A completed repaired entry reconciles through `already_stopped`. The old ID still replays the original negative receipt. A failed switch creates no new remote activity and requires fresh context/consent before a new start.
+
+Classify `interval_too_long` and `overlap_check_limit` as definitive non-applied review outcomes. Preserve the entire original interval and its normalized provider payload, show the relevant limit, and stop automatic unchanged retries. Explicit correction uses a new ID with both original and corrected times retained. For a scan-budget failure, offer manual recovery or a new reviewed attempt only after the user has addressed the history condition; do not offer a blind unchanged retry. Never split, truncate, or discard the interval automatically. Local reading history remains available even if its remote export exceeds the limit. Manual completion and abandonment use the existing remote-outcome confirmation path.
+
 ### Credentials, diagnostics, and resource use
 
 Reuse authenticated callables, verified-account connection setup, App Check, owner checks, account-deletion checks, bounded queue creation, and backend-only credentials. Configure the Threeggle service URL on the server; do not offer an arbitrary URL field.
@@ -204,6 +212,8 @@ Rollback should disable new Threeggle starts while retaining the readers and wor
 | Stop after external switch | Return the original reading entry's final interval and leave the new activity running. |
 | Offline start and stop | Insert the completed interval once on reconnect without changing the current remote timer. Overlap conflicts retain the interval for review. |
 | Online start, offline stop | Target the recorded entry, retain title/project edits, return an already-stopped interval, and show invalid edited-start/deletion results for recovery. Never stop the replacement activity. |
+| Deleted/archived project during stop or switch | Retained archived/null projects work; deleted/missing projects return `project_unavailable`, keep a correlated stop locked, and leave a failed switch unchanged. Lookup/repair/stop remain available even if the connection project is unavailable. Repair plus one reviewed successor succeeds; old-ID replay stays negative. Completed targets reconcile without project validation. |
+| Completed-export limits | Exactly 31 days can export when free; 31 days plus 1 ms or a centuries-long interval yields `interval_too_long`. A dense history/span bucket that exceeds 256 candidate reads yields `overlap_check_limit`, never a false free interval. Preserve intent and classify both 422 results for review, without automatic retry/splitting/truncation. Shared fixtures and the two-backend test cover direct replay, receipt lookup, and explicit correction/manual recovery. |
 | Duplicate delivery and crash | One remote mutation; recover after remote commit but before local confirmation. Changed payload with the same ID is refused. A conflict replayed after the conflicting activity disappears still returns the original negative receipt. |
 | Multiple books, tabs, and devices | One account-wide timer claim; no concurrent starts or cross-provider stop. |
 | Provider/account/project changes | Existing operations retain their original destination. New-client stale offline writes survive in the outbox. Legacy writers are refused after cutover and must sync/update before selection changes; they have no retroactive outbox guarantee. |
@@ -226,9 +236,9 @@ Use Threeggle's Convex tests for atomicity and contract behavior. Use Book Track
 
 Both branches use dedicated worktrees and linked draft PRs. Claude Fable 5.1's combined review is published and reconciled in the disposition table below. Wait for the user's explicit implementation instruction before adding application code in either repository. The PR descriptions must say when they contain planning only; a plan PR is not evidence that the feature is implemented or tested. Keep both PRs open through implementation and mark them ready after the shared acceptance checks pass. No merge or deployment is part of this planning pass.
 
-Threeggle [PR #1](https://github.com/ankile/threeggle/pull/1) is still open. It owns token kinds and the creation UI. If it lands first, the integration reuses its full `connectionToken` helper. If the integration lands first, it adds only a legacy-token shim with the same signature; the second branch to land must adopt the full helper and pass token-kind denial tests on every new action. No reconstruction-token fixture is valid under the older schema. The integration does not need reconstruction UI or proposal features.
+Threeggle [PR #1](https://github.com/ankile/threeggle/pull/1) is merged into the producer base. Reuse its full `connectionToken(ctx, hash, "timer")` helper, token-kind schema, and creation UI. The integration PR itself must pass reconstruction-token denial tests on all seven new actions under that current schema. No legacy-only shim or deferred second-branch validation remains in the implementation path. The integration does not need new reconstruction UI or proposal features.
 
-The Book Tracker profile-read fix changes `db.ts`, the Me page, and subscription behavior. If it lands first, rebase this integration and preserve those subscription changes. The finish forecast and security branches are independent work, not release prerequisites. Do not merge them just to clear the worktree inventory.
+The Book Tracker profile-read fix is already in this base. Preserve its `db.ts`, Me page, and subscription changes, along with the typed Toggl refusal handling now on master. The finish forecast and security work are independent, not integration release prerequisites; do not merge unrelated branches for worktree cleanup.
 
 ### Implementation checklist by repository
 
@@ -281,7 +291,7 @@ Focus the review on these questions:
 3. Is offline work durable when Firestore rejects a stale connection revision? Review the proposed local outbox, reload behavior, account scoping, and acknowledgement boundary, since a Firestore cache alone does not guarantee retention after a rejected write.
 4. Can configuration changes, disconnect, account deletion, and old cached clients race with timer claims or queue creation? Identify any remaining route that can write to the wrong provider/account or leave a permanent lock.
 5. Does the proposed overlap check use complete, bounded history reads and remain correct under concurrent writes? Should overlap review block export in the first release, as proposed?
-6. Does the token-kind integration preserve the access separation introduced by Threeggle PR #1 in either merge order?
+6. Does the token-kind integration preserve the access separation already present from merged Threeggle PR #1 on every new action?
 7. Are the producer/consumer fixtures and two-backend tests enough to catch real contract mismatches, and is the deployment/rollback order safe for active timers?
 
 Return findings by severity with concrete failure sequences, affected plan sections/source files, and the smallest recommended plan change. Distinguish blocking correctness gaps from optional improvements. Do not implement, merge, or deploy as part of this review.
@@ -303,3 +313,13 @@ Author responses to [Claude Fable 5.1's combined review](https://github.com/anki
 | TG-1 cross-reference | Matched the producer's returned negative-receipt design and added conflict-after-timeline-change replay to acceptance checks. |
 | TG-2 cross-reference | Removed caller `expectedVersion` from targeted stop; preserve title/project edits and use the current version inside the producer mutation. |
 | TG-3 cross-reference | Specified bounded conflict snapshots, their age, and how recovery displays/rechecks them. |
+
+## Rebased Astra review disposition
+
+Author responses to [Astra's review](https://github.com/ankile/book-tracker/pull/53#pullrequestreview-5193051771) of `9d0a5f9`. These resolve the planning findings; runtime behavior remains an implementation acceptance gate and has not received reviewer approval.
+
+| Finding | Plan response |
+|---|---|
+| A1 | Matched the producer's `project_unavailable` contract; preserve the stop lock, keep repair available with an unavailable connection project, and retry a repaired entry through one reviewed successor. Added archive/deletion/completed/switch/replay acceptance cases. |
+| A2 | Matched the producer's 31-day duration limit and 256-read overlap budget, 422 details/context limits, durable negative receipts, and explicit correction/manual recovery with no automatic unchanged retries or interval truncation. Added shared-fixture and two-backend acceptance cases. |
+| A3 | Updated both base commits and merged dependencies. Require the existing full token helper and seven-action denial tests; preserve profile-read and typed Toggl refusal changes already in master. |
