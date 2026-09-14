@@ -169,7 +169,7 @@ test("online start/stop each has its own retained receipt and releases only the 
   await processTimerQueue(uid, start.operationId);
   await acceptTimerIntent(uid, start, null);
   await processTimerQueue(uid, start.operationId);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(
     (await book.get()).get("activeTimer.remote.entryKey"),
     remote.key,
@@ -190,6 +190,186 @@ test("online start/stop each has its own retained receipt and releases only the 
   assert.equal((await queue(stop.operationId).get()).get("status"), "synced");
   assert.equal((await user.collection("timerOperations").get()).size, 2);
 });
+for (const state of ["running", "completed", "deleted"] as const) {
+  test(`recovered Threeggle start reconciles the current ${state} entry`, async (t) => {
+    const start = intent();
+    const original = entry();
+    const current: TimeTrackingEntry = {
+      ...original,
+      version: "edited",
+      description: "Externally edited title",
+      projectId: null,
+      startTime: original.startTime - 300000,
+      endTime: state === "completed" ? original.startTime + 30000 : null,
+    };
+    const receipt: TimeTrackingResponse = {
+      apiVersion: 1,
+      ok: true,
+      requestId: start.operationId,
+      result: { disposition: "started", entry: original, previousEntry: null },
+    };
+    const requests: string[] = [];
+    const actions: string[] = [];
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, options: RequestInit) => {
+        const request = decodeTimeTrackingRequest(
+          JSON.parse(String(options.body)),
+        );
+        assert.ok(request);
+        actions.push(request.action);
+        if (request.action === "start") {
+          requests.push(String(options.body));
+          if (requests.length === 1)
+            throw new TypeError("Lost committed start response");
+          return json(receipt);
+        }
+        assert.equal(request.action, "entry");
+        assert.ok(request.action === "entry");
+        assert.equal(request.entryKey, original.key);
+        assert.equal((await book.get()).get("activeTimer.state"), "starting");
+        return state === "deleted"
+          ? json(
+              {
+                apiVersion: 1,
+                ok: false,
+                error: { code: "entry_not_found", message: "Deleted" },
+              },
+              404,
+            )
+          : json({ apiVersion: 1, ok: true, result: { entry: current } });
+      },
+    );
+    await acceptTimerIntent(uid, start, null);
+    await processTimerQueue(uid, start.operationId);
+    assert.equal(
+      (await queue(start.operationId).get()).get("status"),
+      "pending",
+    );
+    await queue(start.operationId).update({ retryAt: null });
+    await processTimerQueue(uid, start.operationId);
+    assert.deepEqual(actions, ["start", "start", "entry"]);
+    assert.equal(requests[0], requests[1]);
+    const row = await queue(start.operationId).get();
+    const result = await user
+      .collection("timeTrackingResults")
+      .doc(start.operationId)
+      .get();
+    assert.deepEqual(result.get("response"), receipt);
+    if (state === "deleted") {
+      assert.equal(row.get("status"), "terminal");
+      assert.equal(row.get("errorCode"), "entry_not_found");
+      assert.equal(result.get("observation.error.code"), "entry_not_found");
+      assert.equal(result.get("interval"), undefined);
+    } else {
+      assert.equal(row.get("status"), "synced");
+      assert.deepEqual(result.get("observation.result.entry"), current);
+    }
+    if (state === "running") {
+      assert.equal((await book.get()).get("activeTimer.state"), "remote");
+      assert.equal(
+        (await book.get()).get("activeTimer.start"),
+        new Date(current.startTime).toISOString(),
+      );
+      assert.equal(
+        (await claim.get()).get("timer.remote.entryKey"),
+        original.key,
+      );
+    } else {
+      assert.equal((await book.get()).get("activeTimer"), null);
+      assert.equal((await claim.get()).get("state"), "idle");
+      if (state === "completed")
+        assert.deepEqual(result.get("interval"), {
+          start: new Date(current.startTime).toISOString(),
+          end: new Date(current.endTime!).toISOString(),
+        });
+      // Re-delivery cannot recreate the old entry or acquire a new timer claim.
+      await processTimerQueue(uid, start.operationId);
+      assert.deepEqual(actions, ["start", "start", "entry"]);
+      await acceptTimerIntent(uid, intent(), null);
+    }
+  });
+}
+
+for (const failure of ["unauthorized", "unavailable", "wrong_entry"] as const) {
+  test(`a ${failure} start lookup cannot promote a stale receipt, including after retry reset`, async (t) => {
+    const start = intent();
+    const original = entry();
+    const current = { ...original, endTime: original.startTime + 30000 };
+    let lookups = 0;
+    const requests: string[] = [];
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, options: RequestInit) => {
+        const request = decodeTimeTrackingRequest(
+          JSON.parse(String(options.body)),
+        );
+        assert.ok(request);
+        if (request.action === "start") {
+          requests.push(String(options.body));
+          return json({
+            apiVersion: 1,
+            ok: true,
+            requestId: request.requestId,
+            result: {
+              disposition: "started",
+              entry: original,
+              previousEntry: null,
+            },
+          });
+        }
+        assert.equal(request.action, "entry");
+        lookups++;
+        if (lookups === 1) {
+          if (failure === "wrong_entry")
+            return json({
+              apiVersion: 1,
+              ok: true,
+              result: { entry: entry("unrelated") },
+            });
+          return json(
+            {
+              apiVersion: 1,
+              ok: false,
+              error: {
+                code:
+                  failure === "unauthorized"
+                    ? "unauthorized"
+                    : "rate_limited",
+                message: "Lookup unavailable",
+              },
+            },
+            failure === "unauthorized" ? 401 : 429,
+          );
+        }
+        return json({ apiVersion: 1, ok: true, result: { entry: current } });
+      },
+    );
+    await acceptTimerIntent(uid, start, null);
+    await processTimerQueue(uid, start.operationId);
+    assert.equal((await book.get()).get("activeTimer.state"), "starting");
+    assert.equal(
+      (await queue(start.operationId).get()).get("status"),
+      failure === "unauthorized" ? "paused" : "pending",
+    );
+    await queue(start.operationId).update({ retryAt: null });
+    await retryTimerOperation(uid, start.operationId);
+    if (failure === "unauthorized")
+      assert.equal((await queue(start.operationId).get()).get("attempts"), 0);
+    await processTimerQueue(uid, start.operationId);
+    assert.equal(lookups, 2);
+    assert.equal(requests[0], requests[1]);
+    assert.equal(
+      (await queue(start.operationId).get()).get("status"),
+      "synced",
+    );
+    assert.equal((await book.get()).get("activeTimer"), null);
+    assert.equal((await claim.get()).get("state"), "idle");
+  });
+}
+
 test("a lost response replays the identical frozen request without a new timer or interval", async (t) => {
   const original = intent("stop");
   await queue(original.operationId).set(initialQueue(original, Date.now()));

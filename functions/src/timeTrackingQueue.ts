@@ -40,6 +40,7 @@ import type {
   TimeTrackingFailure,
   TimeTrackingHttpResult,
   TimeTrackingWriteResponse,
+  TimeTrackingResponse,
 } from "./shared/time-tracking-api";
 
 const db = getFirestore();
@@ -225,6 +226,7 @@ type Outcome = {
   start?: string;
   response?: TimeTrackingWriteResponse;
   interval?: TimerInterval;
+  observation?: TimeTrackingResponse;
 };
 function failureOutcome(result: TimeTrackingHttpResult): Outcome {
   if (result.response.ok) throw new Error("Expected a Threeggle failure.");
@@ -450,6 +452,42 @@ async function send(
               receipt.entry.key === prepared.request.entryKey;
       if (!valid || result.response.requestId !== prepared.request.requestId)
         throw new Error("Threeggle returned a mismatched write receipt.");
+      if (prepared.request.action === "start") {
+        // Receipts retain execution-time state, even after an external stop or
+        // deletion. Check every successful start, including retries whose
+        // attempt counter was reset after credential repair.
+        const lookup = await threeggleRequest(token, {
+          client: "book-tracker",
+          action: "entry",
+          entryKey: receipt.entry.key,
+        });
+        const original = writeOutcome(result);
+        if (!lookup.response.ok)
+          return {
+            ...failureOutcome(lookup),
+            response: original.response,
+            observation: lookup.response,
+          };
+        if (
+          !("entry" in lookup.response.result) ||
+          lookup.response.result.entry.key !== receipt.entry.key
+        )
+          throw new Error("Threeggle returned a different start entry.");
+        const current = lookup.response.result.entry;
+        return {
+          ...original,
+          start: new Date(current.startTime).toISOString(),
+          observation: lookup.response,
+          ...(current.endTime === null
+            ? {}
+            : {
+                interval: {
+                  start: new Date(current.startTime).toISOString(),
+                  end: new Date(current.endTime).toISOString(),
+                },
+              }),
+        };
+      }
     }
     return writeOutcome(result);
   }
@@ -683,7 +721,7 @@ export async function processTimerQueue(
       )
         throw new Error("Timer and lifecycle diverged.");
       if (outcome.status === "synced") {
-        if (item.intent.action === "start") {
+        if (item.intent.action === "start" && !outcome.interval) {
           if (!outcome.remote || !outcome.start)
             throw new Error("Remote start response is incomplete.");
           const remote: TimerV2 = {
@@ -729,6 +767,7 @@ export async function processTimerQueue(
         {
           ...(outcome.response ? { response: outcome.response } : {}),
           ...(outcome.interval ? { interval: outcome.interval } : {}),
+          ...(outcome.observation ? { observation: outcome.observation } : {}),
           recordedAt: Date.now(),
         },
         { merge: true },

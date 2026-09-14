@@ -37,6 +37,14 @@ The [first Astra implementation review](https://github.com/ankile/book-tracker/p
 
 The September 14 manual test used both running local apps and real isolated Firestore/Convex backends: a reading timer was renamed and moved 30 minutes earlier in Threeggle, then switched to another activity. Stopping the original timer from Book Tracker opened Add Reading with 30 confirmed minutes, preserved the edited title and left the new activity running. The synthetic activity was then stopped in Threeggle; all consumer queue rows were synced and the claim was idle.
 
-The [producer implementation review](https://github.com/ankile/threeggle/pull/2#pullrequestreview-5201189968) found no producer issues; its code is unchanged in this pass. A fresh paired Astra review and release approval are still required.
+The [producer implementation review](https://github.com/ankile/threeggle/pull/2#pullrequestreview-5201189968) found no producer issues; its code is unchanged in this pass.
+
+## Recovered-start review fix
+
+The [fresh Astra review](https://github.com/ankile/book-tracker/pull/53#pullrequestreview-5202250272) confirmed the three earlier fixes and found one further consumer issue: replaying a committed Threeggle start could restore a running timer from an old receipt after external completion or deletion. The [paired producer review](https://github.com/ankile/threeggle/pull/2#pullrequestreview-5202251693) found no actionable producer issues.
+
+Every successful Threeggle start now reads its recorded entry before promoting the local timer, including after credential repair resets the retry counter. A running entry uses its current start time. A completed entry releases the matching timer claim and retains the confirmed final interval. A missing entry releases the claim with a terminal `entry_not_found` recovery item. Failed or mismatched lookups cannot promote the timer. The original receipt and current observation are stored separately; replay retains the original operation ID and request.
+
+Six added emulator regressions cover lost-response recovery after completion, deletion or start/title/project edits, plus authorization failure, throttling and a mismatched lookup target. All 32 focused backend/Rules tests, 475 unit tests, 223 Functions tests, Functions lint/build and Node TypeScript checks passed. The real isolated Firestore/Convex test also passed with the added entry lookup. Local disk exhaustion required clearing regenerable package caches and restarting the isolated Convex backend before that test could run. Application UI and producer code are unchanged; the prior browser/build/audit evidence above still applies to those unchanged files. Review and release approval are still required.
 
 The release procedure is in [time-tracking-release.md](time-tracking-release.md). The Threeggle API is deployed first; Book Tracker readers ship with writers disabled; participating devices synchronize and reload before the server-owned controls enable v2 timers and Threeggle.
