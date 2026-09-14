@@ -9,14 +9,14 @@ Implemented:
 - Account-scoped IndexedDB outbox, immutable acceptance records, reconnect barrier, cross-tab reconciliation, rejected-interval recovery and explicit sign-out discard.
 - Additive Rules/indexes, account cleanup, privacy-safe issue reporting, audit readers, updated architecture diagrams and coordinated release instructions.
 
-Validation performed in the worktrees on 2026-09-13 (Pacific time):
+Validation performed in the worktrees on 2026-09-13 and repeated for the Book Tracker review fixes on 2026-09-14 (Pacific time):
 
 | Area | Evidence |
 |---|---|
 | Threeggle | 295 Vitest tests, 15 Python adapter tests, lint and production build passed. |
-| Book Tracker test suite | Type checks passed with no diagnostics; 475 unit tests, two two-test migration suites, 129 combined Rules/backend tests, 9 PWA tests, 223 Functions tests and the catalog emulator test passed. The combined suite includes 8 v2 Rules tests and 12 v2 backend transaction tests, including background retry without an open browser. Functions lint also passed. |
-| Browser suite | All 6 Playwright tests passed with repository Rules explicitly loaded. The three timer cases cover Neither and Toggl offline start/stop/reload, cross-tab acknowledgements, rejected-revision recovery across direct Settings navigation/reload, and sign-out cancellation/discard followed by re-login. |
-| Production checks | Build, 4 generated-artifact checks and the bundle check passed. Total compressed JavaScript is 368.1 KiB against the documented 370 KiB budget; the largest-chunk limit remains 170 KiB. Both dependency audits reported zero vulnerabilities. |
+| Book Tracker test suite | Type checks passed with no diagnostics; 475 unit tests, two two-test migration suites, 135 combined Rules/backend tests, 9 PWA tests, 223 Functions tests and the catalog emulator test passed. The combined suite includes 8 v2 Rules tests and 18 v2 backend transaction tests, including background retry without an open browser, Toggl external edits/completion and targeted Threeggle recovery after the original project disappears. Functions lint also passed. |
+| Browser suite | All 9 Playwright tests passed with repository Rules explicitly loaded. Coverage includes Neither and Toggl offline start/stop/reload, cross-tab acknowledgements, rejected-revision recovery across direct Settings navigation/reload, sign-out cancellation/discard followed by re-login, and confirmed reading durations after Threeggle external stop/start edits and Toggl targeted stop. |
+| Production checks | Build, 4 generated-artifact checks and the bundle check passed against the unchanged 370 KiB total and 170 KiB largest-chunk limits. Both dependency audits reported zero vulnerabilities. |
 | Both real backends | Dedicated local test passed against Firestore and Convex: start/stop, original receipt lookup, completed-interval replay, and overlap rejection. |
 | Manual local UIs | Threeggle login, Reading project and timer connection; Book Tracker project discovery/activation; matching remote start/stop; external-switch decline and accept; missing-credential failure and repair; local-only timer across reload; Toggl stub start/stop; provider switch refused while active. |
 | Architecture | Updated diagrams rendered and the 11-route / five-diagram verification passed. |
@@ -25,8 +25,18 @@ All provider activity used synthetic accounts. Threeggle ran on isolated ports 3
 
 ## Release validation
 
-All checks in Book Tracker's `npm run validate` gate passed: `npm test`, `npm run test:e2e`, `npm run build`, `npm run test:artifacts`, `npm run test:bundle`, `npm audit --omit=dev`, and `npm --prefix functions audit`. The browser suite and subsequent gates were rerun after correcting its sign-out/re-login synchronization. Application source and generated artifacts were committed before artifact verification.
+All checks in Book Tracker's `npm run validate` gate passed: the checks comprising `npm test`, `npm run test:e2e`, `npm run build`, `npm run test:artifacts`, `npm run test:bundle`, `npm audit --omit=dev`, and `npm --prefix functions audit`. On September 14, the first full test command stopped at a Functions lint shadowing error after its earlier suites passed; after renaming the variables, Functions lint/build/tests and every remaining gate passed. Application source and generated artifacts were committed before artifact verification.
 
-Both implementation branches are pushed with implementation and validation evidence in the paired PRs. Earlier model reviews covered the plans; implementation review and release approval are still required.
+## Implementation review fixes — September 14
+
+The [first Astra implementation review](https://github.com/ankile/book-tracker/pull/53#pullrequestreview-5201185411) identified three consumer issues. Commit `42cd09d` addresses all three:
+
+- Online Toggl stops use the targeted PATCH endpoint and read an already-completed target after a conflict. Offline stops read the target first and update only its stop timestamp, preserving existing title/project/start edits and completed entries. Toggl does not offer a conditional timestamp update, so an external stop racing the offline read/update remains a provider limitation documented in the release runbook.
+- Reviewed Threeggle targeted-stop successors no longer require the original configured project to remain active; the producer validates the repaired target. New interval exports retain project validation.
+- Online Add Reading waits for a confirmed provider interval. Pending/offline durations are explicitly labelled as device estimates. Regression tests cover external completion, edited start times and completed Toggl targets.
+
+The September 14 manual test used both running local apps and real isolated Firestore/Convex backends: a reading timer was renamed and moved 30 minutes earlier in Threeggle, then switched to another activity. Stopping the original timer from Book Tracker opened Add Reading with 30 confirmed minutes, preserved the edited title and left the new activity running. The synthetic activity was then stopped in Threeggle; all consumer queue rows were synced and the claim was idle.
+
+The [producer implementation review](https://github.com/ankile/threeggle/pull/2#pullrequestreview-5201189968) found no producer issues; its code is unchanged in this pass. A fresh paired Astra review and release approval are still required.
 
 The release procedure is in [time-tracking-release.md](time-tracking-release.md). The Threeggle API is deployed first; Book Tracker readers ship with writers disabled; participating devices synchronize and reload before the server-owned controls enable v2 timers and Threeggle.
