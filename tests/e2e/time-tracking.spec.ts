@@ -2,8 +2,31 @@ import { randomUUID } from "node:crypto";
 import { initializeApp, deleteApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
+async function deviceRows(page: Page): Promise<unknown[]> {
+  return page.evaluate(
+    () =>
+      new Promise<unknown[]>((resolve, reject) => {
+        const open = indexedDB.open("book-tracker-timer-outbox", 1);
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const database = open.result;
+          const read = database
+            .transaction("operations")
+            .objectStore("operations")
+            .getAll();
+          read.onerror = () => reject(read.error);
+          read.onsuccess = () => {
+            const rows: unknown = read.result;
+            database.close();
+            if (!Array.isArray(rows)) reject(new Error("Invalid outbox"));
+            else resolve(rows);
+          };
+        };
+      }),
+  );
+}
 async function fixture(provider: "none" | "toggl") {
   if (
     process.env.FIRESTORE_EMULATOR_HOST !== "127.0.0.1:8080" ||
@@ -193,6 +216,7 @@ test("a rejected offline revision keeps its interval through reload and explicit
     await expect(stop).toContainText("0:02");
     await stop.click();
     await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect.poll(() => deviceRows(page)).toHaveLength(2);
     await f.user.update({
       timeTracking: { provider: "none", revision: randomUUID() },
     });
@@ -212,13 +236,21 @@ test("a rejected offline revision keeps its interval through reload and explicit
     await expect(
       page.getByRole("button", { name: "Open reading form", exact: true }),
     ).toBeVisible();
-    page.once("dialog", (dialog) => dialog.dismiss());
+    const cancelSignOut = page.waitForEvent("dialog").then(async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      await dialog.dismiss();
+    });
     await page.getByRole("button", { name: "Sign Out", exact: true }).click();
+    await cancelSignOut;
     await expect(page.getByText("Saved on this device · recovery")).toHaveCount(
       2,
     );
-    page.once("dialog", (dialog) => dialog.accept());
+    const confirmSignOut = page.waitForEvent("dialog").then(async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      await dialog.accept();
+    });
     await page.getByRole("button", { name: "Sign Out", exact: true }).click();
+    await confirmSignOut;
     await expect(
       page.getByRole("button", { name: "Log in", exact: true }),
     ).toBeVisible();

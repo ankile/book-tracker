@@ -47,7 +47,13 @@ export function watchTimerControls(
 ): Unsubscribe {
   return onSnapshot(
     doc(db, "configuration", "timeTracking"),
-    (snap) => next(decodeTimerControls(snap.data())),
+    { includeMetadataChanges: true },
+    (snap) => {
+      // An empty cache is not a server decision to use the legacy writer.
+      // Wait for confirmation, or use a real configuration cached earlier.
+      if (!snap.exists() && snap.metadata.fromCache) return;
+      next(decodeTimerControls(snap.data()));
+    },
     failed,
   );
 }

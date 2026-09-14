@@ -1,8 +1,8 @@
 <script lang="ts">
   import {effectiveConnection} from "../../../shared/timeTracking.ts";
   import type {TimerControls} from "../../../shared/timeTracking.ts";
-  import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, reconcileTimerOutbox, watchTimerControls} from "../firebase/timeTracking.ts";
-  import {timerContext, timerSweep} from "../firebase/functions.ts";
+  import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, watchTimerControls} from "../firebase/timeTracking.ts";
+  import {timerContext} from "../firebase/functions.ts";
   import type { Snippet } from 'svelte';
   import ReadingSummary from './ReadingSummary.svelte';
   import Icon from "svelte-awesome";
@@ -121,19 +121,12 @@
     const unsubscribe = userStore.subscribe((data) => (userDoc = data));
     return unsubscribe;
   });
-  let userLoaded = $derived(userDoc !== undefined);
+  let userLoaded = $derived(userDoc !== undefined && userDoc !== null);
   let connection = $derived(userDoc ? effectiveConnection(userDoc) : {provider: "none" as const, revision: "legacy"});
   let hasToggl = $derived(connection.provider === "toggl");
   let timerControls = $state<TimerControls>({threeggleEnabled:false,timerWriteVersion:1});
   let controlsLoaded=$state(false);
   $effect(() => watchTimerControls(value => {timerControls=value;controlsLoaded=true;},error => alert(error.message)));
-  $effect(() => {
-    if (!userLoaded || !online) return;
-    const recover=async()=>{await reconcileTimerOutbox(userId);await timerSweep({});};
-    void recover().catch(error => alert(errorMessage(error)));
-    const interval=setInterval(()=>{if(navigator.onLine) void recover().catch(error => alert(errorMessage(error)));},300000);
-    return ()=>clearInterval(interval);
-  });
 
   $effect(() => {
     // Database reports the failure before rethrowing; observe it here so the

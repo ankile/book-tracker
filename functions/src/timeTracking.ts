@@ -26,14 +26,12 @@ import { decodeConnection, decodeTimerIntent } from "./shared/timeTracking";
 import { isOperationId, wireRecord } from "./shared/time-tracking-api";
 import { getFirestore } from "firebase-admin/firestore";
 
-const callable = functions
-  .region("europe-west1")
-  .runWith({
-    serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
-    maxInstances: CALLABLE_MAX_INSTANCES,
-    enforceAppCheck: true,
-    timeoutSeconds: 120,
-  });
+const callable = functions.region("europe-west1").runWith({
+  serviceAccount: FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
+  maxInstances: CALLABLE_MAX_INSTANCES,
+  enforceAppCheck: true,
+  timeoutSeconds: 120,
+});
 function input(value: unknown): Record<string, unknown> {
   if (!wireRecord(value))
     throw new functions.https.HttpsError(
@@ -234,6 +232,23 @@ exports.syncqueue = onDocumentWritten(
       return;
     await requireLiveUser(event.params.uid);
     await processTimerQueue(event.params.uid, event.params.operationId);
+    const current = await getFirestore()
+      .doc(
+        `users/${event.params.uid}/timeTrackingQueue/${event.params.operationId}`,
+      )
+      .get();
+    if (
+      current.exists &&
+      !current.get("resolution") &&
+      !current.get("successorId") &&
+      ["pending", "processing"].includes(current.get("status"))
+    ) {
+      // Keep Eventarc delivery alive across retry windows, including when
+      // the browser closes. Worker leases and retryAt prevent early sends.
+      throw new Error(
+        "Timer operation is awaiting its retry window or active worker.",
+      );
+    }
   },
 );
 

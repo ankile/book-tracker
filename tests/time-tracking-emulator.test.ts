@@ -508,3 +508,25 @@ test("a full row budget defers new work without falsely counting it or making a 
   assert.equal(row.attempts, 0);
   assert.equal(row.errorCode, "row_limit");
 });
+
+test("background delivery remains retryable after a deferred operation, even without an open client", async () => {
+  const deployed = requireFunctions("./lib") as {
+    timetracking: { syncqueue: { run: (event: unknown) => Promise<void> } };
+  };
+  const original = intent("stop"),
+    ref = queue(original.operationId);
+  await ref.set({
+    ...initialQueue(original, Date.now()),
+    retryAt: Date.now() + 60000,
+  });
+  const event = {
+    params: { uid, operationId: original.operationId },
+    data: { after: await ref.get() },
+  };
+  await assert.rejects(
+    deployed.timetracking.syncqueue.run(event),
+    /awaiting its retry window/,
+  );
+  await ref.update({ status: "terminal", errorCode: "invalid_time" });
+  await deployed.timetracking.syncqueue.run(event);
+});
