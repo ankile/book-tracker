@@ -2,7 +2,7 @@
 
 Implementation is now included in this PR. See [implementation and validation](integration-implementation-status.md) and the [coordinated release runbook](time-tracking-release.md). Deployment checklist items remain pending approval.
 
-Draft for review, September 12, 2026. No implementation or deployment is included in this pass.
+Plan drafted September 12, 2026 and implemented September 13, 2026. The design and review history below are retained for traceability. Deployment remains pending approval.
 
 Review threads: [Book Tracker PR #53](https://github.com/ankile/book-tracker/pull/53) and [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).
 
@@ -251,7 +251,7 @@ Use Threeggle's Convex tests for atomicity and contract behavior. Use Book Track
 | Book Tracker | `feat/threeggle-integration` from `master` | Account setting, adapter, shared lifecycle, queues, compatibility, and end-to-end release checklist. |
 | Threeggle | `feat/book-tracker-integration` from `main` | Versioned API, targeted operations, receipts, authentication integration, and API contract tests. |
 
-Both branches use dedicated worktrees and linked draft PRs. Claude Fable 5.1's combined review is published and reconciled in the disposition table below. Wait for the user's explicit implementation instruction before adding application code in either repository. The PR descriptions must say when they contain planning only; a plan PR is not evidence that the feature is implemented or tested. Keep both PRs open through implementation and mark them ready after the shared acceptance checks pass. No merge or deployment is part of this planning pass.
+Both branches use dedicated worktrees and linked PRs. Claude Fable 5.1's combined planning review is published and reconciled in the disposition table below. The user subsequently authorized implementation in both repositories. Both PRs now contain application code and validation evidence. Keep both PRs open and mark them ready after the shared acceptance checks pass. Merge and deployment still require approval.
 
 Threeggle [PR #1](https://github.com/ankile/threeggle/pull/1) is merged into the producer base. Reuse its full `connectionToken(ctx, hash, "timer")` helper, token-kind schema, and creation UI. The integration PR itself must pass reconstruction-token denial tests on all seven new actions under that current schema. No legacy-only shim or deferred second-branch validation remains in the implementation path. The integration does not need new reconstruction UI or proposal features.
 
@@ -272,11 +272,11 @@ The companion Threeggle plan owns its detailed file list and wire contract. Both
 
 ### Merge and deployment checklist
 
-- [ ] Finish both implementations and resolve overlap with whichever independent PRs have landed.
+- [x] Finish both implementations and resolve overlap with whichever independent PRs have landed.
 - [ ] Record the exact reviewed commit from each repository in both PR descriptions. Re-run affected checks after a rebase or review fix.
-- [ ] Pass Threeggle lint, unit/Convex tests, Python adapter tests invoked with `python3 -m`, and build.
-- [ ] Pass Book Tracker's normal release validation, relevant browser tests, and architecture verification. Follow its existing generated-artifact commit boundary.
-- [ ] Run the shared scenarios across the two isolated local backends with dedicated test accounts. Neither test backend may contact the production timer provider or production Toggl bridge.
+- [x] Pass Threeggle lint, unit/Convex tests, Python adapter tests invoked with `python3 -m`, and build.
+- [x] Pass Book Tracker's normal release validation, relevant browser tests, and architecture verification. Follow its existing generated-artifact commit boundary.
+- [x] Run the shared scenarios across the two isolated local backends with dedicated test accounts. Neither test backend may contact the production timer provider or production Toggl bridge.
 - [ ] Obtain approval for both code PRs before merging either as the coordinated feature release.
 - [ ] Merge the additive Threeggle API change and deploy its backend first. Verify the capability response, token-kind enforcement, and API contract on the intended service with a dedicated connection.
 - [ ] Merge and deploy Book Tracker's v1/v2 client, functions, audit, and diagnostic readers with `timerWriteVersion` still v1 and `threeggleEnabled` false. Deploy the required site/profile-renderer artifacts together under its release runbook.
