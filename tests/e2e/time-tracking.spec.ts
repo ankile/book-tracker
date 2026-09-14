@@ -257,6 +257,8 @@ test("a rejected offline revision keeps its interval through reload and explicit
     await page.getByLabel("Email address", { exact: true }).fill(f.email);
     await page.getByLabel("Password", { exact: true }).fill(f.password);
     await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Sign Out", exact: true })).toBeVisible();
+    await page.goto("/");
     await expect(start).toBeEnabled();
     await page.goto("/me#time-tracking");
     await expect(page.getByText("Saved on this device · recovery")).toHaveCount(
