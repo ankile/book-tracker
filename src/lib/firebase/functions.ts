@@ -173,12 +173,12 @@ export async function adminReview(request: AdminReviewRequest): Promise<AdminRev
 
 export const timerInspect = httpsCallable<{token: string}, unknown>(fns, 'timetracking-inspect');
 export const timerConnect = httpsCallable<unknown, unknown>(fns, 'timetracking-connect');
-export const timerContext = httpsCallable<Record<string, never>, unknown>(fns, 'timetracking-context');
+export const timerContext = httpsCallable<{includeProjects?: boolean}, unknown>(fns, 'timetracking-context');
 export const timerAccept = httpsCallable<unknown, unknown>(fns, 'timetracking-accept');
 export const timerRetry = httpsCallable<{operationId: string}, unknown>(fns, 'timetracking-retry');
 export const timerReplace = httpsCallable<unknown, unknown>(fns, 'timetracking-replace');
 export const timerClear = httpsCallable<unknown, unknown>(fns, 'timetracking-clear');
 export const timerAcknowledgeLegacy = httpsCallable<{queueId: string; remoteChecked: true}, unknown>(fns, 'timetracking-acknowledgelegacy');
 
-export const timerAcknowledge = httpsCallable<{operationId: string; remoteChecked: true}, unknown>(fns, 'timetracking-acknowledge');
+export const timerAcknowledge = httpsCallable<{operationId: string} & ({remoteChecked: true} | {readingChecked: true}), unknown>(fns, 'timetracking-acknowledge');
 export const timerSweep = httpsCallable<Record<string, never>, {processed:number}>(fns, 'timetracking-sweep');

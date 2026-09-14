@@ -47,4 +47,19 @@ Every successful Threeggle start now reads its recorded entry before promoting t
 
 Six added emulator regressions cover lost-response recovery after completion, deletion or start/title/project edits, plus authorization failure, throttling and a mismatched lookup target. All 32 focused backend/Rules tests, 475 unit tests, 223 Functions tests, Functions lint/build and Node TypeScript checks passed. The real isolated Firestore/Convex test also passed with the added entry lookup. Local disk exhaustion required clearing regenerable package caches and restarting the isolated Convex backend before that test could run. Application UI and producer code are unchanged; the prior browser/build/audit evidence above still applies to those unchanged files. Review and release approval are still required.
 
+## Fable review follow-up — September 14
+
+Addressed the seven inline comments and two additional notes in the [Book Tracker Fable review](https://github.com/ankile/book-tracker/pull/53#pullrequestreview-5203274443), together with both comments in the [Threeggle review](https://github.com/ankile/threeggle/pull/2#pullrequestreview-5203274747).
+
+- The release runbook now requires an explicit v1 controls document before reader rollout, preserves it during rollback, and includes the Eventarc deployment/IAM commands and headless-delivery verification. Dedicated live Toggl completion and offline-edit smoke tests are explicit release gates; they have not been run against production.
+- Permanently refused stops cancel the interval wait and leave a recovery item instead of opening an estimated reading form. Recovered completed starts appear in Settings with their confirmed interval, a reading form, and an acknowledgment action that retains the original result.
+- Recovery queries exclude acknowledged and superseded rows before applying their limits. Legacy acknowledgments use a separate server-owned status. The index file retains its original formatting, and timer starts skip the redundant Threeggle projects request. The worker error-handling comment now describes its actual scope.
+- Threeggle has committed coverage for intervals overlapping a running entry, exact adjacency, negative replay, and preservation of the running entry. Its atomic per-account read budget remains intentional; the contention tradeoff is documented.
+
+Fresh validation after these changes passed: the complete Book Tracker `npm test` command (all type checks, 475 unit tests, four migration tests, 142 combined Rules/backend tests, 9 PWA tests, 223 Functions tests, Functions lint/build, and the catalog emulator test); all 12 browser tests; production build; the unchanged 370 KiB total / 170 KiB largest-chunk bundle limits; and both dependency audits with zero vulnerabilities. The combined Rules/backend suite includes 25 v2 backend and 8 v2 Rules tests. Threeggle passed all 296 Vitest tests, lint, and its production build.
+
+All four generated-artifact checks also passed after committing the application source and generated files.
+
+The new browser regressions cover cached reader-only controls with offline start, permanent stop refusal beyond the old timeout, and saving/acknowledging a recovered reading across reload. A manual check in the local Book Tracker UI also displayed the synthetic completed interval and opened the form with exactly 10 minutes. Browser automation stalled at the separate acknowledgment confirmation, so manual acknowledgment is not claimed; the automated browser save/acknowledgment and backend idempotency checks passed. No production provider activity occurred.
+
 The release procedure is in [time-tracking-release.md](time-tracking-release.md). The Threeggle API is deployed first; Book Tracker readers ship with writers disabled; participating devices synchronize and reload before the server-owned controls enable v2 timers and Threeggle.

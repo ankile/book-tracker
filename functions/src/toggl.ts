@@ -520,7 +520,7 @@ exports.clearstopping = functions
       }
       tx.update(bookRef, {activeTimer: null});
       tx.set(claimRef, {version: 1, state: "idle", cleared: claim});
-      tx.update(queueRef, {legacyResolution: {acknowledgedAt: Timestamp.now(), reason: "remote_outcome_checked"}, expiresAt: FieldValue.delete()});
+      tx.update(queueRef, {status: "acknowledged", legacyResolution: {acknowledgedAt: Timestamp.now(), reason: "remote_outcome_checked"}, expiresAt: FieldValue.delete()});
     });
     return {cleared: true};
   });

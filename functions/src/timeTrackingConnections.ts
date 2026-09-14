@@ -112,7 +112,7 @@ export async function connectionQuota(uid: string): Promise<void> {
       "Too many connection requests. Try again later.",
     );
 }
-export async function inspectThreeggle(token: string) {
+export async function inspectThreeggle(token: string, includeProjects = true) {
   const response = await threeggleRequest(token, {
     client: "book-tracker",
     action: "context",
@@ -132,6 +132,7 @@ export async function inspectThreeggle(token: string) {
       "failed-precondition",
       "This Threeggle server does not support the required timer API.",
     );
+  if (!includeProjects) return { context, projects: [] };
   const projects = await threeggleRequest(token, {
     client: "book-tracker",
     action: "projects",

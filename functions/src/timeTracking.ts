@@ -17,6 +17,7 @@ import {
 import { acceptTimerIntent, processTimerQueue } from "./timeTrackingQueue";
 import {
   acknowledgeTimerFailure,
+  acknowledgeRecoveredReading,
   acknowledgeLegacyTogglFailure,
   clearReviewedTimer,
   retryAsNewExport,
@@ -96,7 +97,7 @@ exports.connect = callable.https.onCall(async (data: unknown, context) => {
   });
   return { connection };
 });
-exports.context = callable.https.onCall(async (_data: unknown, context) => {
+exports.context = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.context", context);
   const uid = requireVerifiedUid(context);
   await requireLiveUser(uid);
@@ -127,7 +128,10 @@ exports.context = callable.https.onCall(async (_data: unknown, context) => {
       "failed-precondition",
       "Repair your Threeggle credential in settings.",
     );
-  const inspected = await inspectThreeggle(token);
+  const inspected = await inspectThreeggle(
+    token,
+    input(data).includeProjects !== false,
+  );
   if (
     inspected.context.serviceId !== connection.serviceId ||
     inspected.context.accountId !== connection.accountId
@@ -258,6 +262,10 @@ exports.acknowledge = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.acknowledge", context);
   const uid = requireVerifiedUid(context),
     d = input(data);
+  if (d.readingChecked === true) {
+    await acknowledgeRecoveredReading(uid, operation(d.operationId));
+    return { accepted: true };
+  }
   if (d.remoteChecked !== true)
     throw new functions.https.HttpsError(
       "invalid-argument",

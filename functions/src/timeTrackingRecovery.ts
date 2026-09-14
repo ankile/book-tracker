@@ -13,6 +13,7 @@ import {
   decodeClaimV2,
   decodeQueueV2,
   decodeTimerV2,
+  decodeTimerInterval,
   idleV2,
   initialQueue,
   operationAck,
@@ -47,6 +48,7 @@ export async function acknowledgeLegacyTogglFailure(
         "Only a terminal create may be acknowledged here. Resolve a failed stop from its timer.",
       );
     tx.update(ref, {
+      status: "acknowledged",
       legacyResolution: {
         acknowledgedAt: Timestamp.now(),
         reason: "remote_outcome_checked",
@@ -375,5 +377,28 @@ export async function acknowledgeTimerFailure(
         );
     }
     tx.update(ref, { resolution: "remote_outcome_checked" });
+  });
+}
+
+export async function acknowledgeRecoveredReading(
+  uid: string,
+  operationId: string,
+): Promise<void> {
+  await db.runTransaction(async (tx) => {
+    const user = await tx.get(db.doc(`users/${uid}`));
+    assertLiveAccount(user.exists, user.get("deletedAt"));
+    const ref = db.doc(`users/${uid}/timeTrackingResults/${operationId}`);
+    const result = await tx.get(ref);
+    if (!result.exists || typeof result.get("readingPending") !== "boolean")
+      throw new HttpsError(
+        "failed-precondition",
+        "No completed reading interval is awaiting review.",
+      );
+    decodeTimerInterval(result.get("interval"));
+    if (!result.get("readingPending")) return;
+    tx.update(ref, {
+      readingPending: false,
+      readingAcknowledgedAt: Date.now(),
+    });
   });
 }

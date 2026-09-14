@@ -678,8 +678,9 @@ export async function processTimerQueue(
       try {
         outcome = await send(token, item, prepared);
       } catch (error) {
-        // Only external transport/response failures are ambiguous; database
-        // transaction and local invariant errors must propagate.
+        // Transport and response-validation failures leave delivery unconfirmed.
+        // This includes mismatched provider receipts; database transactions and
+        // invariants outside send() still propagate without being reclassified.
         if (!(error instanceof Error)) throw error;
         const ambiguous =
           prepared.provider === "toggl" &&
@@ -768,6 +769,15 @@ export async function processTimerQueue(
           ...(outcome.response ? { response: outcome.response } : {}),
           ...(outcome.interval ? { interval: outcome.interval } : {}),
           ...(outcome.observation ? { observation: outcome.observation } : {}),
+          ...(item.intent.action === "start" &&
+          outcome.status === "synced" &&
+          outcome.interval
+            ? {
+                readingPending: true,
+                bookId: item.intent.bookId,
+                description: item.intent.description,
+              }
+            : {}),
           recordedAt: Date.now(),
         },
         { merge: true },

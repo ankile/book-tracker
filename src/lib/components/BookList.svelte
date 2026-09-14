@@ -186,7 +186,7 @@
       try {
         let expectedRunning: {key:string;version:string} | null = null;
         if (connection.provider === "threeggle" && navigator.onLine) {
-          const context = inspectResult((await timerContext({})).data).context;
+          const context = inspectResult((await timerContext({includeProjects: false})).data).context;
           if (context.current) {
             const current=context.current;
             if (!confirm(`Threeggle is tracking “${current.description}”. Stop that timer and start reading “${book.title}”?`)) return;
@@ -286,9 +286,9 @@
       try {
         markTimerPending();
         const onlineStop = navigator.onLine;
-        await submitTimerOperation(pendingOperation(userId,intent,onlineStop && timer.remote !== null ? "accept" : "batch",timer));
+        const {delivery} = await submitTimerOperation(pendingOperation(userId,intent,onlineStop && timer.remote !== null ? "accept" : "batch",timer));
         const interval = onlineStop && timer.connection.provider !== "none"
-          ? await waitForTimerStop(userId,intent.operationId,stopWait.signal) : null;
+          ? await waitForTimerStop(userId,intent.operationId,stopWait.signal,delivery) : null;
         if (stopWait.signal.aborted) return;
         estimatedTime = interval === null && timer.connection.provider !== "none";
         const start = interval?.start ?? intent.start, end = interval?.end ?? intent.end ?? intent.start;

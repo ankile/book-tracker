@@ -37,6 +37,7 @@
   import type { OutboxRecord } from "../firebase/timerOutbox.ts";
   import {
     decodeQueueV2,
+    decodeTimerInterval,
     effectiveConnection,
   } from "../../../shared/timeTracking.ts";
   import type {
@@ -44,6 +45,7 @@
     QueueV2,
     TimerControls,
     TimerIntent,
+    TimerInterval,
   } from "../../../shared/timeTracking.ts";
   import { decodeTimeTrackingResponse } from "../../../shared/time-tracking-api.ts";
   import type { TimeTrackingEntry } from "../../../shared/time-tracking-api.ts";
@@ -64,6 +66,10 @@
   let notice = $state("");
   let recoveredBook = $state<Book | null>(null);
   let recoveredMinutes = $state(1);
+  let recoveredOperationId = $state<string | null>(null);
+  let completed = $state<
+    { id: string; title: string; interval: TimerInterval }[]
+  >([]);
   let queues = $state<QueueV2[]>([]);
   let local = $state<OutboxRecord[]>([]);
   let legacy = $state<
@@ -95,12 +101,36 @@
       query(
         collection(db, "users", uid, "timeTrackingQueue"),
         where("status", "!=", "synced"),
+        where("resolution", "==", null),
+        where("successorId", "==", null),
         limit(1000),
       ),
       (snap) => {
         queues = snap.docs
           .map((row) => decodeQueueV2(row.data()))
           .filter((row) => row.resolution === null && row.successorId === null);
+      },
+      showError,
+    ),
+  );
+  $effect(() =>
+    onSnapshot(
+      query(
+        collection(db, "users", uid, "timeTrackingResults"),
+        where("readingPending", "==", true),
+        limit(100),
+      ),
+      (snap) => {
+        completed = snap.docs.map((row) => {
+          const title: unknown = row.get("description");
+          if (typeof title !== "string")
+            throw new Error("Invalid completed reading title.");
+          return {
+            id: row.id,
+            title,
+            interval: decodeTimerInterval(row.get("interval")),
+          };
+        });
       },
       showError,
     ),
@@ -345,7 +375,10 @@
       await timerAcknowledgeLegacy({ queueId: id, remoteChecked: true });
     });
   }
-  async function recoverReading(row: OutboxRecord) {
+  async function recoverReading(
+    row: Pick<OutboxRecord, "intent">,
+    operationId: string | null = null,
+  ) {
     if (!row.intent.end) return;
     if (
       !confirm(
@@ -362,6 +395,7 @@
           "This book was removed. Save the interval file to keep its time.",
         );
       recoveredBook = decodeBook(snap.id, snap.data(), snap.ref.path);
+      recoveredOperationId = operationId;
       recoveredMinutes = Math.max(
         1,
         Math.round(
@@ -372,6 +406,30 @@
       );
     });
   }
+  async function recoverCompleted(row: {
+    id: string;
+    interval: TimerInterval;
+  }) {
+    await run(async () => {
+      const snap = await getDocFromServer(
+        doc(db, "users", uid, "timeTrackingQueue", row.id),
+      );
+      const queued = decodeQueueV2(snap.data());
+      await recoverReading(
+        { intent: { ...queued.intent, ...row.interval } },
+        row.id,
+      );
+    });
+  }
+  async function acknowledgeReading(id: string) {
+    if (
+      !confirm("Have you already recorded or accounted for this reading time?")
+    )
+      return;
+    await run(async () => {
+      await timerAcknowledge({ operationId: id, readingChecked: true });
+    });
+  }
   function recordRecoveredReading(data: {
     id: string;
     timeRead: number;
@@ -379,6 +437,7 @@
     previousPage: number;
   }) {
     const book = recoveredBook;
+    const operationId = recoveredOperationId;
     if (!book) throw new Error("No recovery book selected.");
     void run(async () => {
       await Database.addReading({
@@ -387,8 +446,11 @@
         pageCount: book.pageCount,
         ...data,
       });
-      notice =
-        "Reading session saved. The original device operation remains available for review.";
+      if (operationId)
+        await timerAcknowledge({ operationId, readingChecked: true });
+      notice = operationId
+        ? "Reading session saved."
+        : "Reading session saved. The original device operation remains available for review.";
     });
   }
   function download(row: OutboxRecord) {
@@ -517,6 +579,35 @@
   </p>
   {#if error}<p role="alert" class="error">{error}</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}
+
+  {#if completed.length}
+    <h3>Completed remotely</h3>
+    <p>
+      These recovered timers have finished in Threeggle. Review their confirmed
+      time before adding a reading session.
+    </p>
+    {#each completed as row (row.id)}
+      <article aria-label={`Completed reading: ${row.title}`}>
+        <strong>{row.title}</strong>
+        <p>
+          {new Date(row.interval.start).toLocaleString()} to {new Date(
+            row.interval.end,
+          ).toLocaleString()}
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          onclick={() => recoverCompleted(row)}>Open reading form</button
+        >
+        <button
+          type="button"
+          disabled={busy}
+          onclick={() => acknowledgeReading(row.id)}
+          >Already accounted for</button
+        >
+      </article>
+    {/each}
+  {/if}
 
   {#if queues.length || legacy.length || local.length}
     <h3>Saved activity and recovery</h3>

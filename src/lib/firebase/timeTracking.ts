@@ -245,16 +245,21 @@ function permanent(error: unknown): boolean {
     ].includes(error.code)
   );
 }
-export async function submitTimerOperation(row: OutboxRecord): Promise<void> {
+type TimerDelivery = "accepted" | "pending" | "rejected";
+export async function submitTimerOperation(
+  row: OutboxRecord,
+): Promise<{ delivery: Promise<TimerDelivery> }> {
   belongs(row.uid);
   await putOutbox(row);
   // Do not await Firestore's offline commit in the UI. Its local timer
   // snapshot is immediate; reconciliation retains the interval on rejection.
-  void deliverSavedOperation(row).catch(() => {
+  const delivery = deliverSavedOperation(row).catch((): TimerDelivery => {
     addError(
       "Your timer operation is saved on this device and will retry when you reconnect.",
     );
+    return "pending";
   });
+  return { delivery };
 }
 
 // Acceptance is durable intent, not proof that a remote timer has stopped.
@@ -263,6 +268,7 @@ export function waitForTimerStop(
   uid: string,
   operationId: string,
   signal: AbortSignal,
+  delivery?: Promise<TimerDelivery>,
 ): Promise<TimerInterval | null> {
   belongs(uid);
   if (!navigator.onLine || signal.aborted) return Promise.resolve(null);
@@ -283,6 +289,15 @@ export function waitForTimerStop(
     };
     const pending = () => finish(null);
     const timeout = setTimeout(pending, 15000);
+    void delivery?.then((status) => {
+      if (status === "rejected")
+        finish(
+          null,
+          new Error(
+            "The stop was refused. Open Time tracking in settings to recover the saved operation before adding reading time.",
+          ),
+        );
+    });
     window.addEventListener("offline", pending);
     signal.addEventListener("abort", pending);
     stopResult = onSnapshot(
@@ -339,17 +354,21 @@ export function waitForTimerStop(
     );
   });
 }
-async function deliverSavedOperation(row: OutboxRecord): Promise<void> {
-  await sendRow(row)
+async function deliverSavedOperation(
+  row: OutboxRecord,
+): Promise<TimerDelivery> {
+  return sendRow(row)
     .then(async () => {
       if (navigator.onLine && (await accepted(row)))
         await removeOutbox(row.uid, row.id);
+      return "accepted" as const;
     })
     .catch(async (error: unknown) => {
       if (permanent(error)) {
-        if (navigator.onLine && (await accepted(row)))
+        if (navigator.onLine && (await accepted(row))) {
           await removeOutbox(row.uid, row.id);
-        else {
+          return "accepted" as const;
+        } else {
           await putOutbox({
             ...row,
             state: "recovery",
@@ -358,11 +377,13 @@ async function deliverSavedOperation(row: OutboxRecord): Promise<void> {
           addError(
             "Your timer operation was saved for recovery. Open Time tracking in settings.",
           );
+          return "rejected" as const;
         }
       } else {
         addError(
           "Your timer operation is saved on this device and will retry when you reconnect.",
         );
+        return "pending" as const;
       }
     });
 }

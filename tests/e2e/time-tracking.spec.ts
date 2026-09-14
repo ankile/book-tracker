@@ -338,7 +338,12 @@ for (const scenario of ["external switch", "edited remote start"] as const)
       });
       batch.set(
         f.user.collection("timeTrackingQueue").doc(intent.operationId),
-          { ...initialQueue(intent, Date.now()), status: "processing", attempts: 1, claimedAt: Date.now() },
+        {
+          ...initialQueue(intent, Date.now()),
+          status: "processing",
+          attempts: 1,
+          claimedAt: Date.now(),
+        },
       );
       await batch.commit();
       operationId = intent.operationId;
@@ -427,6 +432,185 @@ test("online Toggl reading uses the targeted stop's confirmed duration", async (
     expect(rows.size).toBe(1);
     expect(rows.docs[0].get("prepared.action")).toBe("stop_now");
     expect(rows.docs[0].get("status")).toBe("synced");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("explicit reader-only controls keep offline starts available after reload", async ({
+  page,
+  context,
+}) => {
+  const f = await fixture("none");
+  await f.user.set({ uid: f.uid, email: f.email });
+  await f.db
+    .doc("configuration/timeTracking")
+    .set({ timerWriteVersion: 1, threeggleEnabled: false });
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    const start = page.getByRole("button", {
+      name: "Start a reading timer for Offline reading book",
+      exact: true,
+    });
+    await expect(start).toBeEnabled();
+    await page.reload();
+    await expect(start).toBeEnabled();
+    await context.setOffline(true);
+    // The live cached document remains sufficient when network access is lost.
+    await start.click();
+    await expect(
+      page.getByRole("button", {
+        name: "Stop the reading timer for Offline reading book",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await context.setOffline(false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a permanently refused online stop never opens an estimated reading form", async ({
+  page,
+}) => {
+  const f = await fixture("toggl");
+  const timer = {
+    version: 2,
+    timerId: randomUUID(),
+    operationId: randomUUID(),
+    connection: (await f.user.get()).get("timeTracking"),
+    state: "remote",
+    start: new Date(Date.now() - 600000).toISOString(),
+    claimedAt: Date.now() - 600000,
+    remote: { provider: "toggl", entryId: 900003 },
+    queueId: null,
+    errorCode: null,
+  };
+  await f.book.update({ activeTimer: timer });
+  await f.user
+    .collection("timerLifecycle")
+    .doc("current")
+    .set({ version: 2, state: "active", bookId: f.book.id, timer });
+  let refused = false;
+  page.on("dialog", async (dialog) => {
+    refused = dialog.message().includes("stop was refused");
+    await dialog.dismiss();
+  });
+  await page.route("**/timetracking-accept", (route) =>
+    route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          status: "FAILED_PRECONDITION",
+          message: "This timer has changed.",
+        },
+      }),
+    }),
+  );
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await page
+      .getByRole("button", {
+        name: "Stop the reading timer for Offline reading book",
+        exact: true,
+      })
+      .click();
+    await expect.poll(() => refused).toBe(true);
+    await page.waitForTimeout(16000);
+    await expect(
+      page.getByRole("dialog", { name: "Offline reading book", exact: true }),
+    ).toHaveCount(0);
+    expect((await f.book.get()).get("activeTimer.state")).toBe("remote");
+    await expect
+      .poll(async () =>
+        (await deviceRows(page)).some(
+          (row) =>
+            typeof row === "object" &&
+            row !== null &&
+            "state" in row &&
+            row.state === "recovery",
+        ),
+      )
+      .toBe(true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("completed recovered starts offer confirmed reading time and retain their receipt after recording", async ({
+  page,
+}) => {
+  const f = await fixture("none");
+  const operationId = randomUUID();
+  const interval = {
+    start: new Date(Date.now() - 600000).toISOString(),
+    end: new Date().toISOString(),
+  };
+  const intent = decodeTimerIntent({
+    version: 2,
+    action: "start",
+    operationId,
+    timerId: randomUUID(),
+    bookId: f.book.id,
+    connection: {
+      provider: "threeggle",
+      revision: "test",
+      serviceId: "test",
+      accountId: "test",
+      projectId: "reading",
+    },
+    start: interval.start,
+    end: null,
+    description: "Offline reading book",
+    remote: null,
+  });
+  await f.user
+    .collection("timeTrackingQueue")
+    .doc(operationId)
+    .set({ ...initialQueue(intent, Date.now()), status: "synced" });
+  const result = f.user.collection("timeTrackingResults").doc(operationId);
+  await result.set({
+    readingPending: true,
+    bookId: f.book.id,
+    description: intent.description,
+    interval,
+    recordedAt: Date.now(),
+  });
+  page.on("dialog", (dialog) => dialog.accept());
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await page.goto("/me#time-tracking");
+    const recovered = page.getByRole("article", {
+      name: "Completed reading: Offline reading book",
+      exact: true,
+    });
+    await expect(recovered).toBeVisible();
+    await recovered
+      .getByRole("button", { name: "Open reading form", exact: true })
+      .click();
+    await expect(
+      page.getByRole("spinbutton", { name: "Minutes read", exact: true }),
+    ).toHaveValue("10");
+    await page
+      .getByRole("spinbutton", { name: "Current page", exact: true })
+      .fill("11");
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(recovered).toHaveCount(0);
+    expect((await result.get()).get("readingPending")).toBe(false);
+    expect((await result.get()).get("interval")).toEqual(interval);
+    await page.reload();
+    await expect(recovered).toHaveCount(0);
+    expect((await f.book.get()).get("timeRead")).toBe(30);
   } finally {
     await f.cleanup();
   }

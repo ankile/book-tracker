@@ -43,17 +43,22 @@ const { activateConnection } = requireFunctions(
     input: { provider: "none"; expectedRevision: string },
   ) => Promise<Connection>;
 };
-const { retryTimerOperation, retryAsNewExport, acknowledgeLegacyTogglFailure } =
-  requireFunctions("./lib/timeTrackingRecovery") as {
-    retryTimerOperation: (uid: string, id: string) => Promise<void>;
-    retryAsNewExport: (
-      uid: string,
-      source: string,
-      intent: TimerIntent,
-      project?: string,
-    ) => Promise<void>;
-    acknowledgeLegacyTogglFailure: (uid: string, id: string) => Promise<void>;
-  };
+const {
+  retryTimerOperation,
+  retryAsNewExport,
+  acknowledgeLegacyTogglFailure,
+  acknowledgeRecoveredReading,
+} = requireFunctions("./lib/timeTrackingRecovery") as {
+  retryTimerOperation: (uid: string, id: string) => Promise<void>;
+  retryAsNewExport: (
+    uid: string,
+    source: string,
+    intent: TimerIntent,
+    project?: string,
+  ) => Promise<void>;
+  acknowledgeLegacyTogglFailure: (uid: string, id: string) => Promise<void>;
+  acknowledgeRecoveredReading: (uid: string, id: string) => Promise<void>;
+};
 const db = getFirestore(),
   secrets = getFirestore("secrets"),
   uid = `threeggle-emulator-${randomUUID()}`;
@@ -190,6 +195,68 @@ test("online start/stop each has its own retained receipt and releases only the 
   assert.equal((await queue(stop.operationId).get()).get("status"), "synced");
   assert.equal((await user.collection("timerOperations").get()).size, 2);
 });
+test("start context skips project discovery while settings can still request it", async (t) => {
+  const { inspectThreeggle } = requireFunctions(
+    "./lib/timeTrackingConnections",
+  ) as {
+    inspectThreeggle: (
+      token: string,
+      includeProjects?: boolean,
+    ) => Promise<{ projects: { id: string; name: string }[] }>;
+  };
+  const actions: string[] = [];
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (_url: unknown, options: RequestInit) => {
+      const request = decodeTimeTrackingRequest(
+        JSON.parse(String(options.body)),
+      );
+      assert.ok(request);
+      actions.push(request.action);
+      if (request.action === "projects")
+        return json({
+          apiVersion: 1,
+          ok: true,
+          result: { projects: [{ id: "reading", name: "Reading" }] },
+        });
+      assert.equal(request.action, "context");
+      return json({
+        apiVersion: 1,
+        ok: true,
+        result: {
+          serviceId: "test-service",
+          accountId: "test-account",
+          actions: [
+            "context",
+            "projects",
+            "entry",
+            "operation",
+            "start",
+            "stop",
+            "create_interval",
+          ],
+          serverTime: Date.now(),
+          current: null,
+          readiness: "ready",
+          limits: {
+            maxIntervalDurationMs: 2678400000,
+            maxOverlapReadDocuments: 256,
+          },
+        },
+      });
+    },
+  );
+  assert.deepEqual(
+    (await inspectThreeggle("isolated-test-token", false)).projects,
+    [],
+  );
+  assert.deepEqual(actions, ["context"]);
+  assert.deepEqual((await inspectThreeggle("isolated-test-token")).projects, [
+    { id: "reading", name: "Reading" },
+  ]);
+  assert.deepEqual(actions, ["context", "context", "projects"]);
+});
 for (const state of ["running", "completed", "deleted"] as const) {
   test(`recovered Threeggle start reconciles the current ${state} entry`, async (t) => {
     const start = intent();
@@ -279,11 +346,27 @@ for (const state of ["running", "completed", "deleted"] as const) {
     } else {
       assert.equal((await book.get()).get("activeTimer"), null);
       assert.equal((await claim.get()).get("state"), "idle");
-      if (state === "completed")
+      if (state === "completed") {
+        assert.equal(result.get("readingPending"), true);
+        assert.equal(result.get("bookId"), start.bookId);
         assert.deepEqual(result.get("interval"), {
           start: new Date(current.startTime).toISOString(),
           end: new Date(current.endTime!).toISOString(),
         });
+        await assert.rejects(
+          acknowledgeRecoveredReading(uid, randomUUID()),
+          /No completed reading/,
+        );
+        await acknowledgeRecoveredReading(uid, start.operationId);
+        const acknowledged = await result.ref.get();
+        assert.equal(acknowledged.get("readingPending"), false);
+        assert.deepEqual(acknowledged.get("response"), receipt);
+        await acknowledgeRecoveredReading(uid, start.operationId);
+        assert.equal(
+          (await result.ref.get()).get("readingAcknowledgedAt"),
+          acknowledged.get("readingAcknowledgedAt"),
+        );
+      }
       // Re-delivery cannot recreate the old entry or acquire a new timer claim.
       await processTimerQueue(uid, start.operationId);
       assert.deepEqual(actions, ["start", "start", "entry"]);
@@ -335,9 +418,7 @@ for (const failure of ["unauthorized", "unavailable", "wrong_entry"] as const) {
               ok: false,
               error: {
                 code:
-                  failure === "unauthorized"
-                    ? "unauthorized"
-                    : "rate_limited",
+                  failure === "unauthorized" ? "unauthorized" : "rate_limited",
                 message: "Lookup unavailable",
               },
             },
@@ -567,7 +648,21 @@ test("legacy acknowledgements are terminal, immutable and reject retryable creat
     (await legacy.get()).get("legacyResolution.acknowledgedAt"),
     time,
   );
-  assert.equal((await legacy.get()).get("status"), "error");
+  assert.equal((await legacy.get()).get("status"), "acknowledged");
+  assert.equal(
+    (
+      await user
+        .collection("togglQueue")
+        .where("status", "in", [
+          "pending",
+          "processing",
+          "error",
+          "outcome-unknown",
+        ])
+        .get()
+    ).size,
+    0,
+  );
   await legacy.set({ ...base, attempts: 1 });
   await assert.rejects(
     acknowledgeLegacyTogglFailure(uid, "legacy"),

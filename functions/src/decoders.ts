@@ -1531,6 +1531,7 @@ export type TogglQueueDocument = TogglQueuePayload & QueueLifecycle & (
   | {status: "error"; claimedAt: Timestamp; error: string}
   | {status: "outcome-unknown"; claimedAt: Timestamp; error: string}
   | {status: "synced"; claimedAt: Timestamp; entryId: number}
+  | {status: "acknowledged"}
 );
 
 export function decodeTogglQueueDocument(
@@ -1545,7 +1546,7 @@ export function decodeTogglQueueDocument(
   const status = decoded.status;
   if (status !== "pending" && status !== "processing" &&
       status !== "error" && status !== "outcome-unknown" &&
-      status !== "synced") {
+      status !== "synced" && status !== "acknowledged") {
     fail("Toggl queue item has an invalid status.");
   }
   const entryIdAllowed = type === "stop" || status === "synced";
@@ -1626,6 +1627,10 @@ export function decodeTogglQueueDocument(
     return decoded.error;
   })();
 
+  if (status === "acknowledged") {
+    if (!legacyResolution) fail("An acknowledged queue item needs its immutable resolution.");
+    return {...payload, status, createdAt, attempts, claimedAt, error, deferrals};
+  }
   if (status === "pending") {
     if (attempts === 0 && (decoded.attempts !== undefined ||
         claimedAt !== undefined || error !== undefined)) {
