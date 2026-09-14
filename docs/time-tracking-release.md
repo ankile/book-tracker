@@ -10,7 +10,7 @@ Book Tracker stores one account preference: Neither, Toggl Track, or Threeggle. 
 4. After both PRs are approved and deployed, set the server-owned configuration to `{timerWriteVersion: 2, threeggleEnabled: true}`. Connect a timer token and active Reading project through Dashboard → Settings → Time tracking. Verify online start/stop, a completed offline interval, and recovery with dedicated test entries. Complete the Toggl provider checks below before enabling v2 for a Toggl account.
 5. To suspend new Threeggle work, set `threeggleEnabled: false`. Keep v2 readers and workers deployed. Existing stops, durable queue replay, receipt reads, and same-identity credential repair remain available. Do not roll back to a client that cannot read v2 data.
 
-Neither merging nor deployment is performed by the implementation PRs. Keep both active worktrees until approval and merge, then remove merged branches/worktrees using the normal cleanup process.
+Merging and deployment require the owner's approval. Keep both active worktrees until approval and merge, then remove merged branches/worktrees using the normal cleanup process. The initial release is recorded in [September 14 production deployment](time-tracking-deployment-2026-09-14.md).
 
 ### Operator checks
 

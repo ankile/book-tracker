@@ -1,6 +1,6 @@
 # Integration implementation and validation
 
-The implementation is in Book Tracker PR #53 and Threeggle PR #2. Both are ready for implementation review; neither is merged or deployed. The active worktrees are retained until approval and merge.
+Book Tracker PR #53 and Threeggle PR #2 were merged and deployed on September 14, 2026. V2 timers and the Threeggle option are enabled. See the [production release record](time-tracking-deployment-2026-09-14.md) for deployed versions, live checks and verification limits. The evidence below records the preceding implementation and review passes.
 
 Implemented:
 
