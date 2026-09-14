@@ -30,3 +30,9 @@ The new queue service's Eventarc runtime identity has the required per-service i
 The live Toggl partial-PUT probe used a completed test entry because the owner's timer was running. The complete browser-offline-to-running-Toggl-stop sequence remains covered by automated tests rather than this live probe. A future dedicated live check should exercise that exact sequence when it can run without interrupting personal tracking. The provider's read/update race remains documented in the [release runbook](time-tracking-release.md).
 
 Do not roll back to readers that cannot handle v2 timers. To suspend new Threeggle work, disable `threeggleEnabled` and retain the deployed readers, stops and recovery workers.
+
+## Cleanup
+
+Both integration branches were deleted locally and remotely after verifying their exact heads were ancestors of the merged default branches. Both clean integration worktrees were removed. Their ignored configuration and isolated local test data were archived privately first, and their local servers were stopped. No additional merged branches remain. Unmerged forecast, security, backup and dependency-update work was preserved.
+
+The live synthetic entries were removed, the test project archived, temporary connection tokens revoked, the test session signed out, and the dedicated Firestore fixture and credential removed. The empty synthetic Convex account and its audit receipts remain. Both signed-in production Settings pages were checked; Threeggle connected normally and Book Tracker showed the enabled integration option.

@@ -1,8 +1,8 @@
 # Threeggle integration plan
 
-Implementation is now included in this PR. See [implementation and validation](integration-implementation-status.md) and the [coordinated release runbook](time-tracking-release.md). Deployment checklist items remain pending approval.
+The implementation was merged and deployed on September 14, 2026. See [implementation and validation](integration-implementation-status.md), the [production release record](time-tracking-deployment-2026-09-14.md), and the [coordinated release runbook](time-tracking-release.md).
 
-Plan drafted September 12, 2026 and implemented September 13, 2026. The design and review history below are retained for traceability. Deployment remains pending approval.
+Plan drafted September 12, 2026 and implemented September 13, 2026. The design and review history below are retained for traceability.
 
 Review threads: [Book Tracker PR #53](https://github.com/ankile/book-tracker/pull/53) and [Threeggle PR #2](https://github.com/ankile/threeggle/pull/2).
 
