@@ -57,7 +57,7 @@ function emulatorTogglFetch(
     match?.[1] !== undefined &&
     path.endsWith("/stop")
   ) {
-    return emulatorJson({ duration: EMULATOR_STOP_DURATION_SECONDS });
+    return emulatorJson({ id: Number(match[1]), start: new Date(Date.now() - EMULATOR_STOP_DURATION_SECONDS * 1000).toISOString(), duration: EMULATOR_STOP_DURATION_SECONDS });
   }
   if (method === "PUT" && match?.[1] !== undefined) {
     return emulatorJson({ id: Number(match[1]) });
@@ -67,6 +67,7 @@ function emulatorTogglFetch(
   if (method === "GET" && existingEntry !== null) {
     return emulatorJson({
       id: Number(existingEntry[1]),
+      start: new Date(Date.now() - EMULATOR_STOP_DURATION_SECONDS * 1000).toISOString(),
       duration: EMULATOR_STOP_DURATION_SECONDS,
     });
   }

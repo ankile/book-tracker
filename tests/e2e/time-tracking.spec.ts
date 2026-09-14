@@ -3,6 +3,11 @@ import { initializeApp, deleteApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { test, expect, type Page } from "@playwright/test";
+import {
+  decodeTimerIntent,
+  initialQueue,
+  operationAck,
+} from "../../shared/timeTracking.ts";
 
 async function deviceRows(page: Page): Promise<unknown[]> {
   return page.evaluate(
@@ -267,6 +272,161 @@ test("a rejected offline revision keeps its interval through reload and explicit
     await expect(page.getByText("Saved on this device · recovery")).toHaveCount(
       0,
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+for (const scenario of ["external switch", "edited remote start"] as const)
+  test(`online Threeggle reading form waits for the confirmed interval after ${scenario}`, async ({
+    page,
+  }) => {
+    const f = await fixture("none");
+    const connection = {
+      provider: "threeggle" as const,
+      revision: randomUUID(),
+      serviceId: "browser-test",
+      accountId: "browser-account",
+      projectId: "reading",
+    };
+    const start = new Date(Date.now() - 3600000).toISOString();
+    const timer = {
+      version: 2 as const,
+      timerId: randomUUID(),
+      operationId: randomUUID(),
+      connection,
+      state: "remote" as const,
+      start,
+      claimedAt: Date.now() - 3600000,
+      remote: { provider: "threeggle" as const, entryKey: "external-entry" },
+      queueId: null,
+      errorCode: null,
+    };
+    const finalStart =
+      scenario === "external switch"
+        ? start
+        : new Date(Date.parse(start) + 1800000).toISOString();
+    const finalEnd = new Date(
+      Date.parse(finalStart) +
+        (scenario === "external switch" ? 600000 : 300000),
+    ).toISOString();
+    await f.user.update({ timeTracking: connection });
+    await f.book.update({ activeTimer: timer });
+    await f.user
+      .collection("timerLifecycle")
+      .doc("current")
+      .set({ version: 2, state: "active", bookId: f.book.id, timer });
+    let operationId: string | null = null;
+    await page.route("**/timetracking-accept", async (route) => {
+      const payload: unknown = route.request().postDataJSON();
+      if (
+        typeof payload !== "object" ||
+        payload === null ||
+        !("data" in payload) ||
+        typeof payload.data !== "object" ||
+        payload.data === null ||
+        !("intent" in payload.data)
+      )
+        throw new Error("Missing stop intent");
+      const intent = decodeTimerIntent(payload.data.intent);
+      expect(intent.action).toBe("stop");
+      expect(intent.remote).toEqual(timer.remote);
+      const batch = f.db.batch();
+      batch.set(f.user.collection("timerOperations").doc(intent.operationId), {
+        ...operationAck(intent, Date.now()),
+        intent,
+      });
+      batch.set(
+        f.user.collection("timeTrackingQueue").doc(intent.operationId),
+          { ...initialQueue(intent, Date.now()), status: "processing", attempts: 1, claimedAt: Date.now() },
+      );
+      await batch.commit();
+      operationId = intent.operationId;
+      await route.fulfill({
+        json: { result: { accepted: true, operationId: intent.operationId } },
+      });
+    });
+    try {
+      await page.goto("/");
+      await page.getByLabel("Email address", { exact: true }).fill(f.email);
+      await page.getByLabel("Password", { exact: true }).fill(f.password);
+      await page.getByRole("button", { name: "Log in", exact: true }).click();
+      await page
+        .getByRole("button", {
+          name: "Stop the reading timer for Offline reading book",
+          exact: true,
+        })
+        .click();
+      await expect.poll(() => operationId).not.toBeNull();
+      await expect(
+        page.getByRole("dialog", { name: "Offline reading book", exact: true }),
+      ).not.toBeVisible();
+      if (operationId === null) throw new Error("Stop not submitted");
+      const batch = f.db.batch();
+      batch.set(f.user.collection("timeTrackingResults").doc(operationId), {
+        interval: { start: finalStart, end: finalEnd },
+        recordedAt: Date.now(),
+      });
+      batch.update(f.user.collection("timeTrackingQueue").doc(operationId), {
+        status: "synced",
+      });
+      batch.update(f.book, { activeTimer: null });
+      batch.set(f.user.collection("timerLifecycle").doc("current"), {
+        version: 2,
+        state: "idle",
+        cleared: { bookId: f.book.id, timerId: timer.timerId, operationId },
+      });
+      await batch.commit();
+      await expect(
+        page.getByRole("spinbutton", { name: "Minutes read", exact: true }),
+      ).toHaveValue(scenario === "external switch" ? "10" : "5");
+      await expect(
+        page.getByText("Estimated from this device.", { exact: false }),
+      ).not.toBeVisible();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+test("online Toggl reading uses the targeted stop's confirmed duration", async ({
+  page,
+}) => {
+  const f = await fixture("toggl");
+  const timer = {
+    version: 2,
+    timerId: randomUUID(),
+    operationId: randomUUID(),
+    connection: (await f.user.get()).get("timeTracking"),
+    state: "remote",
+    start: new Date(Date.now() - 3600000).toISOString(),
+    claimedAt: Date.now() - 3600000,
+    remote: { provider: "toggl", entryId: 900003 },
+    queueId: null,
+    errorCode: null,
+  };
+  await f.book.update({ activeTimer: timer });
+  await f.user
+    .collection("timerLifecycle")
+    .doc("current")
+    .set({ version: 2, state: "active", bookId: f.book.id, timer });
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await page
+      .getByRole("button", {
+        name: "Stop the reading timer for Offline reading book",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("spinbutton", { name: "Minutes read", exact: true }),
+    ).toHaveValue("1");
+    const rows = await f.user.collection("timeTrackingQueue").get();
+    expect(rows.size).toBe(1);
+    expect(rows.docs[0].get("prepared.action")).toBe("stop_now");
+    expect(rows.docs[0].get("status")).toBe("synced");
   } finally {
     await f.cleanup();
   }

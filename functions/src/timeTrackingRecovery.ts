@@ -192,9 +192,10 @@ export async function retryAsNewExport(
     if (
       available.context.serviceId !== intent.connection.serviceId ||
       available.context.accountId !== intent.connection.accountId ||
-      !available.projects.some(
-        (p) => p.id === (correctedProjectId ?? connection.projectId),
-      )
+      (initial.intent.remote === null &&
+        !available.projects.some(
+          (p) => p.id === (correctedProjectId ?? connection.projectId),
+        ))
     )
       throw new HttpsError(
         "failed-precondition",

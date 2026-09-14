@@ -11,7 +11,11 @@ import {
 } from "./timeTrackingConnections";
 import { threeggleRequest } from "./threeggleTransport";
 import { togglFetch } from "./togglTransport";
-import { decodeStartedTogglEntry, decodeCreatedTogglEntryId } from "./decoders";
+import {
+  decodeStartedTogglEntry,
+  decodeCreatedTogglEntryId,
+  decodeTogglTimerEntry,
+} from "./decoders";
 import {
   claimV2,
   decodeTimerIntent,
@@ -29,6 +33,7 @@ import type {
   RemoteReference,
   TimerIntent,
   TimerV2,
+  TimerInterval,
 } from "./shared/timeTracking";
 import type {
   TimeTrackingEntry,
@@ -169,6 +174,20 @@ export async function acceptTimerIntent(
         );
       if (intent.connection.provider !== "none")
         queue = initialQueue(intent, now);
+      // Callable stops happen online. Offline batches retain their recorded end.
+      if (
+        queue &&
+        intent.connection.provider === "toggl" &&
+        intent.remote?.provider === "toggl"
+      )
+        queue.prepared = {
+          provider: "toggl",
+          action: "stop_now",
+          start: intent.start,
+          end: intent.end,
+          description: intent.description,
+          entryId: intent.remote.entryId,
+        };
       if (current.remote !== null) {
         const stopping: TimerV2 = {
           ...current,
@@ -205,6 +224,7 @@ type Outcome = {
   remote?: RemoteReference;
   start?: string;
   response?: TimeTrackingWriteResponse;
+  interval?: TimerInterval;
 };
 function failureOutcome(result: TimeTrackingHttpResult): Outcome {
   if (result.response.ok) throw new Error("Expected a Threeggle failure.");
@@ -231,6 +251,16 @@ function writeOutcome(result: TimeTrackingHttpResult): Outcome {
     },
     start: new Date(result.response.result.entry.startTime).toISOString(),
     response: { ...result.response, result: result.response.result },
+    ...(result.response.result.entry.endTime === null
+      ? {}
+      : {
+          interval: {
+            start: new Date(
+              result.response.result.entry.startTime,
+            ).toISOString(),
+            end: new Date(result.response.result.entry.endTime).toISOString(),
+          },
+        }),
   };
 }
 function normalizedInterval(
@@ -328,6 +358,72 @@ async function prepare(
     entryId: intent.remote.entryId,
   };
 }
+function togglStopFailure(status: number): Outcome {
+  if (status === 401 || status === 403)
+    return { status: "paused", code: "unauthorized" };
+  if (status === 429 || status >= 500)
+    return {
+      status: "pending",
+      code: status === 429 ? "rate_limited" : "provider_unavailable",
+      retryAt: Date.now() + 60000,
+    };
+  return { status: "terminal", code: `provider_${status}` };
+}
+async function stopToggl(
+  token: string,
+  item: QueueV2,
+  prepared: Extract<PreparedRequest, { provider: "toggl" }>,
+): Promise<Outcome> {
+  const connection = item.intent.connection;
+  if (
+    connection.provider !== "toggl" ||
+    prepared.entryId === null ||
+    prepared.end === null
+  )
+    throw new Error("Invalid targeted Toggl stop.");
+  const target = `/workspaces/${connection.workspaceId}/time_entries/${prepared.entryId}`;
+  const lookup = () =>
+    togglFetch(token, "GET", `/me/time_entries/${prepared.entryId}`);
+  const completed = (value: unknown): Outcome => {
+    const finalEntry = decodeTogglTimerEntry(value);
+    if (finalEntry.id !== prepared.entryId || finalEntry.duration < 0)
+      throw new Error("Toggl did not confirm the completed target.");
+    return {
+      status: "synced",
+      code: null,
+      remote: { provider: "toggl", entryId: finalEntry.id },
+      interval: {
+        start: new Date(finalEntry.start).toISOString(),
+        end: new Date(
+          Date.parse(finalEntry.start) + finalEntry.duration * 1000,
+        ).toISOString(),
+      },
+    };
+  };
+  if (prepared.action === "stop_now") {
+    let onlineReply = await togglFetch(token, "PATCH", `${target}/stop`);
+    // Toggl's targeted stop refuses a completed entry. Read the existing
+    // result instead of reopening or extending it after an external switch.
+    if (onlineReply.status === 409) onlineReply = await lookup();
+    if (!onlineReply.ok) return togglStopFailure(onlineReply.status);
+    return completed(await onlineReply.json());
+  }
+  const existing = await lookup();
+  if (!existing.ok) return togglStopFailure(existing.status);
+  const entry = decodeTogglTimerEntry(await existing.json());
+  if (entry.id !== prepared.entryId)
+    throw new Error("Toggl returned a different target.");
+  if (entry.duration >= 0) return completed(entry);
+  if (Date.parse(prepared.end) <= Date.parse(entry.start))
+    return { status: "paused", code: "end_before_start" };
+  // A delayed offline stop keeps its recorded end, but never sends stale
+  // description/project/start/duration fields. Toggl derives duration from
+  // the current start. The provider offers no conditional update for this
+  // offline timestamp; a concurrent external stop remains a provider limit.
+  const reply = await togglFetch(token, "PUT", target, { stop: prepared.end });
+  if (!reply.ok) return togglStopFailure(reply.status);
+  return completed(await reply.json());
+}
 async function send(
   token: string,
   item: QueueV2,
@@ -360,6 +456,8 @@ async function send(
   const connection = item.intent.connection;
   if (connection.provider !== "toggl")
     throw new Error("Invalid Toggl connection.");
+  if (prepared.action === "stop" || prepared.action === "stop_now")
+    return stopToggl(token, item, prepared);
   const start = Math.floor(Date.parse(prepared.start) / 1000);
   const end =
     prepared.end === null ? null : Math.floor(Date.parse(prepared.end) / 1000);
@@ -376,8 +474,8 @@ async function send(
   };
   const reply = await togglFetch(
     token,
-    prepared.action === "stop" ? "PUT" : "POST",
-    `/workspaces/${connection.workspaceId}/time_entries${prepared.action === "stop" ? `/${prepared.entryId}` : ""}`,
+    "POST",
+    `/workspaces/${connection.workspaceId}/time_entries`,
     body,
   );
   if (!reply.ok) {
@@ -391,7 +489,7 @@ async function send(
       };
     if (reply.status >= 500)
       return {
-        status: prepared.action === "stop" ? "pending" : "outcome-unknown",
+        status: "outcome-unknown",
         code: "provider_unavailable",
         retryAt: Date.now() + 60000,
       };
@@ -412,10 +510,11 @@ async function send(
     code: null,
     remote: {
       provider: "toggl",
-      entryId:
-        prepared.action === "stop" && prepared.entryId !== null
-          ? prepared.entryId
-          : decodeCreatedTogglEntryId(value),
+      entryId: decodeCreatedTogglEntryId(value),
+    },
+    interval: {
+      start: new Date(start * 1000).toISOString(),
+      end: new Date((end ?? start) * 1000).toISOString(),
     },
   };
 }
@@ -530,7 +629,8 @@ export async function processTimerQueue(
         // A Toggl POST is ambiguous until its successful response is saved.
         tx.update(ref, {
           prepared,
-          ...(prepared.provider === "toggl" && prepared.action !== "stop"
+          ...(prepared.provider === "toggl" &&
+          (prepared.action === "start" || prepared.action === "create_interval")
             ? { status: "outcome-unknown", errorCode: "delivery_unconfirmed" }
             : {}),
         });
@@ -544,7 +644,9 @@ export async function processTimerQueue(
         // transaction and local invariant errors must propagate.
         if (!(error instanceof Error)) throw error;
         const ambiguous =
-          prepared.provider === "toggl" && prepared.action !== "stop";
+          prepared.provider === "toggl" &&
+          (prepared.action === "start" ||
+            prepared.action === "create_interval");
         outcome = {
           status: ambiguous ? "outcome-unknown" : "pending",
           code: "delivery_unconfirmed",
@@ -621,10 +723,14 @@ export async function processTimerQueue(
       errorCode: outcome.code,
       retryAt: outcome.retryAt ?? null,
     });
-    if (outcome.response)
+    if (outcome.response || outcome.interval)
       tx.set(
         p.results.doc(operationId),
-        { response: outcome.response, recordedAt: Date.now() },
+        {
+          ...(outcome.response ? { response: outcome.response } : {}),
+          ...(outcome.interval ? { interval: outcome.interval } : {}),
+          recordedAt: Date.now(),
+        },
         { merge: true },
       );
     return true;

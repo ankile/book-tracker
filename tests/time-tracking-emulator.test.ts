@@ -3,8 +3,16 @@ import test, { after, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { initialQueue, decodeQueueV2 } from "../shared/timeTracking.ts";
-import type { Connection, TimerIntent } from "../shared/timeTracking.ts";
+import {
+  initialQueue,
+  decodeQueueV2,
+  claimV2,
+} from "../shared/timeTracking.ts";
+import type {
+  Connection,
+  TimerIntent,
+  TimerV2,
+} from "../shared/timeTracking.ts";
 import { decodeTimeTrackingRequest } from "../shared/time-tracking-api.ts";
 import type {
   TimeTrackingEntry,
@@ -530,3 +538,275 @@ test("background delivery remains retryable after a deferred operation, even wit
   await ref.update({ status: "terminal", errorCode: "invalid_time" });
   await deployed.timetracking.syncqueue.run(event);
 });
+
+async function seedRemoteStop(provider: "toggl" | "threeggle", online = true) {
+  const selected: Connection =
+    provider === "toggl"
+      ? {
+          provider,
+          revision: "revision-a",
+          accountId: "1",
+          workspaceId: 123,
+          projectId: 456,
+        }
+      : connection;
+  await user.update({ timeTracking: selected });
+  const original = {
+    ...intent("stop"),
+    connection: selected,
+    start: new Date(Date.now() - 3600000).toISOString(),
+    remote:
+      provider === "toggl"
+        ? ({ provider, entryId: 678 } as const)
+        : ({ provider, entryKey: "repair-target" } as const),
+  };
+  const timer: TimerV2 = {
+    version: 2,
+    timerId: original.timerId,
+    operationId: randomUUID(),
+    connection: selected,
+    state: "remote",
+    start: original.start,
+    claimedAt: Date.now() - 3600000,
+    remote: original.remote,
+    queueId: null,
+    errorCode: null,
+  };
+  await book.update({ activeTimer: timer });
+  await claim.set(claimV2("book", timer));
+  if (online) await acceptTimerIntent(uid, original, null);
+  else {
+    const stopping: TimerV2 = {
+      ...timer,
+      state: "stopping",
+      operationId: original.operationId,
+      queueId: original.operationId,
+    };
+    await book.update({ activeTimer: stopping });
+    await claim.set(claimV2("book", stopping));
+    await queue(original.operationId).set(initialQueue(original, Date.now()));
+  }
+  return original;
+}
+for (const online of [true, false])
+  test(`${online ? "online" : "offline"} Toggl stop preserves an external completion and its edited interval`, async (t) => {
+    const original = await seedRemoteStop("toggl", online);
+    const edited = {
+      id: 678,
+      start: new Date(Date.parse(original.start) + 300000).toISOString(),
+      duration: 600,
+      description: "External title",
+      project_id: 999,
+    };
+    const methods: string[] = [];
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (url: unknown, options: RequestInit) => {
+        const method = String(options.method);
+        methods.push(method);
+        assert.equal(options.body, undefined);
+        if (method === "PATCH") {
+          assert.match(String(url), /\/678\/stop$/);
+          return new Response("already stopped", { status: 409 });
+        }
+        assert.equal(method, "GET");
+        assert.match(String(url), /\/me\/time_entries\/678$/);
+        return new Response(JSON.stringify(edited));
+      },
+    );
+    await processTimerQueue(uid, original.operationId);
+    assert.deepEqual(methods, online ? ["PATCH", "GET"] : ["GET"]);
+    assert.equal(
+      (await queue(original.operationId).get()).get("status"),
+      "synced",
+    );
+    assert.deepEqual(
+      (
+        await user
+          .collection("timeTrackingResults")
+          .doc(original.operationId)
+          .get()
+      ).get("interval"),
+      {
+        start: edited.start,
+        end: new Date(Date.parse(edited.start) + 600000).toISOString(),
+      },
+    );
+    assert.equal((await book.get()).get("activeTimer"), null);
+  });
+test("online Toggl stop uses the provider's edited start and duration without writing metadata", async (t) => {
+  const original = await seedRemoteStop("toggl");
+  const edited = {
+    id: 678,
+    start: new Date(Date.now() - 120000).toISOString(),
+    duration: 120,
+    description: "Edited",
+    project_id: 999,
+  };
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (url: unknown, options: RequestInit) => {
+      assert.equal(options.method, "PATCH");
+      assert.match(String(url), /\/678\/stop$/);
+      assert.equal(options.body, undefined);
+      return new Response(JSON.stringify(edited));
+    },
+  );
+  await processTimerQueue(uid, original.operationId);
+  const interval = (
+    await user.collection("timeTrackingResults").doc(original.operationId).get()
+  ).get("interval");
+  assert.equal(interval.start, edited.start);
+  assert.equal(Date.parse(interval.end) - Date.parse(interval.start), 120000);
+});
+test("offline Toggl stop sends only its recorded end and reconciles a lost update response", async (t) => {
+  const original = await seedRemoteStop("toggl", false);
+  const editedStart = new Date(
+    Date.parse(original.start) + 300000,
+  ).toISOString();
+  let duration = -1,
+    updates = 0;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (_url: unknown, options: RequestInit) => {
+      if (options.method === "GET")
+        return new Response(
+          JSON.stringify({
+            id: 678,
+            start: editedStart,
+            duration,
+            description: "Edited",
+            project_id: 999,
+          }),
+        );
+      assert.equal(options.method, "PUT");
+      assert.deepEqual(JSON.parse(String(options.body)), {
+        stop: original.end,
+      });
+      updates++;
+      duration = Math.floor(
+        (Date.parse(original.end ?? "") - Date.parse(editedStart)) / 1000,
+      );
+      throw new Error("lost response after committed update");
+    },
+  );
+  await processTimerQueue(uid, original.operationId);
+  assert.equal(
+    (await queue(original.operationId).get()).get("status"),
+    "pending",
+  );
+  await queue(original.operationId).update({ retryAt: 0 });
+  await processTimerQueue(uid, original.operationId);
+  assert.equal(updates, 1);
+  assert.equal(
+    (await queue(original.operationId).get()).get("status"),
+    "synced",
+  );
+  assert.equal(
+    (
+      await user
+        .collection("timeTrackingResults")
+        .doc(original.operationId)
+        .get()
+    ).get("interval.start"),
+    editedStart,
+  );
+});
+for (const alreadyStopped of [false, true])
+  test(`targeted Threeggle stop recovery works without the configured project (${alreadyStopped ? "completed" : "running"} target)`, async (t) => {
+    const original = await seedRemoteStop("threeggle");
+    await queue(original.operationId).update({
+      status: "terminal",
+      errorCode: "project_unavailable",
+    });
+    const remote = {
+      ...entry("repair-target"),
+      projectId: alreadyStopped ? null : "new-project",
+      startTime: Date.parse(original.start) + 300000,
+      endTime: alreadyStopped ? Date.parse(original.start) + 900000 : null,
+    };
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, options: RequestInit) => {
+        const request = decodeTimeTrackingRequest(
+          JSON.parse(String(options.body)),
+        );
+        assert.ok(request);
+        if (request.action === "context")
+          return json({
+            apiVersion: 1,
+            ok: true,
+            result: {
+              serviceId: connection.serviceId,
+              accountId: connection.accountId,
+              actions: [
+                "context",
+                "projects",
+                "start",
+                "stop",
+                "create_interval",
+                "entry",
+                "operation",
+              ],
+              serverTime: Date.now(),
+              current: null,
+              readiness: "ready",
+              limits: {
+                maxIntervalDurationMs: 2678400000,
+                maxOverlapReadDocuments: 256,
+              },
+            },
+          });
+        if (request.action === "projects")
+          return json({ apiVersion: 1, ok: true, result: { projects: [] } });
+        if (request.action === "entry")
+          return json({ apiVersion: 1, ok: true, result: { entry: remote } });
+        assert.equal(request.action, "stop");
+        return json({
+          apiVersion: 1,
+          ok: true,
+          requestId: request.requestId,
+          result: {
+            disposition: alreadyStopped ? "already_stopped" : "stopped",
+            entry: { ...remote, endTime: remote.endTime ?? request.endTime },
+          },
+        });
+      },
+    );
+    const successor = { ...original, operationId: randomUUID() };
+    await retryAsNewExport(uid, original.operationId, successor);
+    assert.equal(
+      (await claim.get()).get("timer.queueId"),
+      successor.operationId,
+    );
+    await processTimerQueue(uid, successor.operationId);
+    assert.equal(
+      (await queue(original.operationId).get()).get("errorCode"),
+      "project_unavailable",
+    );
+    assert.equal(
+      (await queue(original.operationId).get()).get("successorId"),
+      successor.operationId,
+    );
+    assert.equal(
+      (await queue(successor.operationId).get()).get("status"),
+      "synced",
+    );
+    assert.equal((await claim.get()).get("state"), "idle");
+    const interval = (
+      await user
+        .collection("timeTrackingResults")
+        .doc(successor.operationId)
+        .get()
+    ).get("interval");
+    assert.equal(interval.start, new Date(remote.startTime).toISOString());
+    if (alreadyStopped)
+      assert.equal(
+        Date.parse(interval.end) - Date.parse(interval.start),
+        600000,
+      );
+  });

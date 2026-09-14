@@ -61,7 +61,7 @@ export type PreparedRequest =
   | { provider: "threeggle"; request: TimeTrackingWrite }
   | {
       provider: "toggl";
-      action: "start" | "stop" | "create_interval";
+      action: "start" | "stop" | "stop_now" | "create_interval";
       start: string;
       end: string | null;
       description: string;
@@ -99,6 +99,15 @@ export type TimerControls = {
   threeggleEnabled: boolean;
   timerWriteVersion: 1 | 2;
 };
+
+export type TimerInterval = { start: string; end: string };
+export function decodeTimerInterval(value: unknown): TimerInterval {
+  const interval = record(value, ["start", "end"], "confirmed timer interval");
+  const start = iso(interval.start),
+    end = iso(interval.end);
+  if (Date.parse(end) < Date.parse(start)) fail("confirmed timer interval");
+  return { start, end };
+}
 
 function fail(label: string): never {
   throw new TypeError(`Invalid ${label}.`);
@@ -371,6 +380,7 @@ export function decodePrepared(value: unknown): PreparedRequest | null {
     value.provider !== "toggl" ||
     (value.action !== "start" &&
       value.action !== "stop" &&
+      value.action !== "stop_now" &&
       value.action !== "create_interval")
   )
     fail("prepared Toggl request");

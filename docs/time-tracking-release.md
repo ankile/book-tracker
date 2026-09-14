@@ -24,6 +24,12 @@ Connection changes require an idle claim and resolved legacy/v2 queues. Credenti
 
 Legacy terminal create acknowledgements retain the original queue record and a server-owned `legacyResolution`; correlated stop recovery records that resolution while clearing its matching claim. Client writes, workers and sweeps cannot remove or rearm an acknowledgement.
 
+Online remote stops wait for the worker's confirmed interval before suggesting reading minutes. A device-only interval or a remote operation still pending after 15 seconds uses a clearly marked estimate. Leaving the page cancels that page's confirmation listeners without cancelling the saved operation. Failure and reviewed-successor states direct the reader to recovery instead of presenting a final duration.
+
+V2 online Toggl stops use the targeted `PATCH /stop` endpoint. A 409 reads the already-completed entry without changing it. Delayed offline stops read the target first, retain an existing completion, and otherwise update only the recorded stop timestamp. They do not send the saved description, project, start, or duration. Toggl's API has no conditional timestamp update, so a simultaneous external stop during that offline read/update cannot be made atomic by the consumer. See [Toggl's endpoint contract](https://engineering.toggl.com/docs/track/api/time_entries/). Threeggle provides the stronger atomic targeted-stop guarantee through its transaction and receipts.
+
+Reviewed Threeggle targeted stops require the same service/account but do not require the old configured project to remain active. The producer validates the repaired target. New completed exports still require an active project, including any explicitly reviewed replacement project.
+
 ## Local verification
 
 Ordinary Functions tests use an in-process Threeggle stub and a Toggl stub. Setting an endpoint without explicitly selecting isolated mode fails before any request. A real local round trip uses a fresh anonymous Convex backend and:

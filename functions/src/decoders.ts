@@ -1475,6 +1475,14 @@ export function decodeStoppedTogglDuration(
   return duration;
 }
 
+export function decodeTogglTimerEntry(value: unknown): StartedTogglEntry & { duration: number } {
+  const entry = decodeStartedTogglEntry(value);
+  const decoded = record(value, "Toggl timer response", throwDecodeError);
+  const duration = finiteNumber(decoded.duration, "Toggl entry duration", throwDecodeError);
+  if (!Number.isSafeInteger(duration)) throwDecodeError("Invalid Toggl duration.");
+  return { ...entry, duration };
+}
+
 export function decodeCreatedTogglEntryId(
   value: unknown,
   fail: DecodeFailure = throwDecodeError,

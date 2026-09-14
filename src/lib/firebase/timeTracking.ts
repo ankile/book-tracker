@@ -24,12 +24,15 @@ import {
   idleV2,
   initialQueue,
   operationAck,
+  decodeTimerInterval,
+  decodeQueueV2,
 } from "../../../shared/timeTracking.ts";
 import type {
   Connection,
   TimerControls,
   TimerIntent,
   TimerV2,
+  TimerInterval,
 } from "../../../shared/timeTracking.ts";
 import {
   decodeTimeTrackingResponse,
@@ -250,6 +253,89 @@ export async function submitTimerOperation(row: OutboxRecord): Promise<void> {
   void deliverSavedOperation(row).catch(() => {
     addError(
       "Your timer operation is saved on this device and will retry when you reconnect.",
+    );
+  });
+}
+
+// Acceptance is durable intent, not proof that a remote timer has stopped.
+// Wait for the worker's result before suggesting an online reading duration.
+export function waitForTimerStop(
+  uid: string,
+  operationId: string,
+  signal: AbortSignal,
+): Promise<TimerInterval | null> {
+  belongs(uid);
+  if (!navigator.onLine || signal.aborted) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let stopResult = () => {};
+    let stopQueue = () => {};
+    const finish = (interval: TimerInterval | null, error?: unknown) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      stopResult();
+      stopQueue();
+      window.removeEventListener("offline", pending);
+      signal.removeEventListener("abort", pending);
+      if (error !== undefined) reject(error);
+      else resolve(interval);
+    };
+    const pending = () => finish(null);
+    const timeout = setTimeout(pending, 15000);
+    window.addEventListener("offline", pending);
+    signal.addEventListener("abort", pending);
+    stopResult = onSnapshot(
+      doc(db, "users", uid, "timeTrackingResults", operationId),
+      (snap) => {
+        if (!snap.exists()) return;
+        try {
+          belongs(uid);
+          const interval: unknown = snap.get("interval");
+          if (interval !== undefined) {
+            finish(decodeTimerInterval(interval));
+            return;
+          }
+          // Reader compatibility with receipts saved before interval projection.
+          const response = decodeTimeTrackingResponse(snap.get("response"));
+          if (
+            response?.ok &&
+            "entry" in response.result &&
+            response.result.entry.endTime !== null
+          )
+            finish({
+              start: new Date(response.result.entry.startTime).toISOString(),
+              end: new Date(response.result.entry.endTime).toISOString(),
+            });
+        } catch (error) {
+          finish(null, error);
+        }
+      },
+      (error) => finish(null, error),
+    );
+    stopQueue = onSnapshot(
+      doc(db, "users", uid, "timeTrackingQueue", operationId),
+      (snap) => {
+        if (!snap.exists()) return;
+        try {
+          belongs(uid);
+          const row = decodeQueueV2(snap.data());
+          if (
+            ["terminal", "paused"].includes(row.status) ||
+            row.resolution ||
+            row.successorId
+          )
+            finish(
+              null,
+              new Error(
+                "The remote stop needs review. Open Time tracking in settings before adding reading time.",
+              ),
+            );
+        } catch (error) {
+          finish(null, error);
+        }
+      },
+      (error) => finish(null, error),
     );
   });
 }

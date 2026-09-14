@@ -1,9 +1,10 @@
 <script lang="ts">
   import {effectiveConnection} from "../../../shared/timeTracking.ts";
   import type {TimerControls} from "../../../shared/timeTracking.ts";
-  import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, watchTimerControls} from "../firebase/timeTracking.ts";
+  import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, watchTimerControls, waitForTimerStop} from "../firebase/timeTracking.ts";
   import {timerContext} from "../firebase/functions.ts";
   import type { Snippet } from 'svelte';
+  import { onDestroy } from 'svelte';
   import ReadingSummary from './ReadingSummary.svelte';
   import Icon from "svelte-awesome";
   import { plus, edit, play, stop } from "svelte-awesome/icons";
@@ -41,6 +42,7 @@
   const closemodal = () => {
     currentBook = null;
     prefillMinutes = null;
+    estimatedTime = false;
   };
 
   // Use provided books prop if available, otherwise fetch from database.
@@ -99,6 +101,9 @@
   // With a Toggl token connected the timer runs through Toggl; otherwise a
   // local timer is written directly to Firestore (no entryId).
   let prefillMinutes = $state<number | null>(null);
+  let estimatedTime = $state(false);
+  const stopWait = new AbortController();
+  onDestroy(() => stopWait.abort());
   let busy = $state(false);
   let now = $state(Date.now());
   let online = $state(true);
@@ -277,10 +282,19 @@
       if (timer.state !== "local" && timer.state !== "remote") { window.location.assign("/me#time-tracking");return; }
       if (timerPending) return;
       const intent=stopTimerIntent(book.id,book.title,timer);
-      markTimerPending();
-      await submitTimerOperation(pendingOperation(userId,intent,"batch",timer));
-      prefillMinutes=Math.max(1,Math.round((Date.parse(intent.end ?? intent.start)-Date.parse(intent.start))/60000));
-      setModalBook(book,"addReading");
+      busy = true;
+      try {
+        markTimerPending();
+        const onlineStop = navigator.onLine;
+        await submitTimerOperation(pendingOperation(userId,intent,onlineStop && timer.remote !== null ? "accept" : "batch",timer));
+        const interval = onlineStop && timer.connection.provider !== "none"
+          ? await waitForTimerStop(userId,intent.operationId,stopWait.signal) : null;
+        if (stopWait.signal.aborted) return;
+        estimatedTime = interval === null && timer.connection.provider !== "none";
+        const start = interval?.start ?? intent.start, end = interval?.end ?? intent.end ?? intent.start;
+        prefillMinutes=Math.max(1,Math.round((Date.parse(end)-Date.parse(start))/60000));
+        setModalBook(book,"addReading");
+      } catch (error) { alert(errorMessage(error)); } finally { busy = false; }
       return;
     }
     if ('state' in timer) throw new Error('Cannot stop a Toggl timer before its lifecycle transition is resolved.');
@@ -662,6 +676,7 @@
   <AddReadingModal
     book={currentBook}
     initialTime={prefillMinutes ?? undefined}
+    estimatedTime={estimatedTime}
     onaddReading={addReading}
     oncloseModal={closemodal} />
 {:else if currentBook && modal === 'updatePage'}
