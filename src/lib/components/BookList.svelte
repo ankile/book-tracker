@@ -701,10 +701,14 @@
 
 {#snippet timerControl(book: Book, scale: number)}
   {#if isTimerV2(book.activeTimer)}
-    <button type="button" class="action-button timer-button" disabled={busy || timerPending || !userLoaded}
+    <button
+      type="button"
+      class="action-button timer-button"
+      disabled={busy || timerPending || !userLoaded}
       aria-label={book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? `Stop the reading timer for ${book.title}` : `Review time tracking for ${book.title}`}
       onclick={() => stopTimer(book)}>
-      <span>{book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? formatElapsed(book.activeTimer.start) : book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
+      <Icon data={stop} {scale} style={book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? 'color: #dc3545;' : 'color: #666;'} />
+      <span class="elapsed">{book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? formatElapsed(book.activeTimer.start) : book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
     </button>
   {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
     <button
@@ -928,12 +932,29 @@
             <span>Log reading</span>
           </button>
           {#if isTimerV2(book.activeTimer)}
-    <button type="button" class="action-button timer-button" disabled={busy || timerPending || !userLoaded}
-      aria-label={book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? `Stop the reading timer for ${book.title}` : `Review time tracking for ${book.title}`}
-      onclick={() => stopTimer(book)}>
-      <span>{book.activeTimer.state === 'local' || book.activeTimer.state === 'remote' ? formatElapsed(book.activeTimer.start) : book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
-    </button>
-  {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
+            {#if book.activeTimer.state === 'local' || book.activeTimer.state === 'remote'}
+              <button
+                type="button"
+                class="mobile-action-button stop-button"
+                disabled={busy || timerPending || !userLoaded}
+                aria-label={`Stop the reading timer for ${book.title}`}
+                onclick={() => stopTimer(book)}>
+                <Icon data={stop} scale={0.9} />
+                <span>Stop</span>
+                <span class="mobile-elapsed">{formatElapsed(book.activeTimer.start)}</span>
+              </button>
+            {:else}
+              <button
+                type="button"
+                class="mobile-action-button stop-button"
+                disabled={busy || timerPending || !userLoaded}
+                aria-label={`Review time tracking for ${book.title}`}
+                onclick={() => stopTimer(book)}>
+                <Icon data={stop} scale={0.9} />
+                <span>{book.activeTimer.state === 'starting' ? 'Starting…' : book.activeTimer.state === 'stopping' ? 'Stop queued · Review' : 'Review timer'}</span>
+              </button>
+            {/if}
+          {:else if book.activeTimer && 'state' in book.activeTimer && book.activeTimer.state === 'starting'}
             <button
               type="button"
               class="mobile-action-button start-button"

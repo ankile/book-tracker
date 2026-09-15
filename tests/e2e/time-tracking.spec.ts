@@ -615,3 +615,43 @@ test("completed recovered starts offer confirmed reading time and retain their r
     await f.cleanup();
   }
 });
+
+test.describe("mobile layout", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("running timer renders as the mobile Stop pill and returns to Start timer", async ({
+    page,
+  }) => {
+    const f = await fixture("none");
+    try {
+      await page.goto("/");
+      await page.getByLabel("Email address", { exact: true }).fill(f.email);
+      await page.getByLabel("Password", { exact: true }).fill(f.password);
+      await page.getByRole("button", { name: "Log in", exact: true }).click();
+      const start = page.getByRole("button", {
+        name: "Start a reading timer for Offline reading book",
+        exact: true,
+      });
+      await expect(start).toBeEnabled();
+      await expect(start).toHaveClass(/mobile-action-button/);
+      await expect(start).toContainText("Start timer");
+      await start.click();
+      const stop = page.getByRole("button", {
+        name: "Stop the reading timer for Offline reading book",
+        exact: true,
+      });
+      await expect(stop).toBeVisible();
+      // The Threeggle timer branch once rendered on mobile with the desktop
+      // classes and no label, leaving only bare elapsed text on the card.
+      await expect(stop).toHaveClass(/mobile-action-button/);
+      await expect(stop).toHaveClass(/stop-button/);
+      await expect(stop).toContainText("Stop");
+      await expect(stop).toContainText("0:0");
+      await stop.click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(start).toBeEnabled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
