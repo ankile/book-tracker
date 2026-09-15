@@ -654,4 +654,32 @@ test.describe("mobile layout", () => {
       await f.cleanup();
     }
   });
+
+  test("settings sections share one flat style and the sharing switch is a toggle", async ({
+    page,
+  }) => {
+    const f = await fixture("none");
+    try {
+      await page.goto("/");
+      await page.getByLabel("Email address", { exact: true }).fill(f.email);
+      await page.getByLabel("Password", { exact: true }).fill(f.password);
+      await page.getByRole("button", { name: "Log in", exact: true }).click();
+      await page.goto("/me#time-tracking");
+      const tracking = page.locator("#time-tracking");
+      await expect(tracking).toBeVisible();
+      // A flat hairline section like Profile and Sharing, not a boxed card.
+      await expect(tracking).toHaveCSS("border-top-width", "1px");
+      await expect(tracking).toHaveCSS("border-left-width", "0px");
+      await expect(
+        page.getByRole("button", { name: "Save choice", exact: true }),
+      ).toHaveCSS("background-color", "rgb(47, 102, 107)");
+      // The Sharing switch once sat outside the class its toggle styles are
+      // scoped to and rendered as a bare checkbox with run-on text.
+      const share = page.getByRole("switch", { name: /Share what you read/ });
+      await expect(share).toHaveCSS("appearance", "none");
+      await expect(share).toHaveCSS("width", "42px");
+    } finally {
+      await f.cleanup();
+    }
+  });
 });

@@ -1331,7 +1331,7 @@
           {/if}
         </div>
 
-        <div class="toggl-card">
+        <div class="toggl-card share-card">
           <h2>Sharing</h2>
           <label class="visibility-control">
             <input

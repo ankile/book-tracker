@@ -490,7 +490,7 @@
   aria-labelledby="tracking-title"
 >
   <h2 id="tracking-title">Time tracking</h2>
-  <p>
+  <p class="description">
     Choose one app for all reading timers. Your choice stays in effect until you
     change it.
   </p>
@@ -504,7 +504,7 @@
     >
   </p>
   <label for="tracking-provider">Send reading time to</label>
-  <select id="tracking-provider" bind:value={selected} disabled={busy}>
+  <select id="tracking-provider" class="form-control" bind:value={selected} disabled={busy}>
     <option value="none">Neither — keep time in Book Tracker</option>
     <option value="toggl">Toggl Track</option>
     <option
@@ -527,17 +527,19 @@
     >
     <input
       id="tracking-token"
+      class="form-control"
       type="password"
       autocomplete="off"
       bind:value={token}
     />
     {#if selected === "threeggle"}
-      <button type="button" disabled={busy || !token} onclick={inspect}
+      <button type="button" class="secondary-button" disabled={busy || !token} onclick={inspect}
         >Load Threeggle projects</button
       >
       <label for="tracking-project">Reading project</label>
       <select
         id="tracking-project"
+        class="form-control"
         bind:value={projectId}
         disabled={busy || projects.length === 0}
       >
@@ -558,6 +560,7 @@
   <div class="actions">
     <button
       type="button"
+      class="primary-button"
       disabled={busy ||
         controls.timerWriteVersion !== 2 ||
         (selected !== "none" && !token) ||
@@ -567,6 +570,7 @@
     {#if selected === connection.provider && selected !== "none"}
       <button
         type="button"
+        class="secondary-button"
         disabled={busy || !token}
         onclick={() => connect(true)}>Repair credential</button
       >
@@ -596,11 +600,13 @@
         </p>
         <button
           type="button"
+          class="secondary-button"
           disabled={busy}
           onclick={() => recoverCompleted(row)}>Open reading form</button
         >
         <button
           type="button"
+          class="secondary-button"
           disabled={busy}
           onclick={() => acknowledgeReading(row.id)}
           >Already accounted for</button
@@ -623,6 +629,7 @@
         <div class="actions">
           {#if ["pending", "paused", "processing"].includes(row.status)}<button
               type="button"
+              class="secondary-button"
               disabled={busy}
               onclick={() =>
                 run(async () => {
@@ -631,11 +638,13 @@
             >{/if}
           <button
             type="button"
+            class="secondary-button"
             disabled={busy}
             onclick={() => reviewOperation(row)}>Review</button
           >
           {#if row.status === "terminal" || row.status === "outcome-unknown" || row.status === "paused"}<button
               type="button"
+              class="secondary-button"
               disabled={busy}
               onclick={() => acknowledge(row)}
               >I checked the remote outcome</button
@@ -649,6 +658,7 @@
         <p>Toggl · {row.status}</p>
         {#if row.eligible}<button
             type="button"
+            class="secondary-button"
             disabled={busy}
             onclick={() => acknowledgeLegacy(row.id)}
             >I checked the remote outcome</button
@@ -670,19 +680,22 @@
         <div class="actions">
           <button
             type="button"
+            class="secondary-button"
             disabled={busy}
             onclick={() =>
               run(async () => {
                 await reconcileTimerOutbox(uid);
               })}>Check saved operation</button
-          ><button type="button" onclick={() => download(row)}
+          ><button type="button" class="secondary-button" onclick={() => download(row)}
             >Save interval file</button
           >{#if row.state === "recovery"}{#if row.intent.end}<button
                 type="button"
+                class="secondary-button"
                 disabled={busy}
                 onclick={() => recoverReading(row)}>Open reading form</button
               >{/if}<button
               type="button"
+              class="secondary-button"
               disabled={busy}
               onclick={() =>
                 run(async () => {
@@ -693,7 +706,7 @@
                   });
                   await reconcileTimerOutbox(uid);
                 })}>Retry original operation</button
-            ><button type="button" disabled={busy} onclick={() => discard(row)}
+            ><button type="button" class="secondary-button" disabled={busy} onclick={() => discard(row)}
               >Discard device copy</button
             >{/if}
         </div>
@@ -720,21 +733,23 @@
       {#if review.status === "terminal" && review.intent.action === "stop"}
         <label for="review-start">Start (ISO timestamp)</label><input
           id="review-start"
+          class="form-control"
           bind:value={reviewStart}
           readonly={review.intent.remote !== null}
         />
         <label for="review-end">End (ISO timestamp)</label><input
           id="review-end"
+          class="form-control"
           bind:value={reviewEnd}
         />
         {#if review.intent.connection.provider === "threeggle" && review.intent.remote === null && ["project_unavailable", "project_not_found"].includes(review.errorCode ?? "")}<label
             for="review-project">Project for this export</label
-          ><select id="review-project" bind:value={reviewProject}
+          ><select id="review-project" class="form-control" bind:value={reviewProject}
             >{#each projects as project}<option value={project.id}
                 >{project.name}</option
               >{/each}</select
           >{/if}
-        <button type="button" disabled={busy || !reviewEnd} onclick={replace}
+        <button type="button" class="secondary-button" disabled={busy || !reviewEnd} onclick={replace}
           >Export reviewed interval</button
         >
       {:else if review.status === "outcome-unknown"}<p>
@@ -745,57 +760,99 @@
           If the start was rejected, begin a fresh timer from your book after
           resolving the failure.
         </p>{/if}
-      <button type="button" onclick={() => (review = null)}>Close review</button
+      <button type="button" class="secondary-button" onclick={() => (review = null)}>Close review</button
       >
     </section>
   {/if}
 </section>
 
 <style>
+  /* A flat section of the Settings card, matching the Profile and Sharing
+     sections above it: hairline on top, no box of its own. */
   .tracking-card {
-    border: 1px solid #ddd;
-    border-radius: 10px;
-    padding: 1.25rem;
+    border-top: 1px solid #e0e0e0;
+    padding: 1.5rem 0 0;
     scroll-margin-top: 5rem;
   }
   h2 {
-    margin-top: 0;
+    font-size: 1.5rem;
+    color: #333;
+    margin: 0 0 1rem;
+  }
+  h3 {
+    font-size: 1.1rem;
+    color: #333;
+    margin: 1.5rem 0 0.5rem;
   }
   p {
     line-height: 1.5;
     overflow-wrap: anywhere;
   }
+  .description {
+    max-width: 720px;
+    margin: 0 0 1.35rem;
+    color: #666;
+    font-size: 0.92rem;
+  }
+  .status {
+    color: #555;
+  }
   label {
     display: block;
-    font-weight: 600;
+    color: #555;
+    font-size: 0.78rem;
+    font-weight: 650;
     margin-top: 0.8rem;
   }
-  input,
-  select {
-    width: 100%;
-    padding: 0.6rem;
-    border: 1px solid #aaa;
-    border-radius: 5px;
+  .form-control {
     margin: 0.3rem 0 0.7rem;
-    background: var(--input-background, #fff);
-    color: inherit;
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
+    margin-top: 0.5rem;
   }
-  button {
-    padding: 0.55rem 0.8rem;
-    border: 1px solid #777;
-    border-radius: 5px;
+  article .actions {
+    margin-top: 0.75rem;
+  }
+  .primary-button,
+  .secondary-button {
+    min-height: 40px;
+    padding: 0.55rem 0.9rem;
+    font-size: 0.88rem;
+    font-weight: 650;
+    line-height: 1.1;
+    border-radius: 8px;
+    box-shadow: none;
     cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
-  button:disabled {
-    opacity: 0.5;
+  .primary-button:disabled,
+  .secondary-button:disabled {
     cursor: default;
+    opacity: 0.5;
+  }
+  .primary-button {
+    color: #fff;
+    background: #2f666b;
+    border: 1px solid #2f666b;
+  }
+  .primary-button:hover:not(:disabled) {
+    background: #27575c;
+    border-color: #27575c;
+  }
+  .secondary-button {
+    color: #333;
+    background: #fff;
+    border: 1px solid #d8d8d8;
+  }
+  .secondary-button:hover:not(:disabled) {
+    background: #f7f7f7;
+    border-color: #bdbdbd;
   }
   .hint {
+    margin-top: 1rem;
     font-size: 0.9rem;
     color: #626262;
   }
@@ -803,13 +860,19 @@
     color: #b42318;
   }
   article {
-    border-top: 1px solid #ddd;
+    border-top: 1px solid #ededed;
     padding: 1rem 0;
   }
   .review {
-    border: 2px solid #777;
+    border: 1px solid #d8d8d8;
     border-radius: 8px;
     padding: 1rem;
     margin-top: 1rem;
+  }
+  @media (max-width: 768px) {
+    .actions .primary-button,
+    .actions .secondary-button {
+      flex: 1 1 auto;
+    }
   }
 </style>
