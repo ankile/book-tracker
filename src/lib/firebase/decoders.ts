@@ -18,8 +18,9 @@ import type {
   LegacyEmbeddedAuthorsBook,
   LegacyStringAuthorBook,
 } from '../interfaces/book.ts';
-import type { CatalogLink, CatalogMatchMethod } from '../interfaces/catalog.ts';
+import type { CatalogLink, CatalogMatchMethod, CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
+import type { PlanEntry, PlannedAuthor, ReadingPlanSettings } from '../interfaces/readingPlan.ts';
 import {
   PROFILE_LINK_TYPES,
   type Momentum,
@@ -654,6 +655,83 @@ export function decodeReadingSession(id: string, value: unknown, path: string): 
   const decoded = decodeBookUpdate(id, value, path);
   if (decoded.type !== 'reading') fail(path, 'a reading session');
   return decoded;
+}
+
+function nullablePositiveNumber(value: unknown, context: string): number | null {
+  if (value === undefined || value === null) return null;
+  const decoded = number(value, context);
+  if (decoded <= 0) return fail(context, 'a positive number');
+  return decoded;
+}
+
+// A planned entry's shared-work choice is stored flat like a book's link
+// but without linkedAt: the book stamps that when Start reading creates it.
+function plannedCatalogLink(data: Data, context: string): CatalogSelection | null {
+  const workId = nullableNonEmptyString(data.workId, `${context}.workId`);
+  const editionId = nullableNonEmptyString(data.editionId, `${context}.editionId`);
+  const matchMethod = catalogMatchMethod(data.matchMethod, `${context}.matchMethod`);
+  if (workId === null) {
+    if (editionId !== null || matchMethod !== null) {
+      return fail(context, 'editionId and matchMethod to be null when workId is null');
+    }
+    return null;
+  }
+  if (matchMethod !== 'isbn' && matchMethod !== 'external-id' && matchMethod !== 'catalog-choice') {
+    return fail(`${context}.matchMethod`, 'isbn, external-id, or catalog-choice');
+  }
+  return { workId, editionId, matchMethod };
+}
+
+function plannedAuthors(value: unknown, context: string): PlannedAuthor[] {
+  if (!Array.isArray(value)) return fail(context, 'an array');
+  return value.map((entry, index) => {
+    const author = record(entry, `${context}[${index}]`);
+    exactKeys(author, ['id', 'name'], `${context}[${index}]`);
+    return {
+      id: nullableNonEmptyString(author.id, `${context}[${index}].id`),
+      name: nonEmptyString(author.name, `${context}[${index}].name`),
+    };
+  });
+}
+
+export function decodePlanEntry(id: string, value: unknown, path: string): PlanEntry {
+  const data = record(value, path);
+  const kind = string(data.kind, `${path}.kind`);
+  const base = {
+    id,
+    rank: number(data.rank, `${path}.rank`),
+    manualMinutesPerPage: nullablePositiveNumber(data.manualMinutesPerPage, `${path}.manualMinutesPerPage`),
+    createdAt: timestamp(data.createdAt, `${path}.createdAt`),
+    updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
+  };
+  if (kind === 'book') {
+    exactKeys(data, ['kind', 'rank', 'manualMinutesPerPage', 'createdAt', 'updatedAt'], path);
+    return { ...base, kind };
+  }
+  if (kind !== 'planned') return fail(`${path}.kind`, 'planned or book');
+  const pageCount = data.pageCount === undefined || data.pageCount === null
+    ? null
+    : integer(data.pageCount, `${path}.pageCount`);
+  if (pageCount !== null && pageCount <= 0) fail(`${path}.pageCount`, 'a positive integer');
+  return {
+    ...base,
+    kind,
+    title: nonEmptyString(data.title, `${path}.title`),
+    authors: plannedAuthors(data.authors, `${path}.authors`),
+    pageCount,
+    isbn: string(data.isbn, `${path}.isbn`),
+    catalogLink: plannedCatalogLink(data, path),
+    ...metadata(data, path),
+  };
+}
+
+export function decodeReadingPlanSettings(value: unknown, path: string): ReadingPlanSettings {
+  const data = record(value, path);
+  exactKeys(data, ['dailyMinutesOverride', 'updatedAt'], path);
+  return {
+    dailyMinutesOverride: nullablePositiveNumber(data.dailyMinutesOverride, `${path}.dailyMinutesOverride`),
+    updatedAt: timestamp(data.updatedAt, `${path}.updatedAt`),
+  };
 }
 
 export function decodeQueueSweepItem(

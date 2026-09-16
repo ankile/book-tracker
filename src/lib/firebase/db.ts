@@ -25,7 +25,7 @@ import {
   persistentMultipleTabManager,
   type FirestoreError,
 } from 'firebase/firestore';
-import { derived, type Readable, type Unsubscriber } from 'svelte/store';
+import { derived, writable, type Readable, type Unsubscriber, type Writable } from 'svelte/store';
 import { FirebaseError } from 'firebase/app';
 import { app } from './index.ts';
 import { auth } from './auth.ts';
@@ -66,6 +66,13 @@ import type { ActiveTimer, Book } from '../interfaces/book.ts';
 import type { CatalogSelection } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
+  PlanEntry,
+  PlanSnapshot,
+  PlannedAuthor,
+  PlannedEntry,
+  ReadingPlanSettings,
+} from '../interfaces/readingPlan.ts';
+import type {
   Profile,
   ProfileDiscovery,
   ProfileLink,
@@ -78,6 +85,8 @@ import {
   decodeCatalogAuthor,
   decodeBook,
   decodeBookUpdate,
+  decodePlanEntry,
+  decodeReadingPlanSettings,
   decodeLiveQueueSweepItem,
   decodeProfile,
   decodeProfileDiscovery,
@@ -164,6 +173,25 @@ const profileDiscoveryStores = new Map<string, Readable<ProfileDiscovery | null 
 const bookSharingStores = new Map<string, Readable<BookSharingSettings | null | undefined>>();
 const bookUpdatesStores = new Map<string, Readable<BookUpdate[]>>();
 const allReadingSessionsStores = new Map<string, Readable<BookUpdate[] | undefined>>();
+// Companion to the history store: the metadata of its latest snapshot, so
+// the planner can say whether the sessions it averaged are cache-only or
+// still have local writes waiting (docs/to-read-plan.md). Retained like
+// the data; undefined until the listener has delivered once.
+export interface SnapshotState {
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+}
+const historyStateStores = new Map<string, Writable<SnapshotState | undefined>>();
+const historyState = (userId: string) => {
+  let store = historyStateStores.get(userId);
+  if (store === undefined) {
+    store = writable<SnapshotState | undefined>(undefined);
+    historyStateStores.set(userId, store);
+  }
+  return store;
+};
+const readingPlanStores = new Map<string, Readable<PlanSnapshot<PlanEntry[]> | undefined>>();
+const readingPlanSettingsStores = new Map<string, Readable<ReadingPlanSettings | null | undefined>>();
 const catalogAuthorsStore: Readable<Author[] | undefined> = cachedReadable<Author[] | undefined>(
   undefined,
   (set) => diagnosticSnapshot('authors', query(collection(db, 'catalogAuthors')), (snapshot) => {
@@ -1282,14 +1310,223 @@ class Database {
         where('type', 'in', ['reading', 'update'])
       );
 
+      // Metadata changes are delivered too: a pending session's server
+      // acknowledgement changes no document, but the planner reports it.
       return diagnosticSnapshot('history', q, (snapshot) => {
         const sessions = snapshot.docs.map((sessionDoc) => decodeStored(
           () => decodeBookUpdate(sessionDoc.id, sessionDoc.data(), sessionDoc.ref.path),
         ));
         set(sessions);
-      }, listenError('load reading sessions'));
+        historyState(userId).set({
+          fromCache: snapshot.metadata.fromCache,
+          hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        });
+      }, listenError('load reading sessions'), { includeMetadataChanges: true });
     });
   }
+
+  static getReadingHistoryState(userId: string): Readable<SnapshotState | undefined> {
+    return { subscribe: historyState(userId).subscribe };
+  }
+
+  // ---------------------------------------------------------------------
+  // The to-read plan (docs/to-read-plan.md): private queue entries and the
+  // reader's daily-minutes scenario. Forecasts are derived in the client;
+  // nothing computed is stored.
+
+  static getReadingPlan(userId: string): Readable<PlanSnapshot<PlanEntry[]> | undefined> {
+    return cachedStore(readingPlanStores, userId, undefined, (set) => (
+      diagnosticSnapshot('plan', query(collection(db, 'users', userId, 'readingPlanEntries')), (snapshot) => {
+        const entries = snapshot.docs.map((entryDoc) => decodeStored(
+          () => decodePlanEntry(entryDoc.id, entryDoc.data(), entryDoc.ref.path),
+        ));
+        set({
+          value: entries,
+          fromCache: snapshot.metadata.fromCache,
+          hasPendingWrites: snapshot.metadata.hasPendingWrites,
+        });
+      }, listenError('load your reading plan'), { includeMetadataChanges: true })
+    ));
+  }
+
+  static getReadingPlanSettings(userId: string): Readable<ReadingPlanSettings | null | undefined> {
+    return cachedStore(readingPlanSettingsStores, userId, undefined, (set) => (
+      diagnosticSnapshot('plan-settings', doc(db, 'users', userId, 'readingPlans', 'default'), (snapshot) => {
+        set(snapshot.exists()
+          ? decodeStored(() => decodeReadingPlanSettings(snapshot.data(), snapshot.ref.path))
+          : null);
+      }, listenError('load your reading plan settings'))
+    ));
+  }
+
+  static setReadingPlanScenario({ userId, dailyMinutesOverride }: SetReadingPlanScenarioInput): Promise<void> {
+    return setDoc(doc(db, 'users', userId, 'readingPlans', 'default'), {
+      dailyMinutesOverride,
+      updatedAt: Timestamp.now(),
+    });
+  }
+
+  // A new intention lands below the whole visible queue, so the books
+  // displayed after the ranked rows get their positions in the same batch.
+  static addPlannedEntry({ userId, rank, positionWrites, ...fields }: AddPlannedEntryInput): Promise<void> {
+    const batch = writeBatch(db);
+    appendPlanEntryWrites(batch, userId, positionWrites);
+    batch.set(doc(collection(db, 'users', userId, 'readingPlanEntries')), {
+      kind: 'planned',
+      rank,
+      manualMinutesPerPage: null,
+      ...plannedEntryFields(fields),
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+    return batch.commit();
+  }
+
+  static updatePlannedEntry({ userId, entryId, ...fields }: UpdatePlannedEntryInput): Promise<void> {
+    return updateDoc(doc(db, 'users', userId, 'readingPlanEntries', entryId), {
+      ...plannedEntryFields(fields),
+      updatedAt: Timestamp.now(),
+    });
+  }
+
+  static removePlannedEntry({ userId, entryId }: RemovePlannedEntryInput): Promise<void> {
+    return deleteDoc(doc(db, 'users', userId, 'readingPlanEntries', entryId));
+  }
+
+  // Ranks and estimates, one batch: a move is normally one document, and
+  // positioning not-yet-saved books ahead of a drop rides along
+  // (utils/readingPlan.ts planMove).
+  static writePlanEntries({ userId, writes }: WritePlanEntriesInput): Promise<void> {
+    const batch = writeBatch(db);
+    appendPlanEntryWrites(batch, userId, writes);
+    return batch.commit();
+  }
+
+  // Start reading: the personal book takes the entry's id and the entry
+  // becomes its saved position, in one batch. The rules admit the
+  // conversion only while the same batch creates the book, so a repeated
+  // submission cannot mint a second book or reset progress.
+  static startPlannedEntry({ userId, entry, authorChips, pageCount, currentPage }: StartPlannedEntryInput): Promise<void> {
+    const authorIds = storedAuthorIds(authorChips);
+    const batch = writeBatch(db);
+    const ownerRef = doc(db, 'users', userId);
+    batch.set(doc(db, 'users', userId, 'books', entry.id), {
+      authorIds,
+      currentPage,
+      currentPageUpdateId: null,
+      finished: isFinished(currentPage, pageCount),
+      finishedAt: isFinished(currentPage, pageCount) ? Timestamp.now() : null,
+      lastReadAt: null,
+      owner: ownerRef,
+      pageCount,
+      pagesRead: 0,
+      timeRead: 0,
+      title: entry.title,
+      isbn: entry.isbn,
+      ...catalogLinkFields(entry.catalogLink),
+      coverUrl: entry.coverUrl,
+      publisher: entry.publisher,
+      publishedDate: entry.publishedDate,
+      subjects: entry.subjects,
+      fiction: entry.fiction,
+      language: entry.language,
+      updatedAt: Timestamp.now(),
+      createdAt: Timestamp.now(),
+    });
+    batch.update(doc(db, 'users', userId, 'readingPlanEntries', entry.id), {
+      kind: 'book',
+      updatedAt: Timestamp.now(),
+      ...Object.fromEntries(PLANNED_ONLY_FIELDS.map((field) => [field, deleteField()])),
+    });
+    return batch.commit();
+  }
+}
+
+interface SetReadingPlanScenarioInput {
+  userId: string;
+  dailyMinutesOverride: number | null;
+}
+
+interface PlannedEntryFieldsInput {
+  title: string;
+  authors: PlannedAuthor[];
+  pageCount: number | null;
+  isbn: string;
+  metadata: BookMetadata;
+  catalogLink: CatalogSelection | null;
+}
+
+interface AddPlannedEntryInput extends PlannedEntryFieldsInput {
+  userId: string;
+  rank: number;
+  positionWrites: readonly PlanEntryWrite[];
+}
+
+interface UpdatePlannedEntryInput extends PlannedEntryFieldsInput {
+  userId: string;
+  entryId: string;
+}
+
+interface RemovePlannedEntryInput {
+  userId: string;
+  entryId: string;
+  title: string;
+}
+
+export type PlanEntryWrite =
+  | { id: string; create: true; rank: number; manualMinutesPerPage: number | null }
+  | { id: string; create: false; rank?: number; manualMinutesPerPage?: number | null };
+
+interface WritePlanEntriesInput {
+  userId: string;
+  writes: readonly PlanEntryWrite[];
+}
+
+interface StartPlannedEntryInput {
+  userId: string;
+  entry: PlannedEntry;
+  authorChips: AuthorChip[];
+  pageCount: number;
+  currentPage: number;
+}
+
+// The fields only a planned entry carries; the conversion to a book entry
+// deletes them (the rules allowlist the remaining keys).
+const PLANNED_ONLY_FIELDS = [
+  'title', 'authors', 'pageCount', 'isbn', 'coverUrl', 'publisher', 'publishedDate',
+  'subjects', 'fiction', 'language', 'workId', 'editionId', 'matchMethod',
+] as const;
+
+function appendPlanEntryWrites(batch: ReturnType<typeof writeBatch>, userId: string, writes: readonly PlanEntryWrite[]): void {
+  for (const write of writes) {
+    const ref = doc(db, 'users', userId, 'readingPlanEntries', write.id);
+    if (write.create) {
+      batch.set(ref, {
+        kind: 'book',
+        rank: write.rank,
+        manualMinutesPerPage: write.manualMinutesPerPage,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      });
+    } else {
+      batch.update(ref, {
+        ...(write.rank === undefined ? {} : { rank: write.rank }),
+        ...(write.manualMinutesPerPage === undefined ? {} : { manualMinutesPerPage: write.manualMinutesPerPage }),
+        updatedAt: Timestamp.now(),
+      });
+    }
+  }
+}
+
+function plannedEntryFields({ title, authors, pageCount, isbn, metadata, catalogLink }: PlannedEntryFieldsInput) {
+  return {
+    title,
+    authors,
+    pageCount,
+    isbn,
+    ...metadata,
+    ...(catalogLink === null ? { workId: null, editionId: null, matchMethod: null } : catalogLink),
+  };
 }
 
 // Flush-time rejections (offline-queued writes failing on reconnect: rules
@@ -1396,6 +1633,30 @@ Database.updateReadingSession = reportWriteFailures(
 Database.deleteReadingSession = reportWriteFailures(
   'deleteReadingSession', ({ userId }) => userId,
   ({ title }) => `delete the reading session for "${title}"`, Database.deleteReadingSession,
+);
+Database.setReadingPlanScenario = reportWriteFailures(
+  'setReadingPlanScenario', ({ userId }) => userId,
+  (_input: SetReadingPlanScenarioInput) => 'save your reading plan scenario', Database.setReadingPlanScenario,
+);
+Database.addPlannedEntry = reportWriteFailures(
+  'addPlannedEntry', ({ userId }) => userId,
+  ({ title }) => `add "${title}" to your plan`, Database.addPlannedEntry,
+);
+Database.updatePlannedEntry = reportWriteFailures(
+  'updatePlannedEntry', ({ userId }) => userId,
+  ({ title }) => `save changes to "${title}" in your plan`, Database.updatePlannedEntry,
+);
+Database.removePlannedEntry = reportWriteFailures(
+  'removePlannedEntry', ({ userId }) => userId,
+  ({ title }) => `remove "${title}" from your plan`, Database.removePlannedEntry,
+);
+Database.writePlanEntries = reportWriteFailures(
+  'writePlanEntries', ({ userId }) => userId,
+  (_input: WritePlanEntriesInput) => 'save your reading plan order', Database.writePlanEntries,
+);
+Database.startPlannedEntry = reportWriteFailures(
+  'startPlannedEntry', ({ userId }) => userId,
+  ({ entry }) => `start reading "${entry.title}"`, Database.startPlannedEntry,
 );
 
 export { Database, db, listenError };

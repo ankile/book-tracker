@@ -14,7 +14,9 @@
   } from "../utils/bookMetadata.ts";
   import { effectiveLanguage, languageLabel } from "../../../shared/language.ts";
   import { lookupIsbnSources } from "../utils/isbnLookup.ts";
-  import { catalogAddEdition, catalogCreate, catalogSearch, lookupIsbn } from "../firebase/functions.ts";
+  import { catalogAddEdition, catalogCreate, lookupIsbn } from "../firebase/functions.ts";
+  import { CatalogDraft } from "./catalogDraft.svelte.ts";
+  import { completeBookDraft } from "../utils/bookDraft.ts";
   import type { Author, AuthorChip } from "../interfaces/author.ts";
   import type { Book } from "../interfaces/book.ts";
   import type { BookMetadata, BookLookupResult } from "../interfaces/metadata.ts";
@@ -32,16 +34,7 @@
     prepareBookWrite,
   } from "../utils/bookForm.ts";
   import { acceptReportedWrite } from "../utils/offlineWrite.ts";
-  import {
-    automaticIsbnSelectionStillApplies,
-    buildCatalogAddEditionRequest,
-    buildCatalogCreateRequest,
-    buildCatalogSearchRequest,
-    createLatestRequestGate,
-    exactEditionPreselection,
-    linkedBooksForWork,
-    selectionForResult,
-  } from '../utils/catalogClient.ts';
+  import { buildCatalogSearchRequest, linkedBooksForWork } from '../utils/catalogClient.ts';
 
   let {
     open, userId, book = null, onclose,
@@ -75,15 +68,10 @@
   // edit mode so saving without a fresh lookup preserves what's stored.
   let metadata = $state<BookMetadata>({ ...EMPTY_METADATA });
   let allBooks = $state<Book[]>([]);
-  let catalogResults = $state<CatalogSearchResult[]>([]);
-  let catalogSelection = $state<CatalogSelection | null>(null);
-  let selectedCatalogResult = $state<CatalogSearchResult | null>(null);
-  let catalogLoading = $state(false);
-  let catalogMessage = $state("");
-  let catalogChoiceTouched = $state(false);
-  let automaticSelectionIsbn13 = $state<string | null>(null);
+  // Catalog search and selection (catalogDraft.svelte.ts), shared with the
+  // to-read planner's add flow.
+  const catalog = new CatalogDraft();
   let online = $state(true);
-  const catalogRequestGate = createLatestRequestGate();
 
   $effect(() => {
     if (!open || !userId) return;
@@ -140,7 +128,7 @@
       fiction: book?.fiction ?? null,
       language: book?.language ?? "",
     };
-    catalogSelection = book?.workId
+    const storedLink: CatalogSelection | null = book?.workId
       ? {
         workId: book.workId,
         editionId: book.editionId,
@@ -149,13 +137,7 @@
         matchMethod: 'catalog-choice',
       }
       : null;
-    selectedCatalogResult = null;
-    catalogChoiceTouched = false;
-    automaticSelectionIsbn13 = book?.matchMethod === 'isbn'
-      ? normalizeIsbn(book.isbn)
-      : null;
-    catalogResults = [];
-    catalogMessage = "";
+    catalog.seed(storedLink, book?.matchMethod === 'isbn' ? normalizeIsbn(book.isbn) : null);
     lookupError = "";
   });
 
@@ -172,9 +154,7 @@
       seededBookId = undefined;
       authorChips = [];
       lookupError = "";
-      catalogRequestGate.invalidate();
-      catalogResults = [];
-      catalogMessage = "";
+      catalog.reset();
       return;
     }
     if (!authorsLoaded) return;
@@ -194,79 +174,21 @@
 
   const catalogAuthorNames = $derived(authorChips.map((chip) => chip.name).filter(Boolean));
   const duplicateBooks = $derived(
-    selectedCatalogResult === null
+    catalog.selectedResult === null
       ? []
-      : linkedBooksForWork(allBooks, selectedCatalogResult.work, book?.id ?? null),
+      : linkedBooksForWork(allBooks, catalog.selectedResult.work, book?.id ?? null),
   );
 
   $effect(() => {
     if (!open || !authorsLoaded) return;
     const request = buildCatalogSearchRequest({isbn, title, authorNames: catalogAuthorNames});
-    if (request === null) {
-      catalogRequestGate.invalidate();
-      catalogResults = [];
-      catalogLoading = false;
-      if (automaticSelectionIsbn13 !== null) {
-        catalogSelection = null;
-        selectedCatalogResult = null;
-        automaticSelectionIsbn13 = null;
-      }
-      return;
-    }
-    if (!automaticIsbnSelectionStillApplies(automaticSelectionIsbn13, request)) {
-      catalogSelection = null;
-      selectedCatalogResult = null;
-      automaticSelectionIsbn13 = null;
-    }
-    if (!online) {
-      catalogRequestGate.invalidate();
-      catalogLoading = false;
-      catalogMessage = catalogSelection === null
-        ? 'Catalog lookup is unavailable offline. Saving will keep this book unlinked.'
-        : 'Catalog lookup is unavailable offline. Your current shared-work choice remains selected.';
-      return;
-    }
-
-    // Input changes make any already-running request stale immediately, not
-    // only after the replacement request starts at the end of the debounce.
-    catalogRequestGate.invalidate();
-    catalogResults = [];
-    const timeout = window.setTimeout(() => void searchCatalog(request), 350);
-    return () => window.clearTimeout(timeout);
+    return catalog.sync(request, online, (exact) => selectCatalogResult(exact, false));
   });
 
-  async function searchCatalog(request: NonNullable<ReturnType<typeof buildCatalogSearchRequest>>) {
-    const requestId = catalogRequestGate.begin();
-    catalogLoading = true;
-    catalogMessage = '';
-    try {
-      const response = await catalogSearch(request);
-      if (!catalogRequestGate.isCurrent(requestId)) return;
-      catalogResults = response.results;
-      if (catalogSelection !== null) {
-        selectedCatalogResult = response.results.find((result) =>
-          result.workId === catalogSelection?.workId ||
-          result.work.mergedFrom.includes(catalogSelection?.workId ?? '')) ?? selectedCatalogResult;
-      }
-      const exact = exactEditionPreselection(response.results);
-      if (!catalogChoiceTouched && catalogSelection === null && exact !== null) {
-        selectCatalogResult(exact, false);
-      }
-    } catch (error) {
-      if (!catalogRequestGate.isCurrent(requestId)) return;
-      console.error('Catalog search failed', error);
-      catalogResults = [];
-      catalogMessage = 'Catalog suggestions are unavailable. You can still save this book unlinked.';
-    } finally {
-      if (catalogRequestGate.isCurrent(requestId)) catalogLoading = false;
-    }
-  }
-
+  // A chosen result fills what the form still lacks; the catalog side of
+  // the choice lives in the draft.
   function selectCatalogResult(result: CatalogSearchResult, touched = true) {
-    catalogSelection = selectionForResult(result);
-    selectedCatalogResult = result;
-    catalogChoiceTouched = touched;
-    automaticSelectionIsbn13 = touched ? null : normalizeIsbn(isbn);
+    catalog.select(result, touched, isbn);
     title = fillMissingText(title, result.edition?.title || result.work.canonicalTitle);
     const inheritingAuthors = authorChips.length === 0;
     authorChips = fillMissingItems(
@@ -276,7 +198,7 @@
         .map((author) => resolveChip(author.canonicalName, authorList)),
     );
     if (inheritingAuthors && result.work.authors.length > MAX_BOOK_AUTHORS) {
-      catalogMessage = `This work has ${result.work.authors.length} catalog authors. The first ${MAX_BOOK_AUTHORS} were copied to your personal book.`;
+      catalog.message = `This work has ${result.work.authors.length} catalog authors. The first ${MAX_BOOK_AUTHORS} were copied to your personal book.`;
     }
     pageCount = fillMissingPageCount(pageCount, [result.edition?.suggestedPageCount ?? undefined]);
     metadata = {
@@ -291,14 +213,6 @@
         effectiveLanguage(result.edition?.language ?? '', result.work.language),
       ),
     };
-  }
-
-  function removeCatalogLink() {
-    catalogSelection = null;
-    selectedCatalogResult = null;
-    catalogChoiceTouched = true;
-    automaticSelectionIsbn13 = null;
-    catalogMessage = 'This personal book will be saved without a shared-work link.';
   }
 
   async function handleSubmit() {
@@ -326,119 +240,49 @@
       currentPage,
       isbn,
       metadata: $state.snapshot(metadata),
-      catalogSelection: $state.snapshot(catalogSelection),
-      catalogSelectionTouched: catalogChoiceTouched,
-      catalogSelectionIsbn13: automaticSelectionIsbn13,
+      catalogSelection: $state.snapshot(catalog.selection),
+      catalogSelectionTouched: catalog.choiceTouched,
+      catalogSelectionIsbn13: catalog.automaticIsbn13,
     });
     let prepared = preparedWrite();
     if (!prepared.valid) {
       lookupError = prepared.message;
       return;
     }
-    if (authorChips.some((chip) => chip.id === null)) {
-      if (!online) {
-        lookupError = 'Connect to create a new shared author, then try again.';
-        return;
-      }
-      const request = ++authorResolutionRequest;
-      resolvingAuthors = true;
-      try {
-        const resolved = await Database.resolveBookAuthors(authorChips);
-        if (!open || request !== authorResolutionRequest) return;
-        authorChips = resolved;
-      } catch (error) {
-        if (request !== authorResolutionRequest) return;
-        lookupError = error instanceof Error
-          ? error.message
-          : 'Could not create the shared author. Try again.';
-        return;
-      } finally {
-        if (request === authorResolutionRequest) resolvingAuthors = false;
-      }
-      prepared = preparedWrite();
-      if (!prepared.valid) {
-        lookupError = prepared.message;
-        return;
-      }
+    // New authors, a missing edition and an unmatched work are settled
+    // over the network first (utils/bookDraft.ts); the draft stays for a
+    // retry when any step fails.
+    const request = ++authorResolutionRequest;
+    const completion = await completeBookDraft({
+      online,
+      authorChips,
+      catalogSelection: $state.snapshot(catalog.selection),
+      selectedWorkLanguage: catalog.selectedResult?.work.language ?? '',
+      catalogChoiceTouched: catalog.choiceTouched,
+      title: prepared.write.input.title,
+      isbn: prepared.write.input.isbn,
+      pageCount: prepared.write.input.pageCount,
+      metadata: $state.snapshot(metadata),
+    }, {
+      resolveAuthors: (chips) => Database.resolveBookAuthors(chips),
+      addEdition: catalogAddEdition,
+      createWork: catalogCreate,
+    }, (phase) => {
+      resolvingAuthors = phase === 'authors';
+      creatingWork = phase === 'catalog';
+    });
+    if (!open || request !== authorResolutionRequest) return;
+    if (!completion.ok) {
+      lookupError = completion.message;
+      return;
     }
-    // A chosen work without a matching edition gets this book's edition
-    // added to it, so every linked book stands on an edition (owner
-    // decision 2026-09-01). The callable needs the network; offline the
-    // link cannot be completed and the draft stays for a retry.
-    if (catalogSelection !== null && catalogSelection.editionId === null) {
-      if (!online) {
-        lookupError = 'Connect to add your edition to the shared work, then try again.';
-        return;
-      }
-      const request = buildCatalogAddEditionRequest({
-        workId: catalogSelection.workId,
-        workLanguage: selectedCatalogResult?.work.language ?? '',
-        title: prepared.write.input.title,
-        isbn: prepared.write.input.isbn,
-        pageCount: prepared.write.input.pageCount,
-        metadata: $state.snapshot(metadata),
-      });
-      creatingWork = true;
-      try {
-        const added = await catalogAddEdition(request);
-        if (!open) return;
-        // The edition is this account's choice for the book, whatever
-        // provenance the stored link had.
-        catalogSelection = {
-          workId: added.workId,
-          editionId: added.editionId,
-          matchMethod: 'catalog-choice',
-        };
-        catalogChoiceTouched = true;
-      } catch (error) {
-        console.error('Catalog edition creation failed', error);
-        lookupError = 'Could not add your edition to the shared work. Try again, or remove the link to save the book unlinked.';
-        return;
-      } finally {
-        creatingWork = false;
-      }
-      prepared = preparedWrite();
-      if (!prepared.valid) {
-        lookupError = prepared.message;
-        return;
-      }
-    }
-    // A book that matched nothing and that the user did not explicitly
-    // save unlinked seeds the shared catalog itself (catalog data is
-    // public). Offline it stays unlinked, as the panel says; a creation
-    // failure keeps the draft so the user can retry or save unlinked.
-    if (catalogSelection === null && !catalogChoiceTouched && online) {
-      const request = buildCatalogCreateRequest({
-        title: prepared.write.input.title,
-        authorIds: authorChips.flatMap((chip) => chip.id === null ? [] : [chip.id]),
-        isbn: prepared.write.input.isbn,
-        pageCount: prepared.write.input.pageCount,
-        metadata: $state.snapshot(metadata),
-      });
-      if (request !== null) {
-        creatingWork = true;
-        try {
-          const created = await catalogCreate(request);
-          if (!open) return;
-          catalogSelection = {
-            workId: created.workId,
-            editionId: created.editionId,
-            matchMethod: 'catalog-choice',
-          };
-          catalogChoiceTouched = true;
-        } catch (error) {
-          console.error('Catalog creation failed', error);
-          lookupError = 'Could not create the shared work. Try again, or remove the link to save the book unlinked.';
-          return;
-        } finally {
-          creatingWork = false;
-        }
-        prepared = preparedWrite();
-        if (!prepared.valid) {
-          lookupError = prepared.message;
-          return;
-        }
-      }
+    authorChips = completion.authorChips;
+    catalog.selection = completion.catalogSelection;
+    catalog.choiceTouched = completion.catalogChoiceTouched;
+    prepared = preparedWrite();
+    if (!prepared.valid) {
+      lookupError = prepared.message;
+      return;
     }
     // The SDK has accepted the mutation into its offline queue once the
     // wrapped method returns its promise. Close now; waiting for that promise
@@ -785,15 +629,15 @@
   {/if}
 
   <CatalogMatchPanel
-    suggestions={catalogResults}
-    selected={catalogSelection}
-    selectedResult={selectedCatalogResult}
+    suggestions={catalog.results}
+    selected={catalog.selection}
+    selectedResult={catalog.selectedResult}
     duplicates={duplicateBooks}
-    loading={catalogLoading}
+    loading={catalog.loading}
     {online}
-    message={catalogMessage}
+    message={catalog.message}
     onselect={selectCatalogResult}
-    onremove={removeCatalogLink} />
+    onremove={() => catalog.remove()} />
 
   {#if isEditMode}
     <button

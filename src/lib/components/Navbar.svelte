@@ -97,7 +97,7 @@
       display: grid;
       grid-column: 1 / -1;
       grid-row: 2;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 0.25rem;
       padding-top: 0.45rem;
       border-top: 1px solid rgba(237, 245, 245, 0.2);
@@ -142,6 +142,7 @@
 
     <div class="primary-links">
       <NavLink to="/">{#snippet children()}Reading{/snippet}</NavLink>
+      <NavLink to="/to-read">{#snippet children()}To read{/snippet}</NavLink>
       <NavLink to="/finished">{#snippet children()}Finished{/snippet}</NavLink>
       <NavLink to="/me">{#snippet children()}Dashboard{/snippet}</NavLink>
     </div>

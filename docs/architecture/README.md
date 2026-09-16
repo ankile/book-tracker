@@ -90,6 +90,7 @@ part of this public map package.
 | Route | Main functionality | Access and writes |
 |---|---|---|
 | `/` | Books in progress, page progress, reading sessions, and timers | Signed-in owner read and write |
+| `/to-read` | Ordered reading queue: books in progress and planned books, expected start and finish dates from recent reading time, reorder by drag or keyboard, start a planned book | Signed-in owner read and write; private planning records only |
 | `/finished` | Finished books, search, sorting, filtering, totals, and session correction | Signed-in owner read and write |
 | `/me` | Reading analytics, sharing settings, optional integrations, and sign-out | Signed-in owner read and write |
 | `/authors` | Browse the shared author catalog | Signed-in reader; no writes on this page |

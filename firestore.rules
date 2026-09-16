@@ -235,6 +235,143 @@ service cloud.firestore {
                     && settingId == 'bookSharing';
     }
 
+    // The to-read plan (docs/to-read-plan.md): private queue rows and the
+    // reader's daily-minutes scenario. Owner-only, the same posture as the
+    // books they order (no tombstone gate: a soft-deleted account keeps
+    // its personal content, SEC-006). A 'planned' row is an intention with
+    // its own bibliographic fields; a 'book' row is the saved position of
+    // the personal book sharing its id. Start reading converts planned to
+    // book in the batch that creates that book, and only then, so a replay
+    // cannot create a second book. Catalog fields on a planned row are
+    // advisory copies; the book create validates the link when it lands.
+    match /users/{userId}/readingPlanEntries/{entryId} {
+      allow read: if request.auth != null && userId == request.auth.uid;
+      allow create: if request.auth != null && userId == request.auth.uid
+                    && validPlanEntryBase(request.resource.data)
+                    && ((request.resource.data.kind == 'planned'
+                         && validPlannedEntryFields(request.resource.data))
+                        || (request.resource.data.kind == 'book'
+                            && validBookEntryFields(request.resource.data)
+                            && existsAfter(/databases/$(database)/documents/users/$(userId)/books/$(entryId))));
+      allow update: if request.auth != null && userId == request.auth.uid
+                    && validPlanEntryBase(request.resource.data)
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && ((resource.data.kind == 'planned'
+                         && request.resource.data.kind == 'planned'
+                         && validPlannedEntryFields(request.resource.data))
+                        || (resource.data.kind == 'book'
+                            && request.resource.data.kind == 'book'
+                            && validBookEntryFields(request.resource.data))
+                        || (resource.data.kind == 'planned'
+                            && request.resource.data.kind == 'book'
+                            && validBookEntryFields(request.resource.data)
+                            && !exists(/databases/$(database)/documents/users/$(userId)/books/$(entryId))
+                            && existsAfter(/databases/$(database)/documents/users/$(userId)/books/$(entryId))));
+      allow delete: if request.auth != null && userId == request.auth.uid;
+    }
+
+    match /users/{userId}/readingPlans/{planId} {
+      allow get: if request.auth != null && userId == request.auth.uid && planId == 'default';
+      allow create, update: if request.auth != null && userId == request.auth.uid
+                            && planId == 'default'
+                            && validReadingPlanSettings(request.resource.data);
+      allow delete: if request.auth != null && userId == request.auth.uid && planId == 'default';
+    }
+
+    function validPlanEntryBase(entry) {
+      return entry.kind in ['planned', 'book']
+             && entry.rank is number
+             && entry.rank >= -1000000000000000
+             && entry.rank <= 1000000000000000
+             && (entry.manualMinutesPerPage == null
+                 || (entry.manualMinutesPerPage is number
+                     && entry.manualMinutesPerPage > 0
+                     && entry.manualMinutesPerPage <= 1000))
+             && entry.createdAt is timestamp
+             && entry.updatedAt is timestamp;
+    }
+
+    function validBookEntryFields(entry) {
+      return entry.keys().hasAll(['kind', 'rank', 'manualMinutesPerPage', 'createdAt', 'updatedAt'])
+             && entry.keys().hasOnly(['kind', 'rank', 'manualMinutesPerPage', 'createdAt', 'updatedAt']);
+    }
+
+    function validPlannedEntryFields(entry) {
+      return entry.keys().hasAll([
+               'kind', 'rank', 'manualMinutesPerPage', 'createdAt', 'updatedAt',
+               'title', 'authors', 'pageCount', 'isbn', 'coverUrl', 'publisher',
+               'publishedDate', 'subjects', 'fiction', 'language',
+               'workId', 'editionId', 'matchMethod'
+             ])
+             && entry.keys().hasOnly([
+               'kind', 'rank', 'manualMinutesPerPage', 'createdAt', 'updatedAt',
+               'title', 'authors', 'pageCount', 'isbn', 'coverUrl', 'publisher',
+               'publishedDate', 'subjects', 'fiction', 'language',
+               'workId', 'editionId', 'matchMethod'
+             ])
+             && entry.title is string
+             && entry.title.size() > 0
+             && entry.title.size() <= 500
+             && entry.authors is list
+             && entry.authors.size() <= 6
+             && validPlannedAuthorAt(entry.authors, 0)
+             && validPlannedAuthorAt(entry.authors, 1)
+             && validPlannedAuthorAt(entry.authors, 2)
+             && validPlannedAuthorAt(entry.authors, 3)
+             && validPlannedAuthorAt(entry.authors, 4)
+             && validPlannedAuthorAt(entry.authors, 5)
+             && (entry.pageCount == null
+                 || (entry.pageCount is int
+                     && entry.pageCount > 0
+                     && entry.pageCount <= 9007199254740991))
+             && entry.isbn is string
+             && entry.isbn.size() <= 32
+             && entry.coverUrl is string
+             && entry.coverUrl.size() <= 2048
+             && entry.publisher is string
+             && entry.publisher.size() <= 500
+             && entry.publishedDate is string
+             && entry.publishedDate.size() <= 64
+             && entry.subjects is list
+             && entry.subjects.size() <= 25
+             && entry.subjects.join('').size() <= 2500
+             && (entry.fiction == null || entry.fiction is bool)
+             && entry.language is string
+             && entry.language.size() <= 16
+             && ((entry.workId == null
+                  && entry.editionId == null
+                  && entry.matchMethod == null)
+                 || (entry.workId is string
+                     && entry.workId.matches('[^/]{1,100}')
+                     && entry.matchMethod in ['isbn', 'external-id', 'catalog-choice']
+                     && (entry.editionId == null
+                         || (entry.editionId is string
+                             && entry.editionId.matches('[^/]{1,100}')))));
+    }
+
+    function validPlannedAuthorAt(authors, index) {
+      return authors.size() <= index
+             || (authors[index] is map
+                 && authors[index].keys().hasAll(['id', 'name'])
+                 && authors[index].keys().hasOnly(['id', 'name'])
+                 && (authors[index].id == null
+                     || (authors[index].id is string
+                         && authors[index].id.matches('[^/]{1,100}')))
+                 && authors[index].name is string
+                 && authors[index].name.size() > 0
+                 && authors[index].name.size() <= 200);
+    }
+
+    function validReadingPlanSettings(settings) {
+      return settings.keys().hasAll(['dailyMinutesOverride', 'updatedAt'])
+             && settings.keys().hasOnly(['dailyMinutesOverride', 'updatedAt'])
+             && (settings.dailyMinutesOverride == null
+                 || (settings.dailyMinutesOverride is number
+                     && settings.dailyMinutesOverride > 0
+                     && settings.dailyMinutesOverride <= 1440))
+             && settings.updatedAt is timestamp;
+    }
+
     function validBookSharingSetting(userId) {
       let setting = request.resource.data;
       return userId == request.auth.uid

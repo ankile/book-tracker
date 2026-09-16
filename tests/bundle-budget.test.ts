@@ -82,9 +82,16 @@ test('the production JavaScript bundle stays within its transfer budget', () => 
   // validators, revision-aware timer reader, IndexedDB recovery, and provider
   // settings/review UI bring the measured build to 368.1 KiB compressed.
   // The largest-chunk limit stays at 170 KiB; recovery is dynamically loaded.
+  // Total raised 370 -> 390 KiB for the to-read plan (docs/to-read-plan.md):
+  // the /to-read route chunk (queue with pointer and keyboard reorder,
+  // summary, add/edit, start and estimate dialogs) is 14.4 KiB compressed
+  // and loads only on that route; the shared chunks grow 4.9 KiB for the
+  // plan stores, decoders, rank arithmetic, the catalog draft shared with
+  // the add-book dialog, and the navigation entry. Measured 368.1 -> 387.4
+  // KiB; the rest is headroom. No dependency was added.
   assert.ok(
-    totalBytes <= 370 * 1024,
-    `Expected at most 370 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
+    totalBytes <= 390 * 1024,
+    `Expected at most 390 KiB of compressed JavaScript, received ${(totalBytes / 1024).toFixed(1)} KiB`
   );
   assert.ok(
     largestChunk.bytes <= 170 * 1024,

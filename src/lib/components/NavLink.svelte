@@ -52,6 +52,16 @@
       padding-right: 0.4rem;
       padding-left: 0.4rem;
       font-size: 0.9rem;
+      white-space: nowrap;
+    }
+  }
+
+  /* Four destinations at 320px: "Dashboard" must still fit on one line. */
+  @media only screen and (max-width: 360px) {
+    a {
+      padding-right: 0.15rem;
+      padding-left: 0.15rem;
+      font-size: 0.8rem;
     }
   }
 </style>

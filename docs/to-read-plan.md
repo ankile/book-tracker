@@ -1,6 +1,6 @@
 # To-read queue and completion forecast
 
-Status: proposed, September 15, 2026. This document plans the feature; it does not implement it.
+Status: implemented on this branch, September 16, 2026. The plan below is kept as the specification; the decisions section records where the implementation settled the open questions.
 
 ## PR workflow
 
@@ -14,11 +14,29 @@ Use the draft PR on `feature/to-read-planner` to refine this plan, then implemen
 
 Related work: [PR #52](https://github.com/ankile/book-tracker/pull/52) proposes a book finish prediction engine and uncertainty view. Before implementation, review overlap and decide which calculation and presentation pieces to share. This plan starts from `master` and does not depend on that unmerged branch.
 
+## Decisions and implementation (September 16, 2026)
+
+The owner resolved the open questions on September 16, 2026, and the feature was implemented on this branch the same day. The rest of this document is the specification; where it offered options, these choices apply.
+
+- Timeline: year dividers in the list only. The proportional timeline bar is not built. The summary sentence names the queue's end, the spare hours in the current year, or the hours carried past December 31 and the book that crosses it.
+- Dashboard: `projectedFinishes()` is unchanged. The "On deck" list on the dashboard is labelled as independent estimates (each book gets the whole 30-day daily budget at its own measured pace) and links to `/to-read`. PR #52 is not touched.
+- History source: the existing full-history store is reused. Its listener now delivers metadata changes and publishes cache-origin and pending-write state through `Database.getReadingHistoryState`, so the planner can say when the budget rests on cached or unconfirmed sessions.
+- Ranks: fractional numbers. A move writes the midpoint between its neighbours; neighbours closer than the minimum gap renumber the ranked queue in one batch; ties break by entry id. Books not yet positioned are materialised only when a drop lands among them or an estimate is saved on one (`planMove`, `planMaterialize` in `src/lib/utils/readingPlan.ts`).
+- Add flow: catalog search, ISBN lookup, and manual title. The catalog search and selection state was extracted once into `CatalogDraft` (`src/lib/components/catalogDraft.svelte.ts`) and the author, edition, and work completion steps into `completeBookDraft` (`src/lib/utils/bookDraft.ts`); the add-book dialog uses both.
+- Undo on remove: deferred. Removing a planned book asks for confirmation instead.
+- Account lifecycle: plan rows follow the books posture exactly. They are owner-only with no email-verification or tombstone gate, because `users/{uid}/books` has none either; the review's reading that tombstoning should revoke plan access would have been stricter than the data it orders. A rules test pins this.
+- Validation: unit tests, emulator Rules tests, and an emulator-backed Playwright flow. No hosted branch preview.
+- Bundle: the total budget rises from 370 to 390 KiB with the measurement recorded in `tests/bundle-budget.test.ts` (route chunk 14.4 KiB, shared growth 4.9 KiB, no new dependency).
+
+Storage as built: `users/{uid}/readingPlanEntries/{entryId}` with `kind`, `rank`, `manualMinutesPerPage`, `createdAt`, `updatedAt`; planned rows add `title`, `authors` (up to six `{id, name}` pairs, `id` null for a typed name), `pageCount` (null until known), `isbn`, the five metadata fields, and flat `workId`, `editionId`, `matchMethod`. `users/{uid}/readingPlans/default` holds `dailyMinutesOverride`. Start reading converts a planned row to a book row in the batch that creates the book, and the rules admit that conversion only while the same batch creates the book, so a replay cannot create a second book or reset progress.
+
+Rules for the two collections must be deployed before this client ships; there is no backfill.
+
 ## Design and engineering review
 
 [Fable 5.1's detailed review and our assessment](reviews/to-read-fable-5.1.md) cover desktop and mobile layouts, interactions, component reuse, storage, performance, and testing. The review was requested through the Claude CLI against the original plan commit. It is a source review, not evidence from a running implementation.
 
-The constraints below incorporate its verified findings. Suggestions to defer catalog search, the timeline, or undo remain proposals; those features stay in this plan. The review's sample wireframes do not change the rule that currently reading books remain included.
+The constraints below incorporate its verified findings. Of its deferral suggestions, the owner deferred undo and the proportional timeline and kept catalog search; see the decisions section. The review's sample wireframes do not change the rule that currently reading books remain included.
 
 ### Visual language and information hierarchy
 
@@ -60,8 +78,8 @@ The current bundle test caps all compressed JavaScript at 370 KiB and the larges
 
 - Resolve initial queue ordering and rank persistence before implementing drag. A new future book must land below the entire visible queue, including implicit in-progress rows. New reading activity must not reshuffle a saved plan. Specify concurrent edits, reopening finished books, rank collisions, and large-queue behavior without assuming every queue fits one batch.
 - The dashboard's `projectedFinishes()` currently gives each book the full daily budget from a rolling 30-day history window. Label those as independent estimates and explain the basis, with a link to the ordered plan. Coordinate any later replacement with PR #52; do not silently present two different dates as the same forecast.
-- Keep the compact timeline secondary to the list, with year boundaries also visible in the list. Unknown effort stops the complete forecast in both views. Year dividers alone are an available scope reduction if we decide to defer the proportional timeline.
-- Preserve the existing account lifecycle: tombstoned accounts lose access to planning data, while personal content remains retained. A broader content-purge change belongs in a separate decision.
+- Year boundaries are visible in the list as dividers; the proportional timeline is deferred (owner decision 2026-09-16). Unknown effort stops the complete forecast.
+- Preserve the existing account lifecycle: plan rows are owner-only like personal books, and a tombstoned account keeps the same access to them that it keeps to its books (none of the per-user book rules gate on the tombstone). A broader content-purge change belongs in a separate decision.
 
 ## Outcome
 
@@ -80,14 +98,14 @@ The page should answer: "If I read these books in this order, at my recent level
 - Each row shows cover, title, status, remaining pages, estimated minutes per page and its source, remaining reading hours, expected start, and expected finish. Show month and year prominently, with the full date in the row details.
 - Recalculate locally during reordering; persist the final move on drop. Also recalculate after reading sessions, progress corrections, metadata edits, removals, and day changes.
 - "Start reading" turns a future entry into a normal personal book while preserving its queue position. It does not start a timer or record any reading time.
-- Remove a future entry with an undo action. Removing an intention must not delete an existing personal book or its history. Currently reading books remain included while unfinished.
+- Remove a future entry after a confirmation (undo deferred, owner decision 2026-09-16). Removing an intention must not delete an existing personal book or its history. Currently reading books remain included while unfinished.
 - Finished books leave the forecast automatically. Retain their position metadata so reopening an unfinished book can restore its place. A deleted personal book must disappear without becoming a future entry again.
 
 ### Summary and timeline
 
 At the top, show recent reading minutes per day, reading days out of 14, total remaining pages and hours, and the expected end of the queue. Example copy: "At 30 minutes a day, these books take you through December 2026."
 
-Below that, show a compact timeline with month and year boundaries. Book segments represent remaining time, so a difficult 200-page book can occupy more space than a quick 400-page book. Keep the ordered list as the primary interaction on small screens.
+The proportional timeline (book segments sized by remaining time) is deferred; the first version marks year boundaries with dividers in the list and states the year summary in the sentence above.
 
 Mark December 31 and show which book crosses into the next year. If the queue fits within this year, show the estimated spare reading hours. If it does not, show the remaining hours carried into the next year. A queue extending several years should still be readable, using year groupings and month detail.
 
@@ -197,7 +215,7 @@ Use sortable ranks per entry so a normal move writes one document. Break equal r
 
 Implicit entries use a deterministic order after ranked entries. On the first reorder, materialize the affected implicit positions in the same batch as the move so the displayed order is preserved. Test a large initial library against write-batch limits; use a deterministic base rank scheme if materializing the entire initial library would exceed one batch.
 
-Rules must restrict these collections to the owner and enforce the existing account requirements for writes. Validate entry variants, allowed fields, positive overrides, rank and text sizes, and legal conversion from planned entry to book entry. Keep planning data out of public profiles and shared catalog projections. Verify account tombstoning revokes plan access, and book deletion cannot leave a visible linked row.
+Rules must restrict these collections to the owner with the same account requirements personal books have. Validate entry variants, allowed fields, positive overrides, rank and text sizes, and legal conversion from planned entry to book entry. Keep planning data out of public profiles and shared catalog projections. Verify that book deletion cannot leave a visible linked row.
 
 Derive forecasts in the client from books, plan entries, and sessions. Store intentions and overrides, not calculated finish dates. No scheduled job or new external integration is needed.
 
@@ -238,7 +256,7 @@ Deploy compatible Rules before a client starts writing the new collections. Keep
 - Start reading preserves identity and order, obeys existing validation, and is atomic and safe against duplicate submission. Finishing, reopening, and deleting a book produce the intended queue changes.
 - Two devices can reorder different entries without replacing each other's entire queue. Save failures remain visible and the view reconciles with stored state.
 - Touch and keyboard users can perform every reorder action. Dates and estimate sources are available without hover.
-- Another user cannot read or mutate the plan, including when the owner has a public profile. Account tombstoning revokes plan access while retaining content, matching the existing account lifecycle.
+- Another user cannot read or mutate the plan, including when the owner has a public profile. Plan access follows the books rules exactly, tombstone included, matching the existing account lifecycle.
 - Pointer-only reorder changes do not rescan reading history or recalculate book pace. Listener counts, initial load, and bundle growth are measured against the base revision.
 
 Use focused unit tests for the forecast and ordering, emulator tests for Rules and atomic lifecycle writes, and browser tests for the complete planning flow. Follow the repository's normal checks and release validation when implementing.

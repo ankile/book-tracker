@@ -3,7 +3,7 @@ title: Pages and navigation
 ---
 flowchart LR
   accTitle: Book Tracker pages and navigation
-  accDescr: Signed-in readers use the primary navigation for Currently Reading, Finished, and My site. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and the catalog console, whose lists open one page per work and per author. The separate route access matrix lists readers and writes for every page.
+  accDescr: Signed-in readers use the primary navigation for Currently Reading, To read, Finished, and My site. To read orders the books in progress and the books planned next with expected finish dates. My site links to Authors, Book metadata, and the reading profile. Catalog links open shared Work pages. Shared links and search results can enter the public profile directly. Authorized operators can open the restricted overview and the catalog console, whose lists open one page per work and per author. The separate route access matrix lists readers and writes for every page.
 
   classDef person fill:#f7f8f8,stroke:#8b9691,color:#263331,stroke-width:2px;
   classDef gate fill:#fff7e8,stroke:#b98a3c,color:#5b421f,stroke-width:2px;
@@ -25,6 +25,7 @@ flowchart LR
     shell["<b>Signed-in shell</b><br/>Primary navbar"]:::gate
 
     current["<b>Currently Reading</b><br/><code>/</code><br/>Books in progress · pages · timers"]:::page
+    toread["<b>To read</b><br/><code>/to-read</code><br/>Ordered queue · planned books · finish forecast"]:::page
     finished["<b>Finished</b><br/><code>/finished</code><br/>Search · sort · year filter · totals"]:::page
     me["<b>My site</b><br/><code>/me</code><br/>Analytics · profile · optional integrations"]:::page
 
@@ -49,7 +50,9 @@ flowchart LR
   adminauthor -->|"Work row"| adminwork
 
   shell -->|"Currently Reading"| current
+  shell -->|"To read"| toread
   shell -->|"Finished"| finished
+  toread -->|"Start reading"| current
   shell -->|"My site"| me
   me -->|"Authors card"| authors
   me -->|"Needs an ISBN card"| isbns

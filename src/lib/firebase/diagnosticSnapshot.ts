@@ -1,4 +1,4 @@
-import {onSnapshot, type Query, type DocumentReference, type DocumentData, type QuerySnapshot, type DocumentSnapshot, type FirestoreError} from 'firebase/firestore';
+import {onSnapshot, type Query, type DocumentReference, type DocumentData, type QuerySnapshot, type DocumentSnapshot, type FirestoreError, type SnapshotListenOptions} from 'firebase/firestore';
 import {createSubscriptionDiagnostics, instrumentSubscription, type QueryLabel} from './subscriptionDiagnostics.ts';
 
 const capture = createSubscriptionDiagnostics(Date.now, () => ({online: navigator.onLine, visibility: document.visibilityState}));
@@ -24,13 +24,13 @@ if (typeof window !== 'undefined') {
   Object.assign(window, {bookTrackerDiagnostics: api});
 }
 
-export function diagnosticSnapshot(label: QueryLabel, source: Query<DocumentData>, next: (snapshot: QuerySnapshot<DocumentData>) => void, error: (error: FirestoreError) => void): () => void;
-export function diagnosticSnapshot(label: QueryLabel, source: DocumentReference<DocumentData>, next: (snapshot: DocumentSnapshot<DocumentData>) => void, error: (error: FirestoreError) => void): () => void;
-export function diagnosticSnapshot(label: QueryLabel, source: Query<DocumentData> | DocumentReference<DocumentData>, next: ((snapshot: QuerySnapshot<DocumentData>) => void) | ((snapshot: DocumentSnapshot<DocumentData>) => void), error: (error: FirestoreError) => void): () => void {
+export function diagnosticSnapshot(label: QueryLabel, source: Query<DocumentData>, next: (snapshot: QuerySnapshot<DocumentData>) => void, error: (error: FirestoreError) => void, options?: SnapshotListenOptions): () => void;
+export function diagnosticSnapshot(label: QueryLabel, source: DocumentReference<DocumentData>, next: (snapshot: DocumentSnapshot<DocumentData>) => void, error: (error: FirestoreError) => void, options?: SnapshotListenOptions): () => void;
+export function diagnosticSnapshot(label: QueryLabel, source: Query<DocumentData> | DocumentReference<DocumentData>, next: ((snapshot: QuerySnapshot<DocumentData>) => void) | ((snapshot: DocumentSnapshot<DocumentData>) => void), error: (error: FirestoreError) => void, options: SnapshotListenOptions = {}): () => void {
   const metadata = (snapshot: QuerySnapshot<DocumentData> | DocumentSnapshot<DocumentData>) => ({count: 'size' in snapshot ? snapshot.size : snapshot.exists() ? 1 : 0, fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites});
   // Preserve the application's normal delivery semantics. Metadata on every
   // delivered snapshot is recorded, without opting consumers into extra events.
   return source.type !== 'document'
-    ? instrumentSubscription(capture, label, (deliver, fail) => onSnapshot(source, deliver, fail), metadata, next as (snapshot: QuerySnapshot<DocumentData>) => void, error)
-    : instrumentSubscription(capture, label, (deliver, fail) => onSnapshot(source, deliver, fail), metadata, next as (snapshot: DocumentSnapshot<DocumentData>) => void, error);
+    ? instrumentSubscription(capture, label, (deliver, fail) => onSnapshot(source, options, deliver, fail), metadata, next as (snapshot: QuerySnapshot<DocumentData>) => void, error)
+    : instrumentSubscription(capture, label, (deliver, fail) => onSnapshot(source, options, deliver, fail), metadata, next as (snapshot: DocumentSnapshot<DocumentData>) => void, error);
 }
