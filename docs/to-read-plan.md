@@ -14,6 +14,55 @@ Use the draft PR on `feature/to-read-planner` to refine this plan, then implemen
 
 Related work: [PR #52](https://github.com/ankile/book-tracker/pull/52) proposes a book finish prediction engine and uncertainty view. Before implementation, review overlap and decide which calculation and presentation pieces to share. This plan starts from `master` and does not depend on that unmerged branch.
 
+## Design and engineering review
+
+[Fable 5.1's detailed review and our assessment](reviews/to-read-fable-5.1.md) cover desktop and mobile layouts, interactions, component reuse, storage, performance, and testing. The review was requested through the Claude CLI against the original plan commit. It is a source review, not evidence from a running implementation.
+
+The constraints below incorporate its verified findings. Suggestions to defer catalog search, the timeline, or undo remain proposals; those features stay in this plan. The review's sample wireframes do not change the rule that currently reading books remain included.
+
+### Visual language and information hierarchy
+
+- Use the existing `BookSummary` presentation for the summary, with its light border, 8px radius, and faint shadow. Put compact queue rows in a matching container. Keep the existing italic book titles, tabular numbers, and duration formatting.
+- Reuse the existing teal action and focus colors. The app does not yet have a unified design-token system; avoid introducing another palette or undertaking an unrelated redesign. Extract a small shared style only when it removes actual duplication in the components being changed.
+- Default rows show position and drag handle, cover, title and author, reading status, remaining effort, and expected finish month and year. Expand row details for exact dates, pages, pace evidence, manual estimates, and secondary actions. Essential information must not depend on hover.
+- On phones, place effort and expected finish below the title. Use CSS for responsive layout, not a separate DOM tree driven by JavaScript window width. Summary statistics use the existing two-column mobile layout.
+- Keep one primary Add to plan action. Starting and removing a future book belong in its details. Already-reading rows must not offer Start reading or an ineffective Remove from plan action.
+- Update the mobile navigation's three-column assumption for the fourth destination, and verify labels at 320px and 360px. Include the footer and route/access documentation in navigation changes.
+- Use existing dialog and form primitives. Only extend a shared primitive where the new behavior is required, such as a larger dialog variant; do not copy its implementation.
+
+### Reorder interaction
+
+Drag starts from a visible handle, after a small movement threshold. Touch scrolling remains available on the rest of the row. Specify insertion targets, edge auto-scroll, Escape and pointer-cancel behavior, and what happens when the underlying queue changes during a drag. A cancelled move writes nothing.
+
+Keyboard users can grab and drop with Space or Enter, move with arrow keys, and cancel with Escape. Keep the explicit Move up, Move down, and Move to position controls. Preserve focus on the moved book. Announce keyboard moves and the final pointer drop through one polite live region; do not announce every pointer movement. Respect reduced motion and use at least 44px interaction targets.
+
+Show pending versus confirmed saves. A write rejection restores the stored order and explains the failure. Browser connectivity alone must not be presented as confirmation that a write reached Firestore.
+
+### Reuse and performance boundaries
+
+Reuse `BookSummary`, `ModalCard`, form controls, author and ISBN helpers, formatting functions, pace estimation, day grouping, cached stores, and existing error handling. Keep the planner separate from the timer-heavy `BookList`. Extract small cover or identity components only where both existing and new callers benefit.
+
+Catalog search currently contains stateful effects inside `NewBookModal`. Extract the shared search and selection behavior once for the planner's add flow, preserving existing catalog tests. Avoid copying that flow or turning the whole modal into a component with many conditional modes. For Start reading, separate reusable book-write construction from batch submission so the planner can supply a fixed book ID and commit the book and entry conversion atomically. A prefilled form and a narrow writer interface may support this without duplicating the form.
+
+Separate reactive calculations into three stages:
+
+1. Recent session totals and the daily budget, updated when session evidence or the reading day changes.
+2. An effort map keyed by entry ID, updated when relevant book metadata, progress, pace evidence, or overrides change. Position-only changes must not invalidate this map.
+3. A linear cumulative schedule using the order, effort map, and daily budget. Dragging updates this stage only, at most once per animation frame or when the insertion target changes.
+
+Do not rescan session history or rerun `paceFor()` for every pointer event. Keep planner history and entry subscriptions owned by the route. Expose loading, cache origin, pending writes, and server-confirmation state where needed; the current array-only history store does not provide enough information to promise a complete offline forecast. Metadata-only transitions must also update that state.
+
+Measure initial loading, listener counts, recalculation, and compressed bundle growth against the base revision. Start with 60 queued books, 300 library books, and 10,000 history records, then include a 1,000-entry queue stress case. Test dependency invalidation with counters, and benchmark timing separately from ordinary unit tests. Do not add virtualization unless browser measurements show it is needed.
+
+The current bundle test caps all compressed JavaScript at 370 KiB and the largest chunk at 170 KiB. Route splitting can help initial load but does not reduce that total budget. Prefer existing primitives and a small reorder implementation. Any dependency or budget increase needs a measured before/after result and an explanation of its cost; no automatic increase is assumed.
+
+### Coordination and decisions before implementation
+
+- Resolve initial queue ordering and rank persistence before implementing drag. A new future book must land below the entire visible queue, including implicit in-progress rows. New reading activity must not reshuffle a saved plan. Specify concurrent edits, reopening finished books, rank collisions, and large-queue behavior without assuming every queue fits one batch.
+- The dashboard's `projectedFinishes()` currently gives each book the full daily budget from a rolling 30-day history window. Label those as independent estimates and explain the basis, with a link to the ordered plan. Coordinate any later replacement with PR #52; do not silently present two different dates as the same forecast.
+- Keep the compact timeline secondary to the list, with year boundaries also visible in the list. Unknown effort stops the complete forecast in both views. Year dividers alone are an available scope reduction if we decide to defer the proportional timeline.
+- Preserve the existing account lifecycle: tombstoned accounts lose access to planning data, while personal content remains retained. A broader content-purge change belongs in a separate decision.
+
 ## Outcome
 
 Add a private `/to-read` page where the reader orders everything they intend to read, including books already in progress. Moving a book immediately updates its expected start and finish dates and the dates of the books after it.
@@ -148,7 +197,7 @@ Use sortable ranks per entry so a normal move writes one document. Break equal r
 
 Implicit entries use a deterministic order after ranked entries. On the first reorder, materialize the affected implicit positions in the same batch as the move so the displayed order is preserved. Test a large initial library against write-batch limits; use a deterministic base rank scheme if materializing the entire initial library would exceed one batch.
 
-Rules must restrict these collections to the owner and enforce the existing account requirements for writes. Validate entry variants, allowed fields, positive overrides, rank and text sizes, and legal conversion from planned entry to book entry. Keep planning data out of public profiles and shared catalog projections. Verify account deletion removes it, and book deletion cannot leave a visible linked row.
+Rules must restrict these collections to the owner and enforce the existing account requirements for writes. Validate entry variants, allowed fields, positive overrides, rank and text sizes, and legal conversion from planned entry to book entry. Keep planning data out of public profiles and shared catalog projections. Verify account tombstoning revokes plan access, and book deletion cannot leave a visible linked row.
 
 Derive forecasts in the client from books, plan entries, and sessions. Store intentions and overrides, not calculated finish dates. No scheduled job or new external integration is needed.
 
@@ -158,13 +207,13 @@ Derive forecasts in the client from books, plan entries, and sessions. Store int
 |---|---|
 | Calculation | New `src/lib/utils/readingPlan.ts` for rolling budget, entry ordering, effort, cumulative dates, and year summaries; reuse `paceEstimate.ts` |
 | Types and persistence | New plan interfaces, strict decoders, cached stores and batch writes in the Firebase layer |
-| Reading history | Reuse `Database.getAllReadingSessions()` and daily grouping conventions; own the subscription on `/to-read` and share it with existing consumers |
+| Reading history | Reuse decoding and daily grouping; compare the existing full-history store with a bounded query, expose snapshot state, and own the subscription on `/to-read` |
 | UI | New `/to-read` route, queue rows, summary, timeline, estimate editor, and future-book add flow using existing catalog controls |
 | Navigation | Update `Navbar.svelte`, its mobile layout, route prefetch list, and route/access coverage |
 | Rules and lifecycle | Owner-only plan rules, atomic Start reading behavior, account deletion coverage, linked-book deletion behavior |
 | Documentation | Update route, access, and data-flow maps and regenerate their images when implementation changes those surfaces |
 
-For the first release, reuse the existing history subscription rather than creating a second aggregation system. Measure the planner's history load. Revisit a bounded 14-day query or maintained daily totals if full-history reads become costly. Planned entries should load once per planner visit, with client-side rendering limited to visible rows when long queues justify it.
+Use existing history decoding and subscription infrastructure. Compare reusing the full-history store with a query bounded to the 14 completed reading days plus today before choosing the planner's source. The owner/type/createdAt index already exists; verify the exact query in emulator tests. A bounded listener must refresh its cutoff at the reading-day boundary. Either option must expose cache and confirmation state, avoid duplicate listeners, and release subscriptions on navigation. A new maintained aggregation system is unnecessary for the first version. Render ordinary keyed rows initially; consider virtualization only after measuring long queues.
 
 ## Delivery sequence
 
@@ -189,7 +238,8 @@ Deploy compatible Rules before a client starts writing the new collections. Keep
 - Start reading preserves identity and order, obeys existing validation, and is atomic and safe against duplicate submission. Finishing, reopening, and deleting a book produce the intended queue changes.
 - Two devices can reorder different entries without replacing each other's entire queue. Save failures remain visible and the view reconciles with stored state.
 - Touch and keyboard users can perform every reorder action. Dates and estimate sources are available without hover.
-- Another user cannot read or mutate the plan, including when the owner has a public profile. Account deletion removes planning data.
+- Another user cannot read or mutate the plan, including when the owner has a public profile. Account tombstoning revokes plan access while retaining content, matching the existing account lifecycle.
+- Pointer-only reorder changes do not rescan reading history or recalculate book pace. Listener counts, initial load, and bundle growth are measured against the base revision.
 
 Use focused unit tests for the forecast and ordering, emulator tests for Rules and atomic lifecycle writes, and browser tests for the complete planning flow. Follow the repository's normal checks and release validation when implementing.
 
