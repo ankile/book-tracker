@@ -9,6 +9,8 @@ import {
   decodeBookUpdate,
   decodeCatalogAuthor,
   decodeLiveQueueSweepItem,
+  decodePlanEntry,
+  decodeReadingPlanSettings,
   decodeProfile,
   decodeProfileDiscovery,
   decodeProfileView,
@@ -681,4 +683,57 @@ test('update decoder enforces the pagesRead arithmetic invariant', () => {
     }, 'users/owner/books/book/updates/update'),
     /toPage - fromPage/,
   );
+});
+
+const plannedData = (overrides: Record<string, unknown> = {}) => ({
+  kind: 'planned',
+  rank: 1000,
+  manualMinutesPerPage: null,
+  title: 'A book I mean to read',
+  authors: [{ id: null, name: 'Typed Name' }, { id: 'author', name: 'Known Author' }],
+  pageCount: null,
+  isbn: '',
+  coverUrl: '',
+  publisher: '',
+  publishedDate: '',
+  subjects: [],
+  fiction: null,
+  language: '',
+  workId: null,
+  editionId: null,
+  matchMethod: null,
+  createdAt,
+  updatedAt,
+  ...overrides,
+});
+
+test('plan entry decoder reads planned and book rows and refuses other shapes', () => {
+  const planned = decodePlanEntry('wish', plannedData({ pageCount: 320, workId: 'work', editionId: 'edition', matchMethod: 'isbn', manualMinutesPerPage: 2.5 }), 'users/owner/readingPlanEntries/wish');
+  assert.equal(planned.kind, 'planned');
+  if (planned.kind !== 'planned') throw new Error('unreachable');
+  assert.equal(planned.pageCount, 320);
+  assert.equal(planned.manualMinutesPerPage, 2.5);
+  assert.deepEqual(planned.catalogLink, { workId: 'work', editionId: 'edition', matchMethod: 'isbn' });
+  assert.deepEqual(planned.authors, [{ id: null, name: 'Typed Name' }, { id: 'author', name: 'Known Author' }]);
+  const unlinked = decodePlanEntry('wish', plannedData(), 'p');
+  assert.equal(unlinked.kind === 'planned' ? unlinked.catalogLink : 'not planned', null);
+  const book = decodePlanEntry('book', { kind: 'book', rank: 5, manualMinutesPerPage: null, createdAt, updatedAt }, 'users/owner/readingPlanEntries/book');
+  assert.deepEqual(book, { id: 'book', kind: 'book', rank: 5, manualMinutesPerPage: null, createdAt, updatedAt });
+  const path = 'users/owner/readingPlanEntries/x';
+  assert.throws(() => decodePlanEntry('x', plannedData({ kind: 'wish' }), path), /planned or book/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ workId: 'work' }), path), /matchMethod/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ workId: 'work', matchMethod: 'migration' }), path), /isbn, external-id, or catalog-choice/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ editionId: 'edition' }), path), /editionId and matchMethod to be null/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ pageCount: 0 }), path), /positive integer/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ manualMinutesPerPage: 0 }), path), /positive number/);
+  assert.throws(() => decodePlanEntry('x', plannedData({ authors: [{ id: null, name: 'A', kind: 'person' }] }), path), /only keys id, name/);
+  assert.throws(() => decodePlanEntry('x', { kind: 'book', rank: 5, manualMinutesPerPage: null, createdAt, updatedAt, title: 'no' }, path), /only keys/);
+  assert.throws(() => decodePlanEntry('x', { kind: 'book', manualMinutesPerPage: null, createdAt, updatedAt }, path), /rank/);
+});
+
+test('reading plan settings decoder bounds the override', () => {
+  assert.deepEqual(decodeReadingPlanSettings({ dailyMinutesOverride: 45, updatedAt }, 'p'), { dailyMinutesOverride: 45, updatedAt });
+  assert.equal(decodeReadingPlanSettings({ dailyMinutesOverride: null, updatedAt }, 'p').dailyMinutesOverride, null);
+  assert.throws(() => decodeReadingPlanSettings({ dailyMinutesOverride: 0, updatedAt }, 'p'), /positive number/);
+  assert.throws(() => decodeReadingPlanSettings({ dailyMinutesOverride: 45, updatedAt, extra: 1 }, 'p'), /only keys/);
 });

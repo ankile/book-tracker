@@ -2,7 +2,7 @@ import { preloadCode } from '$app/navigation';
 import { Database } from '$lib/firebase/db.ts';
 import type { Unsubscriber } from 'svelte/store';
 
-const PRIVATE_ROUTES = ['/', '/finished', '/me', '/authors', '/isbns'];
+const PRIVATE_ROUTES = ['/', '/to-read', '/finished', '/me', '/authors', '/isbns'];
 
 // Keep lightweight shared app data current across signed-in routes. History
 // belongs to /me and the catalog belongs to the admin layout, so neither

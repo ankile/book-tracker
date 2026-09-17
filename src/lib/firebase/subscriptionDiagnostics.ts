@@ -1,5 +1,5 @@
 // Deliberately no query paths, document identifiers, data, or error messages.
-export const queryLabels = ['authors', 'user', 'books', 'profile', 'discovery', 'sharing', 'book-updates', 'history', 'admin-authors', 'admin-works', 'admin-editions', 'admin-isbn', 'admin-external', 'admin-books', 'admin-users'] as const;
+export const queryLabels = ['authors', 'user', 'books', 'profile', 'discovery', 'sharing', 'book-updates', 'history', 'plan', 'plan-settings', 'admin-authors', 'admin-works', 'admin-editions', 'admin-isbn', 'admin-external', 'admin-books', 'admin-users'] as const;
 export type QueryLabel = typeof queryLabels[number];
 type Kind = 'start' | 'stop' | 'snapshot' | 'error';
 type Details = { count?: number; fromCache?: boolean; hasPendingWrites?: boolean; code?: string };

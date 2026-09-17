@@ -56,6 +56,17 @@
     margin-bottom: 2rem;
   }
 
+  .basis {
+    margin: 0 0 0.75rem;
+    font-size: 0.8rem;
+    color: #53636a;
+    line-height: 1.5;
+  }
+
+  .basis a {
+    color: #1b7179;
+  }
+
   h2 {
     font-size: 1.5rem;
     color: #333;
@@ -143,6 +154,11 @@
     <div class="columns">
       <div>
         <h3>On deck</h3>
+        <p class="basis">
+          Independent estimates: each book gets your whole daily reading time from the
+          last 30 days at its own measured pace, so they overlap. For one ordered plan,
+          see <a href="/to-read">To read</a>.
+        </p>
         {#if active.length > 0}
           <ul>
             {#each active as book}

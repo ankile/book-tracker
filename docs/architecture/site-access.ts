@@ -31,6 +31,14 @@ const rows: AccessRow[] = [
     writes: ['Personal books · page updates', 'Sessions · reading timers'],
   },
   {
+    name: 'To read',
+    path: '/to-read',
+    reached: ['Navbar · footer · direct URL', 'My site In Progress note'],
+    read: ['Owner'],
+    readKind: 'owner',
+    writes: ['Private planning records', 'Starting a planned book creates a personal book'],
+  },
+  {
     name: 'Finished',
     path: '/finished',
     reached: ['Navbar · My site card · direct URL'],

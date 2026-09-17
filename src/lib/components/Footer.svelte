@@ -134,6 +134,7 @@
         <a href="/" data-sveltekit-reload>Go to app</a>
       {:else}
         <a href="/">Currently reading</a>
+        <a href="/to-read">To read</a>
         <a href="/finished">Finished books</a>
         <a href="/authors">Authors</a>
         <a href="/me">Dashboard</a>
