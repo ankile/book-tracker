@@ -36,6 +36,7 @@ function services(overrides: Partial<BookDraftServices> = {}) {
       calls.push(`createWork:${request.work.authorIds.join(',')}`);
       return { workId: 'new-work', editionId: 'new-work-edition', created: true };
     },
+    cancelled: () => false,
     ...overrides,
   };
   return { calls, impl };
@@ -136,4 +137,22 @@ test('service failures keep the draft with a step-specific message and end the p
   assert.equal(work.ok, false);
   if (work.ok) throw new Error('unreachable');
   assert.match(work.message, /Could not create the shared work/);
+});
+
+test('a draft abandoned during a network step writes nothing further to the catalog', async () => {
+  // Closed while the author is being minted: no work is seeded.
+  let closed = false;
+  const duringAuthors = services({ cancelled: () => closed });
+  const resolveAuthors = duringAuthors.impl.resolveAuthors;
+  duringAuthors.impl.resolveAuthors = async (chips) => {
+    closed = true;
+    return resolveAuthors(chips);
+  };
+  const first = await completeBookDraft(draft({ authorChips: [fresh] }), duringAuthors.impl);
+  assert.equal(first.ok, false);
+  assert.deepEqual(duringAuthors.calls, ['resolveAuthors']);
+  // Still open: the same draft goes on to seed the work.
+  const open = services();
+  await completeBookDraft(draft({ authorChips: [fresh] }), open.impl);
+  assert.deepEqual(open.calls, ['resolveAuthors', 'createWork:minted-New Author']);
 });

@@ -366,3 +366,24 @@ export function planMaterialize(rows: readonly QueueRow[], id: string): RankWrit
   if (rows[index].rank !== null) return [];
   return planMove(rows, index, index).writes;
 }
+
+// Each newly positioned book costs the rules one existsAfter lookup and a
+// batched write may make 20, so a large materialization spans several
+// batches. Ranks are absolute values: any committed subset is a valid
+// plan, and the rest stay in their displayed order after the ranked rows.
+// Always at least one batch, so a caller can append its own write.
+export const PLAN_CREATES_PER_BATCH = 20;
+
+export function chunkPlanWrites<T extends { create: boolean }>(writes: readonly T[], limit = PLAN_CREATES_PER_BATCH): T[][] {
+  const batches: T[][] = [[]];
+  let creates = 0;
+  for (const write of writes) {
+    if (write.create && creates === limit) {
+      batches.push([]);
+      creates = 0;
+    }
+    if (write.create) creates += 1;
+    batches[batches.length - 1].push(write);
+  }
+  return batches;
+}

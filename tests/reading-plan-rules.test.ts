@@ -260,6 +260,53 @@ test('Start reading converts a planned row only in the batch that creates its bo
   replay.update(entryRef(db, 'owner', 'again'), conversion);
   await assertFails(replay.commit());
   await assertFails(updateDoc(entryRef(db, 'owner', 'again'), conversion));
+  // The real replay: a second tab resubmits after the conversion landed and
+  // the book was edited. The row is already a book row, so the stale set
+  // over the book is what must fail, leaving the edit in place.
+  await assertSucceeds(updateDoc(bookRef(db, 'owner', 'wish'), { title: 'Edited since', pageCount: 500, updatedAt: Timestamp.now() }));
+  const stale = writeBatch(db);
+  stale.set(bookRef(db, 'owner', 'wish'), startedBook(db, 'owner', { createdAt: Timestamp.fromMillis(Date.now() + 1000) }));
+  stale.update(entryRef(db, 'owner', 'wish'), conversion);
+  await assertFails(stale.commit());
+  assert.equal((await getDoc(bookRef(db, 'owner', 'wish'))).data()?.title, 'Edited since');
+});
+
+test('only an intention can be removed: a row that became a book keeps its rank and estimate', async () => {
+  await seedAccount('owner');
+  const db = verified('owner');
+  await setDoc(entryRef(db, 'owner', 'wish'), plannedEntry());
+  await setDoc(entryRef(db, 'owner', 'started'), plannedEntry({ manualMinutesPerPage: 2 }));
+  const batch = writeBatch(db);
+  batch.set(bookRef(db, 'owner', 'started'), startedBook(db, 'owner'));
+  batch.update(entryRef(db, 'owner', 'started'), {
+    kind: 'book',
+    updatedAt: Timestamp.now(),
+    ...Object.fromEntries([
+      'title', 'authors', 'pageCount', 'isbn', 'coverUrl', 'publisher', 'publishedDate',
+      'subjects', 'fiction', 'language', 'workId', 'editionId', 'matchMethod',
+    ].map((field) => [field, deleteField()])),
+  });
+  await assertSucceeds(batch.commit());
+  // A Remove confirmed in a tab that still saw the intention: refused.
+  await assertFails(deleteDoc(entryRef(db, 'owner', 'started')));
+  assert.equal((await getDoc(entryRef(db, 'owner', 'started'))).data()?.manualMinutesPerPage, 2);
+  await assertSucceeds(deleteDoc(entryRef(db, 'owner', 'wish')));
+  // Once the book itself is gone the leftover row may go too.
+  await assertSucceeds(deleteDoc(bookRef(db, 'owner', 'started')));
+  await assertSucceeds(deleteDoc(entryRef(db, 'owner', 'started')));
+});
+
+test('one batch may position 20 books and no more, which the client splits on', async () => {
+  await seedAccount('owner');
+  const db = verified('owner');
+  for (let index = 0; index < 21; index += 1) await setDoc(bookRef(db, 'owner', `b${index}`), startedBook(db, 'owner'));
+  const position = (count: number) => {
+    const batch = writeBatch(db);
+    for (let index = 0; index < count; index += 1) batch.set(entryRef(db, 'owner', `b${index}`), bookEntry({ rank: (index + 1) * 1000 }));
+    return batch.commit();
+  };
+  await assertFails(position(21));
+  await assertSucceeds(position(20));
 });
 
 test('the daily-minutes scenario is one owner-only document with a bounded override', async () => {

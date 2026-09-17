@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { BookUpdateView } from '../src/lib/interfaces/reading.ts';
 import {
+  chunkPlanWrites,
   dailyBudget,
   entryEffort,
   orderQueue,
@@ -251,4 +252,16 @@ test('materializing positions an unpositioned row in place and leaves ranked row
   assert.deepEqual(planMaterialize(rows, 'y'), [{ id: 'x', kind: 'book', rank: 2000 }, { id: 'y', kind: 'book', rank: 3000 }]);
   assert.deepEqual(planMaterialize(rows, 'x'), [{ id: 'x', kind: 'book', rank: 2000 }]);
   assert.throws(() => planMaterialize(rows, 'missing'), /not in the queue/);
+});
+
+test('plan writes split so no batch positions more than 20 books, the rules lookup limit', () => {
+  const creates = Array.from({ length: 45 }, (_, index) => ({ id: `b${index}`, create: true }));
+  const chunks = chunkPlanWrites([{ id: 'u', create: false }, ...creates, { id: 'v', create: false }]);
+  assert.deepEqual(chunks.map((chunk) => chunk.filter((write) => write.create).length), [20, 20, 5]);
+  assert.deepEqual(chunks.flat().map((write) => write.id), ['u', ...creates.map((write) => write.id), 'v']);
+  // Updates cost no lookup, and an empty list still yields a batch to append to.
+  assert.equal(chunkPlanWrites(Array.from({ length: 300 }, (_, index) => ({ id: `u${index}`, create: false }))).length, 1);
+  assert.deepEqual(chunkPlanWrites([]), [[]]);
+  assert.equal(chunkPlanWrites(creates.slice(0, 20)).length, 1);
+  assert.equal(chunkPlanWrites(creates.slice(0, 21)).length, 2);
 });

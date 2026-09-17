@@ -36,7 +36,12 @@ export interface BookDraftServices {
   resolveAuthors(chips: AuthorChip[]): Promise<AuthorChip[]>;
   addEdition(request: CatalogAddEditionRequest): Promise<CatalogAddEditionResponse>;
   createWork(request: CatalogCreateRequest): Promise<CatalogCreateResponse>;
+  // The form was closed or resubmitted: asked after every network step,
+  // so an abandoned draft never goes on to write the shared catalog.
+  cancelled(): boolean;
 }
+
+const CANCELLED: BookDraftCompletion = { ok: false, message: 'Cancelled.' };
 
 export type BookDraftPhase = 'authors' | 'catalog' | null;
 
@@ -69,6 +74,7 @@ export async function completeBookDraft(
           message: error instanceof Error ? error.message : 'Could not create the shared author. Try again.',
         };
       }
+      if (services.cancelled()) return CANCELLED;
     }
     // A chosen work without a matching edition gets this book's edition
     // added to it, so every linked book stands on an edition (owner
@@ -97,6 +103,7 @@ export async function completeBookDraft(
           message: 'Could not add your edition to the shared work. Try again, or remove the link to save the book unlinked.',
         };
       }
+      if (services.cancelled()) return CANCELLED;
     }
     // A book that matched nothing and that the reader did not explicitly
     // save unlinked seeds the shared catalog itself. Offline it stays

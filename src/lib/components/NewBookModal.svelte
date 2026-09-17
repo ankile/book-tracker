@@ -267,6 +267,7 @@
       resolveAuthors: (chips) => Database.resolveBookAuthors(chips),
       addEdition: catalogAddEdition,
       createWork: catalogCreate,
+      cancelled: () => !open || request !== authorResolutionRequest,
     }, (phase) => {
       resolvingAuthors = phase === 'authors';
       creatingWork = phase === 'catalog';

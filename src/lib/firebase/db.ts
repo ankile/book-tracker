@@ -35,6 +35,7 @@ import { addError } from '../stores/errors.ts';
 import { cachedReadable } from '../stores/cached-readable.ts';
 import { finishedAtPatch, isFinished } from '../utils/finished.ts';
 import { isReadingActivity, readOrderMillis } from '../utils/lastRead.ts';
+import { chunkPlanWrites } from '../utils/readingPlan.ts';
 import {
   isExpectedTogglRetryMarkerDenial,
   isTogglSweepTransactionCandidate,
@@ -1369,8 +1370,8 @@ class Database {
   // A new intention lands below the whole visible queue, so the books
   // displayed after the ranked rows get their positions in the same batch.
   static addPlannedEntry({ userId, rank, positionWrites, ...fields }: AddPlannedEntryInput): Promise<void> {
-    const batch = writeBatch(db);
-    appendPlanEntryWrites(batch, userId, positionWrites);
+    const batches = planEntryBatches(userId, positionWrites);
+    const batch = batches[batches.length - 1];
     batch.set(doc(collection(db, 'users', userId, 'readingPlanEntries')), {
       kind: 'planned',
       rank,
@@ -1379,7 +1380,7 @@ class Database {
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
     });
-    return batch.commit();
+    return commitAll(batches);
   }
 
   static updatePlannedEntry({ userId, entryId, ...fields }: UpdatePlannedEntryInput): Promise<void> {
@@ -1397,9 +1398,7 @@ class Database {
   // positioning not-yet-saved books ahead of a drop rides along
   // (utils/readingPlan.ts planMove).
   static writePlanEntries({ userId, writes }: WritePlanEntriesInput): Promise<void> {
-    const batch = writeBatch(db);
-    appendPlanEntryWrites(batch, userId, writes);
-    return batch.commit();
+    return commitAll(planEntryBatches(userId, writes));
   }
 
   // Start reading: the personal book takes the entry's id and the entry
@@ -1497,25 +1496,33 @@ const PLANNED_ONLY_FIELDS = [
   'subjects', 'fiction', 'language', 'workId', 'editionId', 'matchMethod',
 ] as const;
 
-function appendPlanEntryWrites(batch: ReturnType<typeof writeBatch>, userId: string, writes: readonly PlanEntryWrite[]): void {
-  for (const write of writes) {
-    const ref = doc(db, 'users', userId, 'readingPlanEntries', write.id);
-    if (write.create) {
-      batch.set(ref, {
-        kind: 'book',
-        rank: write.rank,
-        manualMinutesPerPage: write.manualMinutesPerPage,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-      });
-    } else {
-      batch.update(ref, {
-        ...(write.rank === undefined ? {} : { rank: write.rank }),
-        ...(write.manualMinutesPerPage === undefined ? {} : { manualMinutesPerPage: write.manualMinutesPerPage }),
-        updatedAt: Timestamp.now(),
-      });
+function planEntryBatches(userId: string, writes: readonly PlanEntryWrite[]): ReturnType<typeof writeBatch>[] {
+  return chunkPlanWrites(writes).map((chunk) => {
+    const batch = writeBatch(db);
+    for (const write of chunk) {
+      const ref = doc(db, 'users', userId, 'readingPlanEntries', write.id);
+      if (write.create) {
+        batch.set(ref, {
+          kind: 'book',
+          rank: write.rank,
+          manualMinutesPerPage: write.manualMinutesPerPage,
+          createdAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        });
+      } else {
+        batch.update(ref, {
+          ...(write.rank === undefined ? {} : { rank: write.rank }),
+          ...(write.manualMinutesPerPage === undefined ? {} : { manualMinutesPerPage: write.manualMinutesPerPage }),
+          updatedAt: Timestamp.now(),
+        });
+      }
     }
-  }
+    return batch;
+  });
+}
+
+async function commitAll(batches: ReturnType<typeof writeBatch>[]): Promise<void> {
+  await Promise.all(batches.map((batch) => batch.commit()));
 }
 
 function plannedEntryFields({ title, authors, pageCount, isbn, metadata, catalogLink }: PlannedEntryFieldsInput) {

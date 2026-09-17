@@ -266,6 +266,7 @@
         resolveAuthors: (toResolve) => Database.resolveBookAuthors(toResolve),
         addEdition: catalogAddEdition,
         createWork: catalogCreate,
+        cancelled: () => !open || current !== request,
       });
       settling = false;
       if (!open || current !== request) return;
