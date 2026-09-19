@@ -69,9 +69,38 @@ test('sources that fail or know nothing answer null, and none at all is no prima
   assert.equal(primaryLookup(sources), null);
 });
 
-test('an Open Library outage is an error, not a silent miss', async () => {
-  await assert.rejects(lookupIsbnSources(ISBN, {
-    fetch: fakeFetch({'https://openlibrary.org/api/books': () => new Response('', {status: 503})}),
-    google: async () => ({volume: null}),
-  }), /Network error/);
+// Open Library is the first source asked and the one that answered every
+// ISBN with an empty 404 on 2026-09-18. Its outage must cost its own
+// fields only: the other two sources still answer and the lookup still
+// has a primary.
+test('an Open Library outage costs its fields, not the other sources', async () => {
+  const sources = await lookupIsbnSources(ISBN, {
+    fetch: fakeFetch({
+      'https://openlibrary.org/api/books': () => new Response('', {status: 404}),
+      'https://api.nb.no/catalog/v1/items': () => jsonResponse({
+        _embedded: {items: [{id: 'nb-1', metadata: {title: 'Sult', creators: ['Hamsun, Knut'], pageCount: 199,
+          originInfo: {publisher: 'Gyldendal Norsk Forlag', issued: '2009'}}}]},
+      }),
+      'https://api.nb.no/catalog/v1/metadata/nb-1/mods': () => new Response('<mods:mods/>', {status: 200}),
+    }),
+    google: async () => ({volume: {title: 'Sult', authors: ['Knut Hamsun'], pageCount: 200}}),
+  });
+  assert.equal(sources.openLibrary, null);
+  assert.equal(sources.google?.title, 'Sult');
+  assert.equal(sources.nb?.publisher, 'Gyldendal Norsk Forlag');
+  assert.equal(primaryLookup(sources)?.pageCount, 200);
+});
+
+// A 200 with a body the parser rejects is the same outage in a different
+// coat: it must not abort the lookup either.
+test('an unparseable Open Library answer counts as knowing nothing', async () => {
+  const sources = await lookupIsbnSources(ISBN, {
+    fetch: fakeFetch({
+      'https://openlibrary.org/api/books': () => jsonResponse([]),
+      'https://api.nb.no/catalog/v1/items': () => jsonResponse({_embedded: {items: []}}),
+    }),
+    google: async () => ({volume: {title: 'Sult', authors: ['Knut Hamsun']}}),
+  });
+  assert.equal(sources.openLibrary, null);
+  assert.equal(sources.google?.title, 'Sult');
 });
