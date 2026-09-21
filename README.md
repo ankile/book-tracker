@@ -233,6 +233,9 @@ Root package commands:
 | `npm run pages:assemble` | Assemble the Cloudflare Pages upload directory (`.pages-dist/`: the build plus the worker) |
 | `npm run pages:deploy` | Assemble and deploy the site to Cloudflare Pages with the pinned wrangler |
 | `npm run pages:purge` | Purge the Cloudflare edge cache so a release is visible before the TTL expires |
+| `npm run deploy:backend` | Deploy the backend (functions, rules, indexes) with the pinned Firebase CLI |
+| `npm run release` | Routine release: `pages:deploy`, then `deploy:backend`, then `release:verify` |
+| `npm run release:verify` | Check that the live profile renderer and the live site were released from `HEAD` and agree on the app bundle |
 | `node docs/architecture/verify.ts` | Route coverage, image freshness, and map sanitization |
 
 Functions package commands:
@@ -274,20 +277,34 @@ For a routine release:
 6. Run `npm run validate` from that clean commit. The artifact checks compare
    the generated files with `HEAD`, so this step belongs after the artifact
    commit and before deployment. Confirm the working tree remains clean.
-7. Deploy the site to Cloudflare Pages, then the backend, with the pinned
-   CLIs, and follow the private verification and rollback runbooks.
+7. Release with `npm run release`, then follow the private verification and
+   rollback runbooks. It runs `npm run pages:deploy` (the site, to Cloudflare
+   Pages), then `npm run deploy:backend` (the pinned firebase-tools@15.24.0
+   CLI), then `npm run release:verify`.
 
 ```bash
-npm run pages:deploy
+npm run release
+```
+
+`deploy:backend` is the pinned CLI:
+
+```bash
 npm exec --yes --package firebase-tools@15.24.0 -- firebase deploy
 ```
 
 The site and the public profile renderer are coupled: the renderer serves a
-shell synchronized from the site build, so release both together, never one
-by itself. `firebase deploy` also republishes the retired Firebase Hosting
-site, which only redirects to the canonical domain. A routine release must not
-rerun database migrations, legacy configuration exports, or completed rollout
-steps.
+shell synchronized from the site build, and Pages keeps only the bundle it was
+last given, so release both together, never one by itself. A site-only release
+leaves the renderer's shell pointing at bundle files the site no longer serves,
+and every direct load of a profile URL is then blank (2026-09-21). `npm run
+release:verify` fails in that state: it reads a rendered profile from the
+renderer's own origin, the site's index page, and the shell at `HEAD`, and
+requires all three to reference the same bundle files, each of which the site
+must serve as an asset rather than as the application shell. Run it on its own
+whenever the two sides may have drifted. `deploy:backend` also republishes the
+retired Firebase Hosting site, which only redirects to the canonical domain. A
+routine release must not rerun database migrations, legacy configuration
+exports, or completed rollout steps.
 
 For any data-shape change, use [MIGRATIONS.md](MIGRATIONS.md) and the migration
 script's own header. Production migration timing and emergency procedures stay

@@ -84,11 +84,16 @@ test('the README documents the current routine release without completed migrati
     'Commit the source and generated artifacts',
     'npm run validate',
     'artifact checks compare',
+    'npm run release',
     'npm run pages:deploy',
+    'npm run deploy:backend',
     'firebase-tools@15.24.0',
+    'npm run release:verify',
   ]);
   assert.match(deployment, /site and the public profile renderer are coupled/i);
   assert.match(deployment, /release both together,\s+never one\s+by\s+itself/i);
+  assert.match(deployment, /site-only release[\s\S]*blank/i);
+  assert.match(deployment, /release:verify`?\s+fails in that state/i);
   assert.match(deployment, /retired Firebase Hosting\s+site, which only redirects/i);
   assert.doesNotMatch(deployment, /migrate-timer-claims|migrate-reading-progress-sources/i);
   assert.doesNotMatch(deployment, /7-day|old-bundle overlap|let old in-flight invocations drain/i);
