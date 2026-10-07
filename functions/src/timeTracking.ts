@@ -64,6 +64,17 @@ function operation(value: unknown): string {
     );
   return value;
 }
+// A reader-visible timer list starts the start/stop callables before the
+// tap, so the ~2 s instance boot and the first Firestore channel setup are
+// already paid. It reads only the caller's own user document.
+async function warmUp(
+  data: unknown,
+  context: functions.https.CallableContext,
+): Promise<{ warm: true } | null> {
+  if (!wireRecord(data) || data.warmup !== true) return null;
+  await getFirestore().doc(`users/${requireVerifiedUid(context)}`).get();
+  return { warm: true };
+}
 exports.inspect = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.inspect", context);
   const uid = requireVerifiedUid(context),
@@ -104,6 +115,8 @@ exports.connect = callable.https.onCall(async (data: unknown, context) => {
 });
 exports.context = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.context", context);
+  const warm = await warmUp(data, context);
+  if (warm) return warm;
   const timing = phaseTimer("timetracking.context_timing");
   const uid = requireVerifiedUid(context);
   const user = await getFirestore().doc(`users/${uid}`).get();
@@ -153,6 +166,8 @@ exports.context = callable.https.onCall(async (data: unknown, context) => {
 });
 exports.accept = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.accept", context);
+  const warm = await warmUp(data, context);
+  if (warm) return warm;
   const uid = requireVerifiedUid(context),
     d = input(data),
     intent = decodeTimerIntent(d.intent);

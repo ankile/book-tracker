@@ -22,6 +22,15 @@
   // initial value here is intentional.
   // svelte-ignore state_referenced_locally
   let inputTime = $state<number | null | undefined>(initialTime);
+  // A timer stop opens the form on this device's estimate; the confirmed
+  // duration replaces it when it arrives, unless the reader already edited it.
+  // svelte-ignore state_referenced_locally
+  let appliedTime = initialTime;
+  $effect(() => {
+    if (initialTime === appliedTime) return;
+    if (inputTime === appliedTime) inputTime = initialTime;
+    appliedTime = initialTime;
+  });
   let inputPages = $state<number | null | undefined>(undefined);
 
   // Projected end page from this book's historical pace (pages per minute)
