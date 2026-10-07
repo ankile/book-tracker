@@ -277,8 +277,12 @@ test("a rejected offline revision keeps its interval through reload and explicit
   }
 });
 
-for (const scenario of ["external switch", "edited remote start"] as const)
-  test(`online Threeggle reading form waits for the confirmed interval after ${scenario}`, async ({
+for (const scenario of [
+  "external switch",
+  "edited remote start",
+  "reader edit",
+] as const)
+  test(`online Threeggle reading form opens on the estimate and adopts the confirmed interval after ${scenario}`, async ({
     page,
   }) => {
     const f = await fixture("none");
@@ -303,9 +307,9 @@ for (const scenario of ["external switch", "edited remote start"] as const)
       errorCode: null,
     };
     const finalStart =
-      scenario === "external switch"
-        ? start
-        : new Date(Date.parse(start) + 1800000).toISOString();
+      scenario === "edited remote start"
+        ? new Date(Date.parse(start) + 1800000).toISOString()
+        : start;
     const finalEnd = new Date(
       Date.parse(finalStart) +
         (scenario === "external switch" ? 600000 : 300000),
@@ -319,6 +323,8 @@ for (const scenario of ["external switch", "edited remote start"] as const)
     let operationId: string | null = null;
     await page.route("**/timetracking-accept", async (route) => {
       const payload: unknown = route.request().postDataJSON();
+      if (JSON.stringify(payload) === JSON.stringify({ data: { warmup: true } }))
+        return route.fulfill({ json: { result: { warm: true } } });
       if (
         typeof payload !== "object" ||
         payload === null ||
@@ -363,9 +369,16 @@ for (const scenario of ["external switch", "edited remote start"] as const)
         })
         .click();
       await expect.poll(() => operationId).not.toBeNull();
+      const minutes = page.getByRole("spinbutton", {
+        name: "Minutes read",
+        exact: true,
+      });
+      // The form opens on this device's hour before the worker confirms.
+      await expect(minutes).toHaveValue("60");
       await expect(
-        page.getByRole("dialog", { name: "Offline reading book", exact: true }),
-      ).not.toBeVisible();
+        page.getByText("Estimated from this device.", { exact: false }),
+      ).toBeVisible();
+      if (scenario === "reader edit") await minutes.fill("42");
       if (operationId === null) throw new Error("Stop not submitted");
       const batch = f.db.batch();
       batch.set(f.user.collection("timeTrackingResults").doc(operationId), {
@@ -383,11 +396,14 @@ for (const scenario of ["external switch", "edited remote start"] as const)
       });
       await batch.commit();
       await expect(
-        page.getByRole("spinbutton", { name: "Minutes read", exact: true }),
-      ).toHaveValue(scenario === "external switch" ? "10" : "5");
-      await expect(
         page.getByText("Estimated from this device.", { exact: false }),
       ).not.toBeVisible();
+      // A confirmed interval never overwrites the reader's own entry.
+      await expect(minutes).toHaveValue(
+        { "external switch": "10", "edited remote start": "5", "reader edit": "42" }[
+          scenario
+        ],
+      );
     } finally {
       await f.cleanup();
     }
@@ -473,7 +489,7 @@ test("explicit reader-only controls keep offline starts available after reload",
   }
 });
 
-test("a permanently refused online stop never opens an estimated reading form", async ({
+test("a permanently refused online stop closes its estimated reading form", async ({
   page,
 }) => {
   const f = await fixture("toggl");
@@ -500,7 +516,10 @@ test("a permanently refused online stop never opens an estimated reading form", 
     await dialog.dismiss();
   });
   await page.route("**/timetracking-accept", (route) =>
-    route.fulfill({
+    JSON.stringify(route.request().postDataJSON()) ===
+    JSON.stringify({ data: { warmup: true } })
+      ? route.fulfill({ json: { result: { warm: true } } })
+      : route.fulfill({
       status: 400,
       contentType: "application/json",
       body: JSON.stringify({
@@ -523,6 +542,8 @@ test("a permanently refused online stop never opens an estimated reading form", 
       })
       .click();
     await expect.poll(() => refused).toBe(true);
+    // The estimate form opened at once and closed on the refusal. Waiting out
+    // the confirmation timeout proves it does not reopen.
     await page.waitForTimeout(16000);
     await expect(
       page.getByRole("dialog", { name: "Offline reading book", exact: true }),
@@ -682,4 +703,100 @@ test.describe("mobile layout", () => {
       await f.cleanup();
     }
   });
+});
+
+test("an idle visible reading list warms both timer callables once per throttle window", async ({
+  page,
+}) => {
+  const f = await fixture("none");
+  const connection = {
+    provider: "threeggle" as const,
+    revision: randomUUID(),
+    serviceId: "book-tracker-emulator",
+    accountId: "emulator-account",
+    projectId: "reading",
+  };
+  await f.user.update({ timeTracking: connection });
+  await f.db
+    .doc("configuration/timeTracking")
+    .set({ threeggleEnabled: true, timerWriteVersion: 2 });
+  const warmups: string[] = [];
+  page.on("request", (request) => {
+    const name = /\/(timetracking-(?:accept|context))$/.exec(request.url())?.[1];
+    if (
+      name &&
+      request.method() === "POST" &&
+      request.postData() === JSON.stringify({ data: { warmup: true } })
+    )
+      warmups.push(name);
+  });
+  const responses: unknown[] = [];
+  page.on("response", async (response) => {
+    if (
+      /\/timetracking-accept$/.test(response.url()) &&
+      response.request().postData() ===
+        JSON.stringify({ data: { warmup: true } })
+    )
+      responses.push(await response.json());
+  });
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await expect
+      .poll(() => [...warmups].sort())
+      .toEqual(["timetracking-accept", "timetracking-context"]);
+    await expect.poll(() => responses).toEqual([{ result: { warm: true } }]);
+    // Returning to the page within the throttle window sends nothing new.
+    await page.evaluate(() =>
+      document.dispatchEvent(new Event("visibilitychange")),
+    );
+    await page.waitForTimeout(500);
+    expect(warmups).toHaveLength(2);
+    expect((await f.user.collection("timerOperations").get()).size).toBe(0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a running timer warms only the stop callable", async ({ page }) => {
+  const f = await fixture("toggl");
+  const timer = {
+    version: 2,
+    timerId: randomUUID(),
+    operationId: randomUUID(),
+    connection: (await f.user.get()).get("timeTracking"),
+    state: "remote",
+    start: new Date(Date.now() - 600000).toISOString(),
+    claimedAt: Date.now() - 600000,
+    remote: { provider: "toggl", entryId: 900003 },
+    queueId: null,
+    errorCode: null,
+  };
+  await f.book.update({ activeTimer: timer });
+  await f.user
+    .collection("timerLifecycle")
+    .doc("current")
+    .set({ version: 2, state: "active", bookId: f.book.id, timer });
+  const warmups: string[] = [];
+  page.on("request", (request) => {
+    const name = /\/(timetracking-(?:accept|context))$/.exec(request.url())?.[1];
+    if (
+      name &&
+      request.postData() === JSON.stringify({ data: { warmup: true } })
+    )
+      warmups.push(name);
+  });
+  try {
+    await page.goto("/");
+    await page.getByLabel("Email address", { exact: true }).fill(f.email);
+    await page.getByLabel("Password", { exact: true }).fill(f.password);
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await expect.poll(() => warmups).toEqual(["timetracking-accept"]);
+    await page.waitForTimeout(500);
+    expect(warmups).toEqual(["timetracking-accept"]);
+  } finally {
+    await f.cleanup();
+  }
 });

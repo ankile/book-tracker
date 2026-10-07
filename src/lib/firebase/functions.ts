@@ -173,7 +173,7 @@ export async function adminReview(request: AdminReviewRequest): Promise<AdminRev
 
 export const timerInspect = httpsCallable<{token: string}, unknown>(fns, 'timetracking-inspect');
 export const timerConnect = httpsCallable<unknown, unknown>(fns, 'timetracking-connect');
-export const timerContext = httpsCallable<{includeProjects?: boolean}, unknown>(fns, 'timetracking-context');
+export const timerContext = httpsCallable<{includeProjects?: boolean} | {warmup: true}, unknown>(fns, 'timetracking-context');
 export const timerAccept = httpsCallable<unknown, unknown>(fns, 'timetracking-accept');
 export const timerRetry = httpsCallable<{operationId: string}, unknown>(fns, 'timetracking-retry');
 export const timerReplace = httpsCallable<unknown, unknown>(fns, 'timetracking-replace');

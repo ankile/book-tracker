@@ -1,8 +1,9 @@
 <script lang="ts">
   import {effectiveConnection} from "../../../shared/timeTracking.ts";
-  import type {TimerControls} from "../../../shared/timeTracking.ts";
+  import type {TimerControls, TimerInterval} from "../../../shared/timeTracking.ts";
   import {isTimerV2, inspectResult, newTimerIntent, stopTimerIntent, pendingOperation, submitTimerOperation, watchTimerControls, waitForTimerStop} from "../firebase/timeTracking.ts";
   import {timerContext} from "../firebase/functions.ts";
+  import {warmTimerCallables} from "../firebase/timerWarmup.ts";
   import type { Snippet } from 'svelte';
   import { onDestroy } from 'svelte';
   import ReadingSummary from './ReadingSummary.svelte';
@@ -140,6 +141,23 @@
   });
 
   let anyTimerRunning = $derived(books.some((b) => b.activeTimer));
+
+  // Keep the start/stop callables warm while this list is on screen. Only
+  // an idle reader needs the start's Threeggle context check.
+  $effect(() => {
+    if (finished || !userLoaded || !controlsLoaded || timerControls.timerWriteVersion !== 2 || connection.provider === "none") return;
+    const includeContext = connection.provider === "threeggle" && !anyTimerRunning;
+    const warm = () => { if (document.visibilityState === "visible") warmTimerCallables(includeContext); };
+    warm();
+    document.addEventListener("visibilitychange", warm);
+    window.addEventListener("online", warm);
+    const interval = setInterval(warm, 10 * 60 * 1000);
+    return () => {
+      document.removeEventListener("visibilitychange", warm);
+      window.removeEventListener("online", warm);
+      clearInterval(interval);
+    };
+  });
 
   // Set synchronously when a fire-and-forget timer write is issued so a
   // double-tap in the IndexedDB round-trip window cannot start two timers
@@ -287,13 +305,19 @@
         markTimerPending();
         const onlineStop = navigator.onLine;
         const {delivery} = await submitTimerOperation(pendingOperation(userId,intent,onlineStop && timer.remote !== null ? "accept" : "batch",timer));
-        const interval = onlineStop && timer.connection.provider !== "none"
-          ? await waitForTimerStop(userId,intent.operationId,stopWait.signal,delivery) : null;
-        if (stopWait.signal.aborted) return;
-        estimatedTime = interval === null && timer.connection.provider !== "none";
-        const start = interval?.start ?? intent.start, end = interval?.end ?? intent.end ?? intent.start;
-        prefillMinutes=Math.max(1,Math.round((Date.parse(end)-Date.parse(start))/60000));
+        // The form opens at once on this device's interval. A remote stop
+        // replaces it with the confirmed interval, or closes the form if
+        // the stop needs review.
+        const minutes = (interval: TimerInterval) => Math.max(1,Math.round((Date.parse(interval.end)-Date.parse(interval.start))/60000));
+        const showing = () => modal === "addReading" && currentBook?.id === book.id;
+        estimatedTime = timer.connection.provider !== "none";
+        prefillMinutes = minutes({start: intent.start, end: intent.end ?? intent.start});
         setModalBook(book,"addReading");
+        if (!onlineStop || timer.connection.provider === "none") return;
+        try {
+          const interval = await waitForTimerStop(userId,intent.operationId,stopWait.signal,delivery);
+          if (interval !== null && showing()) { prefillMinutes = minutes(interval); estimatedTime = false; }
+        } catch (error) { if (showing()) closemodal(); throw error; }
       } catch (error) { alert(errorMessage(error)); } finally { busy = false; }
       return;
     }

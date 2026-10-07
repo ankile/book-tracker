@@ -10,6 +10,7 @@ import {
 } from "../shared/timeTracking.ts";
 import type {
   Connection,
+  QueueV2,
   TimerIntent,
   TimerV2,
 } from "../shared/timeTracking.ts";
@@ -25,16 +26,24 @@ requireFunctions("./lib");
 const { getFirestore } = requireFunctions(
   "firebase-admin/firestore",
 ) as typeof import("firebase-admin/firestore");
-const { acceptTimerIntent, processTimerQueue } = requireFunctions(
-  "./lib/timeTrackingQueue",
-) as {
-  acceptTimerIntent: (
-    uid: string,
-    intent: TimerIntent,
-    expected: { key: string; version: string } | null,
-  ) => Promise<void>;
-  processTimerQueue: (uid: string, id: string) => Promise<void>;
-};
+const { acceptTimerIntent, acceptAndDeliver, processTimerQueue } =
+  requireFunctions("./lib/timeTrackingQueue") as {
+    acceptTimerIntent: (
+      uid: string,
+      intent: TimerIntent,
+      expected: { key: string; version: string } | null,
+    ) => Promise<QueueV2 | null>;
+    acceptAndDeliver: (
+      uid: string,
+      intent: TimerIntent,
+      expected: { key: string; version: string } | null,
+    ) => Promise<void>;
+    processTimerQueue: (
+      uid: string,
+      id: string,
+      inline?: { item: QueueV2; token: string | null },
+    ) => Promise<void>;
+  };
 const { activateConnection } = requireFunctions(
   "./lib/timeTrackingConnections",
 ) as {
@@ -151,8 +160,8 @@ test("online start/stop each has its own retained receipt and releases only the 
       );
       assert.ok(request);
       calls++;
-      if (request.action === "entry")
-        return json({ apiVersion: 1, ok: true, result: { entry: remote } });
+      // An inline delivery's receipt is current, and an online stop targets
+      // its entry directly: neither needs an entry lookup.
       assert.ok(request.action === "start" || request.action === "stop");
       return json({
         apiVersion: 1,
@@ -170,11 +179,9 @@ test("online start/stop each has its own retained receipt and releases only the 
     },
   );
   const start = intent();
-  await acceptTimerIntent(uid, start, null);
-  await processTimerQueue(uid, start.operationId);
-  await acceptTimerIntent(uid, start, null);
-  await processTimerQueue(uid, start.operationId);
-  assert.equal(calls, 2);
+  await acceptAndDeliver(uid, start, null);
+  await acceptAndDeliver(uid, start, null);
+  assert.equal(calls, 1);
   assert.equal(
     (await book.get()).get("activeTimer.remote.entryKey"),
     remote.key,
@@ -187,8 +194,8 @@ test("online start/stop each has its own retained receipt and releases only the 
     end: new Date().toISOString(),
     remote: { provider: "threeggle", entryKey: remote.key },
   };
-  await acceptTimerIntent(uid, stop, null);
-  await processTimerQueue(uid, stop.operationId);
+  await acceptAndDeliver(uid, stop, null);
+  assert.equal(calls, 2);
   assert.equal((await book.get()).get("activeTimer"), null);
   assert.equal((await claim.get()).get("state"), "idle");
   assert.equal((await queue(start.operationId).get()).get("status"), "synced");
@@ -308,8 +315,7 @@ for (const state of ["running", "completed", "deleted"] as const) {
           : json({ apiVersion: 1, ok: true, result: { entry: current } });
       },
     );
-    await acceptTimerIntent(uid, start, null);
-    await processTimerQueue(uid, start.operationId);
+    await acceptAndDeliver(uid, start, null);
     assert.equal(
       (await queue(start.operationId).get()).get("status"),
       "pending",
@@ -392,6 +398,10 @@ for (const failure of ["unauthorized", "unavailable", "wrong_entry"] as const) {
         assert.ok(request);
         if (request.action === "start") {
           requests.push(String(options.body));
+          // The first delivery commits but loses its response, so every
+          // later receipt is a replay that must be checked.
+          if (requests.length === 1)
+            throw new TypeError("Lost committed start response");
           return json({
             apiVersion: 1,
             ok: true,
@@ -428,7 +438,13 @@ for (const failure of ["unauthorized", "unavailable", "wrong_entry"] as const) {
         return json({ apiVersion: 1, ok: true, result: { entry: current } });
       },
     );
-    await acceptTimerIntent(uid, start, null);
+    await acceptAndDeliver(uid, start, null);
+    assert.equal(lookups, 0);
+    assert.equal(
+      (await queue(start.operationId).get()).get("status"),
+      "pending",
+    );
+    await queue(start.operationId).update({ retryAt: null });
     await processTimerQueue(uid, start.operationId);
     assert.equal((await book.get()).get("activeTimer.state"), "starting");
     assert.equal(
@@ -441,7 +457,8 @@ for (const failure of ["unauthorized", "unavailable", "wrong_entry"] as const) {
       assert.equal((await queue(start.operationId).get()).get("attempts"), 0);
     await processTimerQueue(uid, start.operationId);
     assert.equal(lookups, 2);
-    assert.equal(requests[0], requests[1]);
+    assert.equal(requests.length, 3);
+    assert.equal(new Set(requests).size, 1);
     assert.equal(
       (await queue(start.operationId).get()).get("status"),
       "synced",
@@ -814,6 +831,129 @@ test("background delivery remains retryable after a deferred operation, even wit
   await deployed.timetracking.syncqueue.run(event);
 });
 
+// A Threeggle double that records each action and answers start/stop with a
+// receipt for `remote`. Lookups and contexts fail the test: the online path
+// must not need them.
+function onlineThreeggle(
+  t: { mock: { method: typeof import("node:test").mock.method } },
+  remote: TimeTrackingEntry,
+  stop?: (request: { endTime: number }) => Response,
+) {
+  const actions: string[] = [];
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (_url: unknown, options: RequestInit) => {
+      const request = decodeTimeTrackingRequest(
+        JSON.parse(String(options.body)),
+      );
+      assert.ok(request);
+      actions.push(request.action);
+      assert.ok(request.action === "start" || request.action === "stop");
+      if (request.action === "stop" && stop) return stop(request);
+      return json({
+        apiVersion: 1,
+        ok: true,
+        requestId: request.requestId,
+        result: {
+          disposition: request.action === "start" ? "started" : "stopped",
+          ...(request.action === "start" ? { previousEntry: null } : {}),
+          entry: {
+            ...remote,
+            endTime: request.action === "stop" ? request.endTime : null,
+          },
+        },
+      });
+    },
+  );
+  return actions;
+}
+test("an accepted operation is claimed when created, so the queue trigger never races its callable", async (t) => {
+  const deployed = requireFunctions("./lib") as {
+    timetracking: { syncqueue: { run: (event: unknown) => Promise<void> } };
+  };
+  const actions = onlineThreeggle(t, entry());
+  const start = intent();
+  const claimed = await acceptTimerIntent(uid, start, null);
+  const ref = queue(start.operationId),
+    created = await ref.get();
+  assert.ok(claimed);
+  assert.equal(created.get("status"), "processing");
+  assert.equal(created.get("attempts"), 1);
+  assert.equal(created.get("rowCounted"), true);
+  assert.equal(created.get("claimedAt"), claimed.claimedAt);
+  assert.equal(created.get("prepared.request.action"), "start");
+  // The create event arrives while the callable holds the lease. The trigger
+  // keeps its delivery retryable without a claim transaction or a request.
+  const transactions = t.mock.method(db, "runTransaction");
+  const event = {
+    params: { uid, operationId: start.operationId },
+    data: { after: created },
+  };
+  await assert.rejects(
+    deployed.timetracking.syncqueue.run(event),
+    /leased by an active worker/,
+  );
+  assert.equal(transactions.mock.callCount(), 0);
+  assert.deepEqual(actions, []);
+  assert.deepEqual((await ref.get()).data(), created.data());
+  await processTimerQueue(uid, start.operationId, {
+    item: claimed,
+    token: "isolated-test-token",
+  });
+  assert.equal((await ref.get()).get("status"), "synced");
+  // A retried delivery of the same stale event finds the finished row.
+  await deployed.timetracking.syncqueue.run(event);
+  assert.deepEqual(actions, ["start"]);
+});
+test("an online start or stop commits two transactions around one Threeggle request", async (t) => {
+  const remote = entry();
+  const actions = onlineThreeggle(t, remote);
+  const transactions = t.mock.method(db, "runTransaction");
+  const start = intent();
+  await acceptAndDeliver(uid, start, null);
+  assert.equal(transactions.mock.callCount(), 2);
+  assert.deepEqual(actions, ["start"]);
+  assert.equal((await book.get()).get("activeTimer.state"), "remote");
+  await acceptAndDeliver(
+    uid,
+    {
+      ...start,
+      action: "stop",
+      operationId: randomUUID(),
+      start: new Date(remote.startTime).toISOString(),
+      end: new Date().toISOString(),
+      remote: { provider: "threeggle", entryKey: remote.key },
+    },
+    null,
+  );
+  assert.equal(transactions.mock.callCount(), 4);
+  assert.deepEqual(actions, ["start", "stop"]);
+  assert.equal((await book.get()).get("activeTimer"), null);
+});
+test("an online stop before the remote start pauses for review instead of failing terminally", async (t) => {
+  const { original, claimed } = await seedRemoteStop("threeggle");
+  const refused: TimeTrackingResponse = {
+    apiVersion: 1,
+    ok: false,
+    requestId: original.operationId,
+    error: {
+      code: "invalid_time",
+      message: "The recorded stop precedes the activity’s current start.",
+      details: { entry: entry("repair-target"), reason: "end_before_start" },
+    },
+  };
+  const actions = onlineThreeggle(t, entry("repair-target"), () =>
+    json(refused, 400),
+  );
+  await deliver(original.operationId, claimed);
+  assert.deepEqual(actions, ["stop"]);
+  const row = await queue(original.operationId).get();
+  assert.equal(row.get("status"), "paused");
+  assert.equal(row.get("errorCode"), "end_before_start");
+  assert.equal((await book.get()).get("activeTimer.state"), "stopping");
+});
+
 async function seedRemoteStop(provider: "toggl" | "threeggle", online = true) {
   const selected: Connection =
     provider === "toggl"
@@ -849,7 +989,8 @@ async function seedRemoteStop(provider: "toggl" | "threeggle", online = true) {
   };
   await book.update({ activeTimer: timer });
   await claim.set(claimV2("book", timer));
-  if (online) await acceptTimerIntent(uid, original, null);
+  let claimed: QueueV2 | null = null;
+  if (online) claimed = await acceptTimerIntent(uid, original, null);
   else {
     const stopping: TimerV2 = {
       ...timer,
@@ -861,11 +1002,20 @@ async function seedRemoteStop(provider: "toggl" | "threeggle", online = true) {
     await claim.set(claimV2("book", stopping));
     await queue(original.operationId).set(initialQueue(original, Date.now()));
   }
-  return original;
+  return { original, claimed };
 }
+// What the accept callable does after accepting: deliver its claim inline.
+const deliver = (id: string, claimed: QueueV2 | null) =>
+  processTimerQueue(
+    uid,
+    id,
+    claimed === null
+      ? undefined
+      : { item: claimed, token: "isolated-test-token" },
+  );
 for (const online of [true, false])
   test(`${online ? "online" : "offline"} Toggl stop preserves an external completion and its edited interval`, async (t) => {
-    const original = await seedRemoteStop("toggl", online);
+    const { original, claimed } = await seedRemoteStop("toggl", online);
     const edited = {
       id: 678,
       start: new Date(Date.parse(original.start) + 300000).toISOString(),
@@ -890,7 +1040,7 @@ for (const online of [true, false])
         return new Response(JSON.stringify(edited));
       },
     );
-    await processTimerQueue(uid, original.operationId);
+    await deliver(original.operationId, claimed);
     assert.deepEqual(methods, online ? ["PATCH", "GET"] : ["GET"]);
     assert.equal(
       (await queue(original.operationId).get()).get("status"),
@@ -911,7 +1061,7 @@ for (const online of [true, false])
     assert.equal((await book.get()).get("activeTimer"), null);
   });
 test("online Toggl stop uses the provider's edited start and duration without writing metadata", async (t) => {
-  const original = await seedRemoteStop("toggl");
+  const { original, claimed } = await seedRemoteStop("toggl");
   const edited = {
     id: 678,
     start: new Date(Date.now() - 120000).toISOString(),
@@ -929,7 +1079,7 @@ test("online Toggl stop uses the provider's edited start and duration without wr
       return new Response(JSON.stringify(edited));
     },
   );
-  await processTimerQueue(uid, original.operationId);
+  await deliver(original.operationId, claimed);
   const interval = (
     await user.collection("timeTrackingResults").doc(original.operationId).get()
   ).get("interval");
@@ -937,7 +1087,7 @@ test("online Toggl stop uses the provider's edited start and duration without wr
   assert.equal(Date.parse(interval.end) - Date.parse(interval.start), 120000);
 });
 test("offline Toggl stop sends only its recorded end and reconciles a lost update response", async (t) => {
-  const original = await seedRemoteStop("toggl", false);
+  const { original } = await seedRemoteStop("toggl", false);
   const editedStart = new Date(
     Date.parse(original.start) + 300000,
   ).toISOString();
@@ -992,7 +1142,7 @@ test("offline Toggl stop sends only its recorded end and reconciles a lost updat
 });
 for (const alreadyStopped of [false, true])
   test(`targeted Threeggle stop recovery works without the configured project (${alreadyStopped ? "completed" : "running"} target)`, async (t) => {
-    const original = await seedRemoteStop("threeggle");
+    const { original } = await seedRemoteStop("threeggle");
     await queue(original.operationId).update({
       status: "terminal",
       errorCode: "project_unavailable",

@@ -1,4 +1,5 @@
 import { consumeQuota } from "./quota";
+import { phaseTimer } from "./phaseTiming";
 import { logAppCheckPresence } from "./appCheck";
 import * as functions from "firebase-functions/v1";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
@@ -7,14 +8,18 @@ import {
   EVENT_INGRESS,
   FUNCTIONS_RUNTIME_SERVICE_ACCOUNT,
 } from "./runtime";
-import { requireVerifiedUid, requireLiveUser } from "./callerGuards";
+import {
+  assertLiveAccount,
+  requireVerifiedUid,
+  requireLiveUser,
+} from "./callerGuards";
 import {
   activateConnection,
   connectionQuota,
   inspectThreeggle,
   timerCredential,
 } from "./timeTrackingConnections";
-import { acceptTimerIntent, processTimerQueue } from "./timeTrackingQueue";
+import { acceptAndDeliver, processTimerQueue } from "./timeTrackingQueue";
 import {
   acknowledgeTimerFailure,
   acknowledgeRecoveredReading,
@@ -59,6 +64,17 @@ function operation(value: unknown): string {
     );
   return value;
 }
+// A reader-visible timer list starts the start/stop callables before the
+// tap, so the ~2 s instance boot and the first Firestore channel setup are
+// already paid. It reads only the caller's own user document.
+async function warmUp(
+  data: unknown,
+  context: functions.https.CallableContext,
+): Promise<{ warm: true } | null> {
+  if (!wireRecord(data) || data.warmup !== true) return null;
+  await getFirestore().doc(`users/${requireVerifiedUid(context)}`).get();
+  return { warm: true };
+}
 exports.inspect = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.inspect", context);
   const uid = requireVerifiedUid(context),
@@ -99,30 +115,34 @@ exports.connect = callable.https.onCall(async (data: unknown, context) => {
 });
 exports.context = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.context", context);
+  const warm = await warmUp(data, context);
+  if (warm) return warm;
+  const timing = phaseTimer("timetracking.context_timing");
   const uid = requireVerifiedUid(context);
-  await requireLiveUser(uid);
-  if (
-    !(
-      await consumeQuota(
-        getFirestore(),
-        `users/${uid}/functionQuotas/timeTrackingContext`,
-        60,
-        3600000,
-      )
-    ).granted
-  )
-    throw new functions.https.HttpsError(
-      "resource-exhausted",
-      "Too many timer context requests. Try again later.",
-    );
   const user = await getFirestore().doc(`users/${uid}`).get();
+  assertLiveAccount(user.exists, user.get("deletedAt"));
   const connection = decodeConnection(user.get("timeTracking"));
   if (connection.provider !== "threeggle")
     throw new functions.https.HttpsError(
       "failed-precondition",
       "Threeggle is not connected.",
     );
-  const token = await timerCredential(uid, connection);
+  timing.mark("live");
+  const [quota, token] = await Promise.all([
+    consumeQuota(
+      getFirestore(),
+      `users/${uid}/functionQuotas/timeTrackingContext`,
+      60,
+      3600000,
+    ),
+    timerCredential(uid, connection),
+  ]);
+  if (!quota.granted)
+    throw new functions.https.HttpsError(
+      "resource-exhausted",
+      "Too many timer context requests. Try again later.",
+    );
+  timing.mark("quota");
   if (!token)
     throw new functions.https.HttpsError(
       "failed-precondition",
@@ -140,10 +160,14 @@ exports.context = callable.https.onCall(async (data: unknown, context) => {
       "failed-precondition",
       "The remote identity changed. Repair your connection.",
     );
+  timing.mark("remote");
+  timing.log({});
   return inspected;
 });
 exports.accept = callable.https.onCall(async (data: unknown, context) => {
   logAppCheckPresence("timetracking.accept", context);
+  const warm = await warmUp(data, context);
+  if (warm) return warm;
   const uid = requireVerifiedUid(context),
     d = input(data),
     intent = decodeTimerIntent(d.intent);
@@ -155,9 +179,10 @@ exports.accept = callable.https.onCall(async (data: unknown, context) => {
       version: text(running.version, 256),
     };
   }
-  await acceptTimerIntent(uid, intent, expectedRunning);
-  if (intent.connection.provider !== "none")
-    await processTimerQueue(uid, intent.operationId);
+  const timing = phaseTimer("timetracking.accept_timing");
+  await acceptAndDeliver(uid, intent, expectedRunning);
+  timing.mark("deliver");
+  timing.log({ operationId: intent.operationId, action: intent.action });
   return { accepted: true, operationId: intent.operationId };
 });
 exports.retry = callable.https.onCall(async (data: unknown, context) => {
@@ -231,18 +256,38 @@ exports.syncqueue = onDocumentWritten(
     retry: true,
   },
   async (event) => {
+    const status: unknown = event.data?.after.get("status");
     if (
       !event.data?.after.exists ||
-      event.data.after.get("status") !== "pending"
+      (status !== "pending" && status !== "processing")
     )
       return;
+    const ref = getFirestore().doc(
+      `users/${event.params.uid}/timeTrackingQueue/${event.params.operationId}`,
+    );
+    const claimedAt: unknown = event.data.after.get("claimedAt");
+    if (
+      status === "processing" &&
+      typeof claimedAt === "number" &&
+      claimedAt > Date.now() - 180000
+    ) {
+      // An accepted operation is claimed by its callable in the creating
+      // transaction. A plain read, not a claim transaction, checks whether
+      // that worker finished, so this delivery never contends with it.
+      const leased = await ref.get();
+      if (
+        !leased.exists ||
+        leased.get("resolution") ||
+        leased.get("successorId") ||
+        !["pending", "processing"].includes(leased.get("status"))
+      )
+        return;
+      if (leased.get("status") === "processing")
+        throw new Error("Timer operation is leased by an active worker.");
+    }
     await requireLiveUser(event.params.uid);
     await processTimerQueue(event.params.uid, event.params.operationId);
-    const current = await getFirestore()
-      .doc(
-        `users/${event.params.uid}/timeTrackingQueue/${event.params.operationId}`,
-      )
-      .get();
+    const current = await ref.get();
     if (
       current.exists &&
       !current.get("resolution") &&

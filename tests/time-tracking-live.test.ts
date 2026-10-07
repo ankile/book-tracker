@@ -26,10 +26,10 @@ requireFunctions("./lib");
 const { getFirestore } = requireFunctions(
   "firebase-admin/firestore",
 ) as typeof import("firebase-admin/firestore");
-const { acceptTimerIntent, processTimerQueue } = requireFunctions(
+const { acceptAndDeliver, processTimerQueue } = requireFunctions(
   "./lib/timeTrackingQueue",
 ) as {
-  acceptTimerIntent: (
+  acceptAndDeliver: (
     uid: string,
     intent: TimerIntent,
     expected: null,
@@ -110,8 +110,7 @@ test("real Firestore and isolated Convex preserve start/stop receipts and comple
       description: "Isolated two-backend reading",
       remote: null,
     };
-    await acceptTimerIntent(uid, start, null);
-    await processTimerQueue(uid, start.operationId);
+    await acceptAndDeliver(uid, start, null);
     const active = (await book.get()).get("activeTimer");
     assert.equal(active.state, "remote");
     const stop: TimerIntent = {
@@ -122,8 +121,7 @@ test("real Firestore and isolated Convex preserve start/stop receipts and comple
       end: new Date().toISOString(),
       remote: active.remote,
     };
-    await acceptTimerIntent(uid, stop, null);
-    await processTimerQueue(uid, stop.operationId);
+    await acceptAndDeliver(uid, stop, null);
     assert.equal((await book.get()).get("activeTimer"), null);
     for (const id of [start.operationId, stop.operationId]) {
       const receipt = await request({
