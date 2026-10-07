@@ -1,4 +1,5 @@
 import { env } from "node:process";
+import { logger } from "firebase-functions";
 import {
   decodeTimeTrackingRequest,
   decodeTimeTrackingResponse,
@@ -97,6 +98,7 @@ export async function threeggleRequest(
 ): Promise<TimeTrackingHttpResult> {
   const url = threeggleEndpoint();
   if (url === null) return stub(request);
+  const started = Date.now();
   const response = await fetch(url, {
     method: "POST",
     redirect: "error",
@@ -127,6 +129,11 @@ export async function threeggleRequest(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  logger.info("threeggle.request", {
+    action: request.action,
+    status: response.status,
+    ms: Date.now() - started,
+  });
   const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
   const decoded = decodeTimeTrackingResponse(body);
   if (!decoded || decoded.ok !== response.ok)

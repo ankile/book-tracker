@@ -1,7 +1,9 @@
 import { logger } from "firebase-functions";
 import { logIssue } from "./logging";
+import { phaseTimer } from "./phaseTiming";
 import { wireRecord } from "./shared/time-tracking-api";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
+import type { DocumentData, Transaction } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v1/https";
 import { assertLiveAccount } from "./callerGuards";
 import { applyQuota } from "./quota";
@@ -17,6 +19,8 @@ import {
   decodeTogglTimerEntry,
 } from "./decoders";
 import {
+  sameConnection,
+  effectiveConnection,
   claimV2,
   decodeTimerIntent,
   decodeClaimV2,
@@ -53,24 +57,98 @@ function paths(uid: string) {
     queues: db.collection(`users/${uid}/timeTrackingQueue`),
     acks: db.collection(`users/${uid}/timerOperations`),
     results: db.collection(`users/${uid}/timeTrackingResults`),
+    quota: db.doc(`users/${uid}/functionQuotas/timeTrackingQueue`),
+    rows: db.doc(`users/${uid}/functionQuotas/timeTrackingQueueRows`),
   };
 }
+// Claims one delivery attempt for a queue row inside the caller's
+// transaction, after it has read both quota documents. A refused claim
+// returns the deferred or paused row instead.
+function claimRow(
+  tx: Transaction,
+  uid: string,
+  row: QueueV2,
+  quota: DocumentData | undefined,
+  rows: DocumentData | undefined,
+): { next: QueueV2; claimed: boolean } {
+  const p = paths(uid);
+  if (!row.rowCounted) {
+    const rowQuota = applyQuota(tx, p.rows, rows, 60, 3600000, Timestamp.now());
+    if (!rowQuota.granted)
+      return {
+        claimed: false,
+        next: {
+          ...row,
+          status: "pending",
+          retryAt: Date.now() + 3600000,
+          errorCode: "row_limit",
+        },
+      };
+  }
+  const granted = applyQuota(
+    tx,
+    p.quota,
+    quota,
+    row.intent.remote !== null ? 60 : 30,
+    3600000,
+    Timestamp.now(),
+  );
+  if (!granted.granted)
+    return {
+      claimed: false,
+      next: {
+        ...row,
+        rowCounted: true,
+        status: "pending",
+        retryAt: Date.now() + 3600000,
+        errorCode: "rate_limited",
+      },
+    };
+  if (row.attempts >= MAX_ATTEMPTS)
+    return {
+      claimed: false,
+      next: {
+        ...row,
+        rowCounted: true,
+        status: "paused",
+        errorCode: "retry_limit",
+      },
+    };
+  return {
+    claimed: true,
+    next: {
+      ...row,
+      rowCounted: true,
+      status: "processing",
+      attempts: row.attempts + 1,
+      claimedAt: Date.now(),
+      retryAt: null,
+      errorCode: null,
+    },
+  };
+}
+// Accepting a remote operation also claims its first delivery in the same
+// transaction. The callable then delivers it inline, and the queue trigger
+// sees a leased row instead of racing the callable for a pending one.
 export async function acceptTimerIntent(
   uid: string,
   submitted: TimerIntent,
   expectedRunning: { key: string; version: string } | null,
-): Promise<void> {
+): Promise<QueueV2 | null> {
   const intent = decodeTimerIntent(submitted);
   const p = paths(uid),
     book = db.doc(`users/${uid}/books/${intent.bookId}`);
-  await db.runTransaction(async (tx) => {
-    const [ack, bookSnap, claimSnap, controlsSnap] = await Promise.all([
-      tx.get(p.acks.doc(intent.operationId)),
-      tx.get(book),
-      tx.get(p.claim),
-      tx.get(db.doc("configuration/timeTracking")),
-    ]);
-    const user = await tx.get(p.user);
+  return db.runTransaction(async (tx) => {
+    const [ack, bookSnap, claimSnap, controlsSnap, user, quota, rows] =
+      await Promise.all([
+        tx.get(p.acks.doc(intent.operationId)),
+        tx.get(book),
+        tx.get(p.claim),
+        tx.get(db.doc("configuration/timeTracking")),
+        tx.get(p.user),
+        tx.get(p.quota),
+        tx.get(p.rows),
+      ]);
     assertLiveAccount(user.exists, user.get("deletedAt"));
     if (ack.exists) {
       if (
@@ -81,9 +159,13 @@ export async function acceptTimerIntent(
           "already-exists",
           "An operation ID cannot identify different timer actions.",
         );
-      return;
+      return null;
     }
-    await assertCurrentConnection(tx, uid, intent.connection);
+    if (!sameConnection(effectiveConnection(user.data()), intent.connection))
+      throw new HttpsError(
+        "failed-precondition",
+        "The time tracking connection changed. Reload before continuing.",
+      );
     if (!bookSnap.exists) throw new HttpsError("not-found", "Book not found.");
     const controls = decodeTimerControls(controlsSnap.data());
     const now = Date.now();
@@ -189,6 +271,25 @@ export async function acceptTimerIntent(
           description: intent.description,
           entryId: intent.remote.entryId,
         };
+      // An online stop ends now, so it targets the entry directly. Threeggle
+      // still refuses a missing target or an end before its current start,
+      // and returns already_stopped for a completed one.
+      if (
+        queue &&
+        intent.end !== null &&
+        intent.connection.provider === "threeggle" &&
+        intent.remote?.provider === "threeggle"
+      )
+        queue.prepared = {
+          provider: "threeggle",
+          request: {
+            client: "book-tracker",
+            action: "stop",
+            requestId: intent.operationId,
+            entryKey: intent.remote.entryKey,
+            endTime: Math.min(Date.parse(intent.end), now),
+          },
+        };
       if (current.remote !== null) {
         const stopping: TimerV2 = {
           ...current,
@@ -214,8 +315,37 @@ export async function acceptTimerIntent(
       ...operationAck(intent, now),
       intent,
     });
-    if (queue !== null) tx.create(p.queues.doc(intent.operationId), queue);
+    if (queue === null) return null;
+    const { next, claimed } = claimRow(
+      tx,
+      uid,
+      queue,
+      quota.data(),
+      rows.data(),
+    );
+    tx.create(p.queues.doc(intent.operationId), next);
+    return claimed ? next : null;
   });
+}
+
+// The accept callable's path: accept, then deliver the claimed row inline.
+// The credential read only names the submitted revision; acceptance verifies
+// that revision is the active connection before the token is used.
+export async function acceptAndDeliver(
+  uid: string,
+  intent: TimerIntent,
+  expectedRunning: { key: string; version: string } | null,
+): Promise<void> {
+  const [claimed, token] = await Promise.all([
+    acceptTimerIntent(uid, intent, expectedRunning),
+    timerCredential(uid, intent.connection),
+  ]);
+  if (intent.connection.provider !== "none")
+    await processTimerQueue(
+      uid,
+      intent.operationId,
+      claimed === null ? undefined : { item: claimed, token },
+    );
 }
 
 type Outcome = {
@@ -430,9 +560,23 @@ async function send(
   token: string,
   item: QueueV2,
   prepared: PreparedRequest,
+  firstDelivery: boolean,
 ): Promise<Outcome> {
   if (prepared.provider === "threeggle") {
     const result = await threeggleRequest(token, prepared.request);
+    if (
+      !result.response.ok &&
+      prepared.request.action === "stop" &&
+      result.response.error.code === "invalid_time" &&
+      result.response.error.details &&
+      "reason" in result.response.error.details &&
+      result.response.error.details.reason === "end_before_start"
+    )
+      return {
+        status: "paused",
+        code: "end_before_start",
+        response: result.response,
+      };
     if (
       result.response.requestId !== undefined &&
       result.response.requestId !== prepared.request.requestId
@@ -452,9 +596,10 @@ async function send(
               receipt.entry.key === prepared.request.entryKey;
       if (!valid || result.response.requestId !== prepared.request.requestId)
         throw new Error("Threeggle returned a mismatched write receipt.");
-      if (prepared.request.action === "start") {
+      // A first delivery executed just now, so its receipt is current.
+      if (prepared.request.action === "start" && !firstDelivery) {
         // Receipts retain execution-time state, even after an external stop or
-        // deletion. Check every successful start, including retries whose
+        // deletion. Check every redelivered start, including retries whose
         // attempt counter was reset after credential repair.
         const lookup = await threeggleRequest(token, {
           client: "book-tracker",
@@ -557,146 +702,126 @@ async function send(
   };
 }
 
+// `inline` carries a row claimed by the transaction that created it, so its
+// request has never crossed the remote boundary and is already persisted.
 export async function processTimerQueue(
   uid: string,
   operationId: string,
+  inline?: { item: QueueV2; token: string | null },
 ): Promise<void> {
   const p = paths(uid),
-    ref = p.queues.doc(operationId);
-  const item = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists || snap.get("resolution")) return null;
-    const row = decodeQueueV2(snap.data());
-    if (
-      row.successorId ||
-      row.status === "synced" ||
-      row.status === "terminal" ||
-      row.status === "outcome-unknown" ||
-      row.status === "paused"
-    )
-      return null;
-    if (
-      row.status === "processing" &&
-      row.claimedAt !== null &&
-      row.claimedAt > Date.now() - LEASE_MS
-    )
-      return null;
-    if (row.retryAt !== null && row.retryAt > Date.now()) return null;
-    await assertCurrentConnection(tx, uid, row.intent.connection);
-    const quotaRef = db.doc(`users/${uid}/functionQuotas/timeTrackingQueue`),
-      rowsRef = db.doc(`users/${uid}/functionQuotas/timeTrackingQueueRows`);
-    const [quota, rows] = await Promise.all([
-      tx.get(quotaRef),
-      tx.get(rowsRef),
-    ]);
-    if (!row.rowCounted) {
-      const rowQuota = applyQuota(
-        tx,
-        rowsRef,
-        rows.data(),
-        60,
-        3600000,
-        Timestamp.now(),
-      );
-      if (!rowQuota.granted) {
-        tx.update(ref, {
-          status: "pending",
-          retryAt: Date.now() + 3600000,
-          errorCode: "row_limit",
-        });
+    ref = p.queues.doc(operationId),
+    timing = phaseTimer("timetracking.queue_timing");
+  const item =
+    inline?.item ??
+    (await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists || snap.get("resolution")) return null;
+      const row = decodeQueueV2(snap.data());
+      if (
+        row.successorId ||
+        row.status === "synced" ||
+        row.status === "terminal" ||
+        row.status === "outcome-unknown" ||
+        row.status === "paused"
+      )
         return null;
-      }
-    }
-    const granted = applyQuota(
-      tx,
-      quotaRef,
-      quota.data(),
-      row.intent.remote !== null ? 60 : 30,
-      3600000,
-      Timestamp.now(),
-    );
-    if (!granted.granted) {
-      tx.update(ref, {
-        rowCounted: true,
-        status: "pending",
-        retryAt: Date.now() + 3600000,
-        errorCode: "rate_limited",
-      });
-      return null;
-    }
-    if (row.attempts >= MAX_ATTEMPTS) {
-      tx.update(ref, {
-        rowCounted: true,
-        status: "paused",
-        errorCode: "retry_limit",
-      });
-      return null;
-    }
-    const next: QueueV2 = {
-      ...row,
-      rowCounted: true,
-      status: "processing",
-      attempts: row.attempts + 1,
-      claimedAt: Date.now(),
-      retryAt: null,
-      errorCode: null,
-    };
-    tx.set(ref, next);
-    return next;
-  });
-  if (item === null) return;
-  const token = await timerCredential(uid, item.intent.connection);
+      if (
+        row.status === "processing" &&
+        row.claimedAt !== null &&
+        row.claimedAt > Date.now() - LEASE_MS
+      )
+        return null;
+      if (row.retryAt !== null && row.retryAt > Date.now()) return null;
+      await assertCurrentConnection(tx, uid, row.intent.connection);
+      const [quota, rows] = await Promise.all([
+        tx.get(p.quota),
+        tx.get(p.rows),
+      ]);
+      const { next, claimed } = claimRow(
+        tx,
+        uid,
+        row,
+        quota.data(),
+        rows.data(),
+      );
+      tx.set(ref, next);
+      return claimed ? next : null;
+    }));
+  timing.mark("claim");
+  if (item === null) {
+    timing.log({ operationId, status: "skipped" });
+    return;
+  }
+  const token = inline
+    ? inline.token
+    : await timerCredential(uid, item.intent.connection);
+  timing.mark("credential");
   let outcome: Outcome;
   if (token === null)
     outcome = { status: "paused", code: "credential_missing" };
   else {
     const prepared = await prepare(item, token);
+    timing.mark("prepare");
     if (!("provider" in prepared)) outcome = prepared;
     else {
-      const allowed = await db.runTransaction(async (tx) => {
-        const current = await tx.get(ref);
-        await assertCurrentConnection(tx, uid, item.intent.connection);
-        if (
-          current.get("claimedAt") !== item.claimedAt ||
-          current.get("attempts") !== item.attempts ||
-          current.get("status") !== "processing" ||
-          current.get("resolution")
-        )
-          return false;
-        // Persist the canonical request before crossing the remote boundary.
-        // A Toggl POST is ambiguous until its successful response is saved.
-        tx.update(ref, {
-          prepared,
-          ...(prepared.provider === "toggl" &&
-          (prepared.action === "start" || prepared.action === "create_interval")
-            ? { status: "outcome-unknown", errorCode: "delivery_unconfirmed" }
-            : {}),
-        });
-        return true;
-      });
-      if (!allowed) return;
+      const ambiguous =
+        prepared.provider === "toggl" &&
+        (prepared.action === "start" || prepared.action === "create_interval");
+      // An inline row was claimed and its request persisted by the
+      // transaction that created it, so only an ambiguous Toggl POST still
+      // needs its outcome-unknown marker before the request.
+      const allowed =
+        (inline !== undefined && item.prepared !== null && !ambiguous) ||
+        (await db.runTransaction(async (tx) => {
+          const current = await tx.get(ref);
+          await assertCurrentConnection(tx, uid, item.intent.connection);
+          if (
+            current.get("claimedAt") !== item.claimedAt ||
+            current.get("attempts") !== item.attempts ||
+            current.get("status") !== "processing" ||
+            current.get("resolution")
+          )
+            return false;
+          // Persist the canonical request before crossing the remote boundary.
+          // A Toggl POST is ambiguous until its successful response is saved.
+          tx.update(ref, {
+            prepared,
+            ...(ambiguous
+              ? { status: "outcome-unknown", errorCode: "delivery_unconfirmed" }
+              : {}),
+          });
+          return true;
+        }));
+      timing.mark("persist");
+      if (!allowed) {
+        timing.log({ operationId, status: "lease_lost" });
+        return;
+      }
       try {
-        outcome = await send(token, item, prepared);
+        outcome = await send(token, item, prepared, inline !== undefined);
       } catch (error) {
         // Transport and response-validation failures leave delivery unconfirmed.
         // This includes mismatched provider receipts; database transactions and
         // invariants outside send() still propagate without being reclassified.
         if (!(error instanceof Error)) throw error;
-        const ambiguous =
-          prepared.provider === "toggl" &&
-          (prepared.action === "start" ||
-            prepared.action === "create_interval");
         outcome = {
           status: ambiguous ? "outcome-unknown" : "pending",
           code: "delivery_unconfirmed",
           retryAt: Date.now() + 30000,
         };
       }
+      timing.mark("remote");
     }
   }
+  const bookRef = db.doc(`users/${uid}/books/${item.intent.bookId}`);
   const recorded = await db.runTransaction(async (tx) => {
-    const current = await tx.get(ref),
-      user = await tx.get(p.user);
+    const [current, user, book, claim] = await Promise.all([
+      tx.get(ref),
+      tx.get(p.user),
+      tx.get(bookRef),
+      tx.get(p.claim),
+    ]);
     assertLiveAccount(user.exists, user.get("deletedAt"));
     if (
       current.get("claimedAt") !== item.claimedAt ||
@@ -704,8 +829,6 @@ export async function processTimerQueue(
       current.get("resolution")
     )
       return;
-    const bookRef = db.doc(`users/${uid}/books/${item.intent.bookId}`);
-    const [book, claim] = await Promise.all([tx.get(bookRef), tx.get(p.claim)]);
     const raw: unknown = book.get("activeTimer");
     const timer =
       wireRecord(raw) && raw.version === 2 ? decodeTimerV2(raw) : null;
@@ -783,6 +906,13 @@ export async function processTimerQueue(
         { merge: true },
       );
     return true;
+  });
+  timing.mark("record");
+  timing.log({
+    operationId,
+    action: item.intent.action,
+    provider: item.intent.connection.provider,
+    status: outcome.status,
   });
   if (
     recorded &&
