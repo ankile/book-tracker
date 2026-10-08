@@ -1,7 +1,8 @@
 // Words per minute through the Auth, Firestore and Functions emulators: a
 // reader with two finished books of one work, on two editions Word Counter
 // measured. Only the book whose page count matches its edition's measured
-// page count reads in words, on the stats page and on the work page.
+// page count reads in words, on the stats page and on the work page. A third,
+// unread book on another measured edition gets its time left in words.
 import { createHash, randomUUID } from 'node:crypto';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -71,6 +72,17 @@ test.describe.serial('words per minute through the emulators', () => {
         translatorNames: [], format: 'full', suggestedPageCount: 300, coverUrl: '', externalIds: {},
         createdAt: now, updatedAt: now, wordEstimate: wordEstimate(300, 250),
       }),
+      // Another work, measured on 200 pages at 400 words a page: the unread book.
+      db.doc(`works/unread-work-${suffix}`).set({
+        canonicalTitle: 'Unread Work', alternateTitles: [], titleKeys: ['unread work'],
+        authorIds: [authorId], coverUrl: '', subjects: [], fiction: true, language: 'en',
+        status: 'active', mergedFrom: [], createdAt: now, updatedAt: now,
+      }),
+      db.doc(`editions/unread-${suffix}`).set({
+        workId: `unread-work-${suffix}`, isbn13: null, title: 'Unread Work', publisher: '', publishedDate: '',
+        language: '', translatorNames: [], format: 'full', suggestedPageCount: 200, coverUrl: '', externalIds: {},
+        createdAt: now, updatedAt: now, wordEstimate: wordEstimate(200, 400),
+      }),
       // Measured on 400 pages; the reader's copy has 350.
       db.doc(`editions/other-printing-${suffix}`).set({
         workId, isbn13: null, title: 'Measured Work', publisher: '', publishedDate: '', language: '',
@@ -104,6 +116,11 @@ test.describe.serial('words per minute through the emulators', () => {
         });
       }
     }
+    await userRef.collection('books').doc('unread').set({
+      ...book('unread', 'Unread Measured Copy', `unread-${suffix}`, 200, 0),
+      workId: `unread-work-${suffix}`, currentPage: 0, pagesRead: 0, finished: false, finishedAt: null,
+      lastReadAt: null,
+    });
     // The sharing projection trigger indexes the reader under the work.
     const projection = `sharedWorkOwners/${createHash('sha256').update(`${workId}\0${uid}`).digest('hex')}`;
     for (let attempt = 0; attempt < 100 && !(await db.doc(projection).get()).exists; attempt += 1) {
@@ -142,5 +159,17 @@ test.describe.serial('words per minute through the emulators', () => {
     await expect(wordRows).toHaveCount(1);
     await expect(wordRows.locator('xpath=following-sibling::dd')).toHaveText('≈ 208');
     await page.locator('.attempt-list').first().screenshot({ path: test.info().outputPath('work-words-per-minute.png') });
+  });
+
+  test('an unread measured book gets its time left in words', async ({ page }) => {
+    await login(page, email);
+    await page.goto('/');
+    // The matched copy read 75,000 words in 360 minutes (0.0048 a word); the unread edition sets 400 words on
+    // each of its 200 pages: 1.92 minutes a page, 384 minutes left. The author's pace in pages would say ~1.02.
+    const paces = page.locator('.pace[title*="words per page"]');
+    await expect(paces).toHaveCount(2);
+    await expect(paces.first()).toHaveText('~06:24');
+    await expect(paces.nth(1)).toHaveText('~1.92');
+    await page.locator('.container').first().screenshot({ path: test.info().outputPath('reading-list-words.png') });
   });
 });

@@ -7,6 +7,7 @@ import {
   buildPlanRows,
   effortSourceLabel,
   moveAnnouncement,
+  planEditionIds,
   updateEffortMap,
 } from '../src/lib/utils/planView.ts';
 
@@ -85,7 +86,7 @@ test('rows join ranked entries with unfinished books and mark unpositioned books
 test('the effort map recomputes only rows whose effort inputs changed', () => {
   const library = [book('reading'), book('other', { authorIds: ['author-b'], pagesRead: 50, timeRead: 50 })];
   const rows = buildPlanRows([planned('wish', { rank: 2000 })], [book('reading')], null);
-  const first = updateEffortMap(new Map(), rows, library);
+  const first = updateEffortMap(new Map(), rows, library, new Map());
   assert.equal(first.computed, 2);
   // Own pace on the reading book: 200 min / 100 pages, 200 pages left.
   assert.equal(first.map.get('reading')?.effort.remainingMinutes, 400);
@@ -94,23 +95,59 @@ test('the effort map recomputes only rows whose effort inputs changed', () => {
   assert.equal(first.map.get('wish')?.effort.remainingMinutes, 400);
   // A rank-only change computes nothing.
   const reranked = buildPlanRows([planned('wish', { rank: 1 })], [book('reading')], null);
-  const second = updateEffortMap(first.map, reranked, library);
+  const second = updateEffortMap(first.map, reranked, library, new Map());
   assert.equal(second.computed, 0);
   assert.equal(second.map.get('wish'), first.map.get('wish'));
   // A manual estimate on one row recomputes that row alone.
   const estimated = buildPlanRows([planned('wish', { rank: 1, manualMinutesPerPage: 5 })], [book('reading')], null);
-  const third = updateEffortMap(second.map, estimated, library);
+  const third = updateEffortMap(second.map, estimated, library, new Map());
   assert.equal(third.computed, 1);
   assert.equal(third.map.get('wish')?.effort.remainingMinutes, 1000);
   assert.equal(third.map.get('reading'), first.map.get('reading'));
   // New pace evidence anywhere in the library recomputes every row.
-  const fourth = updateEffortMap(third.map, estimated, [book('reading'), book('other', { authorIds: ['author-b'], pagesRead: 60, timeRead: 50 })]);
+  const fourth = updateEffortMap(third.map, estimated, [book('reading'), book('other', { authorIds: ['author-b'], pagesRead: 60, timeRead: 50 })], new Map());
   assert.equal(fourth.computed, 2);
+  // A Word Counter estimate arriving for the planned book's edition recomputes it in words: the other book,
+  // measured at 250 words a page, read 60 pages in 50 minutes (1/300 min a word); the planned edition sets 300
+  // words on its 200 pages, so a page takes a minute. The reading book has its own pace and keeps it.
+  const linked = buildPlanRows(
+    [planned('wish', { rank: 1, catalogLink: { workId: 'w', editionId: 'wish-edition', matchMethod: 'catalog-choice' } })],
+    [book('reading')], null,
+  );
+  const measuredLibrary = [book('reading'), book('other', { authorIds: ['author-b'], pagesRead: 60, timeRead: 50, editionId: 'other-edition', pageCount: 300 })];
+  const before = updateEffortMap(fourth.map, linked, measuredLibrary, new Map());
+  const estimate = (pageCountBasis: number, wordsPerPage: number) => ({ pageCountBasis, wordsPerPage, wordsPerPageLow: wordsPerPage - 20, wordsPerPageHigh: wordsPerPage + 20 });
+  const estimates = new Map([['wish-edition', estimate(200, 300)], ['other-edition', estimate(300, 250)]]);
+  const fifth = updateEffortMap(before.map, linked, measuredLibrary, estimates);
+  assert.equal(fifth.computed, 2);
+  assert.equal(fifth.map.get('wish')?.effort.source, 'words');
+  assert.ok(Math.abs(fifth.map.get('wish')!.effort.remainingMinutes! - 200) < 1e-9);
+  assert.equal(effortSourceLabel(fifth.map.get('wish')!.effort), 'Your pace in words on measured books');
+  assert.equal(fifth.map.get('reading')?.effort.source, 'own');
+  // The same estimates again compute nothing.
+  assert.equal(updateEffortMap(fifth.map, linked, measuredLibrary, new Map(estimates)).computed, 0);
+  // A new estimate for the planned edition alone recomputes that row alone: 400 words a page now.
+  const remeasured = updateEffortMap(fifth.map, linked, measuredLibrary, new Map([...estimates, ['wish-edition', estimate(200, 400)]]));
+  assert.equal(remeasured.computed, 1);
+  assert.ok(Math.abs(remeasured.map.get('wish')!.effort.remainingMinutes! - 200 * 400 / 300) < 1e-9);
+});
+
+test('the plan reads estimates for its rows\' editions and every timed book\'s', () => {
+  const rows = buildPlanRows(
+    [planned('wish', { catalogLink: { workId: 'w', editionId: 'wish-edition', matchMethod: 'catalog-choice' } }), planned('loose')],
+    [book('reading', { editionId: 'reading-edition' })], null,
+  );
+  const library = [
+    book('reading', { editionId: 'reading-edition' }),
+    book('timed', { editionId: 'timed-edition' }),
+    book('untimed', { editionId: 'untimed-edition', pagesRead: 0, timeRead: 0 }),
+  ];
+  assert.deepEqual(planEditionIds(rows, library), ['reading-edition', 'timed-edition', 'wish-edition']);
 });
 
 test('copy names the effort source and announces a move with its forecast', () => {
   const rows = buildPlanRows([planned('wish', { pageCount: null })], [], null);
-  const { map } = updateEffortMap(new Map(), rows, []);
+  const { map } = updateEffortMap(new Map(), rows, [], new Map());
   assert.equal(effortSourceLabel(map.get('wish')!.effort), 'Page count needed');
   assert.equal(effortSourceLabel({ ...map.get('wish')!.effort, remainingPages: 10 }), 'No pace evidence yet');
   assert.equal(effortSourceLabel({ ...map.get('wish')!.effort, source: 'manual' }), 'Your estimate');

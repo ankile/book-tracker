@@ -17,7 +17,8 @@
   import { togglClearStopping, togglStart, togglStop } from "../firebase/functions.ts";
   import { formatTime } from "../utils/format.ts";
   import { finishedDateOf } from "../utils/finished.ts";
-  import { minutesLeft, paceFor, paceNote } from "../utils/paceEstimate.ts";
+  import { minutesLeft, paceEditionIds, paceFor, paceNote } from "../utils/paceEstimate.ts";
+  import { wordEstimatesFor } from "../firebase/wordEstimates.svelte.ts";
   import { DUSTY_SHELF_DAYS, dustyDividerId } from "../utils/sessions.ts";
   import { repairableBookAuthors, formatAuthors, joinAuthors } from "../utils/authors.ts";
   import { catalogWorkHref } from "../utils/catalogClient.ts";
@@ -67,6 +68,9 @@
     const libraryStore = Database.getAllBooks(userId);
     return libraryStore.subscribe((data) => (library = data ?? []));
   });
+  // Word Counter estimates let an unread book borrow a pace in words; the
+  // finished list shows no time left, so it reads none.
+  const wordEstimates = wordEstimatesFor(() => (finished ? [] : paceEditionIds(books, library)));
   let sessionsBookId = $state<string | null>(null);
   let sessionsBook = $derived(
     sessionsBookId === null
@@ -789,10 +793,10 @@
   {#if header}
     <div class="list-summary">{@render header()}</div>
   {:else if !finished && books.length > 0}
-    <div class="list-summary"><ReadingSummary {books} {library} /></div>
+    <div class="list-summary"><ReadingSummary {books} {library} estimates={wordEstimates.current} /></div>
   {/if}
   {#each books as book (book.id)}
-    {@const pace = paceFor(book, library)}
+    {@const pace = paceFor(book, library, wordEstimates.current)}
     {#if book.id === dividerBefore}
       <div class="shelf-divider" role="separator" aria-label="Dusty shelf: no reading in over {DUSTY_SHELF_DAYS} days">
         <span>Dusty shelf · no reading in over {DUSTY_SHELF_DAYS} days</span>
