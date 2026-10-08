@@ -27,8 +27,8 @@ const workDocument = (id: string, title: string, extra: Record<string, unknown> 
   id,
   data: {
     canonicalTitle: title, alternateTitles: [], titleKeys: [title.toLowerCase()],
-    authorIds: ['ada-author'], coverUrl: '', subjects: [], fiction: true, status: 'active',
-    mergedFrom: [], createdAt: now, updatedAt: now, ...extra,
+    authorIds: ['ada-author'], coverUrl: '', subjects: [], fiction: true, language: 'en',
+    status: 'active', mergedFrom: [], createdAt: now, updatedAt: now, ...extra,
   },
 });
 
@@ -231,6 +231,8 @@ test('catalog integrity findings: duplicates, indexes, redirects, name keys, uns
       editionDocument('ed-one', 'one', { isbn13: '9780140328721', externalIds: { 'open-library': 'OL1M' } }),
       editionDocument('ed-orphan', 'no-such-work'),
       editionDocument('ed-legacy', 'one', { legacyField: 1 }),
+      // Word Counter's measurement (catalog.setwordestimate) is a known field.
+      editionDocument('ed-measured', 'one', { wordEstimate: { wordsPerPage: 280 } }),
     ],
     isbnIndex: [
       { id: '9780140328721', data: { workId: 'one', editionId: 'ed-one' } },
@@ -267,7 +269,7 @@ test('catalog integrity findings: duplicates, indexes, redirects, name keys, uns
   assert.deepEqual(authorWarnings['extra-field'], ['unsupported field legacyName']);
   assert.deepEqual(
     scan.works.map(({ workId, editionCount }) => [workId, editionCount]),
-    [['one', 2], ['two', 0], ['three', 0], ['redirect', 0], ['legacy', 0]],
+    [['one', 3], ['two', 0], ['three', 0], ['redirect', 0], ['legacy', 0]],
   );
   // one, two, redirect and legacy all name ada-author; three's references are broken.
   assert.equal(scan.authors.find(({ authorId }) => authorId === 'ada-author')?.workCount, 4);
@@ -443,7 +445,7 @@ test('rows carry the work default and the edition override, and an active work w
   const scan = scanCatalog(input({
     works: [
       workDocument('sult', 'Sult', { language: 'no' }),
-      workDocument('bare', 'Bare'),
+      workDocument('bare', 'Bare', { language: '' }),
       workDocument('hidden', 'Hidden', { status: 'hidden' }),
     ],
     editions: [
