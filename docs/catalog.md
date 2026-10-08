@@ -171,7 +171,9 @@ candidate index, never the authority.
 reading or finished, page count, first-progress, first-read and finished day
 keys in that reader's time zone, calendar days, active days, tracked minutes,
 session count, qualified pages per hour, percent per hour and tracking
-coverage. Speed figures need enough qualified sessions and are otherwise null,
+coverage, and words per minute when the reader's edition carries a Word
+Counter estimate measured on the reader's page count (see Words per page).
+Speed figures need enough qualified sessions and are otherwise null,
 and no edition-level identifier is disclosed. The page is bounded: readers are
 paged with a cursor, editions and re-reads per reader are capped, and a reader
 whose data is malformed or too large is skipped rather than failing the page.
@@ -201,6 +203,18 @@ Stored estimates are decoded for shape only, never against the sending bar,
 so tightening the bar later does not make existing editions unreadable.
 Admin edits keep an edition's estimate, and a merge gives the survivor the
 first source's estimate if it has none of its own.
+
+A reader's book uses the estimate only when its page count equals the
+`pageCountBasis` the edition was measured on (owner decision 2026-10-08):
+another printing, or a corrected page count, paginates differently, and
+rescaling would be a guess. `shared/wordEstimate.ts` holds that rule for both
+sides. The stats page reads the editions of the reader's timed books one
+document at a time (readers may get an edition, not list the collection) and
+shows words per minute beside pages per hour: per measured book, pooled over
+them, and in the fastest and slowest lists, each with the estimate's 95%
+range carried through. The work page's reader attempts carry
+`qualifiedWordsPerMinute`, computed server-side from the same qualified
+sessions as pages per hour, so the reader's edition is still never disclosed.
 
 ## Admin tools
 

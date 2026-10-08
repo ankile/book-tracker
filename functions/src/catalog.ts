@@ -35,6 +35,7 @@ import {sharedWorkOwnerId} from "./catalogProjection";
 import {readerIdentity, sharingConsent, validTimeZone} from "./sharingConsent";
 import {CATALOG_LIMITS} from "./shared/catalogLimits";
 import {externalIndexDigestInput, normalizeCatalogTitle} from "./shared/catalogIdentity";
+import {matchedWordEstimate} from "./shared/wordEstimate";
 
 export {normalizeCatalogTitle};
 import {CALLABLE_MAX_INSTANCES, FUNCTIONS_RUNTIME_SERVICE_ACCOUNT} from "./runtime";
@@ -197,6 +198,9 @@ interface ReadingAttemptMetrics {
   trackedMinutes: number;
   sessionCount: number;
   qualifiedPagesPerHour: number | null;
+  // The same qualified sessions in words, when the book's edition carries
+  // a Word Counter estimate measured on the book's page count.
+  qualifiedWordsPerMinute: number | null;
   percentPerHour: number | null;
   trackingCoverage: number | null;
 }
@@ -1056,6 +1060,9 @@ export function summarizeReadingAttempt(
     finished: boolean;
     finishedAt: Timestamp | null;
     pageCount: number;
+    // Words per page of the book's edition, matched to its page count
+    // (shared/wordEstimate.ts); null when it has none.
+    wordsPerPage: number | null;
   },
   events: readonly ReadingEvent[],
   timeZone: string,
@@ -1117,6 +1124,8 @@ export function summarizeReadingAttempt(
     trackedMinutes,
     sessionCount: reading.length,
     qualifiedPagesPerHour: pagesPerHour,
+    qualifiedWordsPerMinute: speedAvailable && book.wordsPerPage !== null ?
+      qualifiedPages * book.wordsPerPage / qualifiedMinutes : null,
     percentPerHour: speedAvailable && validPageCount ?
       (qualifiedPages / book.pageCount) / (qualifiedMinutes / 60) * 100 : null,
     trackingCoverage: validPageCount ? qualifiedPages / book.pageCount : null,
@@ -1128,6 +1137,7 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
   finished: boolean;
   finishedAt: Timestamp | null;
   pageCount: number;
+  editionId: string | null;
 } {
   const segments = snapshot.ref.path.split("/");
   if (segments.length !== 4 || segments[0] !== "users" || segments[2] !== "books") {
@@ -1140,10 +1150,12 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
   const finished = snapshot.get("finished");
   const finishedAt = snapshot.get("finishedAt");
   const pageCount = snapshot.get("pageCount");
+  const editionId = snapshot.get("editionId");
   // A finished book without a stamp is refused by summarizeReadingAttempt,
   // which the unit tests pin; this only types the field.
   if (typeof finished !== "boolean" || !Number.isSafeInteger(pageCount) || pageCount <= 0 ||
-      (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp))) {
+      (finishedAt !== null && finishedAt !== undefined && !(finishedAt instanceof Timestamp)) ||
+      (editionId !== null && editionId !== undefined && typeof editionId !== "string")) {
     throw new CatalogDataError(`Invalid personal book summary fields ${snapshot.ref.path}.`);
   }
   return {
@@ -1151,6 +1163,7 @@ function personalBookIdentity(snapshot: DocumentSnapshot): {
     finished,
     finishedAt: finishedAt ?? null,
     pageCount,
+    editionId: editionId ?? null,
   };
 }
 
@@ -1176,6 +1189,7 @@ function safePersonalBookIdentity(
 interface ReaderBook {
   snapshot: DocumentSnapshot;
   identity: ReturnType<typeof personalBookIdentity>;
+  wordsPerPage: number | null;
   shared: {
     readerKey: string;
     username: string | null;
@@ -1206,7 +1220,7 @@ export async function summarizeReaderBooks(
     snapshot.ref.collection("updates").limit(UPDATES_PER_BOOK_LIMIT + 1).get(),
   ));
   for (const [index, updates] of histories.entries()) {
-    const {snapshot, identity, shared} = books[index];
+    const {snapshot, identity, wordsPerPage, shared} = books[index];
     if (updates.size > UPDATES_PER_BOOK_LIMIT) {
       logger.warn("catalog.work_readers.attempt_skipped", {
         workId,
@@ -1222,7 +1236,7 @@ export async function summarizeReaderBooks(
         username: shared.username,
         displayName: shared.displayName,
         ...summarizeReadingAttempt(
-          identity,
+          {...identity, wordsPerPage},
           readingEvents(updates, identity.uid, snapshot.ref.path),
           shared.timeZone,
         ),
@@ -1351,6 +1365,12 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
     }),
   );
   const consent = consentPairs.filter((entry) => entry !== null);
+  // Word Counter estimates on this work's editions, aliases included: a
+  // book in a frozen account may still stand on one.
+  const wordEstimates = new Map(editionSnapshot.docs.flatMap((snapshot) => {
+    const {wordEstimate} = storedEdition(snapshot);
+    return wordEstimate === undefined ? [] : [[snapshot.id, wordEstimate] as const];
+  }));
   const bookGroups = await Promise.all(consent.map(async (shared) => {
     const snapshot = await db.collection(`users/${shared.uid}/books`)
       .where("workId", "in", linkedIds)
@@ -1372,7 +1392,9 @@ async function workReaders(resolved: ResolvedWork, cursor: string | null): Promi
         incomplete = true;
         return [];
       }
-      return [{snapshot: book, identity, shared}];
+      const estimate = identity.editionId === null ? undefined : wordEstimates.get(identity.editionId);
+      const wordsPerPage = matchedWordEstimate(estimate, identity.pageCount)?.wordsPerPage ?? null;
+      return [{snapshot: book, identity, wordsPerPage, shared}];
     });
   }));
   const books = bookGroups.flat();

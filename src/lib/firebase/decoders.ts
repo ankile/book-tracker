@@ -18,7 +18,12 @@ import type {
   LegacyEmbeddedAuthorsBook,
   LegacyStringAuthorBook,
 } from '../interfaces/book.ts';
-import type { CatalogLink, CatalogMatchMethod, CatalogSelection } from '../interfaces/catalog.ts';
+import type {
+  CatalogLink,
+  CatalogMatchMethod,
+  CatalogSelection,
+  EditionWordEstimate,
+} from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type { PlanEntry, PlannedAuthor, ReadingPlanSettings } from '../interfaces/readingPlan.ts';
 import {
@@ -377,6 +382,25 @@ export function decodeBook(id: string, value: unknown, path: string): Book {
   if (authorIds === undefined) fail(path, 'authorIds or a documented legacy author field');
   const book: CurrentBook = { ...shared, authorIds };
   return book;
+}
+
+// An edition's Word Counter estimate, or null when it has none. Only the
+// fields the statistics use are read: the server owns the full record
+// (functions/src/decoders.ts) and may grow it.
+export function decodeEditionWordEstimate(value: unknown, path: string): EditionWordEstimate | null {
+  const data = record(value, path);
+  if (data.wordEstimate === undefined) return null;
+  const context = `${path}.wordEstimate`;
+  const estimate = record(data.wordEstimate, context);
+  const pageCountBasis = integer(estimate.pageCountBasis, `${context}.pageCountBasis`);
+  const wordsPerPage = number(estimate.wordsPerPage, `${context}.wordsPerPage`);
+  const wordsPerPageLow = number(estimate.wordsPerPageLow, `${context}.wordsPerPageLow`);
+  const wordsPerPageHigh = number(estimate.wordsPerPageHigh, `${context}.wordsPerPageHigh`);
+  if (pageCountBasis <= 0 || wordsPerPageLow < 0 || wordsPerPageLow > wordsPerPage ||
+      wordsPerPage <= 0 || wordsPerPageHigh < wordsPerPage) {
+    return fail(context, 'a positive page count and 0 ≤ low ≤ words per page ≤ high');
+  }
+  return { pageCountBasis, wordsPerPage, wordsPerPageLow, wordsPerPageHigh };
 }
 
 export function decodeCatalogAuthor(id: string, value: unknown, path: string): Author {

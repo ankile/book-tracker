@@ -182,6 +182,7 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
     trackedMinutes: 180,
     sessionCount: 3,
     qualifiedPagesPerHour: 50,
+    qualifiedWordsPerMinute: username === 'ada' ? 260 : null,
     percentPerHour: 16.4,
     trackingCoverage: 0.9,
   });
@@ -199,6 +200,18 @@ test('work-reader response decoder is exact and groups rereads by profile', () =
     ],
   });
   assert.equal(decoded.attempts.length, 4);
+  assert.deepEqual(decoded.attempts.map((item) => item.qualifiedWordsPerMinute), [null, null, 260, 260]);
+  // A backend deployed before words per minute existed omits the field; a
+  // release ships the site first, so that still decodes, as unmeasured.
+  const {qualifiedWordsPerMinute: _omitted, ...older} = attempt('grace', 'finished');
+  assert.equal(
+    decodeWorkReadersResponse({...decoded, attempts: [older]}).attempts[0].qualifiedWordsPerMinute,
+    null,
+  );
+  assert.throws(
+    () => decodeWorkReadersResponse({...decoded, attempts: [{...decoded.attempts[0], qualifiedWordsPerMinute: -1}]}),
+    /optional metrics must be null or non-negative/,
+  );
   assert.equal(decoded.incomplete, false);
   assert.equal(decoded.omittedAttempts, 0);
   assert.equal(decoded.nextCursor, null);

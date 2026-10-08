@@ -247,10 +247,13 @@ export function buildCatalogAddEditionRequest({workId, workLanguage, title, isbn
 
 function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummary {
   const data = record(value, context);
+  // qualifiedWordsPerMinute is absent from a server deployed before words
+  // per minute existed: a release ships the site before the backend.
   exactKeys(data, [
     'readerKey', 'username', 'displayName', 'status', 'pageCount', 'firstProgressAt',
     'firstReadAt', 'finishedAt', 'calendarDays', 'activeDays', 'trackedMinutes',
     'sessionCount', 'qualifiedPagesPerHour', 'percentPerHour', 'trackingCoverage',
+    ...(data.qualifiedWordsPerMinute === undefined ? [] : ['qualifiedWordsPerMinute']),
   ], context);
   if (data.status !== 'reading' && data.status !== 'finished') {
     throw new TypeError(`${context}.status: expected reading or finished`);
@@ -264,12 +267,16 @@ function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummar
     data.qualifiedPagesPerHour,
     `${context}.qualifiedPagesPerHour`,
   );
+  const qualifiedWordsPerMinute = data.qualifiedWordsPerMinute === undefined ? null : nullableNumber(
+    data.qualifiedWordsPerMinute,
+    `${context}.qualifiedWordsPerMinute`,
+  );
   const percentPerHour = nullableNumber(data.percentPerHour, `${context}.percentPerHour`);
   const trackingCoverage = nullableNumber(data.trackingCoverage, `${context}.trackingCoverage`);
   if (pageCount <= 0 || activeDays < 0 || trackedMinutes < 0 || sessionCount < 0) {
     throw new TypeError(`${context}: counts must be non-negative and pageCount positive`);
   }
-  if ([calendarDays, qualifiedPagesPerHour, percentPerHour, trackingCoverage]
+  if ([calendarDays, qualifiedPagesPerHour, qualifiedWordsPerMinute, percentPerHour, trackingCoverage]
     .some((metric) => metric !== null && metric < 0)) {
     throw new TypeError(`${context}: optional metrics must be null or non-negative`);
   }
@@ -290,6 +297,7 @@ function decodeAttempt(value: unknown, context: string): WorkReaderAttemptSummar
     trackedMinutes,
     sessionCount,
     qualifiedPagesPerHour,
+    qualifiedWordsPerMinute,
     percentPerHour,
     trackingCoverage,
   };
