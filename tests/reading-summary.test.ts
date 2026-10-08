@@ -30,3 +30,20 @@ test('reading summary weights pages, includes holds and identifies unknown remai
   assert.equal(readingSummary([]).completion, 0);
   assert.equal(readingSummary([timed('done', 100, 100, 0, 0)]).unknownBooks, 0);
 });
+
+test('an unread measured book counts its time left in words', () => {
+  // Book a is measured at 250 words a page on its 100 pages and read 50 pages in 100 minutes (1/125 min a word);
+  // book c's edition sets 500 words on each of its 100 pages: 100 pages × 500 words × 1/125 = 400 minutes.
+  const books = [
+    { ...timed('a', 50, 100, 50, 100), editionId: 'a-edition' },
+    { ...timed('c', 0, 100, 0, 0), editionId: 'c-edition' },
+  ];
+  const estimate = (wordsPerPage: number) => ({
+    pageCountBasis: 100, wordsPerPage, wordsPerPageLow: wordsPerPage - 10, wordsPerPageHigh: wordsPerPage + 10,
+  });
+  const summary = readingSummary(books, books, new Map([['a-edition', estimate(250)], ['c-edition', estimate(500)]]));
+  assert.equal(summary.minutesLeft, 50 * 2 + 400);
+  assert.equal(summary.borrowedBooks, 1);
+  // Without the estimates it borrows a's 2 minutes a page instead.
+  assert.equal(readingSummary(books, books).minutesLeft, 50 * 2 + 200);
+});

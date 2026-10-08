@@ -8,7 +8,7 @@
 // stats.ts), minutes per page comes from paceFor's lifetime evidence or a
 // manual override. Full precision throughout; callers round for display.
 import type { BookUpdateView } from '../interfaces/reading.ts';
-import { paceFor, type Pace, type PaceBook, type PaceSource } from './paceEstimate.ts';
+import { paceFor, type Pace, type PaceBook, type PaceSource, type WordEstimates } from './paceEstimate.ts';
 import { dayKeyOf, shiftedDay } from './stats.ts';
 
 export const PLAN_WINDOW_DAYS = 14;
@@ -108,9 +108,13 @@ export interface PlanEffort {
   remainingMinutes: number | null;
 }
 
-export function entryEffort(book: EffortBook, library: readonly PaceBook[]): PlanEffort {
+export function entryEffort(
+  book: EffortBook,
+  library: readonly PaceBook[],
+  estimates: WordEstimates,
+): PlanEffort {
   const remainingPages = book.pageCount === null ? null : Math.max(0, book.pageCount - book.currentPage);
-  const automaticPace = paceFor(book, library);
+  const automaticPace = paceFor(book, library, estimates);
   const manual = book.manualMinutesPerPage !== null && book.manualMinutesPerPage > 0;
   const minutesPerPage = manual ? book.manualMinutesPerPage : automaticPace?.minutesPerPage ?? null;
   const source: EffortSource | null = manual ? 'manual' : automaticPace?.source ?? null;

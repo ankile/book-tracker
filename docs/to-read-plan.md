@@ -153,7 +153,7 @@ remainingMinutes = remainingPages * estimatedMinutesPerPage
 
 Future books start at page zero. Use `currentPage` for remaining progress, not cumulative `pagesRead`, which can include rereading.
 
-Reuse `paceFor()` from `src/lib/utils/paceEstimate.ts`. It already chooses the book's own measured pace, then the reader's pooled pace on the same author, then the same fiction classification, then the full library. Those estimates use recorded lifetime totals; the rolling two-week window controls available reading time. Label these separately in the UI so "last 14 days" never appears to describe lifetime book pace.
+Reuse `paceFor()` from `src/lib/utils/paceEstimate.ts`. It already chooses the book's own measured pace, then, for a book whose edition Word Counter measured on its page count, the reader's pooled minutes per word on other measured books (since 2026-10-08), then the reader's pooled pace on the same author, then the same fiction classification, then the full library. Those estimates use recorded lifetime totals; the rolling two-week window controls available reading time. Label these separately in the UI so "last 14 days" never appears to describe lifetime book pace.
 
 Allow a positive manual minutes-per-page estimate per queue entry. It overrides the automatic value until cleared, and the row says "Your estimate." This lets the reader plan an unusually difficult book or plan before they have any reading history. Show the automatic value alongside the override in the editor.
 

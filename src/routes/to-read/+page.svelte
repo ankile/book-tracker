@@ -20,7 +20,8 @@
     type QueueRow,
     type RankWrite,
   } from '$lib/utils/readingPlan.ts';
-  import { buildPlanRows, updateEffortMap, type EffortCacheEntry, type PlanRowView } from '$lib/utils/planView.ts';
+  import { buildPlanRows, planEditionIds, updateEffortMap, type EffortCacheEntry, type PlanRowView } from '$lib/utils/planView.ts';
+  import { wordEstimatesFor } from '$lib/firebase/wordEstimates.svelte.ts';
   import PlanSummary from '$lib/components/plan/PlanSummary.svelte';
   import PlanQueue from '$lib/components/plan/PlanQueue.svelte';
   import PlanBookModal, { type PlannedEntryFields } from '$lib/components/plan/PlanBookModal.svelte';
@@ -98,8 +99,11 @@
 
   // Stage 2: effort per row, memoised on its inputs (planView.ts).
   let effortCache: ReadonlyMap<string, EffortCacheEntry> = new Map();
+  // Word Counter estimates for the queued books and every timed book that
+  // could lend a pace in words.
+  const wordEstimates = wordEstimatesFor(() => planEditionIds(rows, allBooks ?? []));
   const effortMap = $derived.by(() => {
-    const { map } = updateEffortMap(effortCache, rows, allBooks ?? []);
+    const { map } = updateEffortMap(effortCache, rows, allBooks ?? [], wordEstimates.current);
     effortCache = map;
     return map;
   });

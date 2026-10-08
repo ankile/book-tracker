@@ -1,13 +1,15 @@
 <script lang="ts">
   import type { Book } from '../interfaces/book.ts';
+  import type { WordEstimates } from '../utils/paceEstimate.ts';
   import { readingSummary } from '../utils/readingSummary.ts';
   import { formatReadingTime } from '../utils/format.ts';
   import BookSummary from './BookSummary.svelte';
 
   // The whole library, finished books included, lends a pace to books
-  // without sessions (utils/paceEstimate.ts).
-  let { books, library }: { books: Book[]; library: Book[] } = $props();
-  const stats = $derived(readingSummary(books, library));
+  // without sessions (utils/paceEstimate.ts), in words where Word Counter
+  // measured the editions.
+  let { books, library, estimates }: { books: Book[]; library: Book[]; estimates: WordEstimates } = $props();
+  const stats = $derived(readingSummary(books, library, estimates));
 </script>
 
 <BookSummary

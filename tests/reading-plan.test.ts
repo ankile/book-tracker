@@ -65,11 +65,12 @@ test('the window excludes today, older sessions and page corrections, and counts
   assert.equal(budget.todayMinutes, 30);
 });
 
+const NO_ESTIMATES = new Map();
 const paceBook = (id: string, pagesRead: number, timeRead: number) => ({ id, authorIds: [], fiction: null, pagesRead, timeRead });
 
 test('effort multiplies remaining pages by the manual pace, else the automatic one', () => {
   const library = [paceBook('other', 100, 200)];
-  const automatic = entryEffort({ ...paceBook('a', 0, 0), pageCount: 300, currentPage: 100, manualMinutesPerPage: null }, library);
+  const automatic = entryEffort({ ...paceBook('a', 0, 0), pageCount: 300, currentPage: 100, manualMinutesPerPage: null }, library, NO_ESTIMATES);
   assert.deepEqual(automatic, {
     remainingPages: 200,
     automaticPace: { minutesPerPage: 2, source: 'library' },
@@ -77,7 +78,7 @@ test('effort multiplies remaining pages by the manual pace, else the automatic o
     source: 'library',
     remainingMinutes: 400,
   });
-  const manual = entryEffort({ ...paceBook('a', 0, 0), pageCount: 300, currentPage: 100, manualMinutesPerPage: 3.5 }, library);
+  const manual = entryEffort({ ...paceBook('a', 0, 0), pageCount: 300, currentPage: 100, manualMinutesPerPage: 3.5 }, library, NO_ESTIMATES);
   assert.equal(manual.minutesPerPage, 3.5);
   assert.equal(manual.source, 'manual');
   assert.equal(manual.remainingMinutes, 700);
@@ -85,15 +86,15 @@ test('effort multiplies remaining pages by the manual pace, else the automatic o
 });
 
 test('effort is unknown without a page count or without any pace', () => {
-  const noPages = entryEffort({ ...paceBook('a', 0, 0), pageCount: null, currentPage: 0, manualMinutesPerPage: null }, [paceBook('o', 10, 10)]);
+  const noPages = entryEffort({ ...paceBook('a', 0, 0), pageCount: null, currentPage: 0, manualMinutesPerPage: null }, [paceBook('o', 10, 10)], NO_ESTIMATES);
   assert.equal(noPages.remainingPages, null);
   assert.equal(noPages.remainingMinutes, null);
-  const noPace = entryEffort({ ...paceBook('a', 0, 0), pageCount: 100, currentPage: 0, manualMinutesPerPage: null }, []);
+  const noPace = entryEffort({ ...paceBook('a', 0, 0), pageCount: 100, currentPage: 0, manualMinutesPerPage: null }, [], NO_ESTIMATES);
   assert.equal(noPace.remainingPages, 100);
   assert.equal(noPace.minutesPerPage, null);
   assert.equal(noPace.remainingMinutes, null);
   // A manual estimate stands in for a missing automatic pace.
-  const manual = entryEffort({ ...paceBook('a', 0, 0), pageCount: 100, currentPage: 0, manualMinutesPerPage: 2 }, []);
+  const manual = entryEffort({ ...paceBook('a', 0, 0), pageCount: 100, currentPage: 0, manualMinutesPerPage: 2 }, [], NO_ESTIMATES);
   assert.equal(manual.remainingMinutes, 200);
 });
 

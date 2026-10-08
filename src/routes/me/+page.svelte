@@ -36,7 +36,7 @@
     monthlyAggregates,
   } from '$lib/utils/sessions.ts';
   import { speedEditionIds } from '$lib/utils/wordSpeed.ts';
-  import type { EditionWordEstimate } from '$lib/interfaces/catalog.ts';
+  import { wordEstimatesFor } from '$lib/firebase/wordEstimates.svelte.ts';
   import { LINK_TYPES, MAX_PROFILE_LINKS } from '$lib/utils/links.ts';
   import { acceptReportedWrite } from '$lib/utils/offlineWrite.ts';
   import { FirebaseError } from 'firebase/app';
@@ -103,20 +103,8 @@
     });
   });
 
-  // Word Counter estimates for the editions of timed books; the joined key
-  // keeps a new books snapshot from re-asking for the same editions.
-  const speedEditionKey = $derived(speedEditionIds(analyticsBooks).join('\n'));
-  let wordEstimates = $state<ReadonlyMap<string, EditionWordEstimate>>(new Map());
-  $effect(() => {
-    const editionIds = speedEditionKey === '' ? [] : speedEditionKey.split('\n');
-    let current = true;
-    void Database.getWordEstimates(editionIds).then((estimates) => {
-      if (current) wordEstimates = estimates;
-    });
-    return () => {
-      current = false;
-    };
-  });
+  // Word Counter estimates for the editions of timed books.
+  const wordEstimates = wordEstimatesFor(() => speedEditionIds(analyticsBooks));
 
   // All update docs ('reading' sessions plus page-only 'update'
   // corrections), for the heatmap, the published profile, and the session
@@ -1388,7 +1376,7 @@
 
     <ReadingHeatmap days={sessionDays} />
     <SuperlativesRow sessions={allSessions ?? []} books={analyticsBooks} {timelines} />
-    <SpeedSection sessions={allSessions ?? []} books={analyticsBooks} {months} {wordEstimates} />
+    <SpeedSection sessions={allSessions ?? []} books={analyticsBooks} {months} wordEstimates={wordEstimates.current} />
     <ClockSection sessions={allSessions ?? []} />
     <CadenceSection {months} />
     <ProgressSection sessions={allSessions ?? []} books={analyticsBooks} {timelines} />

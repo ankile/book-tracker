@@ -212,7 +212,14 @@ sides. The stats page reads the editions of the reader's timed books one
 document at a time (readers may get an edition, not list the collection) and
 shows words per minute beside pages per hour: per measured book, pooled over
 them, and in the fastest and slowest lists, each with the estimate's 95%
-range carried through. The work page's reader attempts carry
+range carried through. Time left uses it too: an unread book (or a planned
+one) whose edition was measured on its page count borrows the reader's
+minutes per word on their other measured books, ahead of the page-based
+author, genre and library paces, which assume every book sets the same
+number of words on a page (`src/lib/utils/paceEstimate.ts`). A book with its
+own sessions keeps its own pace, which already reflects its typesetting. The
+reading list, its summary and the to-read plan read the estimates they need
+through `src/lib/firebase/wordEstimates.svelte.ts`. The work page's reader attempts carry
 `qualifiedWordsPerMinute`, computed server-side from the same qualified
 sessions as pages per hour, so the reader's edition is still never disclosed.
 
