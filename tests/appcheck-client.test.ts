@@ -48,9 +48,10 @@ test('only dev builds use the App Check debug token, sourced from the environmen
 // true` compiles, deploys and bills the handler for anonymous traffic
 // again (SEC-068) with no other test going red, so each onCall chain is
 // checked for the option in its own runWith.
-// Eight on master plus catalog.search, catalog.create, catalog.ensureauthors
-// and catalog.workreaders, which share one runWith chain in catalog.ts.
-const CALLABLE_COUNT = 23;
+// Eight on master plus catalog.search, catalog.create, catalog.ensureauthors,
+// catalog.workreaders and catalog.setwordestimate, which share one runWith
+// chain in catalog.ts.
+const CALLABLE_COUNT = 24;
 
 function callableChains(): { file: string; chain: string }[] {
   const dir = 'functions/src';

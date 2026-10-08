@@ -5,6 +5,7 @@ const catalog = require("./catalog");
 
 exports.create = catalog.create;
 exports.addedition = catalog.addedition;
+exports.setwordestimate = catalog.setwordestimate;
 exports.ensureauthors = catalog.ensureauthors;
 exports.search = catalog.search;
 exports.workreaders = catalog.workreaders;

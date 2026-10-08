@@ -34,6 +34,7 @@ interface Deployed {
     search: Runnable<SearchResult>;
     create: Runnable<{workId: string; editionId: string; created: boolean}>;
     addedition: Runnable<{workId: string; editionId: string; created: boolean}>;
+    setwordestimate: Runnable<{stored: true; measuredAt: string}>;
     ensureauthors: Runnable<{authorIds: string[]}>;
     workreaders: Runnable<WorkReadersResult>;
   };
@@ -1439,4 +1440,123 @@ test("users add an edition to an existing work and resolve an indexed identifier
     );
   }
   assert.deepEqual(created, []);
+});
+
+// Word Counter sends a reader's words-per-page measurement for the edition
+// their book stands on (word-counter docs/book-tracker-word-estimates.md).
+// Only the owner of a book linked to that edition, on the page count the
+// pages were drawn from, may store it; the edition records who sent it and
+// when, never which book, and a merged alias stores on its survivor.
+test("word estimates land on the caller's linked edition and nowhere else", async (t) => {
+  const editionRow = (overrides: Row = {}): Row => ({
+    workId: "sult", isbn13: null, title: "Sult", publisher: "", publishedDate: "", language: "",
+    translatorNames: [], format: "unknown", suggestedPageCount: null, coverUrl: "", externalIds: {},
+    ...overrides,
+  });
+  const rows = new Map<string, Row>([
+    ["users/owner/books/linked", {title: "Sult", pageCount: 320, editionId: "full"}],
+    ["users/owner/books/on-alias", {title: "Sult", pageCount: 320, editionId: "alias"}],
+    ["users/owner/books/unlinked", {title: "Sult", pageCount: 320, editionId: null}],
+    ["users/owner/books/other-edition", {title: "Sult", pageCount: 320, editionId: "other"}],
+    ["users/owner/books/resized", {title: "Sult", pageCount: 336, editionId: "full"}],
+    ["users/stranger/books/linked", {title: "Sult", pageCount: 320, editionId: "full"}],
+    ["editions/full", editionRow({mergedFrom: ["alias"]})],
+    ["editions/alias", editionRow({status: "merged", mergedInto: "full"})],
+    ["editions/other", editionRow()],
+  ]);
+  const ref = (path: string): Ref => ({path, id: path.slice(path.lastIndexOf("/") + 1)});
+  const snap = (reference: Ref) => ({
+    exists: rows.has(reference.path), id: reference.id, ref: reference,
+    data: () => rows.get(reference.path),
+    get: (field: string) => rows.get(reference.path)?.[field],
+  });
+  const updates: Array<{path: string; data: Row}> = [];
+  t.mock.method(db, "doc", (path: string) => ref(path));
+  t.mock.method(db, "collection", (name: string) => {
+    if (name === "users") return liveUserCollection();
+    return {doc: (id: string) => ref(`${name}/${id}`)};
+  });
+  t.mock.method(db, "runTransaction", async (handler: Handler<{
+    get(reference: Ref): Promise<unknown>;
+    update(reference: Ref, data: Row): void;
+  }>) => handler({
+    get: async (reference: Ref) => snap(reference),
+    update: (reference: Ref, data: Row) => {
+      updates.push({path: reference.path, data});
+    },
+  }));
+  const request = {
+    bookId: "linked", editionId: "full", method: "corrected-chosen", countingVersion: 1,
+    pageCountBasis: 320, chosenPages: 10, randomPages: 14, ordinaryShare: 0.857,
+    wordsPerPage: 287.4, wordsPerPageLow: 240.1, wordsPerPageHigh: 334.7, language: "en",
+    readability: {fleschKincaidGrade: 8.2, fleschReadingEase: 64.1},
+    vocabulary: {uniqueWords: 9120, low: 8000, high: 10400},
+  };
+
+  const before = Date.now();
+  const result = await deployed.catalog.setwordestimate.run(request, authContext);
+  assert.equal(result.stored, true);
+  assert.deepEqual(updates.map(({path}) => path), ["editions/full"]);
+  // Exactly the one field, so the edition's updatedAt and the rest stay.
+  assert.deepEqual(Object.keys(updates[0].data), ["wordEstimate"]);
+  const {bookId: _bookId, editionId: _editionId, ...measurement} = request;
+  const stored = updates[0].data.wordEstimate as Row & {measuredAt: import("firebase-admin/firestore").Timestamp};
+  assert.ok(stored.measuredAt instanceof Timestamp);
+  assert.ok(stored.measuredAt.toMillis() >= before);
+  assert.deepEqual(stored, {...measurement, createdBy: "owner", measuredAt: stored.measuredAt});
+  assert.equal(result.measuredAt, stored.measuredAt.toDate().toISOString());
+
+  // A book still on a merged alias stores on the survivor.
+  updates.length = 0;
+  await deployed.catalog.setwordestimate.run({...request, bookId: "on-alias", editionId: "alias"}, authContext);
+  assert.deepEqual(updates.map(({path}) => path), ["editions/full"]);
+
+  // Someone else's book, a missing or unlinked one, one on another edition,
+  // or one whose page count moved since the draw: refused, nothing written.
+  updates.length = 0;
+  for (const [context, overrides, message] of [
+    [{auth: {uid: "owner", token: {email_verified: true}}}, {bookId: "missing"}, /not in your Book Tracker library/],
+    [{auth: {uid: "owner", token: {email_verified: true}}}, {bookId: "unlinked"}, /not linked to this edition/],
+    [{auth: {uid: "owner", token: {email_verified: true}}}, {bookId: "other-edition"}, /not linked to this edition/],
+    [{auth: {uid: "owner", token: {email_verified: true}}}, {bookId: "resized"}, /page count .* differs/],
+    [{auth: {uid: "intruder", token: {email_verified: true}}}, {}, /not in your Book Tracker library/],
+  ] as const) {
+    await assert.rejects(
+      deployed.catalog.setwordestimate.run({...request, ...overrides}, context),
+      (error) => hasCode(error, "failed-precondition") && messageMatches(error, message),
+      JSON.stringify(overrides),
+    );
+  }
+  assert.deepEqual(updates, []);
+});
+
+test("word estimates are refused before Firestore when unauthenticated, unverified or malformed", async (t) => {
+  let touched = false;
+  t.mock.method(db, "doc", () => {
+    touched = true;
+    return {};
+  });
+  t.mock.method(db, "collection", () => {
+    touched = true;
+    return {};
+  });
+  const request = {
+    bookId: "linked", editionId: "full", method: "random-pages", countingVersion: 1,
+    pageCountBasis: 320, chosenPages: 0, randomPages: 14, ordinaryShare: 0.857,
+    wordsPerPage: 287.4, wordsPerPageLow: 240.1, wordsPerPageHigh: 334.7, language: "",
+    readability: null, vocabulary: null,
+  };
+  await assert.rejects(
+    deployed.catalog.setwordestimate.run(request, {auth: undefined}),
+    (error) => hasCode(error, "unauthenticated"),
+  );
+  await assert.rejects(
+    deployed.catalog.setwordestimate.run(request, {auth: {uid: "owner", token: {email_verified: false}}}),
+    (error) => hasCode(error, "failed-precondition") && messageMatches(error, /Verify your email/),
+  );
+  await assert.rejects(
+    deployed.catalog.setwordestimate.run({...request, wordsPerPageHigh: 400}, authContext),
+    (error) => hasCode(error, "invalid-argument") && messageMatches(error, /within ±20%/),
+  );
+  assert.equal(touched, false);
 });

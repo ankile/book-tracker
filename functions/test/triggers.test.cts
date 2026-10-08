@@ -47,6 +47,7 @@ interface FunctionsBundle {
     ensureauthors: DeployedFunction;
     search: DeployedFunction;
     addedition: DeployedFunction;
+    setwordestimate: DeployedFunction;
     workreaders: DeployedFunction;
   };
   createUserDocument: DeployedFunction;
@@ -122,6 +123,7 @@ test("preserves the deployed function export names", () => {
     "create",
     "ensureauthors",
     "search",
+    "setwordestimate",
     "workreaders",
   ]);
   assert.deepEqual(Object.keys(functions.telemetry), ["reportissue"]);
@@ -150,6 +152,7 @@ test("keeps every function in europe-west1 on its required generation", () => {
     functions.catalog.create,
     functions.catalog.ensureauthors,
     functions.catalog.search,
+    functions.catalog.setwordestimate,
     functions.catalog.workreaders,
     functions.telemetry.reportissue,
     functions.toggl.savetoken,
@@ -963,6 +966,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "catalog.search": functions.catalog.search,
     "catalog.create": functions.catalog.create,
     "catalog.addedition": functions.catalog.addedition,
+    "catalog.setwordestimate": functions.catalog.setwordestimate,
     "catalog.ensureauthors": functions.catalog.ensureauthors,
     "catalog.workreaders": functions.catalog.workreaders,
     "telemetry.reportissue": functions.telemetry.reportissue,
@@ -1061,6 +1065,7 @@ test("runs every function as its dedicated least-privilege identity", () => {
     "functions.booksapi.lookupisbn": 10,
     "functions.catalog.create": 10,
     "functions.catalog.addedition": 10,
+    "functions.catalog.setwordestimate": 10,
     "functions.catalog.ensureauthors": 10,
     "functions.catalog.search": 10,
     "functions.catalog.workreaders": 10,

@@ -610,3 +610,103 @@ test('all admin catalog operations use real callable transactions and preserve p
     denied,
   );
 });
+
+// Word Counter's "Send to Book Tracker" (word-counter
+// docs/book-tracker-word-estimates.md) through the real callable and a real
+// transaction: the estimate lands on the reader's linked edition as the one
+// new field, the edition's updatedAt stays, a book on another edition is
+// refused, and the operator's catalog scan accepts the stored field.
+test('a Word Counter estimate is stored on the reader\'s linked edition', async (t) => {
+  requireLocalEmulators();
+  const suffix = randomUUID();
+  const readerEmail = `word-estimate-${suffix}@example.test`;
+  const adminApp = initializeApp({projectId: PROJECT_ID}, `word-estimate-emulator-${suffix}`);
+  const clientApp = initializeClientApp(
+    {projectId: PROJECT_ID, apiKey: 'test-key'},
+    `word-estimate-client-${suffix}`,
+  );
+  t.after(async () => {
+    await Promise.all([deleteApp(adminApp), deleteClientApp(clientApp)]);
+  });
+  const db = getFirestore(adminApp);
+  const {uid} = await getAdminAuth(adminApp).createUser({
+    email: readerEmail, password: PASSWORD, emailVerified: true,
+  });
+  const clientAuth = getAuth(clientApp);
+  connectAuthEmulator(clientAuth, 'http://127.0.0.1:9099', {disableWarnings: true});
+  await signInWithEmailAndPassword(clientAuth, readerEmail, PASSWORD);
+
+  const authorId = `word-author-${suffix}`;
+  const workId = `word-work-${suffix}`;
+  const editionId = `word-edition-${suffix}`;
+  const otherEditionId = `word-other-edition-${suffix}`;
+  const created = Timestamp.fromMillis(1000);
+  await db.doc(`users/${uid}`).set({uid});
+  await db.doc(`catalogAuthors/${authorId}`).set({
+    canonicalName: 'Knut Hamsun', alternateNames: [], nameKeys: ['knut hamsun'], sortName: 'Hamsun',
+    kind: 'person', status: 'active', mergedFrom: [], createdAt: created, updatedAt: created,
+  });
+  await db.doc(`works/${workId}`).set({
+    ...workInput('Sult', authorId), titleKeys: ['sult'], status: 'active', mergedFrom: [],
+    createdAt: created, updatedAt: created,
+  });
+  for (const id of [editionId, otherEditionId]) {
+    await db.doc(`editions/${id}`).set({
+      workId, ...editionInput('Sult', null), createdAt: created, updatedAt: created,
+    });
+  }
+  await db.doc(`users/${uid}/books/sult`).set({
+    owner: db.doc(`users/${uid}`), title: 'Sult', pageCount: 240,
+    workId, editionId, matchMethod: 'catalog-choice', linkedAt: created,
+  });
+
+  const request = {
+    bookId: 'sult', editionId, method: 'random-pages', countingVersion: 1, pageCountBasis: 240,
+    chosenPages: 0, randomPages: 16, ordinaryShare: 0.875, wordsPerPage: 262.3,
+    wordsPerPageLow: 231.9, wordsPerPageHigh: 292.7, language: 'en',
+    readability: {fleschKincaidGrade: 6.1, fleschReadingEase: 71.4}, vocabulary: null,
+  };
+  const call = async (data: unknown) => {
+    const token = await clientAuth.currentUser!.getIdToken();
+    const response = await fetch(`${FUNCTIONS_ORIGIN}/catalog-setwordestimate`, {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${token}`,
+        'content-type': 'application/json',
+        'x-firebase-appcheck': emulatorAppCheckToken(),
+      },
+      body: JSON.stringify({data}),
+    });
+    const payload = await response.json() as {result?: {stored: true; measuredAt: string}; error?: unknown};
+    if (payload.error !== undefined) throw payload.error;
+    return payload.result!;
+  };
+
+  const result = await call(request);
+  assert.equal(result.stored, true);
+  const edition = await db.doc(`editions/${editionId}`).get();
+  const {bookId: _bookId, editionId: _editionId, ...measurement} = request;
+  const stored = edition.get('wordEstimate');
+  assert.ok(stored.measuredAt instanceof Timestamp);
+  assert.equal(stored.measuredAt.toDate().toISOString(), result.measuredAt);
+  assert.deepEqual(stored, {...measurement, createdBy: uid, measuredAt: stored.measuredAt});
+  assert.equal(edition.get('updatedAt').toMillis(), 1000);
+  assert.equal(edition.get('title'), 'Sult');
+
+  await assert.rejects(
+    call({...request, editionId: otherEditionId}),
+    (error: unknown) => (error as {status?: string}).status === 'FAILED_PRECONDITION',
+  );
+  assert.equal((await db.doc(`editions/${otherEditionId}`).get()).get('wordEstimate'), undefined);
+
+  const scan = scanCatalog({
+    authors: [{id: authorId, data: (await db.doc(`catalogAuthors/${authorId}`).get()).data()!}],
+    works: [{id: workId, data: (await db.doc(`works/${workId}`).get()).data()!}],
+    editions: [{id: editionId, data: edition.data()!}],
+    isbnIndex: [],
+    externalIdIndex: [],
+    books: [],
+    liveUserIds: new Set([uid]),
+  });
+  assert.deepEqual(scan.findings.filter((finding) => finding.editionIds.includes(editionId)), []);
+});
