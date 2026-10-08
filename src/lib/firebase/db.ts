@@ -64,7 +64,7 @@ import type {
   UnresolvedAuthorChip,
 } from '../interfaces/author.ts';
 import type { ActiveTimer, Book } from '../interfaces/book.ts';
-import type { CatalogSelection } from '../interfaces/catalog.ts';
+import type { CatalogSelection, EditionWordEstimate } from '../interfaces/catalog.ts';
 import type { BookMetadata } from '../interfaces/metadata.ts';
 import type {
   PlanEntry,
@@ -85,6 +85,7 @@ import { assertProfileViewFor, resolveProfileView } from '../utils/profileRead.t
 import {
   decodeCatalogAuthor,
   decodeBook,
+  decodeEditionWordEstimate,
   decodeBookUpdate,
   decodePlanEntry,
   decodeReadingPlanSettings,
@@ -192,6 +193,9 @@ const historyState = (userId: string) => {
   return store;
 };
 const readingPlanStores = new Map<string, Readable<PlanSnapshot<PlanEntry[]> | undefined>>();
+// One read per edition per session: an estimate changes only when someone
+// sends a new one from Word Counter.
+const wordEstimateReads = new Map<string, Promise<EditionWordEstimate | null>>();
 const readingPlanSettingsStores = new Map<string, Readable<ReadingPlanSettings | null | undefined>>();
 const catalogAuthorsStore: Readable<Author[] | undefined> = cachedReadable<Author[] | undefined>(
   undefined,
@@ -634,6 +638,34 @@ class Database {
       () => Database.getOwnProfile(username),
       () => fetchPublicProfile(username),
     );
+  }
+
+  // Word Counter estimates for these editions, keyed by edition id; an
+  // edition without one is absent. Readers may get an edition but not list
+  // the collection, so this is one read per edition. The rules refuse an
+  // edition whose work is hidden or merged, which counts as unmeasured. An
+  // edition unreachable offline is left out and asked again next time.
+  static getWordEstimates(editionIds: readonly string[]): Promise<Map<string, EditionWordEstimate>> {
+    const reads = editionIds.map(async (editionId) => {
+      let read = wordEstimateReads.get(editionId);
+      if (read === undefined) {
+        read = getDoc(doc(db, 'editions', editionId)).then(
+          (snapshot) => snapshot.exists()
+            ? decodeStored(() => decodeEditionWordEstimate(snapshot.data(), snapshot.ref.path))
+            : null,
+          (error: unknown) => {
+            if (!(error instanceof FirebaseError)) throw error;
+            if (error.code === 'unavailable') wordEstimateReads.delete(editionId);
+            else if (error.code !== 'permission-denied') throw error;
+            return null;
+          },
+        );
+        wordEstimateReads.set(editionId, read);
+      }
+      const estimate = await read;
+      return estimate === null ? [] : [[editionId, estimate] as const];
+    });
+    return Promise.all(reads).then((entries) => new Map(entries.flat()));
   }
 
   // The public projection alone (no auth). Returns null for a missing or

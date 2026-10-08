@@ -55,7 +55,9 @@ interface ReaderBookStub {
     finished: boolean;
     finishedAt: import("firebase-admin/firestore").Timestamp | null;
     pageCount: number;
+    editionId: string | null;
   };
+  wordsPerPage: number | null;
   shared: {readerKey: string; username: string | null; displayName: string | null; timeZone: string};
 }
 interface CreateResult {
@@ -78,6 +80,7 @@ interface CatalogModule {
       finished: boolean;
       finishedAt: import("firebase-admin/firestore").Timestamp | null;
       pageCount: number;
+      wordsPerPage: number | null;
     },
     events: readonly ReadingEventStub[],
     timeZone: string,
@@ -151,6 +154,7 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2024-03-10T22:00:00.000Z")),
       pageCount: 300,
+      wordsPerPage: 280,
     },
     [
       // 01:30 local, before the 3 AM boundary: first (positive) progress
@@ -173,9 +177,29 @@ test("reading summaries use the reader timezone and the 3 AM boundary", () => {
     trackedMinutes: 60,
     sessionCount: 2,
     qualifiedPagesPerHour: 75,
+    // 75 qualified pages in 60 minutes at 280 words a page.
+    qualifiedWordsPerMinute: 350,
     percentPerHour: 25,
     trackingCoverage: 0.25,
   });
+});
+
+// Words per minute needs the same hour of qualified reading pages per hour
+// does; an edition estimate alone does not make a speed.
+test("reading summaries give words per minute only with enough qualified time and an estimate", () => {
+  const reading = (minutes: number): ReadingEventStub => ({
+    type: "reading", createdAt: Timestamp.fromDate(new Date("2026-03-01T10:00:00.000Z")),
+    pagesRead: minutes / 2, timeRead: minutes,
+  });
+  const book = (wordsPerPage: number | null) => ({finished: false, finishedAt: null, pageCount: 300, wordsPerPage});
+  assert.equal(catalog.summarizeReadingAttempt(book(300), [reading(90)], "UTC").qualifiedWordsPerMinute, 150);
+  // A four-minute session is tracked but not qualified; it moves neither side.
+  assert.equal(
+    catalog.summarizeReadingAttempt(book(300), [reading(90), reading(4)], "UTC").qualifiedWordsPerMinute,
+    150,
+  );
+  assert.equal(catalog.summarizeReadingAttempt(book(300), [reading(30)], "UTC").qualifiedWordsPerMinute, null);
+  assert.equal(catalog.summarizeReadingAttempt(book(null), [reading(90)], "UTC").qualifiedWordsPerMinute, null);
 });
 
 test("reading summary dates preserve four-digit years below 1000", () => {
@@ -190,6 +214,7 @@ test("reading summary dates preserve four-digit years below 1000", () => {
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("0001-01-02T04:00:00.000Z")),
       pageCount: 100,
+      wordsPerPage: null,
     },
     [event("0001-01-01T04:00:00.000Z", 50), event("0001-01-02T04:00:00.000Z", 50)],
     "UTC",
@@ -215,6 +240,7 @@ test("the finishedAt stamp is the finish date and an unstamped finished book is 
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-03-05T20:00:00.000Z")),
       pageCount: 200,
+      wordsPerPage: null,
     },
     [reading("2026-03-01T10:00:00.000Z"), reading("2026-03-02T10:00:00.000Z")],
     "UTC",
@@ -223,7 +249,7 @@ test("the finishedAt stamp is the finish date and an unstamped finished book is 
   assert.equal(result.calendarDays, 5);
   assert.throws(
     () => catalog.summarizeReadingAttempt(
-      {finished: true, finishedAt: null, pageCount: 200},
+      {finished: true, finishedAt: null, pageCount: 200, wordsPerPage: null},
       [reading("2026-03-01T10:00:00.000Z")],
       "UTC",
     ),
@@ -247,6 +273,7 @@ test("a later page-count correction does not stretch the reading span", () => {
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-03-02T10:00:00.000Z")),
       pageCount: 250,
+      wordsPerPage: null,
     },
     [
       event("reading", "2026-03-01T10:00:00.000Z", 150),
@@ -270,6 +297,7 @@ test("a correction-only finished attempt has no first progress and no negative s
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-03-05T20:00:00.000Z")),
       pageCount: 180,
+      wordsPerPage: null,
     },
     [{
       type: "update",
@@ -290,7 +318,7 @@ test("a correction-only finished attempt has no first progress and no negative s
 test("reading summaries accept the time zone aliases browsers report", () => {
   for (const timeZone of ["Asia/Kolkata", "Europe/Kyiv", "Etc/UTC"]) {
     const result = catalog.summarizeReadingAttempt(
-      {finished: false, finishedAt: null, pageCount: 100},
+      {finished: false, finishedAt: null, pageCount: 100, wordsPerPage: null},
       [{
         type: "reading",
         createdAt: Timestamp.fromDate(new Date("2026-08-20T18:00:00.000Z")),
@@ -302,7 +330,7 @@ test("reading summaries accept the time zone aliases browsers report", () => {
     assert.equal(result.firstReadAt, "2026-08-20", timeZone);
   }
   assert.throws(() => catalog.summarizeReadingAttempt(
-    {finished: false, finishedAt: null, pageCount: 100}, [], "Mars/Olympus_Mons",
+    {finished: false, finishedAt: null, pageCount: 100, wordsPerPage: null}, [], "Mars/Olympus_Mons",
   ), /Unsupported time zone/);
 });
 
@@ -334,7 +362,9 @@ test("an oversized first attempt does not crowd out the next owner", async () =>
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-08-21T18:00:00.000Z")),
       pageCount: 300,
+      editionId: null,
     },
+    wordsPerPage: null,
     shared: {
       readerKey: `reader-${index}`,
       username: `reader-${index}`,
@@ -380,7 +410,9 @@ test("the largest possible owner page is summarized in full", async () => {
       finished: true,
       finishedAt: Timestamp.fromDate(new Date("2026-08-21T18:00:00.000Z")),
       pageCount: 300,
+      editionId: null,
     },
+    wordsPerPage: null,
     shared: {
       readerKey: `reader-${String(Math.floor(index / 5)).padStart(2, "0")}`,
       username: `reader-${String(Math.floor(index / 5)).padStart(2, "0")}`,
@@ -1028,6 +1060,13 @@ test("work readers resolve aliases and return only consented redacted summaries"
     suggestedPageCount: 300,
     coverUrl: "https://example.test/edition.jpg",
     externalIds: {"google-books": "must-not-be-returned"},
+    // Word Counter's measurement, on the page count the reader's book has.
+    wordEstimate: {
+      method: "random-pages", countingVersion: 1, pageCountBasis: 300, chosenPages: 0,
+      randomPages: 16, ordinaryShare: 0.9, wordsPerPage: 250, wordsPerPageLow: 220,
+      wordsPerPageHigh: 280, language: "en", readability: null, vocabulary: null,
+      createdBy: "estimator-uid", measuredAt: Timestamp.fromMillis(1000),
+    },
   };
   const snap = (path: string, data: Row | undefined, extra: {ref?: BookRef} = {}) => ({
     exists: data !== undefined,
@@ -1265,9 +1304,17 @@ test("work readers resolve aliases and return only consented redacted summaries"
     trackedMinutes: 60,
     sessionCount: 1,
     qualifiedPagesPerHour: 100,
+    // 100 qualified pages in 60 minutes at the edition's 250 words a page.
+    qualifiedWordsPerMinute: 100 * 250 / 60,
     percentPerHour: (100 / 300) * 100,
     trackingCoverage: 1 / 3,
   }]);
+  // Measured on another page count, the estimate does not apply.
+  (editionData.wordEstimate as Row).pageCountBasis = 320;
+  const otherPrinting = await deployed.catalog.workreaders.run({workId: "canonical-work"}, authContext);
+  assert.equal(otherPrinting.attempts[0].qualifiedWordsPerMinute, null);
+  assert.equal(otherPrinting.attempts[0].qualifiedPagesPerHour, 100);
+  (editionData.wordEstimate as Row).pageCountBasis = 300;
   assert.equal(result.incomplete, false);
   assert.equal(result.omittedAttempts, 0);
   assert.equal(result.nextCursor, null);
@@ -1312,6 +1359,7 @@ test("work readers resolve aliases and return only consented redacted summaries"
   assert.equal(JSON.stringify(result).includes("shared-reader"), false);
   assert.equal(JSON.stringify(result).includes("private-reader"), false);
   assert.equal(JSON.stringify(result).includes("must-not-be-returned"), false);
+  assert.equal(JSON.stringify(result).includes("estimator-uid"), false);
   const readerLog = logs.find(([message]) => message === "catalog.work_readers");
   assert.ok(readerLog);
   assert.deepEqual(readerLog[1], {

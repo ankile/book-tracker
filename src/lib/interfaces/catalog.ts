@@ -166,8 +166,21 @@ export interface WorkReaderAttemptSummary {
   trackedMinutes: number;
   sessionCount: number;
   qualifiedPagesPerHour: number | null;
+  // The same qualified sessions in words, when the reader's edition carries
+  // a Word Counter estimate measured on the reader's page count.
+  qualifiedWordsPerMinute: number | null;
   percentPerHour: number | null;
   trackingCoverage: number | null;
+}
+
+// The part of an edition's Word Counter estimate (editions/{id}.wordEstimate,
+// written by catalog.setwordestimate) the reading statistics use: words per
+// numbered page with its 95% interval, and the page count it was measured on.
+export interface EditionWordEstimate {
+  pageCountBasis: number;
+  wordsPerPage: number;
+  wordsPerPageLow: number;
+  wordsPerPageHigh: number;
 }
 
 export interface WorkReadersResponse {

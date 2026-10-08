@@ -180,6 +180,9 @@
                       <div><dt>Tracked reading time</dt><dd>{formatTime(Math.round(attempt.trackedMinutes))}</dd></div>
                       <div><dt>Reading sessions</dt><dd>{attempt.sessionCount}</dd></div>
                       <div><dt>Qualified speed</dt><dd>{attempt.qualifiedPagesPerHour === null ? 'Not enough data' : `${attempt.qualifiedPagesPerHour.toFixed(1)} pages/hour`}</dd></div>
+                      {#if attempt.qualifiedWordsPerMinute !== null}
+                        <div><dt>Words per minute</dt><dd>≈ {Math.round(attempt.qualifiedWordsPerMinute)}</dd></div>
+                      {/if}
                       <div><dt>Edition per tracked hour</dt><dd>{attempt.percentPerHour === null ? 'Not enough data' : `${attempt.percentPerHour.toFixed(1)}%`}</dd></div>
                       <div><dt>Tracking coverage</dt><dd>{displayTrackingCoverage(attempt.trackingCoverage)}</dd></div>
                     </dl>
