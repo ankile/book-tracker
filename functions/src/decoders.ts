@@ -653,6 +653,163 @@ export function decodeWorkReadersRequest(
   };
 }
 
+// A words-per-page estimate measured in Word Counter (word-counter repo,
+// docs/book-tracker-word-estimates.md): words per numbered page of one
+// edition, from OCR'd page photos, with its 95% interval. It is stored on
+// the edition as wordEstimate, beside who sent it and when.
+export interface WordEstimateMeasurement {
+  // random-pages: only uniformly drawn pages; corrected-chosen: hand-picked
+  // full pages corrected by the share of ordinary pages among random ones.
+  method: "random-pages" | "corrected-chosen";
+  // Word Counter's counting rule; counts under different versions differ.
+  countingVersion: number;
+  // The book's page count the random pages were drawn from.
+  pageCountBasis: number;
+  chosenPages: number;
+  randomPages: number;
+  ordinaryShare: number;
+  wordsPerPage: number;
+  wordsPerPageLow: number;
+  wordsPerPageHigh: number;
+  // ISO 639 code of the text Word Counter counted, '' unknown.
+  language: string;
+  // Flesch scores apply to English only.
+  readability: {fleschKincaidGrade: number; fleschReadingEase: number} | null;
+  vocabulary: {uniqueWords: number; low: number; high: number} | null;
+}
+
+export interface SetWordEstimateRequest extends WordEstimateMeasurement {
+  bookId: string;
+  editionId: string;
+}
+
+export interface StoredWordEstimate extends WordEstimateMeasurement {
+  createdBy: string;
+  measuredAt: Timestamp;
+}
+
+const WORD_ESTIMATE_FIELDS = [
+  "method", "countingVersion", "pageCountBasis", "chosenPages", "randomPages",
+  "ordinaryShare", "wordsPerPage", "wordsPerPageLow", "wordsPerPageHigh",
+  "language", "readability", "vocabulary",
+] as const;
+
+// Word Counter only sends an estimate whose 95% interval is within ±20% and
+// that rests on at least eight random pages (owner decision 2026-10-07); the
+// server holds the same bar. The interval bounds arrive rounded to 0.1
+// words, so the margin gets half a percentage point of slack.
+export const WORD_ESTIMATE_MAX_MARGIN = 0.2;
+const WORD_ESTIMATE_MARGIN_SLACK = 0.005;
+export const WORD_ESTIMATE_MIN_RANDOM_PAGES = 8;
+
+// The shape and the invariants any stored estimate keeps. The sending bar
+// (margin, minimum random pages) is policy and is checked only on the way
+// in, so a later change to it never makes stored estimates unreadable.
+function wordEstimateMeasurement(
+  decoded: Record<string, unknown>,
+  label: string,
+  fail: DecodeFailure,
+): WordEstimateMeasurement {
+  const method = string(decoded.method, `${label}.method`, fail, 40);
+  if (method !== "random-pages" && method !== "corrected-chosen") {
+    fail(`${label}.method must be random-pages or corrected-chosen.`);
+  }
+  const countingVersion = positiveInteger(decoded.countingVersion, `${label}.countingVersion`, fail);
+  const pageCountBasis = positiveInteger(decoded.pageCountBasis, `${label}.pageCountBasis`, fail);
+  const chosenPages = nonNegativeInteger(decoded.chosenPages, `${label}.chosenPages`, fail);
+  const randomPages = positiveInteger(decoded.randomPages, `${label}.randomPages`, fail);
+  if (countingVersion > 1000 || pageCountBasis > 100_000 || chosenPages > 100_000) {
+    fail(`${label} has an implausible count.`);
+  }
+  // Random pages are drawn without replacement from the book's pages.
+  if (randomPages > pageCountBasis) {
+    fail(`${label}.randomPages must not exceed pageCountBasis.`);
+  }
+  if ((method === "random-pages") !== (chosenPages === 0)) {
+    fail(`${label}.chosenPages must be 0 exactly when the method is random-pages.`);
+  }
+  const ordinaryShare = finiteNumber(decoded.ordinaryShare, `${label}.ordinaryShare`, fail);
+  if (ordinaryShare < 0 || ordinaryShare > 1) {
+    fail(`${label}.ordinaryShare must be between 0 and 1.`);
+  }
+  const wordsPerPage = finiteNumber(decoded.wordsPerPage, `${label}.wordsPerPage`, fail);
+  const wordsPerPageLow = finiteNumber(decoded.wordsPerPageLow, `${label}.wordsPerPageLow`, fail);
+  const wordsPerPageHigh = finiteNumber(decoded.wordsPerPageHigh, `${label}.wordsPerPageHigh`, fail);
+  if (wordsPerPage <= 0 || wordsPerPage > 5000) {
+    fail(`${label}.wordsPerPage must be above 0 and at most 5000.`);
+  }
+  if (wordsPerPageLow < 0 || wordsPerPageLow > wordsPerPage || wordsPerPageHigh < wordsPerPage) {
+    fail(`${label} must satisfy 0 ≤ wordsPerPageLow ≤ wordsPerPage ≤ wordsPerPageHigh.`);
+  }
+  const language = boundedPossiblyEmptyString(decoded.language, `${label}.language`, fail, 3);
+  if (!isLanguageCode(language)) fail(`${label}.language must be an ISO 639 code or empty.`);
+
+  let readability: WordEstimateMeasurement["readability"] = null;
+  if (decoded.readability !== null) {
+    const scores = record(decoded.readability, `${label}.readability`, fail);
+    exactKeys(scores, ["fleschKincaidGrade", "fleschReadingEase"], `${label}.readability`, fail);
+    readability = {
+      fleschKincaidGrade: finiteNumber(scores.fleschKincaidGrade, `${label}.readability.fleschKincaidGrade`, fail),
+      fleschReadingEase: finiteNumber(scores.fleschReadingEase, `${label}.readability.fleschReadingEase`, fail),
+    };
+    if (language !== "en") fail(`${label}.readability is only defined for English text.`);
+  }
+
+  let vocabulary: WordEstimateMeasurement["vocabulary"] = null;
+  if (decoded.vocabulary !== null) {
+    const counts = record(decoded.vocabulary, `${label}.vocabulary`, fail);
+    exactKeys(counts, ["uniqueWords", "low", "high"], `${label}.vocabulary`, fail);
+    vocabulary = {
+      uniqueWords: positiveInteger(counts.uniqueWords, `${label}.vocabulary.uniqueWords`, fail),
+      low: nonNegativeInteger(counts.low, `${label}.vocabulary.low`, fail),
+      high: positiveInteger(counts.high, `${label}.vocabulary.high`, fail),
+    };
+    if (vocabulary.low > vocabulary.uniqueWords || vocabulary.high < vocabulary.uniqueWords) {
+      fail(`${label}.vocabulary must satisfy low ≤ uniqueWords ≤ high.`);
+    }
+  }
+
+  return {
+    method, countingVersion, pageCountBasis, chosenPages, randomPages, ordinaryShare,
+    wordsPerPage, wordsPerPageLow, wordsPerPageHigh, language, readability, vocabulary,
+  };
+}
+
+export function decodeSetWordEstimateRequest(
+  value: unknown,
+  fail: DecodeFailure = throwDecodeError,
+): SetWordEstimateRequest {
+  const decoded = record(value, "request data", fail);
+  exactKeys(decoded, ["bookId", "editionId", ...WORD_ESTIMATE_FIELDS], "request data", fail);
+  const bookId = documentId(decoded.bookId, "bookId", fail);
+  const editionId = catalogDocumentId(decoded.editionId, "editionId", fail);
+  const measurement = wordEstimateMeasurement(decoded, "request data", fail);
+  // The interval is symmetric before Word Counter clamps its low end at 0,
+  // so the upper half is the margin.
+  const margin = (measurement.wordsPerPageHigh - measurement.wordsPerPage) / measurement.wordsPerPage;
+  if (margin > WORD_ESTIMATE_MAX_MARGIN + WORD_ESTIMATE_MARGIN_SLACK) {
+    fail(`The estimate's 95% interval must be within ±${WORD_ESTIMATE_MAX_MARGIN * 100}%.`);
+  }
+  if (measurement.randomPages < WORD_ESTIMATE_MIN_RANDOM_PAGES) {
+    fail(`The estimate must rest on at least ${WORD_ESTIMATE_MIN_RANDOM_PAGES} random pages.`);
+  }
+  return {bookId, editionId, ...measurement};
+}
+
+export function decodeStoredWordEstimate(
+  value: unknown,
+  label: string,
+  fail: DecodeFailure = throwDecodeError,
+): StoredWordEstimate {
+  const decoded = record(value, label, fail);
+  exactKeys(decoded, [...WORD_ESTIMATE_FIELDS, "createdBy", "measuredAt"], label, fail);
+  return {
+    ...wordEstimateMeasurement(decoded, label, fail),
+    createdBy: string(decoded.createdBy, `${label}.createdBy`, fail, 128),
+    measuredAt: firestoreTimestamp(decoded.measuredAt, `${label}.measuredAt`, fail),
+  };
+}
+
 export interface AdminBookTarget {
   uid: string;
   bookId: string;

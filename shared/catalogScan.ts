@@ -259,7 +259,7 @@ const AUTHOR_FIELDS = [
 const EDITION_FIELDS = [
   'workId', 'isbn13', 'title', 'publisher', 'publishedDate', 'language', 'translatorNames',
   'format', 'suggestedPageCount', 'coverUrl', 'externalIds', 'createdBy', 'createdAt', 'updatedAt',
-  'status', 'mergedInto', 'mergedFrom',
+  'status', 'mergedInto', 'mergedFrom', 'wordEstimate',
 ];
 
 // The admin apply path round-trips whole documents and refuses one with a

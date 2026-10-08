@@ -22,8 +22,12 @@ import {
   decodeCatalogCreateRequest,
   decodeCatalogSearchRequest,
   decodeEnsureCatalogAuthorsRequest,
+  decodeSetWordEstimateRequest,
+  decodeStoredWordEstimate,
   decodeWorkReadersRequest,
   normalizeCatalogIdentity,
+  SetWordEstimateRequest,
+  StoredWordEstimate,
 } from "./decoders";
 import {consumeQuota} from "./quota";
 import {requireLiveUser, requireVerifiedUid} from "./callerGuards";
@@ -116,6 +120,9 @@ export interface StoredEdition {
   status?: "active" | "merged";
   mergedInto?: string;
   mergedFrom?: string[];
+  // Words per numbered page measured in Word Counter (catalog.setwordestimate);
+  // absent until a reader sends one. The last one sent wins.
+  wordEstimate?: StoredWordEstimate;
 }
 
 interface ResolvedWork {
@@ -335,6 +342,11 @@ export function storedEdition(
     ...(data.status === undefined ? {} : {status: data.status}),
     ...(data.mergedInto === undefined ? {} : {mergedInto: data.mergedInto}),
     ...(data.mergedFrom === undefined ? {} : {mergedFrom: data.mergedFrom}),
+    ...(data.wordEstimate === undefined ? {} : {
+      wordEstimate: decodeStoredWordEstimate(
+        data.wordEstimate, `${snapshot.ref.path}.wordEstimate`, fail,
+      ),
+    }),
   };
 }
 
@@ -938,6 +950,50 @@ export async function addCatalogEdition(
   });
 }
 
+const wordEstimatePrecondition = (message: string): never => {
+  throw new functions.https.HttpsError("failed-precondition", message);
+};
+
+// catalog.setwordestimate: Word Counter (the word-counter app) sends a
+// reader's words-per-page measurement for the edition their book stands on.
+// The caller must own the book, the book must be linked to that edition, and
+// its page count must be the one the random pages were drawn from; anything
+// else is a stale or foreign request. The estimate is bibliographic and
+// public like the rest of the edition, so it records who sent it but never
+// which book. A merged alias stores on its survivor. Only wordEstimate is
+// written: a measurement is not a catalog edit, so updatedAt stays.
+export async function setWordEstimate(
+  request: SetWordEstimateRequest,
+  uid: string,
+): Promise<{stored: true; measuredAt: string}> {
+  const measuredAt = Timestamp.now();
+  const {bookId, editionId, ...measurement} = request;
+  const storedOn = await db.runTransaction(async (tx): Promise<string> => {
+    const book = await tx.get(db.doc(`users/${uid}/books/${bookId}`));
+    if (!book.exists) wordEstimatePrecondition("That book is not in your Book Tracker library.");
+    if (book.get("editionId") !== editionId) {
+      wordEstimatePrecondition("That book is not linked to this edition in Book Tracker.");
+    }
+    if (book.get("pageCount") !== measurement.pageCountBasis) {
+      wordEstimatePrecondition(
+        "The book's page count in Book Tracker differs from the one the pages were drawn from.",
+      );
+    }
+    const read: SnapshotReader = (ref) => tx.get(ref);
+    const edition = await resolveEdition(read, await read(db.collection("editions").doc(editionId)));
+    const wordEstimate: StoredWordEstimate = {...measurement, createdBy: uid, measuredAt};
+    tx.update(db.collection("editions").doc(edition.id), {wordEstimate});
+    return edition.id;
+  });
+  logger.info("catalog.word_estimate", {
+    editionId: storedOn,
+    method: measurement.method,
+    randomPages: measurement.randomPages,
+    wordsPerPage: measurement.wordsPerPage,
+  });
+  return {stored: true, measuredAt: measuredAt.toDate().toISOString()};
+}
+
 function dayParts(at: Timestamp, timeZone: string): {key: string; epochDay: number} {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -1398,6 +1454,17 @@ exports.addedition = callable.https.onCall(async (
   const request = decodeCatalogAddEditionRequest(data, invalidArgument);
   await requireLiveUser(uid);
   return addCatalogEdition(request, uid);
+});
+
+exports.setwordestimate = callable.https.onCall(async (
+  data: unknown,
+  context,
+): Promise<{stored: true; measuredAt: string}> => {
+  logAppCheckPresence("catalog.setwordestimate", context);
+  const uid = requireVerifiedUid(context);
+  const request = decodeSetWordEstimateRequest(data, invalidArgument);
+  await requireLiveUser(uid);
+  return setWordEstimate(request, uid);
 });
 
 exports.ensureauthors = callable.https.onCall(async (

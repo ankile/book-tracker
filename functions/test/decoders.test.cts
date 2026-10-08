@@ -88,6 +88,91 @@ test("catalog request decoders are exact and bounded", () => {
   );
 });
 
+// The request Word Counter's "Send to Book Tracker" builds (word-counter
+// convex/publish.ts): ten hand-picked pages corrected by fourteen random ones,
+// ±16.5% at 95%.
+const wordEstimateRequest = {
+  bookId: "book-1",
+  editionId: "edition-1",
+  method: "corrected-chosen",
+  countingVersion: 1,
+  pageCountBasis: 320,
+  chosenPages: 10,
+  randomPages: 14,
+  ordinaryShare: 0.857,
+  wordsPerPage: 287.4,
+  wordsPerPageLow: 240.1,
+  wordsPerPageHigh: 334.7,
+  language: "en",
+  readability: {fleschKincaidGrade: 8.2, fleschReadingEase: 64.1},
+  vocabulary: {uniqueWords: 9120, low: 8000, high: 10400},
+};
+
+test("word estimates decode Word Counter's request and hold the ±20% and eight-random-page bar", () => {
+  assert.deepEqual(decoders.decodeSetWordEstimateRequest(wordEstimateRequest), wordEstimateRequest);
+  const random = {
+    ...wordEstimateRequest, method: "random-pages", chosenPages: 0, language: "no",
+    readability: null, vocabulary: null,
+  };
+  assert.deepEqual(decoders.decodeSetWordEstimateRequest(random), random);
+  // Rounding to 0.1 words may put an estimate Word Counter called ±20.0% a
+  // hair over; 20.4% passes, 20.6% does not.
+  const margin = (percent: number) => ({
+    ...wordEstimateRequest, wordsPerPage: 250, wordsPerPageLow: 250 * (1 - percent / 100),
+    wordsPerPageHigh: 250 * (1 + percent / 100),
+  });
+  assert.doesNotThrow(() => decoders.decodeSetWordEstimateRequest(margin(20.4)));
+  assert.throws(() => decoders.decodeSetWordEstimateRequest(margin(20.6)), /within ±20%/);
+  // A clamped low end does not hide a wide interval: the upper half counts.
+  assert.throws(
+    () => decoders.decodeSetWordEstimateRequest({...margin(25), wordsPerPageLow: 240}),
+    /within ±20%/,
+  );
+  assert.throws(
+    () => decoders.decodeSetWordEstimateRequest({...wordEstimateRequest, randomPages: 7}),
+    /at least 8 random pages/,
+  );
+  assert.doesNotThrow(() => decoders.decodeSetWordEstimateRequest({...wordEstimateRequest, randomPages: 8}));
+  for (const [broken, message] of [
+    [{...wordEstimateRequest, language: "no"}, /readability is only defined for English/],
+    [{...wordEstimateRequest, chosenPages: 0}, /chosenPages must be 0 exactly when/],
+    [{...random, chosenPages: 3}, /chosenPages must be 0 exactly when/],
+    [{...wordEstimateRequest, method: "chosen-pages"}, /method must be random-pages or corrected-chosen/],
+    [{...wordEstimateRequest, randomPages: 321}, /randomPages must not exceed pageCountBasis/],
+    [{...wordEstimateRequest, ordinaryShare: 1.2}, /ordinaryShare must be between 0 and 1/],
+    [{...wordEstimateRequest, wordsPerPageLow: 290}, /wordsPerPageLow ≤ wordsPerPage/],
+    [{...wordEstimateRequest, wordsPerPageHigh: 280}, /wordsPerPageLow ≤ wordsPerPage/],
+    [{...wordEstimateRequest, wordsPerPage: 0, wordsPerPageLow: 0, wordsPerPageHigh: 0}, /wordsPerPage must be above 0/],
+    [{...wordEstimateRequest, language: "English"}, /language must be at most 3 characters/],
+    [{...wordEstimateRequest, language: "EN"}, /ISO 639 code/],
+    [{...wordEstimateRequest, vocabulary: {uniqueWords: 9120, low: 9500, high: 10400}}, /low ≤ uniqueWords ≤ high/],
+    [{...wordEstimateRequest, vocabulary: {uniqueWords: 9120, low: 8000}}, /high must be a finite number/],
+    [{...wordEstimateRequest, readability: undefined}, /readability must be an object/],
+    [{...wordEstimateRequest, editionId: "editions/edition-1"}, /one Firestore document id/],
+    [{...wordEstimateRequest, uid: "other"}, /unexpected field "uid"/],
+    [{...wordEstimateRequest, pageCountBasis: 320.5}, /pageCountBasis must be a positive integer/],
+  ] as const) {
+    assert.throws(() => decoders.decodeSetWordEstimateRequest(broken), message, JSON.stringify(broken));
+  }
+
+  // A stored estimate is held to its shape, not to today's sending bar: a
+  // stricter bar later must not make editions unreadable.
+  const {bookId: _bookId, editionId: _editionId, ...measurement} = wordEstimateRequest;
+  const stored = {
+    ...measurement, randomPages: 5, wordsPerPageHigh: 400,
+    createdBy: "owner", measuredAt: Timestamp.fromMillis(1000),
+  };
+  assert.deepEqual(decoders.decodeStoredWordEstimate(stored, "editions/e.wordEstimate"), stored);
+  assert.throws(
+    () => decoders.decodeStoredWordEstimate({...stored, bookId: "book-1"}, "editions/e.wordEstimate"),
+    /editions\/e.wordEstimate contains unexpected field "bookId"/,
+  );
+  assert.throws(
+    () => decoders.decodeStoredWordEstimate({...stored, measuredAt: "2026-10-08T00:00:00Z"}, "editions/e.wordEstimate"),
+    /measuredAt must be a Firestore timestamp/,
+  );
+});
+
 test("admin catalog decoders admit only the bounded tagged operations", () => {
   assert.throws(() => decoders.decodeAdminCatalogOperation({
     type: "linkBooks",

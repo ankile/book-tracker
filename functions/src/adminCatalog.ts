@@ -213,7 +213,7 @@ function editionFrom(snapshot: DocumentSnapshot): EditionData {
     "workId", "isbn13", "title", "publisher",
     "publishedDate", "language", "translatorNames", "format",
     "suggestedPageCount", "coverUrl", "externalIds", "createdBy", "createdAt", "updatedAt",
-    "status", "mergedInto", "mergedFrom",
+    "status", "mergedInto", "mergedFrom", "wordEstimate",
   ]);
   return {
     ...edition,
@@ -293,6 +293,8 @@ function editionInputData(
     ...(existing?.status === undefined ? {} : {status: existing.status}),
     ...(existing?.mergedInto === undefined ? {} : {mergedInto: existing.mergedInto}),
     ...(existing?.mergedFrom === undefined ? {} : {mergedFrom: existing.mergedFrom}),
+    // A measurement, not bibliographic input: an edit keeps it.
+    ...(existing?.wordEstimate === undefined ? {} : {wordEstimate: existing.wordEstimate}),
   };
 }
 
@@ -1329,6 +1331,12 @@ async function planOperation(
     if (merged.suggestedPageCount === null) {
       merged.suggestedPageCount =
         donors.find(({edition}) => edition.suggestedPageCount !== null)?.edition.suggestedPageCount ?? null;
+    }
+    // Two records of one edition share one words-per-page figure: the
+    // survivor keeps its own, else takes an alias's (aliases keep theirs).
+    if (merged.wordEstimate === undefined) {
+      const donor = donors.find(({edition}) => edition.wordEstimate !== undefined);
+      if (donor !== undefined) merged.wordEstimate = donor.edition.wordEstimate;
     }
     // Identifiers move rather than copy: an index row names one edition and
     // its key must be that edition's own identifier.

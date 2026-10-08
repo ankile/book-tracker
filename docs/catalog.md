@@ -176,6 +176,32 @@ and no edition-level identifier is disclosed. The page is bounded: readers are
 paged with a cursor, editions and re-reads per reader are capped, and a reader
 whose data is malformed or too large is skipped rather than failing the page.
 
+## Words per page
+
+An edition can carry `wordEstimate`: the average number of words per numbered
+page, measured in Word Counter (the word-counter app) from photos of the
+reader's own copy. Word Counter counts hand-picked full pages plus pages drawn
+uniformly at random, corrects the hand-picked pages by the share of ordinary
+pages among the random ones, and reports a 95% interval; its handoff doc
+(word-counter `docs/book-tracker-word-estimates.md`) describes the estimator.
+
+`catalog.setwordestimate` stores it. The caller sends the measurement for
+one of their own books; the server refuses with `failed-precondition` unless
+that book exists in the caller's library, is linked to the named edition,
+and still has the page count the random pages were drawn from. It refuses
+with `invalid-argument` an interval wider than ±20% (half a point of slack
+for the 0.1-word rounding), fewer than eight random pages, and Flesch scores
+for text that isn't English. A merged alias stores on its survivor. The
+stored record is the measurement plus `createdBy` and `measuredAt`; it never
+names the book, since the estimate is bibliographic like the rest of the
+edition. Only that field is written, so `updatedAt` does not move, and the
+last estimate sent wins.
+
+Stored estimates are decoded for shape only, never against the sending bar,
+so tightening the bar later does not make existing editions unreadable.
+Admin edits keep an edition's estimate, and a merge gives the survivor the
+first source's estimate if it has none of its own.
+
 ## Admin tools
 
 `/admin` is the catalog console, and it is live: the operator's browser

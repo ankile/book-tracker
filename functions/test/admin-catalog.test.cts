@@ -976,6 +976,59 @@ test("a review mark stamps reviewedAt on whole records, survives edits, clears a
   assert.equal(store.rows.get("works/seen-work")?.reviewedAt, undefined);
 });
 
+// A Word Counter measurement (catalog.setwordestimate) is not bibliographic
+// input, so the console never edits it, but every whole-document write the
+// console makes must carry it: an edit keeps it, and a merge is the union,
+// survivor first, like the other fields.
+test("a words-per-page estimate survives edition edits and merges", async (t) => {
+  const store = installCatalogStore(t);
+  const estimate = (wordsPerPage: number): Row => ({
+    method: "random-pages", countingVersion: 1, pageCountBasis: 300, chosenPages: 0, randomPages: 12,
+    ordinaryShare: 0.9, wordsPerPage, wordsPerPageLow: wordsPerPage - 20, wordsPerPageHigh: wordsPerPage + 20,
+    language: "no", readability: null, vocabulary: null,
+    createdBy: "magnus", measuredAt: Timestamp.fromMillis(2000),
+  });
+  store.write(store.ref("works/sult"), activeWork("Sult"));
+  store.write(store.ref("editions/measured"), edition("sult", {wordEstimate: estimate(310)}));
+  store.write(store.ref("editions/unmeasured"), edition("sult"));
+  store.write(store.ref("editions/also-measured"), edition("sult", {wordEstimate: estimate(250)}));
+  store.write(store.ref("editions/keeps-own"), edition("sult", {wordEstimate: estimate(280)}));
+
+  await apply(store, {
+    type: "upsertEdition", editionId: "measured", workId: "sult", edition: {
+      isbn13: null, title: "Sult (2009)", publisher: "Gyldendal", publishedDate: "2009", language: "no",
+      translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+    },
+  });
+  assert.equal(store.rows.get("editions/measured")?.title, "Sult (2009)");
+  assert.deepEqual(store.rows.get("editions/measured")?.wordEstimate, estimate(310));
+
+  // A survivor without one takes an alias's; the alias keeps its own.
+  await apply(store, {
+    type: "mergeEditions", workId: "sult", sourceEditionIds: ["measured"], targetEditionId: "unmeasured",
+  });
+  assert.deepEqual(store.rows.get("editions/unmeasured")?.wordEstimate, estimate(310));
+  assert.deepEqual(store.rows.get("editions/measured")?.wordEstimate, estimate(310));
+  // A survivor with one keeps it.
+  await apply(store, {
+    type: "mergeEditions", workId: "sult", sourceEditionIds: ["also-measured"], targetEditionId: "keeps-own",
+  });
+  assert.deepEqual(store.rows.get("editions/keeps-own")?.wordEstimate, estimate(280));
+
+  // A malformed estimate is a catalog invariant violation, not silently dropped.
+  store.write(store.ref("editions/broken"), edition("sult", {wordEstimate: {...estimate(300), wordsPerPage: "300"}}));
+  await assert.rejects(
+    apply(store, {
+      type: "upsertEdition", editionId: "broken", workId: "sult", edition: {
+        isbn13: null, title: "Broken", publisher: "", publishedDate: "", language: "no",
+        translatorNames: [], format: "full", suggestedPageCount: 300, coverUrl: "", externalIds: {},
+      },
+    }),
+    (error: {details?: {reason?: string}; message?: string}) =>
+      error.details?.reason === "catalog-invariant" && /wordEstimate.wordsPerPage/.test(error.message ?? ""),
+  );
+});
+
 test("merging editions aliases the sources, moves their readers' books to the survivor and fills what they left blank", async (t) => {
   const store = installCatalogStore(t);
   const now = Timestamp.fromMillis(1000);
